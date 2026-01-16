@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "../Public/FortAthenaCreativePortal.h"
 #include "../Public/FortGameStateAthena.h"
+#include "../../Erbium/Public/Configuration.h"
 
 void AFortMinigameSettingsBuilding::BeginPlay(AFortMinigameSettingsBuilding* Settings)
 {
@@ -63,12 +64,17 @@ AFortAthenaCreativePortal* AFortAthenaCreativePortal::Create(AFortPlayerControll
 	Portal->bPortalOpen = true;
 	Portal->OnRep_PortalOpen();
 
-	auto RestrictedPlotDefinition = FindObject<UFortCreativeRealEstatePlotItemDefinition>(L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium");
+	auto RestrictedPlotDefinition = FindObject<UFortCreativeRealEstatePlotItemDefinition>(FConfiguration::CreativePlot);
+
+	if (!RestrictedPlotDefinition)
+		RestrictedPlotDefinition = FindObject<UFortCreativeRealEstatePlotItemDefinition>(L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium");
 
 	if (!RestrictedPlotDefinition)
 		RestrictedPlotDefinition = FindObject<UFortCreativeRealEstatePlotItemDefinition>(L"/CR_Legacy/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium");
 
 	auto IslandPlayset = RestrictedPlotDefinition->BasePlayset.Get();
+	/*Portal->LinkedVolume->CurrentPlayset = IslandPlayset;
+	Portal->LinkedVolume->OnRep_CurrentPlayset();*/
 
 	auto LevelSaveComponent = (UFortLevelSaveComponent*)Portal->LinkedVolume->GetComponentByClass(UFortLevelSaveComponent::StaticClass());
 
@@ -79,8 +85,10 @@ AFortAthenaCreativePortal* AFortAthenaCreativePortal::Create(AFortPlayerControll
 		LevelSaveComponent->bLoadPlaysetFromPlot = true;
 		LevelSaveComponent->bAutoLoadFromRestrictedPlotDefinition = true;
 		LevelSaveComponent->RestrictedPlotDefinition = RestrictedPlotDefinition;
+
 		if (LevelSaveComponent->HasPlotPermissions())
 			LevelSaveComponent->PlotPermissions.Permission = 1;
+
 		else if (Portal->LinkedVolume->HasPlayspace())
 		{
 			auto PermissionComponent = (UPlayspaceComponent_CreativeToolsPermission*)Portal->LinkedVolume->Playspace->GetComponentByClass(UPlayspaceComponent_CreativeToolsPermission::StaticClass());
@@ -92,8 +100,14 @@ AFortAthenaCreativePortal* AFortAthenaCreativePortal::Create(AFortPlayerControll
 	}
 
 	auto LevelStreamComponent = (UPlaysetLevelStreamComponent*)Portal->LinkedVolume->GetComponentByClass(UPlaysetLevelStreamComponent::StaticClass());
+
+	//LevelStreamComponent->CurrentPlayset = IslandPlayset;
 	LevelStreamComponent->SetPlayset(IslandPlayset);
-	
+	//LevelStreamComponent->ClientPlaysetData.bValid = true;
+	//LevelStreamComponent->OnRep_ClientPlaysetData();
+	LevelStreamComponent->bAutoLoadLevel = true;
+	LevelStreamComponent->bAutoActivate = true;
+
 	static auto SettingsMachineClass = FindObject<UClass>("/Game/Athena/Items/Gameplay/MinigameSettingsControl/MinigameSettingsMachine.MinigameSettingsMachine_C");
 	auto SettingsMachine = UWorld::SpawnActor<AMinigameSettingsMachine_C>(SettingsMachineClass, Portal->LinkedVolume->K2_GetActorLocation(), {}, Portal->LinkedVolume);
 
@@ -111,13 +125,13 @@ AFortAthenaCreativePortal* AFortAthenaCreativePortal::Create(AFortPlayerControll
 		if (MinigameVolumeComponent)
 			MinigameVolumeComponent->CurrentMinigameSettingsMachine = SettingsMachine;
 	}
-	
-	auto LoadPlayset = (void (*)(UPlaysetLevelStreamComponent*)) FindLoadPlayset();
+
+	auto LoadPlayset = (void (*)(UPlaysetLevelStreamComponent*))FindLoadPlayset();
 	if (LoadPlayset)
 		LoadPlayset(LevelStreamComponent);
 
-	//PlayerController->CreativePlotLinkedVolume = Portal->LinkedVolume;
-	//PlayerController->OnRep_CreativePlotLinkedVolume();
+	PlayerController->CreativePlotLinkedVolume = Portal->LinkedVolume;
+	PlayerController->OnRep_CreativePlotLinkedVolume();
 
 	Portal->LinkedVolume->VolumeState = 3;
 	Portal->LinkedVolume->OnRep_VolumeState();
@@ -190,7 +204,7 @@ void AFortAthenaCreativePortal::Hook()
 {
 	if (!GetDefaultObj())
 		return;
-	
+
 	Utils::ExecHook(GetDefaultObj()->GetFunction("TeleportPlayerToLinkedVolume"), TeleportPlayerToLinkedVolume);
 }
 
@@ -198,6 +212,6 @@ void AFortMinigameSettingsBuilding::Hook()
 {
 	if (!GetDefaultObj())
 		return;
-	
+
 	//Utils::Hook(FindMinigameSettingsBuilding__BeginPlay(), BeginPlay, BeginPlayOG);
 }

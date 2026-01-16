@@ -70,6 +70,7 @@ public:
 
     DEFINE_STRUCT_PROP(FlightSpeed, float);
     DEFINE_STRUCT_PROP(FlightStartLocation, FVector);
+    DEFINE_STRUCT_PROP(FlightStartRotation, FRotator);
     DEFINE_STRUCT_PROP(TimeTillFlightEnd, float);
     DEFINE_STRUCT_PROP(TimeTillDropStart, float);
     DEFINE_STRUCT_PROP(TimeTillDropEnd, float);
@@ -230,6 +231,7 @@ public:
     DEFINE_PROP(VolumeManager, AFortVolumeManager*);
     DEFINE_PROP(CreativePortalManager, AFortCreativePortalManager*);
     DEFINE_PROP(MissionManager, AActor*);
+    DEFINE_PROP(PlayerArray, TArray<AFortPlayerStateAthena*>);
     DEFINE_BITFIELD_PROP(bInSpawningStartup);
 
     DEFINE_FUNC(OnRep_CurrentPlaylistInfo, void);

@@ -66,10 +66,10 @@ enum class Plot : int
     Archipelago,
     Horseshoe,
     Shark,
-    FlatGrid,
     FloatingHub,
     Fortilla,
-    Debris
+    Debris,
+    Custom
 };
 
 void SmallSeparator(float Width, float Thickness = 1.0f)
@@ -247,7 +247,7 @@ void GUI::Init()
     bool g_SwapChainOccluded = false;
 
     static int SelectedPlaylist = (int)Playlist::Solos;
-    static int SelectedPlot = (int)Playlist::Solos;
+    static int SelectedPlot = (int)Plot::Temperate;
 
     while (!done)
     {
@@ -378,7 +378,7 @@ void GUI::Init()
             {
                 Color = ImVec4(0.5f, 0.5f, 0.5f, 1.0f); // gray
                 ImGui::TextColored(Color, "Configuring...");
-			}
+            }
             else if (gsStatus == NotReady)
             {
                 Color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f); // yellow
@@ -558,11 +558,14 @@ void GUI::Init()
 
                 if (ImGui::Button("Destroy Floor Loot", ImVec2(Width, Height)))
                 {
-                    TArray<AFortPickupAthena*> Pickups;
-                    Utils::GetAll<AFortPickupAthena>(Pickups);
+                    TArray<AActor*> Pickups;
+                    Utils::GetAll<AActor>(AFortPickupAthena::StaticClass(), Pickups);
 
                     for (auto& Pickup : Pickups)
-                        Pickup->K2_DestroyActor();
+                    {
+                        if (Pickup)
+                            Pickup->K2_DestroyActor();
+                    }
 
                     Pickups.Free();
                 }
@@ -711,7 +714,7 @@ void GUI::Init()
             ImGui::RadioButton("Arena Duos", &SelectedPlaylist, (int)Playlist::TournamentDuos);
             ImGui::RadioButton("Arena Trios", &SelectedPlaylist, (int)Playlist::TournamentTrios);
             ImGui::RadioButton("Arena Squads", &SelectedPlaylist, (int)Playlist::TournamentSquads);
-            ImGui::RadioButton("Creative", &SelectedPlaylist, (int)Playlist::Creative);
+            ImGui::RadioButton("Creative ", &SelectedPlaylist, (int)Playlist::Creative);
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
 
             switch (SelectedPlaylist)
@@ -799,6 +802,9 @@ void GUI::Init()
             case (int)Playlist::Creative:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2";
+                FConfiguration::bLateGame = false;
+
+
                 break;
             }
             case (int)Playlist::Custom:
@@ -973,7 +979,7 @@ void GUI::Init()
         }
         case 4:
         {
-			ImGui::InputInt("Bot Health", &FConfiguration::BotHealth);
+            ImGui::InputInt("Bot Health", &FConfiguration::BotHealth);
             ImGui::InputInt("Bot Shield", &FConfiguration::BotShield);
 
             ImGui::Spacing();
@@ -1006,7 +1012,167 @@ void GUI::Init()
         }
         case 5:
         {
-            ImGui::RadioButton("Solos", &SelectedPlaylist, (int)Playlist::Solos);
+            ImGui::Text("Use Custom Plot:");
+            SmallSeparator(Width);
+
+            ImGui::RadioButton("Temperate Island", &SelectedPlot, (int)Plot::Temperate);
+            ImGui::RadioButton("Meadow Island", &SelectedPlot, (int)Plot::Meadow);
+            ImGui::RadioButton("Arctic Island", &SelectedPlot, (int)Plot::Arctic);
+            ImGui::RadioButton("Frosty Fortress", &SelectedPlot, (int)Plot::Fortress);
+            ImGui::RadioButton("Ice Lake Island", &SelectedPlot, (int)Plot::IceLake);
+            ImGui::RadioButton("Canyon Island", &SelectedPlot, (int)Plot::Canyon);
+            ImGui::RadioButton("Arid Island", &SelectedPlot, (int)Plot::Arid);
+            ImGui::RadioButton("Wasteland Island", &SelectedPlot, (int)Plot::Wasteland);
+            ImGui::RadioButton("Tropical Island", &SelectedPlot, (int)Plot::Tropical);
+            ImGui::RadioButton("River Edge Island", &SelectedPlot, (int)Plot::RiverEdge);
+            ImGui::RadioButton("Volcano Island", &SelectedPlot, (int)Plot::Volcano);
+            ImGui::RadioButton("Sandbar Island", &SelectedPlot, (int)Plot::Sandbar);
+            ImGui::RadioButton("Caldera Island", &SelectedPlot, (int)Plot::Caldera);
+            ImGui::RadioButton("Kevin Floating Islands", &SelectedPlot, (int)Plot::Kevin);
+            ImGui::RadioButton("Black Glass Island", &SelectedPlot, (int)Plot::BlackGlass);
+            ImGui::RadioButton("Grid Island", &SelectedPlot, (int)Plot::Grid);
+            ImGui::RadioButton("The Block", &SelectedPlot, (int)Plot::Block);
+            ImGui::RadioButton("Grassy Hill Island", &SelectedPlot, (int)Plot::GrassyHill);
+            ImGui::RadioButton("Shoreline Island", &SelectedPlot, (int)Plot::Shoreline);
+            ImGui::RadioButton("Archipelago Island", &SelectedPlot, (int)Plot::Archipelago);
+            ImGui::RadioButton("Horseshoe Island", &SelectedPlot, (int)Plot::Horseshoe);
+            ImGui::RadioButton("The Shark", &SelectedPlot, (int)Plot::Shark);
+            ImGui::RadioButton("Floating Island Hub", &SelectedPlot, (int)Plot::FloatingHub);
+            ImGui::RadioButton("Fortilla Island", &SelectedPlot, (int)Plot::Fortilla);
+            ImGui::RadioButton("Debris Island", &SelectedPlot, (int)Plot::Debris);
+            ImGui::RadioButton("Custom", &SelectedPlot, (int)Plot::Custom);
+
+            switch (SelectedPlot)
+            {
+            case (int)Plot::Temperate:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium";
+                break;
+            }
+            case (int)Plot::Meadow:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/FlatGrass_Large.FlatGrass_Large";
+                break;
+            }
+            case (int)Plot::Arctic:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Arctic_Medium.Arctic_Medium";
+                break;
+            }
+            case (int)Plot::Fortress:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Arctic_Competitive_Medium1.Arctic_Competitive_Medium1";
+                break;
+            }
+            case (int)Plot::IceLake:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/IceLake_Large.IceLake_Large";
+                break;
+            }
+            case (int)Plot::Canyon:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Desert_Large.Desert_Large";
+                break;
+            }
+            case (int)Plot::Arid:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Pandora_Large.Pandora_Large";
+                break;
+            }
+            case (int)Plot::Wasteland:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Desert_Large_02.Desert_Large_02";
+                break;
+            }
+            case (int)Plot::Tropical:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Desert_Large_02.Desert_Large_02";
+                break;
+            }
+            case (int)Plot::RiverEdge:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Military_Medium.Military_Medium";
+                break;
+            }
+            case (int)Plot::Volcano:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Volcano_Large.Volcano_Large";
+                break;
+            }
+            case (int)Plot::Sandbar:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Sandbar_Large.Sandbar_Large";
+                break;
+            }
+            case (int)Plot::Caldera:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Volcano_Large_02.Volcano_Large_02";
+                break;
+            }
+            case (int)Plot::Kevin:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Kevin_Large.Kevin_Large";
+                break;
+            }
+            case (int)Plot::BlackGlass:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/BlackGlass_Medium.BlackGlass_Medium";
+                break;
+            }
+            case (int)Plot::Grid:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/FlatGrid_Large.FlatGrid_Large";
+                break;
+            }
+            case (int)Plot::Block:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/TheBlock_Season7.TheBlock_Season7";
+                break;
+            }
+            case (int)Plot::GrassyHill:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/TheHub_01.TheHub_01";
+                break;
+            }
+            case (int)Plot::Shoreline:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/FlatGrass_LargeV2.FlatGrass_LargeV2";
+                break;
+            }
+            case (int)Plot::Archipelago:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/SandBar_LargeV2.SandBar_LargeV2";
+                break;
+            }
+            case (int)Plot::Horseshoe:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Escape_Large.Escape_Large";
+                break;
+            }
+            case (int)Plot::Shark:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Shark_Large.Shark_Large";
+                break;
+            }
+            case (int)Plot::Fortilla:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Arena_Large_01.Arena_Large_01";
+                break;
+            }
+            case (int)Plot::Debris:
+            {
+                FConfiguration::CreativePlot = L"/Game/Playgrounds/Items/Plots/Arena_Large_02.Arena_Large_02";
+                break;
+            }
+            case (int)Plot::Custom:
+            {
+                break;
+            }
+            default:
+            {
+                break;
+            }
+            }
 
             break;
         }

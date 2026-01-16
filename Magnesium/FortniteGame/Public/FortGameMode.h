@@ -71,6 +71,7 @@ public:
     DefHookOg(bool, StartAircraftPhase, AFortGameMode*, char);
     DefUHookOg(OnAircraftExitedDropZone_);
     DefHookOg(void, FinishWorldInitialization, AFortGameMode*, AActor*);
+    int GetLateSafeZoneIndex();
     
     InitHooks;
     InitPostLoadHooks;

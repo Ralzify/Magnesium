@@ -30,7 +30,6 @@ enum class EAthenaGamePhaseStep : uint8
 	Count = 12,
 };
 
-
 class UFortGameStateComponent_BattleRoyaleGamePhaseLogic : public UActorComponent
 {
 public:

@@ -22,7 +22,7 @@ struct FConfiguration
 
     static inline auto Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
 
-    static inline std::string CreativePlot = "";
+    static inline auto CreativePlot = L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium";
 
     static inline std::string BotName = "Magnesium Bot ";
     static inline auto UseCustomBotNames = false;

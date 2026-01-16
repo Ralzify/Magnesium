@@ -55,8 +55,6 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::HandleMatchHasStarted(A
 	}
 }
 
-constexpr float KINDA_SMALL_NUMBER = 1.e-4f;
-
 // thanks mariki
 struct FStormCircle
 {
@@ -467,16 +465,23 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 				printf("LateGame is not supported on this version!\n");
 				return;
 			}
-			FVector Loc = StormCircles[FConfiguration::LateGameZone + 2].Center;
-			Loc.Z = 17500.f;
 
-			FlightInfo.FlightSpeed = 0.f;
+			FVector Loc = StormCircles[FConfiguration::LateGameZone + 2].Center;
+			Loc.Z = 25000.f;
+
+			bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
+			auto OffsetDistance = IsSmallZone ? 10000.0f : 25000.0f;
+			auto& NewLocation = GameMode->SafeZoneLocations[GameMode->GetLateSafeZoneIndex()];
+			auto OffsetRotation = FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
+			auto OffsetDirection = OffsetRotation.Vector();
+
+			NewLocation += OffsetDirection * OffsetDistance;
 
 			FlightInfo.FlightStartLocation = Loc;
-
+			FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
 			FlightInfo.TimeTillFlightEnd = 7.f;
-			FlightInfo.TimeTillDropEnd = 7.f;
-			FlightInfo.TimeTillDropStart = 0.f;
+			//FlightInfo.TimeTillDropStart = 0.f;
+			FlightInfo.TimeTillDropEnd -= ((FlightInfo.TimeTillDropEnd - FlightInfo.TimeTillDropStart) / 2);
 			//GameState->bAircraftIsLocked = false;
 			//GameState->SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 8.f;
 		}

@@ -1325,3 +1325,266 @@ namespace SDK
 				}
 	}
 }
+
+#undef  PI
+#define PI 					(3.1415926535897932f)
+#define SMALL_NUMBER		(1.e-8f)
+#define KINDA_SMALL_NUMBER	(1.e-4f)
+#define BIG_NUMBER			(3.4e+38f)
+#define EULERS_NUMBER       (2.71828182845904523536f)
+
+// Copied from float.h
+#define MAX_FLT 3.402823466e+38F
+
+static int32 GSRandSeed;
+
+struct FPlatformMath
+{
+	static FORCEINLINE uint32 CountLeadingZeros(uint32 Value)
+	{
+		// Use BSR to return the log2 of the integer
+		unsigned long Log2;
+		if (_BitScanReverse(&Log2, Value) != 0)
+		{
+			return 31 - Log2;
+		}
+
+		return 32;
+	}
+	static FORCEINLINE uint32 CountTrailingZeros(uint32 Value)
+	{
+		if (Value == 0)
+		{
+			return 32;
+		}
+		unsigned long BitIndex;	// 0-based, where the LSB is 0 and MSB is 31
+		_BitScanForward(&BitIndex, Value);	// Scans from LSB to MSB
+		return BitIndex;
+	}
+	static FORCEINLINE uint32 CeilLogTwo(uint32 Arg)
+	{
+		int32 Bitmask = ((int32)(CountLeadingZeros(Arg) << 26)) >> 31;
+		return (32 - CountLeadingZeros(Arg - 1)) & (~Bitmask);
+	}
+	static FORCEINLINE uint32 RoundUpToPowerOfTwo(uint32 Arg)
+	{
+		return 1 << CeilLogTwo(Arg);
+	}
+
+	template< class T >
+	static FORCEINLINE T Square(const T A)
+	{
+		return A * A;
+	}
+
+	template< class T >
+	static FORCEINLINE T Clamp(const T X, const T Min, const T Max)
+	{
+		return X < Min ? Min : X < Max ? X : Max;
+	}
+
+	template< class T, class U >
+	static FORCEINLINE T Lerp(const T& A, const T& B, const U& Alpha)
+	{
+		return (T)(A + Alpha * (B - A));
+	}
+
+	/** Divides two integers and rounds up */
+	template <class T>
+	static FORCEINLINE T DivideAndRoundUp(T Dividend, T Divisor)
+	{
+		return (Dividend + Divisor - 1) / Divisor;
+	}
+
+	/** Divides two integers and rounds down */
+	template <class T>
+	static FORCEINLINE T DivideAndRoundDown(T Dividend, T Divisor)
+	{
+		return Dividend / Divisor;
+	}
+
+	/** Divides two integers and rounds to nearest */
+	template <class T>
+	static FORCEINLINE T DivideAndRoundNearest(T Dividend, T Divisor)
+	{
+		return (Dividend >= 0)
+			? (Dividend + Divisor / 2) / Divisor
+			: (Dividend - Divisor / 2 + 1) / Divisor;
+	}
+
+
+	template <typename T>
+	static FORCEINLINE bool IsPowerOfTwo(T Value)
+	{
+		return ((Value & (Value - 1)) == (T)0);
+	}
+
+
+	// Math Operations
+
+	/** Returns highest of 3 values */
+	template< class T >
+	static FORCEINLINE T Max3(const T A, const T B, const T C)
+	{
+		return Max(Max(A, B), C);
+	}
+
+	/** Returns lowest of 3 values */
+	template< class T >
+	static FORCEINLINE T Min3(const T A, const T B, const T C)
+	{
+		return Min(Min(A, B), C);
+	}
+
+	// Returns e^Value
+	static FORCEINLINE float Exp(float Value) { return expf(Value); }
+	// Returns 2^Value
+	static FORCEINLINE float Exp2(float Value) { return powf(2.f, Value); /*exp2f(Value);*/ }
+	static FORCEINLINE float Loge(float Value) { return logf(Value); }
+	static FORCEINLINE float LogX(float Base, float Value) { return Loge(Value) / Loge(Base); }
+	// 1.0 / Loge(2) = 1.4426950f
+	static FORCEINLINE float Log2(float Value) { return Loge(Value) * 1.4426950f; }
+
+	static FORCEINLINE float Sin(float Value) { return sinf(Value); }
+	static FORCEINLINE float Asin(float Value) { return asinf((Value < -1.f) ? -1.f : ((Value < 1.f) ? Value : 1.f)); }
+	static FORCEINLINE float Sinh(float Value) { return sinhf(Value); }
+	static FORCEINLINE float Cos(float Value) { return cosf(Value); }
+	static FORCEINLINE float Acos(float Value) { return acosf((Value < -1.f) ? -1.f : ((Value < 1.f) ? Value : 1.f)); }
+	static FORCEINLINE float Tan(float Value) { return tanf(Value); }
+	static FORCEINLINE float Atan(float Value) { return atanf(Value); }
+
+	// Note:  We use FASTASIN_HALF_PI instead of HALF_PI inside of FastASin(), since it was the value that accompanied the minimax coefficients below.
+	// It is important to use exactly the same value in all places inside this function to ensure that FastASin(0.0f) == 0.0f.
+	// For comparison:
+	//		HALF_PI				== 1.57079632679f == 0x3fC90FDB
+	//		FASTASIN_HALF_PI	== 1.5707963050f  == 0x3fC90FDA
+
+	static FORCEINLINE float Sqrt(float Value) { return sqrtf(Value); }
+	static FORCEINLINE float Pow(float A, float B) { return powf(A, B); }
+
+	/** Computes a fully accurate inverse square root */
+	static FORCEINLINE float InvSqrt(float F)
+	{
+		return 1.0f / sqrtf(F);
+	}
+
+	/** Computes a faster but less accurate inverse square root */
+	static FORCEINLINE float InvSqrtEst(float F)
+	{
+		return InvSqrt(F);
+	}
+
+	/** Return true if value is NaN (not a number). */
+	static FORCEINLINE bool IsNaN(float A)
+	{
+		return ((*(uint32*)&A) & 0x7FFFFFFF) > 0x7F800000;
+	}
+	/** Return true if value is finite (not NaN and not Infinity). */
+	static FORCEINLINE bool IsFinite(float A)
+	{
+		return ((*(uint32*)&A) & 0x7F800000) != 0x7F800000;
+	}
+	static FORCEINLINE bool IsNegativeFloat(const float& A)
+	{
+		return ((*(uint32*)&A) >= (uint32)0x80000000); // Detects sign bit.
+	}
+
+	static FORCEINLINE bool IsNegativeDouble(const double& A)
+	{
+		return ((*(uint64*)&A) >= (uint64)0x8000000000000000); // Detects sign bit.
+	}
+
+	/**
+	 * Computes the base 2 logarithm for a 64-bit value that is greater than 0.
+	 * The result is rounded down to the nearest integer.
+	 *
+	 * @param Value		The value to compute the log of
+	 * @return			Log2 of Value. 0 if Value is 0.
+	 */
+	static FORCEINLINE uint64 FloorLog2_64(uint64 Value)
+	{
+		uint64 pos = 0;
+		if (Value >= 1ull << 32) { Value >>= 32; pos += 32; }
+		if (Value >= 1ull << 16) { Value >>= 16; pos += 16; }
+		if (Value >= 1ull << 8) { Value >>= 8; pos += 8; }
+		if (Value >= 1ull << 4) { Value >>= 4; pos += 4; }
+		if (Value >= 1ull << 2) { Value >>= 2; pos += 2; }
+		if (Value >= 1ull << 1) { pos += 1; }
+		return (Value == 0) ? 0 : pos;
+	}
+
+	// Conversion Functions
+
+	/**
+	 * Converts radians to degrees.
+	 * @param	RadVal			Value in radians.
+	 * @return					Value in degrees.
+	 */
+	template<class T>
+	static FORCEINLINE auto RadiansToDegrees(T const& RadVal) -> decltype(RadVal* (180.f / PI))
+	{
+		return RadVal * (180.f / PI);
+	}
+
+	/**
+	 * Converts degrees to radians.
+	 * @param	DegVal			Value in degrees.
+	 * @return					Value in radians.
+	 */
+	template<class T>
+	static FORCEINLINE auto DegreesToRadians(T const& DegVal) -> decltype(DegVal* (PI / 180.f))
+	{
+		return DegVal * (PI / 180.f);
+	}
+
+	static FORCEINLINE int32 RoundToInt(float F)
+	{
+		// Note: the x2 is to workaround the rounding-to-nearest-even-number issue when the fraction is .5
+		return _mm_cvt_ss2si(_mm_set_ss(F + F + 0.5f)) >> 1;
+	}
+
+	static FORCEINLINE float RoundToFloat(float F)
+	{
+		return (float)RoundToInt(F);
+	}
+
+	static FORCEINLINE int32 FloorToInt(float F)
+	{
+		return _mm_cvt_ss2si(_mm_set_ss(F + F - 0.5f)) >> 1;
+	}
+
+	static FORCEINLINE float FloorToFloat(float F)
+	{
+		return (float)FloorToInt(F);
+	}
+
+	static FORCEINLINE float GridSnap(float Location, float Grid)
+	{
+		if (Grid == 0.f)	return Location;
+		else
+		{
+			return FloorToFloat((Location + 0.5f * Grid) / Grid) * Grid;
+		}
+	}
+
+	/** Returns a random integer between 0 and RAND_MAX, inclusive */
+	static FORCEINLINE int32 Rand() { return rand(); }
+
+	/** Seeds global random number functions Rand() and FRand() */
+	static FORCEINLINE void RandInit(int32 Seed) { srand(Seed); }
+
+	/** Returns a random float between 0 and 1, inclusive. */
+	static FORCEINLINE float FRand() { return Rand() / (float)RAND_MAX; }
+
+	static void SRandInit(int32 Seed)
+	{
+		GSRandSeed = Seed;
+	}
+
+	static int32 GetRandSeed()
+	{
+		return GSRandSeed;
+	}
+};
+
+typedef FPlatformMath FMath;

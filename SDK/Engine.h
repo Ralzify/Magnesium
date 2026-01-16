@@ -227,6 +227,22 @@ namespace SDK
 		{
 			return X == Other.X && Y == Other.Y && Z == Other.Z;
 		}
+		FVector GetSafeNormal(double Tolerance = 1.e-8) const
+		{
+			const double SquareSum = X * X + Y * Y + Z * Z;
+
+			if (SquareSum > Tolerance)
+			{
+				const double Scale = 1.0 / std::sqrt(SquareSum);
+				return FVector(X * Scale, Y * Scale, Z * Scale);
+			}
+
+			return FVector(0.0, 0.0, 0.0);
+		}
+		static UnderlayingType Dist(const FVector& A, const FVector& B)
+		{
+			return (A - B).Magnitude();
+		}
 	};
 
 	struct FQuat
@@ -272,6 +288,18 @@ namespace SDK
 
 		FRotator() = default;
 		FRotator(const FRotator&) = default;
+		FRotator(double InPitch, double InYaw, double InRoll)
+		{
+			Pitch = InPitch;
+			Yaw = InYaw;
+			Roll = InRoll;
+		}
+
+		FRotator operator+(const FRotator& Other) const
+		{
+			return FRotator(Pitch + Other.Pitch, Yaw + Other.Yaw, Roll + Other.Roll);
+		}
+
 
 		static int32 Size()
 		{
@@ -346,6 +374,19 @@ namespace SDK
 
 			if (Angle > 180.) Angle -= 360.;
 			return Angle;
+		}
+
+		FVector Vector() const
+		{
+			float PitchRad = FMath::DegreesToRadians(Pitch);
+			float YawRad = FMath::DegreesToRadians(Yaw);
+
+			float CosPitch = FMath::Cos(PitchRad);
+			float SinPitch = FMath::Sin(PitchRad);
+			float CosYaw = FMath::Cos(YawRad);
+			float SinYaw = FMath::Sin(YawRad);
+
+			return FVector(CosPitch * CosYaw, CosPitch * SinYaw, SinPitch);
 		}
 	};
 
