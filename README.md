@@ -14,10 +14,9 @@ Hello! Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OG
 # TODO:
 - Fix "cheat summon" on 13.40.
 - Fix Dormant Henchmen
-- Player Marking (marker tp? i dont remember what i was cooking here)
 - Fix Randomize Lootpool : Version-dependant Lootpools?
 - Players Tab (fix GetPlayerName)
 - Auto Dump & Remove Tab / Fix Dumping
 - Pickaxe Stutter
 - Meters in UI/Log (fix GetPlayerName)
-- Creative Tab in UI : Custom Plots
+- Creative Tab in UI : Custom Plots ✅
