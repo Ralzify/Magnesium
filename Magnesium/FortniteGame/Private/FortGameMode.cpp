@@ -970,7 +970,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     if (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 25.20 && !*Ret)
     {
         auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-        auto WarmupDuration = 60.f;
+        auto WarmupDuration = 90.f;
 
         if (GameState->HasWarmupCountdownEndTime()) // gamephaselogic builds
         {
@@ -1398,11 +1398,8 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
 
         bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
         auto OffsetDistance = IsSmallZone ? 10000.0f : 25000.0f;
-        auto& NewLocation = GameMode->SafeZoneLocations[GameMode->GetLateSafeZoneIndex()];
         auto OffsetRotation = Aircraft->FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
         auto OffsetDirection = OffsetRotation.Vector();
-
-        NewLocation += OffsetDirection * OffsetDistance;
 
         if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
         {
@@ -1413,7 +1410,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
         {
             Aircraft->FlightInfo.FlightStartLocation = Loc;
             Aircraft->FlightInfo.FlightStartLocation.Z = 25000.f;
-            Aircraft->FlightInfo.FlightSpeed /= IsSmallZone ? 8 : 4;
+            Aircraft->FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
             Aircraft->FlightInfo.TimeTillFlightEnd = 7.f;
             Aircraft->FlightInfo.TimeTillDropStart = 0.f;
             Aircraft->FlightInfo.TimeTillDropEnd -= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2);
@@ -1433,11 +1430,11 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
                 Aircraft->TimeTillDropStart = 0.f;
             }
         }
+
         Aircraft->DropStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
         Aircraft->DropEndTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 7.f;
         Aircraft->FlightStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
         Aircraft->FlightEndTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 7.f;
-        //GameState->bAircraftIsLocked = false;
         //GameState->SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 7.6f;
     }
 

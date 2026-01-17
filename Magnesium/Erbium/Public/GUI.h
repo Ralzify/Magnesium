@@ -9,11 +9,66 @@ enum EGSStatus
     Ended,
 };
 
+enum class Playlist : int
+{
+    Solos,
+    Duos,
+    Trios,
+    Squads,
+    Creative,
+    OneShotSolos,
+    OneShotDuos,
+    OneShotSquads,
+    SiphonSolos,
+    SiphonDuos,
+    SiphonSquads,
+    SlideSolos,
+    SlideDuos,
+    TournamentSolos,
+    TournamentDuos,
+    TournamentTrios,
+    TournamentSquads,
+    Gav,
+    Custom
+};
+
+enum class Plot : int
+{
+    Temperate,
+    Meadow,
+    Arctic,
+    Fortress,
+    IceLake,
+    Canyon,
+    Arid,
+    Wasteland,
+    Tropical,
+    RiverEdge,
+    Volcano,
+    Sandbar,
+    Caldera,
+    Kevin,
+    BlackGlass,
+    Grid,
+    Block,
+    GrassyHill,
+    Shoreline,
+    Archipelago,
+    Horseshoe,
+    Shark,
+    FloatingHub,
+    Fortilla,
+    Debris,
+    Custom
+};
+
 class GUI
 {
 public:
     static inline char windowTitle[67];
     static inline EGSStatus gsStatus = NotReady;
+    static inline int SelectedPlaylist = static_cast<int>(Playlist::Solos);
+    static inline int SelectedPlot = static_cast<int>(Plot::Temperate);
     static void Init();
 };
 

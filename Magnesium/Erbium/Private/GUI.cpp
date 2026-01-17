@@ -20,59 +20,6 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 
-enum class Playlist : int
-{
-    Solos,
-    Duos,
-    Trios,
-    Squads,
-    Creative,
-    OneShotSolos,
-    OneShotDuos,
-    OneShotSquads,
-    SiphonSolos,
-    SiphonDuos,
-    SiphonSquads,
-    SlideSolos,
-    SlideDuos,
-    TournamentSolos,
-    TournamentDuos,
-    TournamentTrios,
-    TournamentSquads,
-    Gav,
-    Custom
-};
-
-enum class Plot : int
-{
-    Temperate,
-    Meadow,
-    Arctic,
-    Fortress,
-    IceLake,
-    Canyon,
-    Arid,
-    Wasteland,
-    Tropical,
-    RiverEdge,
-    Volcano,
-    Sandbar,
-    Caldera,
-    Kevin,
-    BlackGlass,
-    Grid,
-    Block,
-    GrassyHill,
-    Shoreline,
-    Archipelago,
-    Horseshoe,
-    Shark,
-    FloatingHub,
-    Fortilla,
-    Debris,
-    Custom
-};
-
 void SmallSeparator(float Width, float Thickness = 1.0f)
 {
     ImVec2 Pos = ImGui::GetCursorScreenPos();
@@ -246,9 +193,6 @@ void GUI::Init()
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     bool done = false;
     bool g_SwapChainOccluded = false;
-
-    static int SelectedPlaylist = (int)Playlist::Solos;
-    static int SelectedPlot = (int)Plot::Temperate;
 
     while (!done)
     {

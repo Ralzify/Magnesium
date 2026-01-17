@@ -388,7 +388,8 @@ namespace SDK
 
 			return FVector(CosPitch * CosYaw, CosPitch * SinYaw, SinPitch);
 		}
-	};
+		FQuat Quaternion() const;
+};
 
 	inline FRotator FQuat::Rotator()
 	{

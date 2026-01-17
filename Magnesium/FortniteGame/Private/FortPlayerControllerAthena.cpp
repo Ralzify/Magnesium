@@ -122,7 +122,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			FortPawn->SetShield(100.f);
 	}
 
-	if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
+	if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn") && VersionInfo.FortniteVersion == 27.11)
 	{
 		FortPawn->SetShield(100.f);
 
@@ -1450,7 +1450,7 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		NewPawn->SetHealth(100.f);
 		NewPawn->SetShield(100.f);
 
-		if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
+		if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn") && VersionInfo.FortniteVersion == 27.11)
 		{
 			NewPawn->K2_TeleportTo(FVector(-16.314775, 258.315735, 861.021480), FRotator(0.f, 0.f, 0.f));
 
@@ -2895,6 +2895,12 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			auto Loc = PlayerController->Pawn->K2_GetActorLocation();
 			Loc.Z += 200.f;
 
+			auto Rotation = PlayerController->Pawn->K2_GetActorRotation();
+			FQuat NewQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
+			FRotator RotatorFromQuat = NewQuat.Rotator();
+
+			// auto Transform = PlayerController->Pawn->GetTransform(); // proper, but at what cost?
+
 			auto Class = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
 
 			if (!Class)
@@ -2910,7 +2916,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 			if (Class)
 			{
-				UWorld::SpawnActor(Class, Loc);
+				UWorld::SpawnActor(Class, Loc, RotatorFromQuat);
 				PlayerController->ClientMessage(FString(L"Spawned actor!"), FName(), 1.f);
 			}
 			else

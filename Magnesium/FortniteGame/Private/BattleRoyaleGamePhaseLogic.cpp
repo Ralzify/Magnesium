@@ -39,7 +39,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::HandleMatchHasStarted(A
 	if (!bSkipWarmup)
 	{
 		auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-		auto WarmupDuration = FConfiguration::bAutoBusStart ? 60.f : 99999999.f;
+		auto WarmupDuration = FConfiguration::bAutoBusStart ? 90.f : 99999999.f;
 
 		GamePhaseLogic->WarmupCountdownStartTime = Time;
 		GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
@@ -155,6 +155,62 @@ inline void SinCos(float* ScalarSin, float* ScalarCos, float  Value)
 	// 10-degree minimax approximation
 	float p = ((((-2.6051615e-07f * y2 + 2.4760495e-05f) * y2 - 0.0013888378f) * y2 + 0.041666638f) * y2 - 0.5f) * y2 + 1.0f;
 	*ScalarCos = sign * p;
+}
+struct FQuat FRotator::Quaternion() const
+{
+#if PLATFORM_ENABLE_VECTORINTRINSICS
+	const VectorRegister Angles = MakeVectorRegister(Rotator.Pitch, Rotator.Yaw, Rotator.Roll, 0.0f);
+	const VectorRegister HalfAngles = VectorMultiply(Angles, DEG_TO_RAD_HALF);
+
+	VectorRegister SinAngles, CosAngles;
+	VectorSinCos(&SinAngles, &CosAngles, &HalfAngles);
+
+	// Vectorized conversion, measured 20% faster than using scalar version after VectorSinCos.
+	// Indices within VectorRegister (for shuffles): P=0, Y=1, R=2
+	const VectorRegister SR = VectorReplicate(SinAngles, 2);
+	const VectorRegister CR = VectorReplicate(CosAngles, 2);
+
+	const VectorRegister SY_SY_CY_CY_Temp = VectorShuffle(SinAngles, CosAngles, 1, 1, 1, 1);
+
+	const VectorRegister SP_SP_CP_CP = VectorShuffle(SinAngles, CosAngles, 0, 0, 0, 0);
+	const VectorRegister SY_CY_SY_CY = VectorShuffle(SY_SY_CY_CY_Temp, SY_SY_CY_CY_Temp, 0, 2, 0, 2);
+
+	const VectorRegister CP_CP_SP_SP = VectorShuffle(CosAngles, SinAngles, 0, 0, 0, 0);
+	const VectorRegister CY_SY_CY_SY = VectorShuffle(SY_SY_CY_CY_Temp, SY_SY_CY_CY_Temp, 2, 0, 2, 0);
+
+	const uint32 Neg = uint32(1 << 31);
+	const uint32 Pos = uint32(0);
+	const VectorRegister SignBitsLeft = MakeVectorRegister(Pos, Neg, Pos, Pos);
+	const VectorRegister SignBitsRight = MakeVectorRegister(Neg, Neg, Neg, Pos);
+	const VectorRegister LeftTerm = VectorBitwiseXor(SignBitsLeft, VectorMultiply(CR, VectorMultiply(SP_SP_CP_CP, SY_CY_SY_CY)));
+	const VectorRegister RightTerm = VectorBitwiseXor(SignBitsRight, VectorMultiply(SR, VectorMultiply(CP_CP_SP_SP, CY_SY_CY_SY)));
+
+	FQuat RotationQuat;
+	const VectorRegister Result = VectorAdd(LeftTerm, RightTerm);
+	VectorStoreAligned(Result, &RotationQuat);
+#else
+	const float DEG_TO_RAD = PI / (180.f);
+	const float DIVIDE_BY_2 = DEG_TO_RAD / 2.f;
+	float SP, SY, SR;
+	float CP, CY, CR;
+
+	SinCos(&SP, &CP, Pitch * DIVIDE_BY_2);
+	SinCos(&SY, &CY, Yaw * DIVIDE_BY_2);
+	SinCos(&SR, &CR, Roll * DIVIDE_BY_2);
+
+	FQuat RotationQuat{};
+	RotationQuat.X = CR * SP * SY - SR * CP * CY;
+	RotationQuat.Y = -CR * SP * CY - SR * CP * SY;
+	RotationQuat.Z = CR * CP * SY - SR * SP * CY;
+	RotationQuat.W = CR * CP * CY + SR * SP * SY;
+#endif // PLATFORM_ENABLE_VECTORINTRINSICS
+
+#if ENABLE_NAN_DIAGNOSTIC || DO_CHECK
+	// Very large inputs can cause NaN's. Want to catch this here
+	ensureMsgf(!RotationQuat.ContainsNaN(), TEXT("Invalid input to FRotator::Quaternion - generated NaN output: %s"), *RotationQuat.ToString());
+#endif
+
+	return RotationQuat;
 }
 
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GenerateStormCircles(AFortAthenaMapInfo* MapInfo)
