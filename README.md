@@ -12,6 +12,7 @@ Hello! Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OG
 - Default Settings Changes : Stuff like Infinite Ammo & Infinite Materials are already on by default now!
 
 # TODO:
+- Add Gameplay Effects per Playlist
 - Fix "cheat summon" on 13.40.
 - Fix Dormant Henchmen
 - Fix Randomize Lootpool : Version-dependant Lootpools?
