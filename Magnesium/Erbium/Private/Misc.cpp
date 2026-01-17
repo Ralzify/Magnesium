@@ -982,7 +982,7 @@ void Misc::Hook()
 
 		if (!sig)
 			sig = Memcury::Scanner::FindPattern("40 53 48 83 EC ? 48 8B DA 48 8B D1 48 81 C1 ? ? ? ? E8 ? ? ? ? 48 85 C0 74 ? 4C 8B 0B 45 33 C0").Get();
-		
+
 		Utils::Hook(sig, CrashSomething, CrashSomethingOG);
 	}
 
@@ -992,14 +992,20 @@ void Misc::Hook()
 	/*if (ABuildingProp_LockDevice::StaticClass())
 	{
 		auto Fn = ABuildingProp_LockDevice::GetDefaultObj()->GetFunction("UnlockObject");
+
 		Utils::Hook<ABuildingProp_LockDevice>(Fn->GetVTableIndex(), Ohio);
 	}
+
 	auto ListenCall = FindListenCall();
+
 	if (ListenCall)
 	{
 		auto OverrideFunc = __int64(DefaultObjImpl("FortHUDContext")->GetFunction("EnterCameraMode")->ExecFunction);
+
 		Utils::Hook(OverrideFunc, Listen);
+
 		auto NewRel = uint32(OverrideFunc - (ListenCall + 5));
+
 		Utils::Patch<uint32>(ListenCall + 1, NewRel);
 	}*/
 

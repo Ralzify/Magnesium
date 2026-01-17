@@ -39,6 +39,7 @@ enum class Playlist : int
     TournamentDuos,
     TournamentTrios,
     TournamentSquads,
+    Gav,
     Custom
 };
 
@@ -473,53 +474,62 @@ void GUI::Init()
                 ImGui::Spacing();
                 ImGui::Spacing();
 
+                auto GavMap = wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn");
+
                 ImGui::Text("Pre-Game Configuration:");
                 SmallSeparator(Width);
 
-                ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
-
-                if (!FConfiguration::bReadyToStart)
+                if (GavMap)
                 {
-                    if (VersionInfo.FortniteVersion <= 23.50)
-                        ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
-                }
-
-                if (gsStatus <= Joinable)
+                    ImGui::Text("- Playing Gav 1v1 Map.");
+				}
+                else
                 {
-                    static bool bInitializedZone = false;
+                    ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
 
-                    if (!bInitializedZone)
+                    if (!FConfiguration::bReadyToStart)
                     {
-                        FConfiguration::LateGameZone = FConfiguration::IsS27() ? 3 : 4;
-                        bInitializedZone = true;
+                        if (VersionInfo.FortniteVersion <= 23.50)
+                            ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
                     }
 
-                    ImGui::Checkbox("Lategame", &FConfiguration::bLateGame);
-
-                    if (FConfiguration::bLateGame)
+                    if (gsStatus <= Joinable)
                     {
-                        ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
-                        ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
+                        static bool bInitializedZone = false;
 
-                        ImGui::PushItemWidth(Width);
-                        ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
-                        ImGui::PopItemWidth();
+                        if (!bInitializedZone)
+                        {
+                            FConfiguration::LateGameZone = FConfiguration::IsS27() ? 3 : 4;
+                            bInitializedZone = true;
+                        }
+
+                        ImGui::Checkbox("Lategame", &FConfiguration::bLateGame);
+
+                        if (FConfiguration::bLateGame)
+                        {
+                            ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
+                            ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
+
+                            ImGui::PushItemWidth(Width);
+                            ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
+                            ImGui::PopItemWidth();
+                        }
                     }
-                }
 
-                ImGui::Spacing();
+                    ImGui::Spacing();
 
-                if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
-                {
-                    if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+                    if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                     {
-                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
-                        //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
+                        if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+                        {
+                            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
+                            //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
 
-                        //GamePhaseLogic->StartAircraftPhase();
+                            //GamePhaseLogic->StartAircraftPhase();
+                        }
+                        else
+                            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
                     }
-                    else
-                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
                 }
             }
 
@@ -549,7 +559,7 @@ void GUI::Init()
 
                     for (auto& Build : Builds)
                     {
-                        if (Build->bPlayerPlaced)
+                        if (Build && Build->bPlayerPlaced)
                             Build->K2_DestroyActor();
                     }
 
@@ -715,6 +725,10 @@ void GUI::Init()
             ImGui::RadioButton("Arena Trios", &SelectedPlaylist, (int)Playlist::TournamentTrios);
             ImGui::RadioButton("Arena Squads", &SelectedPlaylist, (int)Playlist::TournamentSquads);
             ImGui::RadioButton("Creative ", &SelectedPlaylist, (int)Playlist::Creative);
+
+            if (VersionInfo.FortniteVersion == 27.11)
+				ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
+
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
 
             switch (SelectedPlaylist)
@@ -803,8 +817,12 @@ void GUI::Init()
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2";
                 FConfiguration::bLateGame = false;
-
-
+                break;
+            }
+            case (int)Playlist::Gav:
+            {
+                FConfiguration::Playlist = L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn";
+                FConfiguration::bLateGame = false;
                 break;
             }
             case (int)Playlist::Custom:
@@ -901,7 +919,7 @@ void GUI::Init()
                 char version[6];
 
                 sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
-                ss << "Fortnite version: " << version << "\n\n";
+                ss << "Fortnite Version: " << version << "\n\n";
 
                 auto RarityEnum = EFortRarity::StaticEnum();
                 for (int i = 0; i < TUObjectArray::Num(); i++)
@@ -949,7 +967,7 @@ void GUI::Init()
                 char version[6];
 
                 sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
-                ss << "Fortnite version: " << version << "\n\n";
+                ss << "Fortnite Version: " << version << "\n\n";
 
                 auto RarityEnum = EFortRarity::StaticEnum();
                 for (int i = 0; i < TUObjectArray::Num(); i++)
@@ -964,9 +982,9 @@ void GUI::Init()
                     ss << "- " << UKismetSystemLibrary::GetPathName(Playlist).ToString() << "\n";
                     ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
                     if (Playlist->HasMaxPlayers())
-                        ss << "-     Max players: " << std::to_string(Playlist->MaxPlayers) << "\n";
+                        ss << "-     Max Players: " << std::to_string(Playlist->MaxPlayers) << "\n";
                     if (Playlist->HasMaxSquadSize())
-                        ss << "-     Squad size: " << std::to_string(Playlist->MaxSquadSize) << "\n";
+                        ss << "-     Squad Size: " << std::to_string(Playlist->MaxSquadSize) << "\n";
                 }
 
                 std::ofstream of("DumpedPlaylists.txt", std::ios::trunc);

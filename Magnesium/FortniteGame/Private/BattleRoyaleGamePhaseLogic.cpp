@@ -471,18 +471,14 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 
 			bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
 			auto OffsetDistance = IsSmallZone ? 10000.0f : 25000.0f;
-			auto& NewLocation = GameMode->SafeZoneLocations[GameMode->GetLateSafeZoneIndex()];
 			auto OffsetRotation = FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
 			auto OffsetDirection = OffsetRotation.Vector();
-
-			NewLocation += OffsetDirection * OffsetDistance;
 
 			FlightInfo.FlightStartLocation = Loc;
 			FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
 			FlightInfo.TimeTillFlightEnd = 7.f;
 			//FlightInfo.TimeTillDropStart = 0.f;
 			FlightInfo.TimeTillDropEnd -= ((FlightInfo.TimeTillDropEnd - FlightInfo.TimeTillDropStart) / 2);
-			//GameState->bAircraftIsLocked = false;
 			//GameState->SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 8.f;
 		}
 
@@ -499,7 +495,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 		Aircraft->FlightStartTime = (float)Time;
 		Aircraft->FlightEndTime = (float)Time + FlightInfo.TimeTillFlightEnd;
 		Aircraft->ReplicatedFlightTimestamp = (float)Time;
-		bAircraftIsLocked = true;
+		bAircraftIsLocked = false;
 
 		for (auto& Player__Uncasted : ((AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode)->AlivePlayers)
 		{
@@ -569,7 +565,6 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 				if (bStartAircraft || (((AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode)->AlivePlayers.Num() > 0 && WarmupCountdownEndTime != -1 && WarmupCountdownEndTime < Time))
 				{
 					StartAircraftPhase();
-
 					return;
 				}
 			}
@@ -619,7 +614,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 					else
 						SafeZonesStartTime = (float)Time + 60.f;
 
-					SetGamePhase(EAthenaGamePhase::SafeZones);
+					SetGamePhase(bSkipWarmup ? EAthenaGamePhase::None : EAthenaGamePhase::SafeZones);
 					SetGamePhaseStep(EAthenaGamePhaseStep::StormForming);
 					return;
 				}

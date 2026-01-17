@@ -121,6 +121,10 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		if (FConfiguration::bLateGame)
 			FortPawn->SetShield(100.f);
 	}
+
+	if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
+		FortPawn->SetShield(100.f);
+
 	if ((!FConfiguration::bKeepInventory || FConfiguration::bLateGame) && PlayerController->WorldInventory)
 	{	
 		UEAllocatedVector<FGuid> GuidsToRemove;
@@ -1346,11 +1350,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				FConfiguration::Elim_EliminatedName = EliminatedPlayer;
 				FConfiguration::Elim_Distance = Distance;*/
 			}
-
-			if (GameMode->AlivePlayers == 0 && GameState->GamePhase > 2)
-			{
-				GUI::gsStatus = Ended;
-			}
 		}
 
 		if ((FConfiguration::bSiphon && FConfiguration::SiphonAmount > 0) && PlayerController->Pawn && KillerPlayerState && KillerPlayerState->AbilitySystemComponent && KillerPawn && KillerPawn->Controller != PlayerController)
@@ -1432,6 +1431,12 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 
 		NewPawn->SetHealth(100.f);
 		NewPawn->SetShield(100.f);
+
+		if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
+			NewPawn->K2_TeleportTo(FVector(-16.314775, 258.315735, 861.021480), FRotator(0.f, 0.f, 0.f));
+
+		// -315.373858 219.791659 452.150000 // button
+		 
 
 		auto Interface = PlayerController->PlayerState->GetInterface(IFortAbilitySystemInterface::StaticClass());
 
@@ -1873,9 +1878,9 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				ss << "- " << UKismetSystemLibrary::GetPathName(Playlist).ToString() << "\n";
 				ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
 				if (Playlist->HasMaxPlayers())
-					ss << "-     Max players: " << std::to_string(Playlist->MaxPlayers) << "\n";
+					ss << "-     Max Players: " << std::to_string(Playlist->MaxPlayers) << "\n";
 				if (Playlist->HasMaxSquadSize())
-					ss << "-     Squad size: " << std::to_string(Playlist->MaxSquadSize) << "\n";
+					ss << "-     Squad Size: " << std::to_string(Playlist->MaxSquadSize) << "\n";
 			}
 
 			std::ofstream of("DumpedPlaylists.txt", std::ios::trunc);
@@ -2834,7 +2839,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 			auto Location = Pawn->K2_GetActorLocation();
 
-			if (Location.IsZero())
+			if (Location.IsZero()) // stupid
 			{
 				PlayerController->ClientMessage(FString(L"Location is (0,0,0)! Cannot provide location."), FName(), 1.f);
 				return;

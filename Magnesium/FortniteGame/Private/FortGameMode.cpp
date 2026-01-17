@@ -1417,6 +1417,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             Aircraft->FlightInfo.TimeTillFlightEnd = 7.f;
             Aircraft->FlightInfo.TimeTillDropStart = 0.f;
             Aircraft->FlightInfo.TimeTillDropEnd -= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2);
+
         }
         else
         {

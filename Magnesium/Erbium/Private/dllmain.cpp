@@ -202,6 +202,17 @@ void Main()
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Mole.WorstCasePlayerCount 1"), nullptr);
         terrainOpen = L"open Mole_UnderBase_Parent";
     }
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
+    {
+        terrainOpen = L"open /Game/Gav/Levels/GM_1v1/Gav_1v1.Gav_1v1";
+        FConfiguration::bSiphon = true;
+		FConfiguration::SiphonAmount = 200;
+        FConfiguration::bInfiniteAmmo = true;
+		FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+		FConfiguration::MaxTickRate = 60.f;
+    }
     else if (VersionInfo.FortniteVersion >= 12.00 && wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2"))
         terrainOpen = L"open Creative_NoApollo_Terrain";
     else
