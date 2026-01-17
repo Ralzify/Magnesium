@@ -727,7 +727,7 @@ void GUI::Init()
             ImGui::RadioButton("Creative ", &SelectedPlaylist, (int)Playlist::Creative);
 
             if (VersionInfo.FortniteVersion == 27.11)
-				ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
+				ImGui::RadioButton("Gav 1v1 Map (requires paks)", &SelectedPlaylist, (int)Playlist::Gav);
 
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
 
