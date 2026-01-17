@@ -84,6 +84,20 @@ public:
 struct FGameplayEffectContextHandle
 {
     uint8_t Padding[0x18];
+
+    UObject* Instigator = nullptr;
+    UObject* Causer = nullptr;
+    UObject* SourceObject = nullptr;
+
+    void AddSourceObject(UObject* InSourceObject)
+    {
+        SourceObject = InSourceObject;
+    }
+
+    UObject* GetSourceObject() const
+    {
+        return SourceObject;
+    }
 };
 
 struct FGameplayCueParameters

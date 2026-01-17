@@ -123,7 +123,25 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	}
 
 	if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
+	{
 		FortPawn->SetShield(100.f);
+
+		if (UAbilitySystemComponent* AbilitySystemComponent = PlayerController->PlayerState->AbilitySystemComponent)
+		{
+			static auto FallDamageGE = FindObject<UClass>(L"/Game/Athena/Items/Gameplay/Backpacks/Ashton/GE_AshtonPack_FallDamageImmune.GE_AshtonPack_FallDamageImmune_C");
+
+			if (FallDamageGE)
+			{
+				FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+				Context.Instigator = PlayerController;
+				Context.Causer = FortPawn;
+				Context.AddSourceObject(FortPawn);
+
+				AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(FallDamageGE, 1.0f, Context);
+			}
+		}
+	}
 
 	if ((!FConfiguration::bKeepInventory || FConfiguration::bLateGame) && PlayerController->WorldInventory)
 	{	
@@ -1433,7 +1451,25 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		NewPawn->SetShield(100.f);
 
 		if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
+		{
 			NewPawn->K2_TeleportTo(FVector(-16.314775, 258.315735, 861.021480), FRotator(0.f, 0.f, 0.f));
+
+			if (UAbilitySystemComponent* AbilitySystemComponent = PlayerState->AbilitySystemComponent)
+			{
+				static auto FallDamageGE = FindObject<UClass>(L"/Game/Athena/Items/Gameplay/Backpacks/Ashton/GE_AshtonPack_FallDamageImmune.GE_AshtonPack_FallDamageImmune_C");
+
+				if (FallDamageGE)
+				{
+					FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+					Context.Instigator = PlayerController;
+					Context.Causer = NewPawn;
+					Context.AddSourceObject(NewPawn);
+
+					AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(FallDamageGE, 1.0f, Context);
+				}
+			}
+		}
 
 		// -315.373858 219.791659 452.150000 // button
 		 
