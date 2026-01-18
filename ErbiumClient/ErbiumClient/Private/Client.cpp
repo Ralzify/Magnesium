@@ -1,8 +1,9 @@
 #include "pch.h"
 #include "../Public/FortPlaylistAthena.h"
-#include "../../../Erbium/Erbium/Public/Configuration.h"
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/Client.h"
+#include "../../../Magnesium/Erbium/Public/Configuration.h"
+#include "../../../Magnesium/Erbium/Public/Utils.h"
 
 bool bEOREnabled = false;
 bool bDisablePreEdits = false;

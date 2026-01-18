@@ -15,7 +15,7 @@ Hello! Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OG
 - Add Gameplay Effects per Playlist
 - Fix "cheat summon" on 13.40.
 - Fix Dormant Henchmen
-- Fix Randomize Lootpool : Version-dependant Lootpools?
+- Fix Randomize Lootpool ✅
 - Players Tab (fix GetPlayerName)
 - Auto Dump & Remove Tab / Fix Dumping
 - Pickaxe Stutter

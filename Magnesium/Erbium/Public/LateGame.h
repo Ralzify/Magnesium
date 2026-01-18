@@ -2,6 +2,8 @@
 #include "../../pch.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
 #include "../../FortniteGame/Public/FortInventory.h"
+#include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
+#include "../Public/GUI.h"
 
 struct FLateGameItem
 {
@@ -18,15 +20,16 @@ enum class EAmmoType : uint8
     Sniper = 4
 };
 
+static inline bool IsOneShot()
+{
+	return GUI::SelectedPlaylist == static_cast<int>(Playlist::OneShotSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::OneShotDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::OneShotSquads);
+}   
+
 class LateGame
 {
 public:
-    static FLateGameItem GetShotgun();
-    static FLateGameItem GetAssaultRifle();
-    static FLateGameItem GetSniper();
-    static FLateGameItem GetHeal();
-	static FLateGameItem GetConsumable();
+    static TArray<TArray<TPair<FString, int>>> GetLoadout();
+    static TArray<TArray<TPair<FString, int>>> GetOSLoadout();
 
-    static const UFortItemDefinition* GetAmmo(EAmmoType);
-    static const UFortItemDefinition* GetResource(EFortResourceType);
+    static void EquipLoadout(AFortPlayerControllerAthena* PlayerController);
 };

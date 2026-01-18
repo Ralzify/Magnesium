@@ -791,6 +791,7 @@ namespace UC
 			return Data;
 		}
 		inline const wchar_t* CStr() const { return Data; }
+		inline const wchar_t* operator*() const { return Data; }
 
 	public:
 		inline bool operator==(const FString& Other) const { return Other ? NumElements == Other.NumElements && wcscmp(Data, Other.Data) == 0 : false; }
@@ -1336,6 +1337,34 @@ namespace UC
 		};
 	}
 
+	class FTCHARToUTF8
+	{
+		std::string Buffer;
+	public:
+		FTCHARToUTF8(const wchar_t* InStr)
+		{
+			if (!InStr || !*InStr) return;
+
+			int SizeNeeded = WideCharToMultiByte(CP_UTF8, 0, InStr, -1, nullptr, 0, nullptr, nullptr);
+
+			if (SizeNeeded > 0)
+			{
+				Buffer.resize(SizeNeeded);
+				WideCharToMultiByte(CP_UTF8, 0, InStr, -1, &Buffer[0], SizeNeeded, nullptr, nullptr);
+			}
+		}
+
+		const char* Get() const 
+		{ 
+			return Buffer.c_str(); 
+		}
+
+		operator const char* () const 
+		{ 
+			return Get(); 
+		}
+	};
+
 	inline Iterators::FSetBitIterator ContainerImpl::FBitArray::begin()
 	{
 		return Iterators::FSetBitIterator(*this, 0);
@@ -1349,3 +1378,5 @@ namespace UC
 	static_assert(sizeof(TSet<int32>) == 0x50, "TSet has a wrong size!");
 	static_assert(sizeof(TMap<int32, int32>) == 0x50, "TMap has a wrong size!");
 }
+
+#define TCHAR_TO_UTF8(Str) (UC::FTCHARToUTF8(Str).Get())

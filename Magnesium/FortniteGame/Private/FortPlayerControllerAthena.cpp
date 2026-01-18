@@ -292,44 +292,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	}
 	else if (FConfiguration::bLateGame && (!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
 	{
-		auto Shotgun = LateGame::GetShotgun();
-		auto AssaultRifle = LateGame::GetAssaultRifle();
-		auto Sniper = LateGame::GetSniper();
-		auto Heal = LateGame::GetHeal();
-		auto Consumable = LateGame::GetConsumable();
-
-		int ShotgunClipSize = 0;
-		int AssaultRifleClipSize = 0;
-		int SniperClipSize = 0;
-		int HealClipSize = 0;
-		int ConsumableClipSize = 0;
-		
-		if (auto Weapon = Shotgun.Item->IsA<UFortGadgetItemDefinition>() ? ((UFortGadgetItemDefinition*)Shotgun.Item)->GetWeaponItemDefinition() : Shotgun.Item->Cast<UFortWeaponItemDefinition>())
-			ShotgunClipSize = AFortInventory::GetStats(Weapon)->ClipSize;
-		if (auto Weapon = AssaultRifle.Item->IsA<UFortGadgetItemDefinition>() ? ((UFortGadgetItemDefinition*)AssaultRifle.Item)->GetWeaponItemDefinition() : AssaultRifle.Item->Cast<UFortWeaponItemDefinition>())
-			AssaultRifleClipSize = AFortInventory::GetStats(Weapon)->ClipSize;
-		if (auto Weapon = Sniper.Item->IsA<UFortGadgetItemDefinition>() ? ((UFortGadgetItemDefinition*)Sniper.Item)->GetWeaponItemDefinition() : Sniper.Item->Cast<UFortWeaponItemDefinition>())
-			SniperClipSize = AFortInventory::GetStats(Weapon)->ClipSize;
-		if (auto Weapon = Heal.Item->IsA<UFortGadgetItemDefinition>() ? ((UFortGadgetItemDefinition*)Heal.Item)->GetWeaponItemDefinition() : Heal.Item->Cast<UFortWeaponItemDefinition>())
-			HealClipSize = AFortInventory::GetStats(Weapon)->ClipSize;
-		if (auto Weapon = Consumable.Item->IsA<UFortGadgetItemDefinition>() ? ((UFortGadgetItemDefinition*)Consumable.Item)->GetWeaponItemDefinition() : Consumable.Item->Cast<UFortWeaponItemDefinition>())
-			ConsumableClipSize = AFortInventory::GetStats(Weapon)->ClipSize;
-
-		PlayerController->WorldInventory->GiveItem(LateGame::GetResource(EFortResourceType::Wood), (std::rand() % 500) + 186);
-		PlayerController->WorldInventory->GiveItem(LateGame::GetResource(EFortResourceType::Stone), (std::rand() % 500) + 186);
-		PlayerController->WorldInventory->GiveItem(LateGame::GetResource(EFortResourceType::Metal), (std::rand() % 500) + 186);
-
-		PlayerController->WorldInventory->GiveItem(LateGame::GetAmmo(EAmmoType::Assault), (std::rand() % 432) + 134);
-		PlayerController->WorldInventory->GiveItem(LateGame::GetAmmo(EAmmoType::Shotgun), (std::rand() % 150) + 52);
-		PlayerController->WorldInventory->GiveItem(LateGame::GetAmmo(EAmmoType::Submachine), (std::rand() % 432) + 186);
-		PlayerController->WorldInventory->GiveItem(LateGame::GetAmmo(EAmmoType::Rocket), 12);
-		PlayerController->WorldInventory->GiveItem(LateGame::GetAmmo(EAmmoType::Sniper), (std::rand() % 50) + 34);
-
-		PlayerController->WorldInventory->GiveItem(Shotgun.Item, Shotgun.Count, ShotgunClipSize);
-		PlayerController->WorldInventory->GiveItem(AssaultRifle.Item, AssaultRifle.Count, AssaultRifleClipSize);
-		PlayerController->WorldInventory->GiveItem(Sniper.Item, Sniper.Count, SniperClipSize);
-		PlayerController->WorldInventory->GiveItem(Heal.Item, Heal.Count, HealClipSize);
-		PlayerController->WorldInventory->GiveItem(Consumable.Item, Consumable.Count, ConsumableClipSize);
+		LateGame::EquipLoadout(PlayerController);
 	}
 }
 
@@ -1983,7 +1946,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				PlayerController->Pawn->bCanBeDamaged ^= 1;
 				PlayerController->ClientMessage(FString(L"Toggled god mode!"), FName(), 1.f);
 
-				if (PlayerController->Pawn->bCanBeDamaged == 1)
+				if (PlayerController->Pawn->bCanBeDamaged == 0)
 				{
 					Pawn->SetHealth(MaxHealth);
 					Pawn->SetShield(MaxShield);
@@ -2064,6 +2027,11 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 			Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
 			PlayerController->ClientMessage(FString(L"Set player speed!"), FName(), 1.f);
+		}
+		else if (command == "randomize")
+		{
+			LateGame::EquipLoadout(PlayerController);
+			PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
 		}
 		/*else if (command == "revive" || command == "res")
 		{
@@ -2875,7 +2843,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 			auto Location = Pawn->K2_GetActorLocation();
 
-			if (Location.IsZero()) // stupid
+			if (Location.X == 0.f && Location.Y == 0.f && Location.Z == 0.f)
 			{
 				PlayerController->ClientMessage(FString(L"Location is (0,0,0)! Cannot provide location."), FName(), 1.f);
 				return;

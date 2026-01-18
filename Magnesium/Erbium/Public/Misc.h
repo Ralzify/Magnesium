@@ -2,6 +2,11 @@
 #include "../../pch.h"
 #include "Utils.h"
 
+inline std::string FStringToStdString(const FString& UnrealStr)
+{
+    return std::string(TCHAR_TO_UTF8(*UnrealStr));
+}
+
 // these dont really fit into a class
 class Misc
 {
