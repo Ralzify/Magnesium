@@ -1886,8 +1886,10 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 			of << ss.str();
 			of.close();
+
+			PlayerController->ClientMessage(FString(L"Dumped all available items! Head to your Win64/Binaries folder to find the .txt file!"), FName(), 1.f);
 		}
-		else if (command == "dumpplaylist")
+		else if (command == "dumpplaylist" || command == "dumpplaylists")
 		{
 			std::stringstream ss;
 
@@ -1919,6 +1921,13 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 			of << ss.str();
 			of.close();
+
+			PlayerController->ClientMessage(FString(L"Dumped all available playlists! Head to your Win64/Binaries folder to find the .txt file!"), FName(), 1.f);
+		}
+		else if (command == "suicide")
+		{
+			PlayerController->ServerSuicide();
+			PlayerController->ClientMessage(FString(L"Killed pawn!"), FName(), 1.f);
 		}
 		else if (command == "infiniteammo")
 			FConfiguration::bInfiniteAmmo ^= 1;
@@ -2461,8 +2470,10 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				Pawn->PlayerState = PlayerState;
 				Pawn->OnRep_PlayerState();
 
-				Pawn->SetMaxHealth(100.f);
-				//Pawn->SetHealth(100.f);
+				Pawn->SetMaxHealth(FConfiguration::BotHealth);
+				Pawn->SetHealth(FConfiguration::BotHealth);
+				Pawn->SetMaxShield(FConfiguration::BotShield);
+				Pawn->SetShield(FConfiguration::BotShield);
 
 				PlayerState->TeamIndex = AFortGameMode::PickTeam(GameMode, 0, PlayerController);
 				if (PlayerState->HasSquadId())
