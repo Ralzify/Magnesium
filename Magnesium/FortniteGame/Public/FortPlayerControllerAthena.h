@@ -418,6 +418,7 @@ public:
     DEFINE_FUNC(OnRep_IsCreativeQuickbarEnabled, void);
     DEFINE_FUNC(ServerAwardVehicleTrickPoints, void);
     DEFINE_FUNC(ClientOnPawnRevived, void);
+    DEFINE_FUNC(ClientReportTournamentPlacementPointsScored, void);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);

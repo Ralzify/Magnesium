@@ -1132,6 +1132,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	auto KillerPawn = (AFortPlayerPawnAthena*)DeathReport.KillerPawn;
 	auto KillerPlayerController = KillerPlayerState ? (AFortPlayerControllerAthena*)KillerPlayerState->Owner : nullptr;
 
+	auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->GetPlayerState();
+
 	if (VersionInfo.FortniteVersion > 1.8 || VersionInfo.EngineVersion >= 4.19)
 	{
 		if (PlayerState->HasPawnDeathLocation())
@@ -1167,20 +1169,23 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		if (KillerPlayerState && KillerPawn && KillerPawn->Controller && KillerPawn->Controller != PlayerController)
 		{
 			if (KillerPlayerState->HasKillScore())
+			{
 				KillerPlayerState->KillScore++;
+			}
 			else
+			{
 				KillerPlayerState->Kills++;
+			}
+
 			KillerPlayerState->OnRep_Kills();
+			KillerPlayerState->ClientReportKill(DeadPlayerState);
+
 			if (KillerPlayerState->HasTeamKillScore())
 			{
 				KillerPlayerState->TeamKillScore++;
 				KillerPlayerState->OnRep_TeamKillScore();
 			}
 
-			struct Test { AFortPlayerStateAthena* ps; uint8_t p[0x8]; };
-
-			Test t{ PlayerState };
-			KillerPlayerState->ClientReportKill(t);
 			if (KillerPlayerState->HasTeamKillScore())
 				KillerPlayerState->ClientReportTeamKill(KillerPlayerState->TeamKillScore);
 
@@ -1365,6 +1370,34 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			KillerPawn->SetHealth(Health);
 			KillerPawn->SetShield(Shield);
 			//forgot to add this back
+		}
+
+		if (GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav))
+		{
+			auto& AlivePlayers = GameMode->AlivePlayers;
+
+			for (AActor* Actor : AlivePlayers)
+			{
+				if (!Actor)
+					continue;
+
+				auto Pawn = Actor->Cast<AFortPlayerPawnAthena>();
+
+				if (!Pawn)
+					continue;
+
+				auto Controller = Pawn->Controller;
+
+				if (!Controller)
+					continue;
+
+				auto FortPC = Controller->Cast<AFortPlayerControllerAthena>();
+
+				if (!FortPC)
+					continue;
+
+				FortPC->ClientReportTournamentPlacementPointsScored(1, 1);
+			}
 		}
 	}
 
