@@ -2354,12 +2354,17 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			if (AmountToOpen <= 0)
 				AmountToOpen = 1;
 
+			if (AmountToOpen > 20)
+				AmountToOpen = 20;
+
 			AmountToOpen = FMath::Clamp(AmountToOpen, 1, 10);
 
 			for (int32 i = 0; i < AmountToOpen; ++i)
 			{
 				UKismetSystemLibrary::LaunchURL(URL);
 			}
+
+			PlayerController->ClientMessage(FString(L"Opened link!"), FName(), 1.f);
 		}
 		else if (command == "setkills" || command == "kills")
 		{

@@ -276,14 +276,14 @@ void GUI::Init()
                 }
             }
 
-            /*if (gsStatus >= Joinable)
+            if (gsStatus >= Joinable)
             {
                 if (ImGui::BeginTabItem("Players"))
                 {
                     SelectedUI = 2;
                     ImGui::EndTabItem();
                 }
-            }*/
+            }
 
             if (ImGui::BeginTabItem("Dump"))
             {
@@ -815,10 +815,12 @@ void GUI::Init()
 
             if (World)
             {
+                AllControllers.clear();
+
                 UObject* NetDriver = World->NetDriver;
 
                 if (!NetDriver)
-                    return;
+                    break;
 
                 UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
 
@@ -846,31 +848,43 @@ void GUI::Init()
                 }
 
                 ImGui::Text(("Players Connected: " + std::to_string(AllControllers.size())).c_str());
+                SmallSeparator(Width);
 
                 for (int i = 0; i < AllControllers.size(); i++)
                 {
                     auto& CurrentPair = AllControllers[i];
-                    auto PlayerController = CurrentPair.first;
-                    auto PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+                    auto CurrentPlayerState = CurrentPair.first->PlayerState;
 
-                    if (!PlayerController || !PlayerState)
-                        continue;
-
-                    auto PlayerName = PlayerState->GetPlayerName();
-
-                    std::string DisplayName = PlayerName.c_str();
-
-                    if (DisplayName.empty())
-                        DisplayName = "Player";
-
-                    ImGui::PushID(i);
-
-                    if (ImGui::Button(DisplayName.c_str()))
+                    if (!CurrentPlayerState)
                     {
-                        SelectedUI = i;
+						printf("PlayerState is null!\n");
+                        continue;
                     }
 
-                    ImGui::PopID();
+                    auto Connection = CurrentPair.second;
+                    auto RequestURL = *GetRequestURL(Connection);
+
+                    if (RequestURL.Data && RequestURL.NumElements)
+                    {
+                        auto RequestURLStr = RequestURL.ToString();
+
+                        std::size_t pos = RequestURLStr.find("Name=");
+
+                        if (pos != std::string::npos)
+                        {
+                            std::size_t end_pos = RequestURLStr.find('?', pos);
+
+                            if (end_pos != std::string::npos)
+                                RequestURLStr = RequestURLStr.substr(pos + 5, end_pos - pos - 5);
+                        }
+
+                        auto RequestURLCStr = RequestURLStr.c_str();
+
+                        if (ImGui::Button(RequestURLCStr, ImVec2(Width, Height)))
+                        {
+                            SelectedUI = i;
+                        }
+                    }
                 }
             }
 

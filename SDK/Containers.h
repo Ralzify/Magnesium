@@ -786,7 +786,7 @@ namespace UC
 
 
 	public:
-		inline       wchar_t* CStr()
+		inline wchar_t* CStr()
 		{
 			return Data;
 		}
@@ -809,6 +809,11 @@ namespace UC
 
 			size_t prefixLen = wcslen(Prefix);
 			return wcsncmp(Ptr, Prefix, prefixLen) == 0;
+		}
+
+		inline bool IsEmpty() const
+		{
+			return !Data || !*Data || NumElements <= 1;
 		}
 	};
 
