@@ -213,6 +213,28 @@ void Main()
         FConfiguration::bKeepInventory = true;
 		FConfiguration::MaxTickRate = 60.f;
     }
+    else if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1"))
+    {
+        terrainOpen = L"open /Game/1v1s/Retrac_1v1.Retrac_1v1";
+        FConfiguration::bSiphon = true;
+        FConfiguration::SiphonAmount = 200;
+        FConfiguration::bInfiniteAmmo = true;
+        FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+        FConfiguration::MaxTickRate = 60.f;
+    }
+    else if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_Turtle.Playlist_Retrac_Turtle"))
+    {
+        terrainOpen = L"open /Game/Turtle/Retrac_Turtle.Retrac_Turtle";
+        FConfiguration::bSiphon = true;
+        FConfiguration::SiphonAmount = 200;
+        FConfiguration::bInfiniteAmmo = true;
+        FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+        FConfiguration::MaxTickRate = 60.f;
+    }
     else if (VersionInfo.FortniteVersion >= 12.00 && wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2"))
         terrainOpen = L"open Creative_NoApollo_Terrain";
     else

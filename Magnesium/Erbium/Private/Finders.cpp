@@ -3300,7 +3300,7 @@ void FindNullsAndRetTrues()
             RetTrueFuncs.push_back(Memcury::Scanner::FindPattern("4C 89 4C 24 20 55 56 57 41 56 48 8D 6C 24 D1").Get());
         else
         {
-            bool bHasStutter = VersionInfo.EngineVersion >= 4.23 && /*VersionInfo.FortniteVersion <= 16.40*/ VersionInfo.FortniteVersion <= 13.40;
+            bool bHasStutter = VersionInfo.FortniteVersion >= 9.00 && /*VersionInfo.FortniteVersion <= 16.40*/ VersionInfo.FortniteVersion <= 13.40;
 
             if (!bHasStutter)
             {

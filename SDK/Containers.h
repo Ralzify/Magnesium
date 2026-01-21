@@ -796,6 +796,20 @@ namespace UC
 	public:
 		inline bool operator==(const FString& Other) const { return Other ? NumElements == Other.NumElements && wcscmp(Data, Other.Data) == 0 : false; }
 		inline bool operator!=(const FString& Other) const { return Other ? NumElements != Other.NumElements || wcscmp(Data, Other.Data) != 0 : true; }
+
+		bool StartsWith(const wchar_t* Prefix) const
+		{
+			if (!Data || !Prefix)
+				return false;
+
+			const wchar_t* Ptr = Data;
+
+			while (*Ptr == L' ' || *Ptr == L'\t')
+				++Ptr;
+
+			size_t prefixLen = wcslen(Prefix);
+			return wcsncmp(Ptr, Prefix, prefixLen) == 0;
+		}
 	};
 
 	/*

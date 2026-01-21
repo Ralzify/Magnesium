@@ -73,9 +73,9 @@ public:
     DEFINE_BITFIELD_PROP(bIsABot);
     DEFINE_BITFIELD_PROP(bIsSpectator);
     DEFINE_PROP(WorldPlayerId, int16);
-    DEFINE_PROP(PlayerName, FString);
     DEFINE_PROP(PlayerTeam, FPlayerTeam*);
 
+    DEFINE_FUNC(GetPlayerName, UEAllocatedString);
     DEFINE_FUNC(OnRep_SquadId, void);
     DEFINE_FUNC(OnRep_DeathInfo, void);
     DEFINE_STATIC_FUNC(ToDeathCause, uint8);

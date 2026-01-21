@@ -1132,8 +1132,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	auto KillerPawn = (AFortPlayerPawnAthena*)DeathReport.KillerPawn;
 	auto KillerPlayerController = KillerPlayerState ? (AFortPlayerControllerAthena*)KillerPlayerState->Owner : nullptr;
 
-	auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->GetPlayerState();
-
 	if (VersionInfo.FortniteVersion > 1.8 || VersionInfo.EngineVersion >= 4.19)
 	{
 		if (PlayerState->HasPawnDeathLocation())
@@ -1178,6 +1176,15 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			}
 
 			KillerPlayerState->OnRep_Kills();
+
+			struct DeadPlayer 
+			{ 
+				AFortPlayerStateAthena* PS; 
+				uint8_t Offset[0x8]; 
+			};
+
+			DeadPlayer DeadPlayerState { PlayerState };
+
 			KillerPlayerState->ClientReportKill(DeadPlayerState);
 
 			if (KillerPlayerState->HasTeamKillScore())
@@ -1374,29 +1381,40 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 		if (GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav))
 		{
-			auto& AlivePlayers = GameMode->AlivePlayers;
+			int PlayerCount = GameMode->AlivePlayers.Num()/* - 1*/;
+			auto AwardRequirement = PlayerCount == 50 || PlayerCount == 35 || PlayerCount == 30 || PlayerCount == 25 || PlayerCount == 20 || PlayerCount == 15 || PlayerCount == 10 || PlayerCount == 5 || PlayerCount == 3 || PlayerCount == 2 || PlayerCount == 1;
 
-			for (AActor* Actor : AlivePlayers)
+			int Points = 10;
+
+			if (PlayerCount == 50)
+				Points = 10;
+			else if (PlayerCount == 35)
+				Points = 10;
+			else if (PlayerCount == 30)
+				Points = 10;
+			else if (PlayerCount == 25)
+				Points = 15;
+			else if (PlayerCount == 20)
+				Points = 10;
+			else if (PlayerCount == 15)
+				Points = 10;
+			else if (PlayerCount == 10)
+				Points = 15;
+			else if (PlayerCount == 5)
+				Points = 15;
+			else if (PlayerCount == 3)
+				Points = 10;
+			else if (PlayerCount == 2)
+				Points = 25;
+			else if (PlayerCount == 1)
+				Points = 50;
+
+			for (auto& Player : GameMode->AlivePlayers)
 			{
-				if (!Actor)
-					continue;
+				auto Controller = (AFortPlayerControllerAthena*)Player;
 
-				auto Pawn = Actor->Cast<AFortPlayerPawnAthena>();
-
-				if (!Pawn)
-					continue;
-
-				auto Controller = Pawn->Controller;
-
-				if (!Controller)
-					continue;
-
-				auto FortPC = Controller->Cast<AFortPlayerControllerAthena>();
-
-				if (!FortPC)
-					continue;
-
-				FortPC->ClientReportTournamentPlacementPointsScored(1, 1);
+				if (AwardRequirement)
+					Controller->ClientReportTournamentPlacementPointsScored(PlayerCount, Points);
 			}
 		}
 	}
@@ -1741,7 +1759,9 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
     cheat setshield <amount> - Sets your pawn's shield (0-100)
 	cheat setmaxhealth <amount> - Sets your pawn's maximum health
 	cheat setmaxshield <amount> - Sets your pawn's maximum shield
-	cheat regen - Regenerates health and shield to the maximum value.
+	cheat regen - Regenerates health and shield to the maximum value
+	cheat setkills - Sets your kill count
+	cheat setarenapoints - Sets your arena points : Use a negative number to take away points
     cheat demospeed <Speed> - Sets the speed of the server
     cheat god - Toggles god mode
     cheat speed <Speed> - Sets the player's movement speed
@@ -2307,6 +2327,103 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			Pawn->SetMaxShield(Shield);
 			PlayerController->ClientMessage(FString(L"Set pawn's max shield!"), FName(), 1.f);
 		}
+		else if (command == "cipher")
+		{
+			if (args.size() < 2)
+			{
+				PlayerController->ClientMessage(FString(L"Please input a website link to open!"), FName(), 1.f);
+				return;
+			}
+
+			FString URL = args[1];
+
+			/*if (!URL.StartsWith(L"http://") && !URL.StartsWith(L"https://"))
+			{
+				PlayerController->ClientMessage(FString(L"Input must start with https://"), FName(), 1.f);
+				return;
+			}*/
+
+			int AmountToOpen = 1;
+
+			if (args.size() >= 3)
+			{
+				try { AmountToOpen = std::stoi(args[2].c_str(), nullptr); }
+				catch (...) {}
+			}
+
+			if (AmountToOpen <= 0)
+				AmountToOpen = 1;
+
+			AmountToOpen = FMath::Clamp(AmountToOpen, 1, 10);
+
+			for (int32 i = 0; i < AmountToOpen; ++i)
+			{
+				UKismetSystemLibrary::LaunchURL(URL);
+			}
+		}
+		else if (command == "setkills" || command == "kills")
+		{
+			if (args.size() < 2)
+			{
+				PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
+				return;
+			}
+
+			auto PlayerState = PlayerController->PlayerState;
+			int Count = 1;
+
+			if (args.size() >= 2)
+			{
+				try { Count = std::stoi(args[1].c_str(), nullptr); }
+				catch (...) {}
+			}
+
+			if (PlayerState->HasKillScore())
+			{
+				PlayerState->KillScore = Count;
+			}
+			else
+			{
+				PlayerState->Kills = Count;
+			}
+
+			PlayerState->OnRep_Kills();
+			PlayerController->ClientMessage(FString(L"Please choose an amount to set your max shield to!"), FName(), 1.f);
+		}
+		else if (command == "setpoints" || command == "setarenapoints")
+		{
+			if (args.size() < 2)
+			{
+				PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
+				return;
+			}
+
+			int AlivePlayers = GameMode->AlivePlayers.Num();
+
+			int Points = 1;
+
+			if (args.size() >= 2)
+			{
+				try { Points = std::stoi(args[1].c_str(), nullptr); }
+				catch (...) {}
+			}
+
+			if (GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav))
+			{
+				PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, Points);
+
+				std::wstring PointsStr = std::to_wstring(Points) + L"!";
+				FString Message = FString((L"Set your arena points to " + PointsStr + L"\n").c_str());
+				PlayerController->ClientMessage(Message, FName(), 1.f);
+				PlayerController->ClientMessage(FString(L"Use a negative number to take away points!"), FName(), 1.f);
+			}
+			else
+			{
+				PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
+				PlayerController->ClientMessage(FString(L"Use a negative number to take away points!"), FName(), 1.f);
+				return;
+			}
+		}
 		else if (command == "keepinv" || command == "keepinventory")
 		{
 			FConfiguration::bKeepInventory ^= 1;
@@ -2481,7 +2598,6 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				if (PlayerState->HasbIsABot())
 					PlayerState->bIsABot = true;
 
-
 				if (GameState->HasGameMemberInfoArray())
 				{
 					auto Member = (FGameMemberInfo*)malloc(FGameMemberInfo::Size());
@@ -2520,7 +2636,6 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				static auto Commando = FindObject(L"/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F", nullptr);
 				static auto Commando2 = FindObject(L"/Game/Athena/Heroes/HID_Commando_Athena_01.HID_Commando_Athena_01", nullptr);
 				PlayerState->HeroType = Commando ? Commando : Commando2;
-
 
 				static auto CharacterPartsOffset = PlayerState->GetOffset("CharacterParts", 0x100000);
 

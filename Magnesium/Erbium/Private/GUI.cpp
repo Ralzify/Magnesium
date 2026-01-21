@@ -276,14 +276,14 @@ void GUI::Init()
                 }
             }
 
-            if (gsStatus >= Joinable)
+            /*if (gsStatus >= Joinable)
             {
-                /*if (ImGui::BeginTabItem("Players"))
+                if (ImGui::BeginTabItem("Players"))
                 {
                     SelectedUI = 2;
                     ImGui::EndTabItem();
-                }*/
-            }
+                }
+            }*/
 
             if (ImGui::BeginTabItem("Dump"))
             {
@@ -501,7 +501,7 @@ void GUI::Init()
                     TArray<ABuildingSMActor*> Builds;
                     Utils::GetAll<ABuildingSMActor>(Builds);
 
-                    for (auto& Build : Builds)
+                    for (auto& Build : Builds) // this
                     {
                         if (Build && Build->bPlayerPlaced)
                             Build->K2_DestroyActor();
@@ -652,6 +652,9 @@ void GUI::Init()
         }
         case 1:
         {
+            ImGui::Text("Gamemodes:");
+            SmallSeparator(Width);
+
             ImGui::RadioButton("Solos", &SelectedPlaylist, (int)Playlist::Solos);
             ImGui::RadioButton("Duos", &SelectedPlaylist, (int)Playlist::Duos);
             ImGui::RadioButton("Trios", &SelectedPlaylist, (int)Playlist::Trios);
@@ -669,11 +672,24 @@ void GUI::Init()
             ImGui::RadioButton("Arena Trios", &SelectedPlaylist, (int)Playlist::TournamentTrios);
             ImGui::RadioButton("Arena Squads", &SelectedPlaylist, (int)Playlist::TournamentSquads);
             ImGui::RadioButton("Creative ", &SelectedPlaylist, (int)Playlist::Creative);
-
-            if (VersionInfo.FortniteVersion == 27.11)
-				ImGui::RadioButton("Gav 1v1 Map (requires paks)", &SelectedPlaylist, (int)Playlist::Gav);
-
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
+
+            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11)
+            {
+                ImGui::Spacing();
+
+                ImGui::Text("Custom Maps (require additional paks):");
+                SmallSeparator(Width);
+
+                if (VersionInfo.FortniteVersion == 27.11)
+                    ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
+
+                if (VersionInfo.FortniteVersion == 14.40)
+                {
+                    ImGui::RadioButton("Retrac 1v1 Map", &SelectedPlaylist, (int)Playlist::Retrac1v1);
+                    ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
+                }
+            }
 
             switch (SelectedPlaylist)
             {
@@ -769,6 +785,18 @@ void GUI::Init()
                 FConfiguration::bLateGame = false;
                 break;
             }
+            case (int)Playlist::Retrac1v1:
+            {
+				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1";
+                FConfiguration::bLateGame = false;
+                break;
+            }
+            case (int)Playlist::RetracTurtle:
+            {
+				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_Turtle.Playlist_Retrac_Turtle";
+                FConfiguration::bLateGame = false;
+                break;
+            }
             case (int)Playlist::Custom:
             {
                 break;
@@ -828,15 +856,12 @@ void GUI::Init()
                     if (!PlayerController || !PlayerState)
                         continue;
 
-                    // FName& PlayerName = PlayerState->PlayerName;
-                    // std::string DisplayName = PlayerName.ToUtf8();
+                    auto PlayerName = PlayerState->GetPlayerName();
 
-                    const FName& PlayerName = PlayerState->PlayerName; // this is the only reason im putting this off atm (playername crashes)
-
-                    std::string DisplayName = PlayerName.ToUtf8();
+                    std::string DisplayName = PlayerName.c_str();
 
                     if (DisplayName.empty())
-                        DisplayName = "Player " + i;
+                        DisplayName = "Player";
 
                     ImGui::PushID(i);
 

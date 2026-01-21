@@ -29,6 +29,8 @@ enum class Playlist : int
     TournamentTrios,
     TournamentSquads,
     Gav,
+    Retrac1v1,
+    RetracTurtle,
     Custom
 };
 
