@@ -164,6 +164,7 @@
     <ClInclude Include="..\SDK\Includes.h" />
     <ClInclude Include="..\SDK\Memcury.h" />
     <ClInclude Include="..\SDK\Offsets.h" />
+    <ClInclude Include="C:\Users\andre\Downloads\imgui-master\imgui-master\misc\cpp\imgui_stdlib.h" />
     <ClInclude Include="Engine\Public\AbilitySystemComponent.h" />
     <ClInclude Include="Engine\Public\CurveTable.h" />
     <ClInclude Include="Engine\Public\DataTable.h" />
@@ -217,6 +218,7 @@
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="C:\Users\andre\Downloads\imgui-master\imgui-master\misc\cpp\imgui_stdlib.cpp" />
     <ClCompile Include="Engine\Private\AbilitySystemComponent.cpp" />
     <ClCompile Include="Engine\Private\NetDriver.cpp" />
     <ClCompile Include="Erbium\Plugins\CrashReporter\Private\CrashReporter.cpp" />

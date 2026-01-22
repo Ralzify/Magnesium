@@ -72,6 +72,11 @@ public:
     static inline int SelectedPlaylist = static_cast<int>(Playlist::Solos);
     static inline int SelectedPlot = static_cast<int>(Plot::Temperate);
     static void Init();
+
+    static bool IsArenaPlaylist()
+    {
+        return GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav);
+    }
 };
 
 // array size is 48672

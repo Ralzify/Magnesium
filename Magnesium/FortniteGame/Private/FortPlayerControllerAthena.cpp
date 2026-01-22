@@ -1196,6 +1196,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (KillerPlayerState->HasTeamKillScore())
 				KillerPlayerState->ClientReportTeamKill(KillerPlayerState->TeamKillScore);
 
+			if (GUI::IsArenaPlaylist())
+				KillerPlayerState->ClientReportTournamentStatUpdate();
+
 			for (auto& Damager : PlayerController->Pawn->Damagers)
 			{
 				if (Damager.DamageCauser != KillerPlayerController && Damager.DamageCauser->IsA<AFortPlayerControllerAthena>())
@@ -1379,9 +1382,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			//forgot to add this back
 		}
 
-		if (GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav))
+		if (GUI::IsArenaPlaylist())
 		{
-			int PlayerCount = GameMode->AlivePlayers.Num()/* - 1*/;
+			int PlayerCount = GameMode->AlivePlayers.Num();
 			auto AwardRequirement = PlayerCount == 50 || PlayerCount == 35 || PlayerCount == 30 || PlayerCount == 25 || PlayerCount == 20 || PlayerCount == 15 || PlayerCount == 10 || PlayerCount == 5 || PlayerCount == 3 || PlayerCount == 2 || PlayerCount == 1;
 
 			int Points = 10;
@@ -2413,7 +2416,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				catch (...) {}
 			}
 
-			if (GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav))
+			if (GUI::IsArenaPlaylist())
 			{
 				PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, Points);
 

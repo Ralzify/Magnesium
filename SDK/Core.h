@@ -605,7 +605,9 @@ namespace SDK
 			return ProcessEvent(Function, nullptr);
 
 		if constexpr (sizeof...(args) == 1 && std::is_void_v<Ret>)
-			return ProcessEvent(Function, &args...);
+		{
+			return ProcessEvent(Function, (void*)std::addressof((std::get<0>(std::forward_as_tuple(args...)))));
+		}
 
 		if constexpr (sizeof...(args) == 0 && !std::is_void_v<Ret>)
 		{

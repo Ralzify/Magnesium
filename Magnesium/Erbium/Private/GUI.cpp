@@ -2,6 +2,7 @@
 #include "../Public/GUI.h"
 #include <d3d11.h>
 #include "../../ImGui/imgui.h"
+#include "../../ImGui/imgui_stdlib.h"
 #include "../../ImGui/imgui_impl_win32.h"
 #include "../../ImGui/imgui_impl_dx11.h"
 #include "../Public/Configuration.h"
@@ -813,40 +814,63 @@ void GUI::Init()
         {
             auto World = UWorld::GetWorld();
 
-            if (World)
+            if (!World) 
+                break;
+
+            static int InspectedPlayerIdx = -1;
+            static bool bIsInspecting = false;
+
+            UObject* NetDriver = World->NetDriver;
+
+            if (!NetDriver) 
+                break;
+
+            UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
+
+            auto& ClientConnections = Driver->ClientConnections;
+            AllControllers.clear();
+
+            for (int i = 0; i < ClientConnections.Num(); i++)
             {
-                AllControllers.clear();
+                auto Connection = ClientConnections[i];
 
-                UObject* NetDriver = World->NetDriver;
+                if (!Connection || !Connection->PlayerController) 
+                    continue;
 
-                if (!NetDriver)
-                    break;
+                AllControllers.push_back(std::make_pair((AFortPlayerControllerAthena*)Connection->PlayerController, Connection));
+            }
 
-                UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
+            auto ExtractNameFromConnection = [&](UNetConnection* Connection) -> std::string
+            {
+                if (!Connection)
+                    return std::string();
 
-                auto& ClientConnections = Driver->ClientConnections;
+                FString* ReqPtr = GetRequestURL(Connection);
+                if (!ReqPtr)
+                    return std::string();
 
-                for (int i = 0; i < ClientConnections.Num(); i++)
+                FString RequestURL = *ReqPtr;
+                if (RequestURL.Data && RequestURL.NumElements)
                 {
-                    auto Connection = ClientConnections[i];
+                    auto RequestURLStr = RequestURL.ToString();
+                    std::string RequestURLStdStr(RequestURLStr.begin(), RequestURLStr.end());
+                    std::size_t pos = RequestURLStdStr.find("Name=");
 
-                    if (!Connection)
-                        continue;
-
-                    auto CurrentController = Connection->PlayerController;
-
-                    if (CurrentController)
+                    if (pos != std::string::npos)
                     {
-                        auto FindAllControllers = std::find_if(AllControllers.begin(), AllControllers.end(), [CurrentController, Connection](const auto& pair)
-                            {
-                                return pair.first == CurrentController && pair.second == Connection;
-                            });
-
-                        if (FindAllControllers == AllControllers.end())
-                            AllControllers.push_back(std::make_pair(CurrentController, Connection));
+                        std::size_t end_pos = RequestURLStdStr.find('?', pos);
+                        if (end_pos != std::string::npos)
+                            return RequestURLStdStr.substr(pos + 5, end_pos - pos - 5);
+                        else
+                            return RequestURLStdStr.substr(pos + 5);
                     }
                 }
 
+                return std::string();
+            };
+
+            if (!bIsInspecting)
+            {
                 ImGui::Text(("Players Connected: " + std::to_string(AllControllers.size())).c_str());
                 SmallSeparator(Width);
 
@@ -857,16 +881,16 @@ void GUI::Init()
 
                     if (!CurrentPlayerState)
                     {
-						printf("PlayerState is null!\n");
+                        printf("PlayerState is null!\n");
                         continue;
                     }
 
                     auto Connection = CurrentPair.second;
-                    auto RequestURL = *GetRequestURL(Connection);
+                    auto RequestURL = GetRequestURL(Connection);
 
-                    if (RequestURL.Data && RequestURL.NumElements)
+                    if (RequestURL && RequestURL->Data && RequestURL->NumElements)
                     {
-                        auto RequestURLStr = RequestURL.ToString();
+                        auto RequestURLStr = RequestURL->ToString();
 
                         std::size_t pos = RequestURLStr.find("Name=");
 
@@ -876,16 +900,319 @@ void GUI::Init()
 
                             if (end_pos != std::string::npos)
                                 RequestURLStr = RequestURLStr.substr(pos + 5, end_pos - pos - 5);
+                            else
+                                RequestURLStr = RequestURLStr.substr(pos + 5);
                         }
 
                         auto RequestURLCStr = RequestURLStr.c_str();
 
-                        if (ImGui::Button(RequestURLCStr, ImVec2(Width, Height)))
+                        if (ImGui::Button(RequestURLCStr, ImVec2(Width, Height))) // this displays the player's name
                         {
-                            SelectedUI = i;
+                            InspectedPlayerIdx = i;
+                            bIsInspecting = true;
                         }
                     }
                 }
+            }
+            else
+            {
+                if (InspectedPlayerIdx >= AllControllers.size())
+                {
+                    bIsInspecting = false;
+                    break;
+                }
+
+                auto TargetPC = AllControllers[InspectedPlayerIdx].first;
+                auto TargetPS = TargetPC->PlayerState;
+                auto TargetPawn = (AFortPlayerPawnAthena*)TargetPC->Pawn;
+
+                if (!TargetPC || !TargetPawn || !TargetPS)
+                {
+                    bIsInspecting = false;
+                    break;
+				}
+
+                if (ImGui::Button("Back", ImVec2(Width, Height)))
+                {
+                    bIsInspecting = false;
+                    break;
+                }
+
+                ImGui::Text("Player Information:");
+                SmallSeparator(Width);
+
+                std::string DisplayName = ExtractNameFromConnection(AllControllers[InspectedPlayerIdx].second);
+
+                if (DisplayName.empty())
+                {
+                    DisplayName = std::string("Player ") + std::to_string(InspectedPlayerIdx);
+                }
+
+                //ImGui::Text("Inspecting Player: %s", DisplayName.c_str());
+
+                ImGui::TextUnformatted("Inspecting Player: ");
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextColored(ImVec4(1.f, 1.f, 0.f, 1.0f), DisplayName.c_str());
+
+				ImGui::Text("Join Order: #%d", InspectedPlayerIdx + 1);
+
+                ImGui::Text("Ping: %.0f ms", TargetPS->GetPingInMilliseconds());
+                // ImGui::Text("Kills: %.0f", TargetPS->HasKillScore() ? TargetPS->KillScore : TargetPS->Kills); // why does this not work
+
+                ImGui::TextUnformatted("Health: ");
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextColored(ImVec4(0.372f, 0.792f, 0.255f, 1.0f), "%.0f", TargetPawn->GetHealth());
+                ImGui::TextUnformatted("Shield: ");
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextColored(ImVec4(0.278f, 0.612f, 0.945f, 1.0f), "%.0f", TargetPawn->GetShield());
+
+                ImGui::Spacing();
+
+                ImGui::Text("Configure Player:");
+                SmallSeparator(Width);
+
+                if (ImGui::Button("Regenerate Health & Shield", ImVec2(Width, Height)))
+                {
+                    TargetPawn->SetHealth(TargetPawn->GetMaxHealth());
+                    TargetPawn->SetShield(TargetPawn->GetMaxShield());
+
+                    auto Handle = TargetPS->AbilitySystemComponent->MakeEffectContext();
+                    FGameplayTag Tag;
+                    static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+                    Tag.TagName = Cue;
+                    auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+                    memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+                    TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+                    TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+                    free(PredictionKey);
+                }
+
+                if (ImGui::Button("Teleport Player to Me", ImVec2(Width, Height)))
+                {
+                    AFortPlayerControllerAthena* LocalPC = nullptr;
+
+                    auto World = UWorld::GetWorld();
+
+                    if (World && World->NetDriver) 
+                    {
+                        UNetDriver* NetDriver = static_cast<UNetDriver*>(World->NetDriver);
+
+                        if (NetDriver->ClientConnections.Num() > 0) 
+                        {
+                            UNetConnection* LocalConnection = NetDriver->ClientConnections[0];
+
+                            if (LocalConnection && LocalConnection->PlayerController) 
+                                LocalPC = (AFortPlayerControllerAthena*)LocalConnection->PlayerController;
+                        }
+                    }
+
+                    auto LocalPawn = (AFortPlayerPawnAthena*)LocalPC->Pawn;
+
+                    if (LocalPawn)
+                        TargetPC->K2_TeleportTo(LocalPawn->K2_GetActorLocation(), TargetPawn->K2_GetActorRotation());
+				}
+
+                if (ImGui::Button("Teleport Me to Player", ImVec2(Width, Height)))
+                {
+                    AFortPlayerControllerAthena* LocalPC = nullptr;
+
+                    auto World = UWorld::GetWorld();
+
+                    if (World && World->NetDriver)
+                    {
+                        UNetDriver* NetDriver = static_cast<UNetDriver*>(World->NetDriver);
+
+                        if (NetDriver->ClientConnections.Num() > 0)
+                        {
+                            UNetConnection* LocalConnection = NetDriver->ClientConnections[0];
+
+                            if (LocalConnection && LocalConnection->PlayerController)
+                                LocalPC = (AFortPlayerControllerAthena*)LocalConnection->PlayerController;
+                        }
+                    }
+
+                    auto LocalPawn = (AFortPlayerPawnAthena*)LocalPC->Pawn;
+
+                    if (LocalPawn)
+                        LocalPC->K2_TeleportTo(TargetPawn->K2_GetActorLocation(), TargetPawn->K2_GetActorRotation());
+				}
+
+                /*if (ImGui::Button("Rift Player", ImVec2(Width, Height)))
+                {
+					auto Loc = TargetPawn->K2_GetActorLocation();
+                    FRotator Rot = FRotator(0.0f, 0.0f, 0.0f);
+
+                    auto RiftClass = FindObject<UClass>(UEAllocatedWString(L"/Game/Athena/Items/Consumables/RiftItem/BGA_RiftPortal_Item_Athena.BGA_RiftPortal_Item_Athena_C").c_str());
+
+                    UWorld::SpawnActor(RiftClass, Loc, Rot);
+				}*/
+
+                auto& Health = TargetPC->MyFortPawn->HealthSet->Health;
+                float MinValue = 100.f;
+
+                bool bIsGodded = false;
+
+                if (VersionInfo.FortniteVersion >= 21)
+                {
+                    if (TargetPC->Pawn)
+                        bIsGodded = (TargetPC->Pawn->bCanBeDamaged == false);
+                }
+                else
+                {
+                    bIsGodded = (Health.Minimum == MinValue);
+                }
+
+                if (bIsGodded)
+                {
+                    if (ImGui::Button("Ungod Player", ImVec2(Width, Height)))
+                    {
+                        if (VersionInfo.FortniteVersion >= 21)
+                        {
+                            TargetPC->Pawn->bCanBeDamaged = true;
+                        }
+                        else
+                        {
+                            Health.Minimum = 0.f;
+                            TargetPC->MyFortPawn->HealthSet->OnRep_Health(Health);
+                        }
+                    }
+                }
+                else
+                {
+                    if (ImGui::Button("God Player", ImVec2(Width, Height)))
+                    {
+                        if (VersionInfo.FortniteVersion >= 21)
+                        {
+                            TargetPC->Pawn->bCanBeDamaged = false;
+
+                            float MaxHealth = TargetPawn->GetMaxHealth();
+                            float MaxShield = TargetPawn->GetMaxShield();
+
+                            TargetPawn->SetHealth(MaxHealth);
+                            TargetPawn->SetShield(MaxShield);
+
+                            auto Handle = TargetPS->AbilitySystemComponent->MakeEffectContext();
+                            FGameplayTag Tag;
+                            static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+                            Tag.TagName = Cue;
+                            auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+                            memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+                            TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+                            TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+                            free(PredictionKey);
+                        }
+                        else
+                        {
+                            if (Health.Minimum != MinValue)
+                            {
+                                Health.Minimum = MinValue;
+                                TargetPC->MyFortPawn->HealthSet->OnRep_Health(Health);
+
+                                float MaxHealth = TargetPawn->GetMaxHealth();
+                                float MaxShield = TargetPawn->GetMaxShield();
+
+                                TargetPawn->SetHealth(MaxHealth);
+                                TargetPawn->SetShield(MaxShield);
+
+                                auto Handle = TargetPS->AbilitySystemComponent->MakeEffectContext();
+                                FGameplayTag Tag;
+                                static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+                                Tag.TagName = Cue;
+                                auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+                                memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+                                TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+                                TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+                                free(PredictionKey);
+                            }
+                            else
+                            {
+                                Health.Minimum = 0.f;
+                                TargetPC->MyFortPawn->HealthSet->OnRep_Health(Health);
+                            }
+                        }
+                    }
+                }
+
+                if (ImGui::Button("Eliminate Player", ImVec2(Width, Height)))
+                {
+                    TargetPC->ServerSuicide();
+                    bIsInspecting = false;
+                }
+
+                if (ImGui::Button("Kick Player", ImVec2(Width, Height)))
+                {
+                    TargetPC->ServerReturnToMainMenu("You have been kicked from the game by the host.");
+					bIsInspecting = false;
+                }
+
+                ImGui::Spacing();
+                ImGui::Spacing();
+
+                static float LaunchX = 0.f;
+                static float LaunchY = 0.f;
+                static float LaunchZ = 0.f;
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputFloat("Launch X", &LaunchX);
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputFloat("Launch Y", &LaunchY);
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputFloat("Launch Z", &LaunchZ);
+
+                if (ImGui::Button("Launch Player", ImVec2(Width, Height)))
+                {
+                    FVector LaunchVelocity = FVector(LaunchX, LaunchY, LaunchZ);
+                    TargetPawn->LaunchCharacterJump(LaunchVelocity, false, nullptr, true);
+                }
+
+                ImGui::Spacing();
+                ImGui::Spacing();
+
+                static char WID[256] = {};
+				static int Amount = 1.f;
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputText("Item To Give", WID, IM_ARRAYSIZE(WID));
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputInt("Amount To Give", &Amount);
+
+                if (ImGui::Button("Give Item To Player", ImVec2(Width, Height)))
+                {
+                    if (WID[0] != '\0')
+                    {
+                        std::string ItemID = WID;
+                        auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(ItemID.begin(), ItemID.end()));
+
+                        if (!ItemDefinition)
+                            ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(ItemID.c_str());
+
+                        int32 Count = Amount;
+
+                        if (Count <= 0)
+							Count = ItemDefinition->GetMaxStackSize();
+
+                        FVector FinalLoc = TargetPawn ? TargetPawn->K2_GetActorLocation() : FVector();
+
+                        FVector ForwardVector = TargetPawn ? TargetPawn->GetActorForwardVector() : FVector();
+                        ForwardVector.Z = 0.0f;
+                        ForwardVector.Normalize();
+
+                        const float RandomAngleVariation = ((float)rand() * 0.00109866634f) - 18.f;
+                        const float FinalAngle = RandomAngleVariation * 0.017453292519943295f;
+
+                        FinalLoc.X += cos(FinalAngle) * 100.f;
+                        FinalLoc.Y += sin(FinalAngle) * 100.f;
+
+                        auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), TargetPawn);
+
+                        if (TargetPawn && Pickup)
+                            TargetPawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+                    }
+				}
+
             }
 
             break;
@@ -992,14 +1319,7 @@ void GUI::Init()
                 static char BotNameBuffer[64] = {};
 
                 if (BotNameBuffer[0] == '\0' && !FConfiguration::BotName.empty())
-                {
-                    strncpy_s(
-                        BotNameBuffer,
-                        sizeof(BotNameBuffer),
-                        FConfiguration::BotName.c_str(),
-                        _TRUNCATE
-                    );
-                }
+                    strncpy_s(BotNameBuffer, sizeof(BotNameBuffer), FConfiguration::BotName.c_str(), _TRUNCATE);
 
                 ImGui::InputText("Bot Name", BotNameBuffer, sizeof(BotNameBuffer));
 

@@ -86,4 +86,6 @@ public:
     DEFINE_FUNC(OnRep_Place, void);
     DEFINE_FUNC(OnRep_SeasonLevelUIDisplay, void);
     DEFINE_FUNC(OnRep_PlayerName, void);
+    DEFINE_FUNC(ClientReportTournamentStatUpdate, void);
+    DEFINE_FUNC(GetPingInMilliseconds, float);
 };
