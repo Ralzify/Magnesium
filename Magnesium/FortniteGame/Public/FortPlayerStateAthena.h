@@ -88,4 +88,10 @@ public:
     DEFINE_FUNC(OnRep_PlayerName, void);
     DEFINE_FUNC(ClientReportTournamentStatUpdate, void);
     DEFINE_FUNC(GetPingInMilliseconds, float);
+
+    FString& GetSavedNetworkAddress()
+    {
+        static auto SavedNetworkAddressOffset = GetOffset("SavedNetworkAddress");
+        return *reinterpret_cast<FString*>(reinterpret_cast<uint8_t*>(this) + SavedNetworkAddressOffset);
+    }
 };

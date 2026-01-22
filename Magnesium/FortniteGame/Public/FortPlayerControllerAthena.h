@@ -420,6 +420,7 @@ public:
     DEFINE_FUNC(ClientOnPawnRevived, void);
     DEFINE_FUNC(ServerSuicide, void);
     DEFINE_FUNC(ClientReportTournamentPlacementPointsScored, void);
+    DEFINE_FUNC(IsInRespawnCountdown, bool);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);

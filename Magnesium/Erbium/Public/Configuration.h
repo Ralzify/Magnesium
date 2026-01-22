@@ -43,6 +43,7 @@ struct FConfiguration
     static inline auto bForceRespawns = false; // build your client with this too!
     static inline auto bKeepInventory = false;
     static inline auto bJoinInProgress = false;
+	static inline auto PermanentRespawn = false;
 
     static inline auto bAutoBusStart = true; // im not sure this even works properly tbh might need to fix
 

@@ -453,6 +453,13 @@ void GUI::Init()
                         if (FConfiguration::bLateGame)
                         {
                             ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
+
+                            if (FConfiguration::bForceRespawns)
+                            {
+                                ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
+								ImGui::Checkbox("Toggle Permanant Respawn", &FConfiguration::PermanentRespawn);
+							}
+
                             ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
 
                             ImGui::PushItemWidth(Width);
@@ -505,7 +512,7 @@ void GUI::Init()
                     for (auto& Build : Builds) // this
                     {
                         if (Build && Build->bPlayerPlaced)
-                            Build->K2_DestroyActor();
+                            Build->SilentDie(true);
                     }
 
                     Builds.Free();

@@ -76,7 +76,12 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
                 Playlist->RespawnTime.Curve.RowName = FName();
                 Playlist->RespawnTime.Value = 3;
             }
-            Playlist->RespawnType = 2; // InfiniteRespawnExceptStorm
+
+            if (FConfiguration::PermanentRespawn)
+                Playlist->RespawnType = 1; // InfiniteRespawn
+            else
+                Playlist->RespawnType = 2; // InfiniteRespawnExceptStorm
+
             //if (Playlist->HasbForceRespawnLocationInsideOfVolume())
             //    Playlist->bForceRespawnLocationInsideOfVolume = true;
         }

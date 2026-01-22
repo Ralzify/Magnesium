@@ -1416,7 +1416,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			{
 				auto Controller = (AFortPlayerControllerAthena*)Player;
 
-				if (AwardRequirement)
+				if (AwardRequirement && !Controller->IsInRespawnCountdown())
 					Controller->ClientReportTournamentPlacementPointsScored(PlayerCount, Points);
 			}
 		}
@@ -1787,231 +1787,393 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 		auto& command = args[0];
 		std::transform(command.begin(), command.end(), command.begin(), tolower);
 
-		if (command == "startaircraft")
-		{
-			if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
-			{
-				auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+		auto& IP = PlayerController->PlayerState->GetSavedNetworkAddress();
+		auto IPStr = IP.ToString();
 
-				GamePhaseLogic->StartAircraftPhase();
-				PlayerController->ClientMessage(FString(L"Started the aircraft!"), FName(), 1.f);
-			}
-			else
+		if (FConfiguration::bEnableCheats || (!FConfiguration::bEnableCheats && IPStr == "127.0.0.1"))
+		{
+			if (command == "startaircraft")
 			{
-				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
-				PlayerController->ClientMessage(FString(L"Started the aircraft!"), FName(), 1.f);
-			}
-		}
-		else if (command == "resumesafezone")
-		{
-			UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = false;
-			if (GameMode->HasbSafeZonePaused())
-				GameMode->bSafeZonePaused = false;
-			UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startsafezone"), nullptr);
-			PlayerController->ClientMessage(FString(L"Resumed the safe zone."), FName(), 1.f);
-		}
-		else if (command == "pausesafezone")
-		{
-			UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = true;
-			if (GameMode->HasbSafeZonePaused())
-				GameMode->bSafeZonePaused = true;
-			UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
-			PlayerController->ClientMessage(FString(L"Paused the safe zone."), FName(), 1.f);
-		}
-		else if (command == "skipsafezone")
-		{
-			if (GameMode->HasSafeZoneIndicator())
-			{
-				if (GameMode->SafeZoneIndicator)
+				if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
 				{
-					GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-					GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + 0.05f;
+					auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+
+					GamePhaseLogic->StartAircraftPhase();
+					PlayerController->ClientMessage(FString(L"Started the aircraft!"), FName(), 1.f);
+				}
+				else
+				{
+					UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
+					PlayerController->ClientMessage(FString(L"Started the aircraft!"), FName(), 1.f);
 				}
 			}
-			else
+			else if (command == "resumesafezone")
 			{
-				auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-
-				if (GamePhaseLogic->SafeZoneIndicator)
+				UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = false;
+				if (GameMode->HasbSafeZonePaused())
+					GameMode->bSafeZonePaused = false;
+				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startsafezone"), nullptr);
+				PlayerController->ClientMessage(FString(L"Resumed the safe zone."), FName(), 1.f);
+			}
+			else if (command == "pausesafezone")
+			{
+				UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = true;
+				if (GameMode->HasbSafeZonePaused())
+					GameMode->bSafeZonePaused = true;
+				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
+				PlayerController->ClientMessage(FString(L"Paused the safe zone."), FName(), 1.f);
+			}
+			else if (command == "skipsafezone")
+			{
+				if (GameMode->HasSafeZoneIndicator())
 				{
-					GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-					GamePhaseLogic->SafeZoneIndicator->SafeZoneFinishShrinkTime = GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime + 0.05f;
-				}
-			}
-
-			PlayerController->ClientMessage(FString(L"Currently skipping the zone."), FName(), 1.f);
-			//UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"skipsafezone"), nullptr);
-		}
-		else if (command == "startshrinksafezone")
-		{
-			auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-			if (GameMode->HasSafeZoneIndicator())
-			{
-				if (GameMode->SafeZoneIndicator)
-					GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-			}
-			else
-			{
-				auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-
-				if (GamePhaseLogic->SafeZoneIndicator)
-					GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-			}
-
-			PlayerController->ClientMessage(FString(L"Started shrinking the zone."), FName(), 1.f);
-
-			//UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startshrinksafezone"), nullptr);
-		}
-		else if (command == "dumpitems")
-		{
-			std::stringstream ss;
-
-			ss << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
-			char version[6];
-
-			sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
-			ss << "Fortnite Version: " << version << "\n\n";
-
-			auto RarityEnum = EFortRarity::StaticEnum();
-			for (int i = 0; i < TUObjectArray::Num(); i++)
-			{
-				auto Object = TUObjectArray::GetObjectByIndex(i);
-				if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortWorldItemDefinition>())
-					continue;
-				auto Item = (UFortWorldItemDefinition*)Object;
-
-				FString Name = UKismetTextLibrary::Conv_TextToString(Item->HasDisplayName() ? Item->DisplayName : Item->ItemName);
-
-				ss << "- " << UKismetSystemLibrary::GetPathName(Item).ToString() << "\n";
-				ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
-
-				auto Names = *(TArray<TPair<FName, int64>>*)(__int64(RarityEnum) + 0x40);
-
-				for (int i = 0; i < Names.Num(); i++)
-				{
-					auto& Pair = Names[i];
-					auto& Name = Pair.Key();
-					auto& Value = Pair.Value();
-
-					if (Value == Item->Rarity)
+					if (GameMode->SafeZoneIndicator)
 					{
-						auto str = Name.ToString();
-						auto colcolIdx = str.find_last_of("::");
-
-						auto RealName = colcolIdx == -1 ? str : str.substr(colcolIdx + 1);
-
-						ss << "-     Rarity: " << RealName << "\n";
+						GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+						GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + 0.05f;
 					}
 				}
-			}
-
-			std::ofstream of("DumpedItems.txt", std::ios::trunc);
-
-			of << ss.str();
-			of.close();
-
-			PlayerController->ClientMessage(FString(L"Dumped all available items! Head to your Win64/Binaries folder to find the .txt file!"), FName(), 1.f);
-		}
-		else if (command == "dumpplaylist" || command == "dumpplaylists")
-		{
-			std::stringstream ss;
-
-			ss << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
-			char version[6];
-
-			sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
-			ss << "Fortnite Version: " << version << "\n\n";
-
-			auto RarityEnum = EFortRarity::StaticEnum();
-			for (int i = 0; i < TUObjectArray::Num(); i++)
-			{
-				auto Object = TUObjectArray::GetObjectByIndex(i);
-				if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortPlaylistAthena>())
-					continue;
-				auto Playlist = (UFortPlaylistAthena*)Object;
-
-				FString Name = UKismetTextLibrary::Conv_TextToString(Playlist->UIDisplayName);
-
-				ss << "- " << UKismetSystemLibrary::GetPathName(Playlist).ToString() << "\n";
-				ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
-				if (Playlist->HasMaxPlayers())
-					ss << "-     Max Players: " << std::to_string(Playlist->MaxPlayers) << "\n";
-				if (Playlist->HasMaxSquadSize())
-					ss << "-     Squad Size: " << std::to_string(Playlist->MaxSquadSize) << "\n";
-			}
-
-			std::ofstream of("DumpedPlaylists.txt", std::ios::trunc);
-
-			of << ss.str();
-			of.close();
-
-			PlayerController->ClientMessage(FString(L"Dumped all available playlists! Head to your Win64/Binaries folder to find the .txt file!"), FName(), 1.f);
-		}
-		else if (command == "suicide")
-		{
-			PlayerController->ServerSuicide();
-			PlayerController->ClientMessage(FString(L"Killed pawn!"), FName(), 1.f);
-		}
-		else if (command == "infiniteammo")
-			FConfiguration::bInfiniteAmmo ^= 1;
-		else if (command == "infinitemats")
-			FConfiguration::bInfiniteMats ^= 1;
-		else if (command == "demospeed")
-		{
-			if (args.size() != 2)
-			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
-			}
-
-			auto ws = L"demospeed " + UEAllocatedWString(args[1].begin(), args[1].end());
-
-			UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(ws.c_str()), nullptr);
-			PlayerController->ClientMessage(FString(L"Modified the server's demospeed!"), FName(), 1.f);
-		}
-		else if (command == "god")
-		{
-			bool bUseMin = false;
-
-			float MinValue = bUseMin ? 1.f : 100.f;
-			auto& Health = PlayerController->MyFortPawn->HealthSet->Health;
-
-			auto Pawn = PlayerController->Pawn;
-			auto PlayerState = PlayerController->PlayerState;
-
-			float MaxHealth = Pawn->GetMaxHealth();
-			float MaxShield = Pawn->GetMaxShield();
-
-			if (args.size() > 1)
-			{
-				std::string FullCommand = args[1].c_str();
-				std::transform(FullCommand.begin(), FullCommand.end(), FullCommand.begin(), tolower);
-
-				if (FullCommand == "min" || FullCommand == "minimum")
+				else
 				{
-					bUseMin = true;
-				}
-				else if (FullCommand == "check" || FullCommand == "c")
-				{
-					if (Health.Minimum == MinValue || PlayerController->Pawn->bCanBeDamaged == true)
+					auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+
+					if (GamePhaseLogic->SafeZoneIndicator)
 					{
-						PlayerController->ClientMessage(FString(L"You currently have god mode **ENABLED**."), FName(), 1);
-						return;
+						GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+						GamePhaseLogic->SafeZoneIndicator->SafeZoneFinishShrinkTime = GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime + 0.05f;
 					}
+				}
+
+				PlayerController->ClientMessage(FString(L"Currently skipping the zone."), FName(), 1.f);
+				//UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"skipsafezone"), nullptr);
+			}
+			else if (command == "startshrinksafezone")
+			{
+				auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+				if (GameMode->HasSafeZoneIndicator())
+				{
+					if (GameMode->SafeZoneIndicator)
+						GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+				}
+				else
+				{
+					auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+
+					if (GamePhaseLogic->SafeZoneIndicator)
+						GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+				}
+
+				PlayerController->ClientMessage(FString(L"Started shrinking the zone."), FName(), 1.f);
+
+				//UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startshrinksafezone"), nullptr);
+			}
+			else if (command == "dumpitems")
+			{
+				std::stringstream ss;
+
+				ss << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
+				char version[6];
+
+				sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
+				ss << "Fortnite Version: " << version << "\n\n";
+
+				auto RarityEnum = EFortRarity::StaticEnum();
+				for (int i = 0; i < TUObjectArray::Num(); i++)
+				{
+					auto Object = TUObjectArray::GetObjectByIndex(i);
+					if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortWorldItemDefinition>())
+						continue;
+					auto Item = (UFortWorldItemDefinition*)Object;
+
+					FString Name = UKismetTextLibrary::Conv_TextToString(Item->HasDisplayName() ? Item->DisplayName : Item->ItemName);
+
+					ss << "- " << UKismetSystemLibrary::GetPathName(Item).ToString() << "\n";
+					ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
+
+					auto Names = *(TArray<TPair<FName, int64>>*)(__int64(RarityEnum) + 0x40);
+
+					for (int i = 0; i < Names.Num(); i++)
+					{
+						auto& Pair = Names[i];
+						auto& Name = Pair.Key();
+						auto& Value = Pair.Value();
+
+						if (Value == Item->Rarity)
+						{
+							auto str = Name.ToString();
+							auto colcolIdx = str.find_last_of("::");
+
+							auto RealName = colcolIdx == -1 ? str : str.substr(colcolIdx + 1);
+
+							ss << "-     Rarity: " << RealName << "\n";
+						}
+					}
+				}
+
+				std::ofstream of("DumpedItems.txt", std::ios::trunc);
+
+				of << ss.str();
+				of.close();
+
+				PlayerController->ClientMessage(FString(L"Dumped all available items! Head to your Win64/Binaries folder to find the .txt file!"), FName(), 1.f);
+			}
+			else if (command == "dumpplaylist" || command == "dumpplaylists")
+			{
+				std::stringstream ss;
+
+				ss << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
+				char version[6];
+
+				sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
+				ss << "Fortnite Version: " << version << "\n\n";
+
+				auto RarityEnum = EFortRarity::StaticEnum();
+				for (int i = 0; i < TUObjectArray::Num(); i++)
+				{
+					auto Object = TUObjectArray::GetObjectByIndex(i);
+					if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortPlaylistAthena>())
+						continue;
+					auto Playlist = (UFortPlaylistAthena*)Object;
+
+					FString Name = UKismetTextLibrary::Conv_TextToString(Playlist->UIDisplayName);
+
+					ss << "- " << UKismetSystemLibrary::GetPathName(Playlist).ToString() << "\n";
+					ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
+					if (Playlist->HasMaxPlayers())
+						ss << "-     Max Players: " << std::to_string(Playlist->MaxPlayers) << "\n";
+					if (Playlist->HasMaxSquadSize())
+						ss << "-     Squad Size: " << std::to_string(Playlist->MaxSquadSize) << "\n";
+				}
+
+				std::ofstream of("DumpedPlaylists.txt", std::ios::trunc);
+
+				of << ss.str();
+				of.close();
+
+				PlayerController->ClientMessage(FString(L"Dumped all available playlists! Head to your Win64/Binaries folder to find the .txt file!"), FName(), 1.f);
+			}
+			else if (command == "suicide")
+			{
+				PlayerController->ServerSuicide();
+				PlayerController->ClientMessage(FString(L"Killed pawn!"), FName(), 1.f);
+			}
+			else if (command == "infiniteammo")
+				FConfiguration::bInfiniteAmmo ^= 1;
+			else if (command == "infinitemats")
+				FConfiguration::bInfiniteMats ^= 1;
+			else if (command == "demospeed")
+			{
+				if (args.size() != 2)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+				}
+
+				auto ws = L"demospeed " + UEAllocatedWString(args[1].begin(), args[1].end());
+
+				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(ws.c_str()), nullptr);
+				PlayerController->ClientMessage(FString(L"Modified the server's demospeed!"), FName(), 1.f);
+			}
+			else if (command == "god")
+			{
+				bool bUseMin = false;
+
+				float MinValue = bUseMin ? 1.f : 100.f;
+				auto& Health = PlayerController->MyFortPawn->HealthSet->Health;
+
+				auto Pawn = PlayerController->Pawn;
+				auto PlayerState = PlayerController->PlayerState;
+
+				float MaxHealth = Pawn->GetMaxHealth();
+				float MaxShield = Pawn->GetMaxShield();
+
+				if (args.size() > 1)
+				{
+					std::string FullCommand = args[1].c_str();
+					std::transform(FullCommand.begin(), FullCommand.end(), FullCommand.begin(), tolower);
+
+					if (FullCommand == "min" || FullCommand == "minimum")
+					{
+						bUseMin = true;
+					}
+					else if (FullCommand == "check" || FullCommand == "c")
+					{
+						if (Health.Minimum == MinValue || PlayerController->Pawn->bCanBeDamaged == true)
+						{
+							PlayerController->ClientMessage(FString(L"You currently have god mode **ENABLED**."), FName(), 1);
+							return;
+						}
+						else
+						{
+							PlayerController->ClientMessage(FString(L"You currently have god mode **DISABLED**."), FName(), 1);
+							return;
+						}
+					}
+				}
+
+				if (VersionInfo.FortniteVersion >= 21)
+				{
+					PlayerController->Pawn->bCanBeDamaged ^= 1;
+					PlayerController->ClientMessage(FString(L"Toggled god mode!"), FName(), 1.f);
+
+					if (PlayerController->Pawn->bCanBeDamaged == 0)
+					{
+						Pawn->SetHealth(MaxHealth);
+						Pawn->SetShield(MaxShield);
+
+						auto Handle = PlayerState->AbilitySystemComponent->MakeEffectContext();
+						FGameplayTag Tag;
+						static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+						Tag.TagName = Cue;
+						auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+						memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+						PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+						PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+						free(PredictionKey);
+					}
+
+					return;
+				}
+				else if (Health.Minimum != MinValue)
+				{
+					Health.Minimum = MinValue;
+					PlayerController->MyFortPawn->HealthSet->OnRep_Health(Health);
+
+					Pawn->SetHealth(MaxHealth);
+					Pawn->SetShield(MaxShield);
+
+					auto Handle = PlayerState->AbilitySystemComponent->MakeEffectContext();
+					FGameplayTag Tag;
+					static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+					Tag.TagName = Cue;
+					auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+					memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+					PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+					PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+					free(PredictionKey);
+
+					if (bUseMin)
+						PlayerController->ClientMessage(FString(L"Minimum Health God mode enabled!"), FName(), 1);
 					else
+						PlayerController->ClientMessage(FString(L"God mode enabled!"), FName(), 1);
+				}
+				else
+				{
+					Health.Minimum = 0.f;
+					PlayerController->MyFortPawn->HealthSet->OnRep_Health(Health);
+
+					PlayerController->ClientMessage(FString(L"God mode disabled!"), FName(), 1);
+				}
+			}
+			else if (command == "speed")
+			{
+				float Speed = 1.0f;
+
+				if (args.size() > 1)
+				{
+					try { Speed = std::stof(std::string(args[1])); }
+					catch (...)
 					{
-						PlayerController->ClientMessage(FString(L"You currently have god mode **DISABLED**."), FName(), 1);
+						PlayerController->ClientMessage(FString(L"Invalid speed value"), FName(), 1.f);
 						return;
 					}
 				}
+
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn to set speed"), FName(), 1.f);
+					return;
+				}
+
+				static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
+
+				if (!SetMovementSpeedFn)
+					SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
+
+				if (!SetMovementSpeedFn)
+					return;
+
+				Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
+				PlayerController->ClientMessage(FString(L"Set player speed!"), FName(), 1.f);
 			}
-
-			if (VersionInfo.FortniteVersion >= 21)
+			else if (command == "randomize")
 			{
-				PlayerController->Pawn->bCanBeDamaged ^= 1;
-				PlayerController->ClientMessage(FString(L"Toggled god mode!"), FName(), 1.f);
+				LateGame::EquipLoadout(PlayerController);
+				PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
+			}
+			/*else if (command == "revive" || command == "res")
+			{
+				auto Pawn = PlayerController->Pawn;
 
-				if (PlayerController->Pawn->bCanBeDamaged == 0)
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find a pawn!"), FName(), 1.f);
+					return;
+				}
+
+				auto PlayerState = PlayerController->PlayerState;
+
+				if (!PlayerState)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find a player state!"), FName(), 1.f);
+					return;
+				}
+
+				if (Pawn->IsDBNO())
+				{
+					Pawn->SetDBNO(false);
+					Pawn->SetHealth(30.f);
+					Pawn->IsDBNO(false);
+
+					Pawn->OnRep_IsDBNO();
+
+					PlayerController->ClientOnPawnRevived(PlayerController);
+					PlayerController->RespawnPlayerAfterDeath(false);
+
+					PlayerController->ClientMessage(FString(L"Player revived!"), FName(), 1.f);
+				}
+			}*/
+			else if (command == "gravity")
+			{
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: gravity <multiplier>"), FName(), 1.f);
+					return;
+				}
+
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+					return;
+
+				float Multiplier = 1.0f;
+
+				try
+				{
+					std::string argStr(args[1].begin(), args[1].end());
+					Multiplier = std::stof(argStr);
+				}
+				catch (...)
+				{
+					PlayerController->ClientMessage(FString(L"Invalid multiplier!"), FName(), 1.f);
+					return;
+				}
+
+				Pawn->SetGravityMultiplier(Multiplier);
+
+				PlayerController->ClientMessage(FString(L"Gravity multiplier set!"), FName(), 1.f);
+			}
+			else if (command == "regen")
+			{
+				auto Pawn = PlayerController->Pawn;
+				auto PlayerState = PlayerController->PlayerState;
+
+				float MaxHealth = Pawn->GetMaxHealth();
+				float MaxShield = Pawn->GetMaxShield();
+
+				if (Pawn)
 				{
 					Pawn->SetHealth(MaxHealth);
 					Pawn->SetShield(MaxShield);
@@ -2025,1064 +2187,917 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 					PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
 					PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
 					free(PredictionKey);
+
+					PlayerController->ClientMessage(FString(L"Regenerated the player's health!"), FName(), 1.f);
 				}
-
-				return;
 			}
-			else if (Health.Minimum != MinValue)
+			else if (command == "changename" || command == "name")
 			{
-				Health.Minimum = MinValue;
-				PlayerController->MyFortPawn->HealthSet->OnRep_Health(Health);
-
-				Pawn->SetHealth(MaxHealth);
-				Pawn->SetShield(MaxShield);
-
-				auto Handle = PlayerState->AbilitySystemComponent->MakeEffectContext();
-				FGameplayTag Tag;
-				static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
-				Tag.TagName = Cue;
-				auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-				memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-				PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-				PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-				free(PredictionKey);
-
-				if (bUseMin)
-					PlayerController->ClientMessage(FString(L"Minimum Health God mode enabled!"), FName(), 1);
-				else
-					PlayerController->ClientMessage(FString(L"God mode enabled!"), FName(), 1);
-			}
-			else
-			{
-				Health.Minimum = 0.f;
-				PlayerController->MyFortPawn->HealthSet->OnRep_Health(Health);
-
-				PlayerController->ClientMessage(FString(L"God mode disabled!"), FName(), 1);
-			}
-		}
-		else if (command == "speed")
-		{
-			float Speed = 1.0f;
-
-			if (args.size() > 1)
-			{
-				try { Speed = std::stof(std::string(args[1])); }
-				catch (...)
+				if (args.size() < 2)
 				{
-					PlayerController->ClientMessage(FString(L"Invalid speed value"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Please include a phrase/name you'd want to change to!"), FName(), 1);
 					return;
 				}
+
+				std::string nameStr;
+
+				for (size_t i = 1; i < args.size(); i++)
+				{
+					nameStr += std::string(args[i].begin(), args[i].end());
+					if (i + 1 < args.size())
+						nameStr += " ";
+				}
+
+				if (nameStr.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Invalid name!"), FName(), 1);
+					return;
+				}
+
+				std::wstring nameW(nameStr.begin(), nameStr.end());
+				FString NewName = FString(nameW.c_str());
+
+				if (!PlayerController)
+					return;
+
+				PlayerController->ServerChangeName(NewName);
+
+				PlayerController->ClientMessage(FString(L"Changed the player's name!"), FName(), 1.f);
 			}
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
+			else if (command == "pausetimeofday" || command == "pausetime" || command == "pt")
 			{
-				PlayerController->ClientMessage(FString(L"No pawn to set speed"), FName(), 1.f);
-				return;
+				static bool bIsPaused = false;
+
+				float Speed = bIsPaused ? 1.f : 0.f;
+
+				UFortKismetLibrary::SetTimeOfDaySpeed(UWorld::GetWorld(), Speed);
+
+				if (bIsPaused)
+					PlayerController->ClientMessage(FString(L"Unpaused time of day!"), FName(), 1.f);
+				else
+					PlayerController->ClientMessage(FString(L"Paused time of day!"), FName(), 1.f);
+
+				bIsPaused ^= 1;
 			}
-
-			static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
-
-			if (!SetMovementSpeedFn)
-				SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
-
-			if (!SetMovementSpeedFn)
-				return;
-
-			Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
-			PlayerController->ClientMessage(FString(L"Set player speed!"), FName(), 1.f);
-		}
-		else if (command == "randomize")
-		{
-			LateGame::EquipLoadout(PlayerController);
-			PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
-		}
-		/*else if (command == "revive" || command == "res")
-		{
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
+			else if (command == "sethealth" || command == "health")
 			{
-				PlayerController->ClientMessage(FString(L"Could not find a pawn!"), FName(), 1.f);
-				return;
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your health to!"), FName(), 1.f);
+					return;
+				}
+
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
+					return;
+				}
+
+				float Health = 100.f;
+
+				try { Health = std::stof(std::string(args[1])); }
+				catch (...) {}
+
+				Pawn->SetHealth(Health);
+				PlayerController->ClientMessage(FString(L"Set pawn's health!"), FName(), 1.f);
 			}
-			
-			auto PlayerState = PlayerController->PlayerState;
-
-			if (!PlayerState)
+			else if (command == "setshield" || command == "shield")
 			{
-				PlayerController->ClientMessage(FString(L"Could not find a player state!"), FName(), 1.f);
-				return;
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your shield to!"), FName(), 1.f);
+					return;
+				}
+
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
+					return;
+				}
+
+				float Shield = 100.f;
+
+				try { Shield = std::stof(std::string(args[1])); }
+				catch (...) {}
+
+				Pawn->SetShield(Shield);
+				PlayerController->ClientMessage(FString(L"Set pawn's shield!"), FName(), 1.f);
 			}
-
-			if (Pawn->IsDBNO())
+			else if (command == "setmaxhealth" || command == "maxhealth")
 			{
-				Pawn->SetDBNO(false);
-				Pawn->SetHealth(30.f);
-				Pawn->IsDBNO(false);
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your max health to!"), FName(), 1.f);
+					return;
+				}
 
-				Pawn->OnRep_IsDBNO();
+				auto Pawn = PlayerController->Pawn;
 
-				PlayerController->ClientOnPawnRevived(PlayerController);
-				PlayerController->RespawnPlayerAfterDeath(false);
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
+					return;
+				}
 
-				PlayerController->ClientMessage(FString(L"Player revived!"), FName(), 1.f);
+				float Health = 100.f;
+
+				try { Health = std::stof(std::string(args[1])); }
+				catch (...) {}
+
+				Pawn->SetMaxHealth(Health);
+				PlayerController->ClientMessage(FString(L"Set pawn's max health!"), FName(), 1.f);
 			}
-		}*/
-		else if (command == "gravity")
-		{
-			if (args.size() < 2)
+			else if (command == "setmaxshield" || command == "maxshield")
 			{
-				PlayerController->ClientMessage(FString(L"Usage: gravity <multiplier>"), FName(), 1.f);
-				return;
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your max shield to!"), FName(), 1.f);
+					return;
+				}
+
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
+					return;
+				}
+
+				float Shield = 100.f;
+
+				try { Shield = std::stof(std::string(args[1])); }
+				catch (...) {}
+
+				Pawn->SetMaxShield(Shield);
+				PlayerController->ClientMessage(FString(L"Set pawn's max shield!"), FName(), 1.f);
 			}
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-				return;
-
-			float Multiplier = 1.0f;
-
-			try
+			else if (command == "cipher")
 			{
-				std::string argStr(args[1].begin(), args[1].end());
-				Multiplier = std::stof(argStr);
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please input a website link to open!"), FName(), 1.f);
+					return;
+				}
+
+				FString URL = args[1];
+
+				/*if (!URL.StartsWith(L"http://") && !URL.StartsWith(L"https://"))
+				{
+					PlayerController->ClientMessage(FString(L"Input must start with https://"), FName(), 1.f);
+					return;
+				}*/
+
+				int AmountToOpen = 1;
+
+				if (args.size() >= 3)
+				{
+					try { AmountToOpen = std::stoi(args[2].c_str(), nullptr); }
+					catch (...) {}
+				}
+
+				if (AmountToOpen <= 0)
+					AmountToOpen = 1;
+
+				if (AmountToOpen > 20)
+					AmountToOpen = 20;
+
+				AmountToOpen = FMath::Clamp(AmountToOpen, 1, 10);
+
+				for (int32 i = 0; i < AmountToOpen; ++i)
+				{
+					UKismetSystemLibrary::LaunchURL(URL);
+				}
+
+				PlayerController->ClientMessage(FString(L"Opened link!"), FName(), 1.f);
 			}
-			catch (...)
+			else if (command == "setkills" || command == "kills")
 			{
-				PlayerController->ClientMessage(FString(L"Invalid multiplier!"), FName(), 1.f);
-				return;
-			}
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
+					return;
+				}
 
-			Pawn->SetGravityMultiplier(Multiplier);
+				auto PlayerState = PlayerController->PlayerState;
+				int Count = 1;
 
-			PlayerController->ClientMessage(FString(L"Gravity multiplier set!"), FName(), 1.f);
-		}
-		else if (command == "regen")
-		{
-			auto Pawn = PlayerController->Pawn;
-			auto PlayerState = PlayerController->PlayerState;
+				if (args.size() >= 2)
+				{
+					try { Count = std::stoi(args[1].c_str(), nullptr); }
+					catch (...) {}
+				}
 
-			float MaxHealth = Pawn->GetMaxHealth();
-			float MaxShield = Pawn->GetMaxShield();
+				if (PlayerState->HasKillScore())
+				{
+					PlayerState->KillScore = Count;
+				}
+				else
+				{
+					PlayerState->Kills = Count;
+				}
 
-			if (Pawn)
-			{
-				Pawn->SetHealth(MaxHealth);
-				Pawn->SetShield(MaxShield);
-
-				auto Handle = PlayerState->AbilitySystemComponent->MakeEffectContext();
-				FGameplayTag Tag;
-				static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
-				Tag.TagName = Cue;
-				auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-				memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-				PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-				PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-				free(PredictionKey);
-
-				PlayerController->ClientMessage(FString(L"Regenerated the player's health!"), FName(), 1.f);
-			}
-		}
-		else if (command == "changename" || command == "name")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please include a phrase/name you'd want to change to!"), FName(), 1);
-				return;
-			}
-
-			std::string nameStr;
-
-			for (size_t i = 1; i < args.size(); i++)
-			{
-				nameStr += std::string(args[i].begin(), args[i].end());
-				if (i + 1 < args.size())
-					nameStr += " ";
-			}
-
-			if (nameStr.empty())
-			{
-				PlayerController->ClientMessage(FString(L"Invalid name!"), FName(), 1);
-				return;
-			}
-
-			std::wstring nameW(nameStr.begin(), nameStr.end());
-			FString NewName = FString(nameW.c_str());
-
-			if (!PlayerController)
-				return;
-
-			PlayerController->ServerChangeName(NewName);
-
-			PlayerController->ClientMessage(FString(L"Changed the player's name!"), FName(), 1.f);
-		}
-		else if (command == "pausetimeofday" || command == "pausetime" || command == "pt")
-		{
-			static bool bIsPaused = false;
-
-			float Speed = bIsPaused ? 1.f : 0.f;
-
-			UFortKismetLibrary::SetTimeOfDaySpeed(UWorld::GetWorld(), Speed);
-
-			if (bIsPaused)
-				PlayerController->ClientMessage(FString(L"Unpaused time of day!"), FName(), 1.f);
-			else
-				PlayerController->ClientMessage(FString(L"Paused time of day!"), FName(), 1.f);
-
-			bIsPaused ^= 1;
-		}
-		else if (command == "sethealth" || command == "health")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please choose an amount to set your health to!"), FName(), 1.f);
-				return;
-			}
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-			{
-				PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
-				return;
-			}
-
-			float Health = 100.f;
-
-			try { Health = std::stof(std::string(args[1])); }
-			catch (...) {}
-
-			Pawn->SetHealth(Health);
-			PlayerController->ClientMessage(FString(L"Set pawn's health!"), FName(), 1.f);
-		}
-		else if (command == "setshield" || command == "shield")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please choose an amount to set your shield to!"), FName(), 1.f);
-				return;
-			}
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-			{
-				PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
-				return;
-			}
-
-			float Shield = 100.f;
-
-			try { Shield = std::stof(std::string(args[1])); }
-			catch (...) {}
-
-			Pawn->SetShield(Shield);
-			PlayerController->ClientMessage(FString(L"Set pawn's shield!"), FName(), 1.f);
-		}
-		else if (command == "setmaxhealth" || command == "maxhealth")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please choose an amount to set your max health to!"), FName(), 1.f);
-				return;
-			}
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-			{
-				PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
-				return;
-			}
-
-			float Health = 100.f;
-
-			try { Health = std::stof(std::string(args[1])); }
-			catch (...) {}
-
-			Pawn->SetMaxHealth(Health);
-			PlayerController->ClientMessage(FString(L"Set pawn's max health!"), FName(), 1.f);
-		}
-		else if (command == "setmaxshield" || command == "maxshield")
-		{
-			if (args.size() < 2)
-			{
+				PlayerState->OnRep_Kills();
 				PlayerController->ClientMessage(FString(L"Please choose an amount to set your max shield to!"), FName(), 1.f);
-				return;
 			}
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
+			else if (command == "setpoints" || command == "setarenapoints")
 			{
-				PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
-				return;
-			}
-
-			float Shield = 100.f;
-
-			try { Shield = std::stof(std::string(args[1])); }
-			catch (...) {}
-
-			Pawn->SetMaxShield(Shield);
-			PlayerController->ClientMessage(FString(L"Set pawn's max shield!"), FName(), 1.f);
-		}
-		else if (command == "cipher")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please input a website link to open!"), FName(), 1.f);
-				return;
-			}
-
-			FString URL = args[1];
-
-			/*if (!URL.StartsWith(L"http://") && !URL.StartsWith(L"https://"))
-			{
-				PlayerController->ClientMessage(FString(L"Input must start with https://"), FName(), 1.f);
-				return;
-			}*/
-
-			int AmountToOpen = 1;
-
-			if (args.size() >= 3)
-			{
-				try { AmountToOpen = std::stoi(args[2].c_str(), nullptr); }
-				catch (...) {}
-			}
-
-			if (AmountToOpen <= 0)
-				AmountToOpen = 1;
-
-			if (AmountToOpen > 20)
-				AmountToOpen = 20;
-
-			AmountToOpen = FMath::Clamp(AmountToOpen, 1, 10);
-
-			for (int32 i = 0; i < AmountToOpen; ++i)
-			{
-				UKismetSystemLibrary::LaunchURL(URL);
-			}
-
-			PlayerController->ClientMessage(FString(L"Opened link!"), FName(), 1.f);
-		}
-		else if (command == "setkills" || command == "kills")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
-				return;
-			}
-
-			auto PlayerState = PlayerController->PlayerState;
-			int Count = 1;
-
-			if (args.size() >= 2)
-			{
-				try { Count = std::stoi(args[1].c_str(), nullptr); }
-				catch (...) {}
-			}
-
-			if (PlayerState->HasKillScore())
-			{
-				PlayerState->KillScore = Count;
-			}
-			else
-			{
-				PlayerState->Kills = Count;
-			}
-
-			PlayerState->OnRep_Kills();
-			PlayerController->ClientMessage(FString(L"Please choose an amount to set your max shield to!"), FName(), 1.f);
-		}
-		else if (command == "setpoints" || command == "setarenapoints")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
-				return;
-			}
-
-			int AlivePlayers = GameMode->AlivePlayers.Num();
-
-			int Points = 1;
-
-			if (args.size() >= 2)
-			{
-				try { Points = std::stoi(args[1].c_str(), nullptr); }
-				catch (...) {}
-			}
-
-			if (GUI::IsArenaPlaylist())
-			{
-				PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, Points);
-
-				std::wstring PointsStr = std::to_wstring(Points) + L"!";
-				FString Message = FString((L"Set your arena points to " + PointsStr + L"\n").c_str());
-				PlayerController->ClientMessage(Message, FName(), 1.f);
-				PlayerController->ClientMessage(FString(L"Use a negative number to take away points!"), FName(), 1.f);
-			}
-			else
-			{
-				PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
-				PlayerController->ClientMessage(FString(L"Use a negative number to take away points!"), FName(), 1.f);
-				return;
-			}
-		}
-		else if (command == "keepinv" || command == "keepinventory")
-		{
-			FConfiguration::bKeepInventory ^= 1;
-			PlayerController->ClientMessage(FString(L"Toggled keep inventory!"), FName(), 1.f);
-		}
-		else if (command == "destroyall")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
-			}
-
-			TArray<AActor*> Actors;
-
-			auto ActorClass = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
-
-			if (!ActorClass)
-				ActorClass = FindClass(args[1].c_str());
-
-			if (args[1].contains("pickup"))
-				ActorClass = AFortPickupAthena::StaticClass();
-
-			if (!ActorClass)
-			{
-				auto ShortNames = Misc::ObjectNames.find(args[1].c_str());
-
-				if (ShortNames != Misc::ObjectNames.end())
-					ActorClass = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
-			}
-
-			if (!ActorClass)
-			{
-				PlayerController->ClientMessage(FString(L"Invalid class path!"), FName(), 1.f);
-				return;
-			}
-
-			//UGameplayStatics::GetAllActorsOfClass(UWorld::GetWorld(), ActorClass, &Actors); // if this crashes then do it other way around
-			Utils::GetAll<AActor>(ActorClass, Actors);
-
-			for (auto Actor : Actors)
-			{
-				if (Actor)
+				if (args.size() < 2)
 				{
-					Actor->K2_DestroyActor();
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
+					return;
+				}
+
+				int AlivePlayers = GameMode->AlivePlayers.Num();
+
+				int Points = 1;
+
+				if (args.size() >= 2)
+				{
+					try { Points = std::stoi(args[1].c_str(), nullptr); }
+					catch (...) {}
+				}
+
+				if (GUI::IsArenaPlaylist())
+				{
+					PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, Points);
+
+					std::wstring PointsStr = std::to_wstring(Points) + L"!";
+					FString Message = FString((L"Set your arena points to " + PointsStr + L"\n").c_str());
+					PlayerController->ClientMessage(Message, FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Use a negative number to take away points!"), FName(), 1.f);
 				}
 				else
 				{
-					PlayerController->ClientMessage(FString(L"Could not find actor!"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Use a negative number to take away points!"), FName(), 1.f);
 					return;
 				}
 			}
-
-			PlayerController->ClientMessage(FString(L"Destroyed all specified actors!"), FName(), 1.f);
-			Actors.Free();
-		}
-		else if (command == "fly")
-		{
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
+			else if (command == "keepinv" || command == "keepinventory")
 			{
-				PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
-				return;
+				FConfiguration::bKeepInventory ^= 1;
+				PlayerController->ClientMessage(FString(L"Toggled keep inventory!"), FName(), 1.f);
 			}
-
-			Pawn->SetActorEnableCollision(true);
-
-			if (Pawn->CharacterMovement)
+			else if (command == "destroyall")
 			{
-				Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
-
-				if (Pawn->CharacterMovement->bCheatFlying)
+				if (args.size() < 2)
 				{
-					Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
-					PlayerController->ClientMessage(FString(L"Enabled flying!"), FName(), 1.f);
-				}
-				else
-				{
-					Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
-					PlayerController->ClientMessage(FString(L"Disabled flying"), FName(), 1.f);
-				}
-			}
-		}
-		else if (command == "ghost")
-		{
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-			{
-				PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
-				return;
-			}
-
-			Pawn->SetActorEnableCollision(!Pawn->bActorEnableCollision);
-
-			if (Pawn->CharacterMovement)
-			{
-				Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
-
-				if (Pawn->CharacterMovement->bCheatFlying)
-					Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
-				else
-					Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
-			}
-		}
-		else if (command == "timeofday" || command == "time" || command == "t")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
-
-			}
-
-			float NewTOD = 0.f;
-			try { NewTOD = std::stof(std::string(args[1])); }
-			catch (...) {}
-
-			UFortKismetLibrary::SetTimeOfDay(UWorld::GetWorld(), NewTOD);
-			PlayerController->ClientMessage(FString(L"Set time of day!"), FName(), 1.f);
-		}
-		else if (command == "spawnbot" || command == "bot")
-		{
-			if (!PlayerController->Pawn)
-				return;
-
-			auto CallerController = PlayerController;
-			int Count = 1;
-
-			if (args.size() >= 2)
-			{
-				try { Count = std::stoi(args[1].c_str(), nullptr); }
-				catch (...) {}
-			}
-
-			for (int i = 0; i < Count; i++)
-			{
-				auto Transform = PlayerController->Pawn->GetTransform();
-
-				auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-				auto GameState = GameMode->GameState;
-				//auto PlayerController = (AFortPlayerControllerAthena*)UWorld::SpawnActor(GameMode->PlayerControllerClass, FVector{});
-				auto Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(GameMode->DefaultPawnClass, Transform);
-				auto PlayerController = (AFortPlayerControllerAthena*)UWorld::SpawnActor(FindObject<UClass>(L"/Game/Athena/Athena_PlayerController.Athena_PlayerController_C"), Transform);
-				//auto PlayerState = PlayerController->PlayerState;
-
-				if (!PlayerController || !Pawn)
-					continue;
-
-				PlayerController->Possess(Pawn);
-				PlayerController->MyFortPawn = Pawn; // dont't ask, crashes on 27+
-
-				auto PlayerState = (AFortPlayerStateAthena*)UWorld::SpawnActor(AFortPlayerStateAthena::StaticClass(), Transform);
-
-				PlayerState->SetOwner(PlayerController);
-
-				PlayerController->PlayerState = PlayerState;
-				PlayerController->OnRep_PlayerState();
-
-				Pawn->PlayerState = PlayerState;
-				Pawn->OnRep_PlayerState();
-
-				Pawn->SetMaxHealth(FConfiguration::BotHealth);
-				Pawn->SetHealth(FConfiguration::BotHealth);
-				Pawn->SetMaxShield(FConfiguration::BotShield);
-				Pawn->SetShield(FConfiguration::BotShield);
-
-				PlayerState->TeamIndex = AFortGameMode::PickTeam(GameMode, 0, PlayerController);
-				if (PlayerState->HasSquadId())
-					PlayerState->SquadId = PlayerState->TeamIndex - 3;
-				if (PlayerState->HasbIsABot())
-					PlayerState->bIsABot = true;
-
-				if (GameState->HasGameMemberInfoArray())
-				{
-					auto Member = (FGameMemberInfo*)malloc(FGameMemberInfo::Size());
-					memset((PBYTE)Member, 0, FGameMemberInfo::Size());
-
-					Member->MostRecentArrayReplicationKey = -1;
-					Member->ReplicationID = -1;
-					Member->ReplicationKey = -1;
-					Member->TeamIndex = PlayerState->TeamIndex;
-					Member->SquadId = PlayerState->SquadId;
-					Member->MemberUniqueId = PlayerState->UniqueId;
-
-					GameState->GameMemberInfoArray.Members.Add(*Member, FGameMemberInfo::Size());
-					GameState->GameMemberInfoArray.MarkItemDirty(*Member);
-
-					auto NotifyGameMemberAdded = (void(*)(AFortGameStateAthena*, uint8_t, uint8_t, FUniqueNetIdRepl*)) NotifyGameMemberAdded_;
-					if (NotifyGameMemberAdded)
-						NotifyGameMemberAdded(GameState, Member->SquadId, Member->TeamIndex, &Member->MemberUniqueId);
-
-					free(Member);
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
 				}
 
-				for (auto& AbilitySet : AFortGameMode::AbilitySets)
-					PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+				TArray<AActor*> Actors;
 
-				/*PlayerController->WorldInventory = (AFortInventory*)UWorld::SpawnActor(AFortInventory::StaticClass(), FVector{});
-				PlayerController->WorldInventory->SetOwner(PlayerController);
-				PlayerController->WorldInventory->InventoryType = 0;*/
-				//PlayerController->bHasInitializedWorldInventory = true;
+				auto ActorClass = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
 
-				GameState->PlayersLeft++;
-				GameState->OnRep_PlayersLeft();
+				if (!ActorClass)
+					ActorClass = FindClass(args[1].c_str());
 
-				GameMode->AlivePlayers.Add(PlayerController);
+				if (args[1].contains("pickup"))
+					ActorClass = AFortPickupAthena::StaticClass();
 
-				static auto Commando = FindObject(L"/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F", nullptr);
-				static auto Commando2 = FindObject(L"/Game/Athena/Heroes/HID_Commando_Athena_01.HID_Commando_Athena_01", nullptr);
-				PlayerState->HeroType = Commando ? Commando : Commando2;
-
-				static auto CharacterPartsOffset = PlayerState->GetOffset("CharacterParts", 0x100000);
-
-				if (CharacterPartsOffset == -1)
+				if (!ActorClass)
 				{
-					static auto CharacterPartsOff = PlayerState->GetOffset("CharacterParts");
-					if (CharacterPartsOff == -1)
-						CharacterPartsOff = PlayerState->GetOffset("LocalCharacterParts");
-					auto& CharacterParts = GetFromOffset<const UObject * [0x6]>(PlayerState, CharacterPartsOff);
+					auto ShortNames = Misc::ObjectNames.find(args[1].c_str());
 
-					static auto Head = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Heads/F_Med_Head1.F_Med_Head1");
-					static auto Body = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Bodies/F_Med_Soldier_01.F_Med_Soldier_01");
-					static auto Backpack = FindObject<UObject>(L"/Game/Characters/CharacterParts/Backpacks/NoBackpack.NoBackpack");
-
-					CharacterParts[0] = Head;
-					CharacterParts[1] = Body;
-					CharacterParts[3] = Backpack;
-				}
-				else
-				{
-					static auto CharacterPartsOff = PlayerState->GetOffset("CharacterParts");
-					auto& CustomCharacterParts = GetFromOffset<FCustomCharacterParts>(PlayerState, CharacterPartsOff);
-					static auto PartsOffset = FCustomCharacterParts::StaticStruct()->GetOffset("Parts");
-					auto& CharacterParts = GetFromOffset<const UObject * [0x6]>(&CustomCharacterParts, PartsOffset);
-
-					static auto Head = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Heads/F_Med_Head1.F_Med_Head1");
-					static auto Body = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Bodies/F_Med_Soldier_01.F_Med_Soldier_01");
-					static auto Backpack = FindObject<UObject>(L"/Game/Characters/CharacterParts/Backpacks/NoBackpack.NoBackpack");
-
-					CharacterParts[0] = Head;
-					CharacterParts[1] = Body;
-					CharacterParts[3] = Backpack;
+					if (ShortNames != Misc::ObjectNames.end())
+						ActorClass = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
 				}
 
-				if (ApplyCharacterCustomization)
-					((void (*)(AActor*, AFortPlayerPawnAthena*)) ApplyCharacterCustomization)(PlayerState, Pawn);
-
-				PlayerBotID++;
-
-				std::string BaseName = FConfiguration::BotName;
-				std::string FinalName;
-
-				if (FConfiguration::UseCustomBotNames)
+				if (!ActorClass)
 				{
-					if (FString::EndsWithSpace(BaseName))
+					PlayerController->ClientMessage(FString(L"Invalid class path!"), FName(), 1.f);
+					return;
+				}
+
+				//UGameplayStatics::GetAllActorsOfClass(UWorld::GetWorld(), ActorClass, &Actors); // if this crashes then do it other way around
+				Utils::GetAll<AActor>(ActorClass, Actors);
+
+				for (auto Actor : Actors)
+				{
+					if (Actor)
 					{
-						BaseName.pop_back();
-
-						FinalName = BaseName + " (#" + std::to_string(PlayerBotID) + ")";
+						Actor->K2_DestroyActor();
 					}
 					else
 					{
-						FinalName = BaseName;
+						PlayerController->ClientMessage(FString(L"Could not find actor!"), FName(), 1.f);
+						return;
+					}
+				}
+
+				PlayerController->ClientMessage(FString(L"Destroyed all specified actors!"), FName(), 1.f);
+				Actors.Free();
+			}
+			else if (command == "fly")
+			{
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				Pawn->SetActorEnableCollision(true);
+
+				if (Pawn->CharacterMovement)
+				{
+					Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
+
+					if (Pawn->CharacterMovement->bCheatFlying)
+					{
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
+						PlayerController->ClientMessage(FString(L"Enabled flying!"), FName(), 1.f);
+					}
+					else
+					{
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+						PlayerController->ClientMessage(FString(L"Disabled flying"), FName(), 1.f);
+					}
+				}
+			}
+			else if (command == "ghost")
+			{
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				Pawn->SetActorEnableCollision(!Pawn->bActorEnableCollision);
+
+				if (Pawn->CharacterMovement)
+				{
+					Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
+
+					if (Pawn->CharacterMovement->bCheatFlying)
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
+					else
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+				}
+			}
+			else if (command == "timeofday" || command == "time" || command == "t")
+			{
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+
+				}
+
+				float NewTOD = 0.f;
+				try { NewTOD = std::stof(std::string(args[1])); }
+				catch (...) {}
+
+				UFortKismetLibrary::SetTimeOfDay(UWorld::GetWorld(), NewTOD);
+				PlayerController->ClientMessage(FString(L"Set time of day!"), FName(), 1.f);
+			}
+			else if (command == "spawnbot" || command == "bot")
+			{
+				if (!PlayerController->Pawn)
+					return;
+
+				auto CallerController = PlayerController;
+				int Count = 1;
+
+				if (args.size() >= 2)
+				{
+					try { Count = std::stoi(args[1].c_str(), nullptr); }
+					catch (...) {}
+				}
+
+				for (int i = 0; i < Count; i++)
+				{
+					auto Transform = PlayerController->Pawn->GetTransform();
+
+					auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+					auto GameState = GameMode->GameState;
+					//auto PlayerController = (AFortPlayerControllerAthena*)UWorld::SpawnActor(GameMode->PlayerControllerClass, FVector{});
+					auto Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(GameMode->DefaultPawnClass, Transform);
+					auto PlayerController = (AFortPlayerControllerAthena*)UWorld::SpawnActor(FindObject<UClass>(L"/Game/Athena/Athena_PlayerController.Athena_PlayerController_C"), Transform);
+					//auto PlayerState = PlayerController->PlayerState;
+
+					if (!PlayerController || !Pawn)
+						continue;
+
+					PlayerController->Possess(Pawn);
+					PlayerController->MyFortPawn = Pawn; // dont't ask, crashes on 27+
+
+					auto PlayerState = (AFortPlayerStateAthena*)UWorld::SpawnActor(AFortPlayerStateAthena::StaticClass(), Transform);
+
+					PlayerState->SetOwner(PlayerController);
+
+					PlayerController->PlayerState = PlayerState;
+					PlayerController->OnRep_PlayerState();
+
+					Pawn->PlayerState = PlayerState;
+					Pawn->OnRep_PlayerState();
+
+					Pawn->SetMaxHealth(FConfiguration::BotHealth);
+					Pawn->SetHealth(FConfiguration::BotHealth);
+					Pawn->SetMaxShield(FConfiguration::BotShield);
+					Pawn->SetShield(FConfiguration::BotShield);
+
+					PlayerState->TeamIndex = AFortGameMode::PickTeam(GameMode, 0, PlayerController);
+					if (PlayerState->HasSquadId())
+						PlayerState->SquadId = PlayerState->TeamIndex - 3;
+					if (PlayerState->HasbIsABot())
+						PlayerState->bIsABot = true;
+
+					if (GameState->HasGameMemberInfoArray())
+					{
+						auto Member = (FGameMemberInfo*)malloc(FGameMemberInfo::Size());
+						memset((PBYTE)Member, 0, FGameMemberInfo::Size());
+
+						Member->MostRecentArrayReplicationKey = -1;
+						Member->ReplicationID = -1;
+						Member->ReplicationKey = -1;
+						Member->TeamIndex = PlayerState->TeamIndex;
+						Member->SquadId = PlayerState->SquadId;
+						Member->MemberUniqueId = PlayerState->UniqueId;
+
+						GameState->GameMemberInfoArray.Members.Add(*Member, FGameMemberInfo::Size());
+						GameState->GameMemberInfoArray.MarkItemDirty(*Member);
+
+						auto NotifyGameMemberAdded = (void(*)(AFortGameStateAthena*, uint8_t, uint8_t, FUniqueNetIdRepl*)) NotifyGameMemberAdded_;
+						if (NotifyGameMemberAdded)
+							NotifyGameMemberAdded(GameState, Member->SquadId, Member->TeamIndex, &Member->MemberUniqueId);
+
+						free(Member);
+					}
+
+					for (auto& AbilitySet : AFortGameMode::AbilitySets)
+						PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+
+					/*PlayerController->WorldInventory = (AFortInventory*)UWorld::SpawnActor(AFortInventory::StaticClass(), FVector{});
+					PlayerController->WorldInventory->SetOwner(PlayerController);
+					PlayerController->WorldInventory->InventoryType = 0;*/
+					//PlayerController->bHasInitializedWorldInventory = true;
+
+					GameState->PlayersLeft++;
+					GameState->OnRep_PlayersLeft();
+
+					GameMode->AlivePlayers.Add(PlayerController);
+
+					static auto Commando = FindObject(L"/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F", nullptr);
+					static auto Commando2 = FindObject(L"/Game/Athena/Heroes/HID_Commando_Athena_01.HID_Commando_Athena_01", nullptr);
+					PlayerState->HeroType = Commando ? Commando : Commando2;
+
+					static auto CharacterPartsOffset = PlayerState->GetOffset("CharacterParts", 0x100000);
+
+					if (CharacterPartsOffset == -1)
+					{
+						static auto CharacterPartsOff = PlayerState->GetOffset("CharacterParts");
+						if (CharacterPartsOff == -1)
+							CharacterPartsOff = PlayerState->GetOffset("LocalCharacterParts");
+						auto& CharacterParts = GetFromOffset<const UObject * [0x6]>(PlayerState, CharacterPartsOff);
+
+						static auto Head = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Heads/F_Med_Head1.F_Med_Head1");
+						static auto Body = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Bodies/F_Med_Soldier_01.F_Med_Soldier_01");
+						static auto Backpack = FindObject<UObject>(L"/Game/Characters/CharacterParts/Backpacks/NoBackpack.NoBackpack");
+
+						CharacterParts[0] = Head;
+						CharacterParts[1] = Body;
+						CharacterParts[3] = Backpack;
+					}
+					else
+					{
+						static auto CharacterPartsOff = PlayerState->GetOffset("CharacterParts");
+						auto& CustomCharacterParts = GetFromOffset<FCustomCharacterParts>(PlayerState, CharacterPartsOff);
+						static auto PartsOffset = FCustomCharacterParts::StaticStruct()->GetOffset("Parts");
+						auto& CharacterParts = GetFromOffset<const UObject * [0x6]>(&CustomCharacterParts, PartsOffset);
+
+						static auto Head = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Heads/F_Med_Head1.F_Med_Head1");
+						static auto Body = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Bodies/F_Med_Soldier_01.F_Med_Soldier_01");
+						static auto Backpack = FindObject<UObject>(L"/Game/Characters/CharacterParts/Backpacks/NoBackpack.NoBackpack");
+
+						CharacterParts[0] = Head;
+						CharacterParts[1] = Body;
+						CharacterParts[3] = Backpack;
+					}
+
+					if (ApplyCharacterCustomization)
+						((void (*)(AActor*, AFortPlayerPawnAthena*)) ApplyCharacterCustomization)(PlayerState, Pawn);
+
+					PlayerBotID++;
+
+					std::string BaseName = FConfiguration::BotName;
+					std::string FinalName;
+
+					if (FConfiguration::UseCustomBotNames)
+					{
+						if (FString::EndsWithSpace(BaseName))
+						{
+							BaseName.pop_back();
+
+							FinalName = BaseName + " (#" + std::to_string(PlayerBotID) + ")";
+						}
+						else
+						{
+							FinalName = BaseName;
+						}
+					}
+					else
+					{
+						int RandomNumber = 200 + (std::rand() % 151);
+
+						char Buffer[4];
+						snprintf(Buffer, sizeof(Buffer), "%03d", RandomNumber);
+
+						FinalName = "Anonymous [" + std::string(Buffer) + "]";
+					}
+
+					std::wstring WideName(FinalName.begin(), FinalName.end());
+
+					FString BotName = FString(WideName.c_str());
+
+					if (std::floor(VersionInfo.FortniteVersion) < 9)
+					{
+						PlayerController->ServerChangeName(BotName);
+					}
+					else
+					{
+						GameMode->ChangeName(PlayerController, BotName, true);
+					}
+
+					PlayerState->OnRep_PlayerName();
+
+					/*static auto DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
+
+					PlayerController->WorldInventory->GiveItem(DefaultPickaxe);
+
+					static auto SmartItem	DefClass = FindClass("FortSmartBuildingItemDefinition");
+
+					for (int i = 0; i < GameMode->StartingItems.Num(); i++)
+					{
+						auto& StartingItem = GameMode->StartingItems.Get(i, FItemAndCount::Size());
+
+						if (StartingItem.Count && (!SmartItemDefClass || !StartingItem.Item->IsA(SmartItemDefClass)))
+							PlayerController->WorldInventory->GiveItem(StartingItem.Item, StartingItem.Count);
+					}*/
+
+					//CallerController->ClientMessage(FString(L"Spawned a player bot!"), FName(), 1.f); // todo: fix
+				}
+			}
+			else if (command == "startevent")
+			{
+				Events::StartEvent();
+				PlayerController->ClientMessage(FString(L"Event started!"), FName(), 1);
+			}
+			else if (command == "bugitgo" || command == "tp")
+			{
+				if (args.size() != 4)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+				}
+
+				double X = 0., Y = 0., Z = 0.;
+
+				X = strtod(args[1].c_str(), nullptr);
+				Y = strtod(args[2].c_str(), nullptr);
+				Z = strtod(args[3].c_str(), nullptr);
+
+				if (PlayerController->Pawn)
+				{
+					PlayerController->Pawn->K2_SetActorLocation(FVector(X, Y, Z), false, nullptr, true);
+					PlayerController->ClientMessage(FString(L"Teleported to location!"), FName(), 1.f);
+				}
+			}
+			else if (command == "launch" || command == "launchpawn")
+			{
+				if (args.size() != 4)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+				}
+
+				double X = 0., Y = 0., Z = 0.;
+
+				X = strtod(args[1].c_str(), nullptr);
+				Y = strtod(args[2].c_str(), nullptr);
+				Z = strtod(args[3].c_str(), nullptr);
+
+				if (PlayerController->Pawn)
+				{
+					PlayerController->Pawn->LaunchCharacterJump(FVector(X, Y, Z), false, nullptr, true);
+					PlayerController->ClientMessage(FString(L"Launched player!"), FName(), 1.f);
+				}
+			}
+			else if (command == "savewaypoint" || command == "s")
+			{
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please provide a phrase to save the waypoint to."), FName(), 1.f);
+					return;
+				}
+
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"Couldn't find a pawn!"), FName(), 1.f);
+					return;
+				}
+
+				FVector PawnLocation(Pawn->K2_GetActorLocation().X, Pawn->K2_GetActorLocation().Y, Pawn->K2_GetActorLocation().Z);
+
+				if (PawnLocation.X == 0.0f && PawnLocation.Y == 0.0f && PawnLocation.Z == 0.0f)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to save a waypoint."), FName(), 1.f);
+					return;
+				}
+
+				std::string Phrase = args[1].c_str();
+
+				auto It = Waypoints.find(Phrase);
+
+				if (It != Waypoints.end())
+				{
+					if (args.size() >= 3 && (args[2] == "override" || args[2] == "o"))
+					{
+						It->second.clear();
+						It->second.push_back(PawnLocation);
+
+						PlayerController->ClientMessage(FString(L"Waypoint overridden successfully!"), FName(), 1.f);
+					}
+					else
+					{
+						PlayerController->ClientMessage(FString(L"A waypoint with this phrase already exists! Use 'waypoint {phrase} override' to override it."), FName(), 1);
 					}
 				}
 				else
 				{
-					int RandomNumber = 200 + (std::rand() % 151);
+					std::vector<FVector> Locations;
+					Locations.push_back(PawnLocation);
+					Waypoints[Phrase] = Locations;
 
-					char Buffer[4];
-					snprintf(Buffer, sizeof(Buffer), "%03d", RandomNumber);
-
-					FinalName = "Anonymous [" + std::string(Buffer) + "]";
-				}
-
-				std::wstring WideName(FinalName.begin(), FinalName.end());
-
-				FString BotName = FString(WideName.c_str());
-
-				if (std::floor(VersionInfo.FortniteVersion) < 9)
-				{
-					PlayerController->ServerChangeName(BotName);
-				}
-				else
-				{
-					GameMode->ChangeName(PlayerController, BotName, true);
-				}
-
-				PlayerState->OnRep_PlayerName();
-
-				/*static auto DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
-
-				PlayerController->WorldInventory->GiveItem(DefaultPickaxe);
-
-				static auto SmartItem	DefClass = FindClass("FortSmartBuildingItemDefinition");
-
-				for (int i = 0; i < GameMode->StartingItems.Num(); i++)
-				{
-					auto& StartingItem = GameMode->StartingItems.Get(i, FItemAndCount::Size());
-
-					if (StartingItem.Count && (!SmartItemDefClass || !StartingItem.Item->IsA(SmartItemDefClass)))
-						PlayerController->WorldInventory->GiveItem(StartingItem.Item, StartingItem.Count);
-				}*/
-
-				//CallerController->ClientMessage(FString(L"Spawned a player bot!"), FName(), 1.f); // todo: fix
-			}
-		}
-		else if (command == "startevent")
-		{
-			Events::StartEvent();
-			PlayerController->ClientMessage(FString(L"Event started!"), FName(), 1);
-		}
-		else if (command == "bugitgo" || command == "tp")
-		{
-			if (args.size() != 4)
-			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
-			}
-
-			double X = 0., Y = 0., Z = 0.;
-
-			X = strtod(args[1].c_str(), nullptr);
-			Y = strtod(args[2].c_str(), nullptr);
-			Z = strtod(args[3].c_str(), nullptr);
-
-			if (PlayerController->Pawn)
-			{
-				PlayerController->Pawn->K2_SetActorLocation(FVector(X, Y, Z), false, nullptr, true);
-				PlayerController->ClientMessage(FString(L"Teleported to location!"), FName(), 1.f);
-			}
-		}
-		else if (command == "launch" || command == "launchpawn")
-		{
-			if (args.size() != 4)
-			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
-			}
-
-			double X = 0., Y = 0., Z = 0.;
-
-			X = strtod(args[1].c_str(), nullptr);
-			Y = strtod(args[2].c_str(), nullptr);
-			Z = strtod(args[3].c_str(), nullptr);
-
-			if (PlayerController->Pawn)
-			{
-				PlayerController->Pawn->LaunchCharacterJump(FVector(X, Y, Z), false, nullptr, true);
-				PlayerController->ClientMessage(FString(L"Launched player!"), FName(), 1.f);
-			}
-		}
-		else if (command == "savewaypoint" || command == "s")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please provide a phrase to save the waypoint to."), FName(), 1.f);
-				return;
-			}
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-			{
-				PlayerController->ClientMessage(FString(L"Couldn't find a pawn!"), FName(), 1.f);
-				return;
-			}
-
-			FVector PawnLocation(Pawn->K2_GetActorLocation().X, Pawn->K2_GetActorLocation().Y, Pawn->K2_GetActorLocation().Z);
-
-			if (PawnLocation.X == 0.0f && PawnLocation.Y == 0.0f && PawnLocation.Z == 0.0f)
-			{
-				PlayerController->ClientMessage(FString(L"Failed to save a waypoint."), FName(), 1.f);
-				return;
-			}
-
-			std::string Phrase = args[1].c_str();
-
-			auto It = Waypoints.find(Phrase);
-
-			if (It != Waypoints.end())
-			{
-				if (args.size() >= 3 && (args[2] == "override" || args[2] == "o"))
-				{
-					It->second.clear();
-					It->second.push_back(PawnLocation);
-
-					PlayerController->ClientMessage(FString(L"Waypoint overridden successfully!"), FName(), 1.f);
-				}
-				else
-				{
-					PlayerController->ClientMessage(FString(L"A waypoint with this phrase already exists! Use 'waypoint {phrase} override' to override it."), FName(), 1);
+					PlayerController->ClientMessage(FString(L"Waypoint saved! Use \" cheat waypoint (phrase) \" to teleport to that location!"), FName(), 1);
 				}
 			}
-			else
+			else if (command == "waypoint" || command == "w")
 			{
-				std::vector<FVector> Locations;
-				Locations.push_back(PawnLocation);
-				Waypoints[Phrase] = Locations;
-
-				PlayerController->ClientMessage(FString(L"Waypoint saved! Use \" cheat waypoint (phrase) \" to teleport to that location!"), FName(), 1);
-			}
-		}
-		else if (command == "waypoint" || command == "w")
-		{
-			if (args.size() < 2)
-			{
-				PlayerController->ClientMessage(FString(L"Please provide a waypoint phrase to teleport to."), FName(), 1.f);
-				return;
-			}
-
-			std::string Phrase = args[1].c_str();
-
-			auto It = Waypoints.find(Phrase);
-
-			if (It == Waypoints.end() || It->second.empty())
-			{
-				PlayerController->ClientMessage(FString(L"A saved waypoint with this phrase was not found!"), FName(), 1.f);
-				return;
-			}
-
-			const auto& WaypointList = It->second;
-
-			if (args.size() >= 3 && (args[2] == "previous" || args[2] == "p"))
-			{
-				if (WaypointList.size() < 2)
+				if (args.size() < 2)
 				{
-					PlayerController->ClientMessage(FString(L"No previous waypoint available for this phrase!"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Please provide a waypoint phrase to teleport to."), FName(), 1.f);
 					return;
 				}
 
-				FVector Destination = Waypoints[Phrase][Waypoints[Phrase].size() - 2];
+				std::string Phrase = args[1].c_str();
 
-				auto Pawn = PlayerController->Pawn;
+				auto It = Waypoints.find(Phrase);
 
-				if (Pawn)
+				if (It == Waypoints.end() || It->second.empty())
 				{
-					Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
-					Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
-					PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
-				}
-				else
-				{
-					PlayerController->ClientMessage(FString(L"Couldn't find a pawn to teleport!"), FName(), 1.f);
-				}
-			}
-			else
-			{
-				FVector Destination = WaypointList.back();
-
-				if (Destination.X == 0.0f && Destination.Y == 0.0f && Destination.Z == 0.0f)
-				{
-					PlayerController->ClientMessage(FString(L"Waypoint is invalid (0, 0, 0)! Aborting teleport."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"A saved waypoint with this phrase was not found!"), FName(), 1.f);
 					return;
 				}
 
-				auto Pawn = PlayerController->Pawn;
+				const auto& WaypointList = It->second;
 
-				if (Pawn)
+				if (args.size() >= 3 && (args[2] == "previous" || args[2] == "p"))
 				{
-					Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
-					Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
-					PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
+					if (WaypointList.size() < 2)
+					{
+						PlayerController->ClientMessage(FString(L"No previous waypoint available for this phrase!"), FName(), 1.f);
+						return;
+					}
+
+					FVector Destination = Waypoints[Phrase][Waypoints[Phrase].size() - 2];
+
+					auto Pawn = PlayerController->Pawn;
+
+					if (Pawn)
+					{
+						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
+						Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+						PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
+					}
+					else
+					{
+						PlayerController->ClientMessage(FString(L"Couldn't find a pawn to teleport!"), FName(), 1.f);
+					}
 				}
 				else
 				{
-					PlayerController->ClientMessage(FString(L"Couldn't find a pawn to teleport!"), FName(), 1.f);
+					FVector Destination = WaypointList.back();
+
+					if (Destination.X == 0.0f && Destination.Y == 0.0f && Destination.Z == 0.0f)
+					{
+						PlayerController->ClientMessage(FString(L"Waypoint is invalid (0, 0, 0)! Aborting teleport."), FName(), 1.f);
+						return;
+					}
+
+					auto Pawn = PlayerController->Pawn;
+
+					if (Pawn)
+					{
+						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
+						Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+						PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
+					}
+					else
+					{
+						PlayerController->ClientMessage(FString(L"Couldn't find a pawn to teleport!"), FName(), 1.f);
+					}
 				}
 			}
-		}
-		else if (command == "giveitem" || command == "give")
-		{
-			if (args.size() != 2 && args.size() != 3)
+			else if (command == "giveitem" || command == "give")
 			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
+				if (args.size() != 2 && args.size() != 3)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+				}
+
+				auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(args[1].begin(), args[1].end()));
+
+				if (!ItemDefinition)
+					ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(args[1].c_str());
+
+				if (!ItemDefinition)
+				{
+					auto ShortNames = Misc::ItemNames.find(args[1].c_str());
+
+					std::replace(args[1].begin(), args[1].end(), '-', '_');
+
+					if (ShortNames != Misc::ItemNames.end())
+						ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(ShortNames->second.c_str());
+				}
+
+				if (!ItemDefinition)
+					return PlayerController->ClientMessage(FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"), FName(), 1);
+
+				int32 Count = 1;
+
+				if (ItemDefinition->IsA(UFortContextTrapItemDefinition::StaticClass()) || ItemDefinition->IsA(UFortTrapItemDefinition::StaticClass()))
+					Count = 6;
+				else
+					Count = ItemDefinition->GetMaxStackSize();
+
+				if (args.size() == 3)
+					Count = strtol(args[2].c_str(), nullptr, 10);
+
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+					return;
+
+				FVector FinalLoc = Pawn ? Pawn->K2_GetActorLocation() : FVector();
+
+				FVector ForwardVector = Pawn ? Pawn->GetActorForwardVector() : FVector();
+				ForwardVector.Z = 0.0f;
+				ForwardVector.Normalize();
+
+				FinalLoc = FinalLoc + ForwardVector * 450.f;
+				FinalLoc.Z += 50.f;
+
+				const float RandomAngleVariation = ((float)rand() * 0.00109866634f) - 18.f;
+				const float FinalAngle = RandomAngleVariation * 0.017453292519943295f;
+
+				FinalLoc.X += cos(FinalAngle) * 100.f;
+				FinalLoc.Y += sin(FinalAngle) * 100.f;
+
+				auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+
+				if (Pawn && Pickup)
+				{
+					Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+					PlayerController->ClientMessage(FString(L"Gave item!"), FName(), 1.f);
+				}
+				else
+				{
+					PlayerController->ClientMessage(FString(L"Failed to give item (no pawn or pickup)."), FName(), 1.f);
+				}
 			}
-
-			auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(args[1].begin(), args[1].end()));
-
-			if (!ItemDefinition)
-				ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(args[1].c_str());
-
-			if (!ItemDefinition)
+			else if (command == "spawnpickup")
 			{
-				auto ShortNames = Misc::ItemNames.find(args[1].c_str());
+				if (args.size() != 2 && args.size() != 3)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+				}
 
-				std::replace(args[1].begin(), args[1].end(), '-', '_');
+				auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(args[1].begin(), args[1].end()));
+				if (!ItemDefinition)
+					ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(args[1].c_str());
 
-				if (ShortNames != Misc::ItemNames.end())
-					ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(ShortNames->second.c_str());
+				if (!ItemDefinition)
+					return PlayerController->ClientMessage(FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"), FName(), 1);
+
+				long Count = 1;
+
+				if (args.size() == 3)
+					Count = strtol(args[2].c_str(), nullptr, 10);
+
+				if (PlayerController->Pawn)
+				{
+					AFortInventory::SpawnPickup(PlayerController->Pawn->K2_GetActorLocation(), ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetTossed(), EFortPickupSpawnSource::GetUnset(), PlayerController->Pawn);
+					PlayerController->ClientMessage(FString(L"Spawned pickup!"), FName(), 1.f);
+				}
 			}
+			else if (command == "getloc" || command == "a" || command == "getlocation")
+			{
+				auto Pawn = PlayerController->Pawn;
 
-			if (!ItemDefinition)
-				return PlayerController->ClientMessage(FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"), FName(), 1);
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
 
-			int32 Count = 1;
+				auto Location = Pawn->K2_GetActorLocation();
 
-			if (ItemDefinition->IsA(UFortContextTrapItemDefinition::StaticClass()) || ItemDefinition->IsA(UFortTrapItemDefinition::StaticClass()))
-				Count = 6;
+				if (Location.X == 0.f && Location.Y == 0.f && Location.Z == 0.f)
+				{
+					PlayerController->ClientMessage(FString(L"Location is (0,0,0)! Cannot provide location."), FName(), 1.f);
+					return;
+				}
+
+				Memcury::Util::CopyToClipboard(std::to_string(Location.X) + " " + std::to_string(Location.Y) + " " + std::to_string(Location.Z));
+				PlayerController->ClientMessage(FString(L"Copied player location to clipboard!"), FName(), 1.f);
+			}
+			else if (command == "spawnactor" || command == "summon" || command == "spawn")
+			{
+				if (args.size() != 2)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+				}
+
+				auto Loc = PlayerController->Pawn->K2_GetActorLocation();
+				Loc.Z += 200.f;
+
+				auto Rotation = PlayerController->Pawn->K2_GetActorRotation();
+				FQuat NewQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
+				FRotator RotatorFromQuat = NewQuat.Rotator();
+
+				// auto Transform = PlayerController->Pawn->GetTransform(); // proper, but at what cost?
+
+				auto Class = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
+
+				if (!Class)
+					Class = FindClass(args[1].c_str());
+
+				if (!Class)
+				{
+					auto ShortNames = Misc::ObjectNames.find(args[1].c_str());
+
+					if (ShortNames != Misc::ObjectNames.end())
+						Class = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
+				}
+
+				if (Class)
+				{
+					UWorld::SpawnActor(Class, Loc, RotatorFromQuat);
+					PlayerController->ClientMessage(FString(L"Spawned actor!"), FName(), 1.f);
+				}
+				else
+				{
+					return PlayerController->ClientMessage(FString(L"Failed to find class! Try passing it as a path or check your spelling & casing"), FName(), 1);
+				}
+			}
+			else if (command == "skydive")
+			{
+				auto Pawn = PlayerController->Pawn;
+				if (!Pawn)
+					return;
+
+				static bool bInVortex = false;
+				bInVortex ^= 1;
+
+				Pawn->SetInVortex(bInVortex);
+				PlayerController->ClientMessage(FString(L"Toggled skydiving!"), FName(), 1.f);
+			}
+			else if (command == "resetbuilds" || command == "reset")
+			{
+				TArray<ABuildingSMActor*> Builds;
+				Utils::GetAll<ABuildingSMActor>(Builds);
+
+				for (auto& Build : Builds)
+				{
+					if (Build->bPlayerPlaced)
+						Build->SilentDie(true);
+				}
+
+				Builds.Free();
+				PlayerController->ClientMessage(FString(L"Resetting builds!"), FName(), 1.f);
+			}
 			else
-				Count = ItemDefinition->GetMaxStackSize();
-
-			if (args.size() == 3)
-				Count = strtol(args[2].c_str(), nullptr, 10);
-
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-				return;
-
-			FVector FinalLoc = Pawn ? Pawn->K2_GetActorLocation() : FVector();
-
-			FVector ForwardVector = Pawn ? Pawn->GetActorForwardVector() : FVector();
-			ForwardVector.Z = 0.0f;
-			ForwardVector.Normalize();
-
-			FinalLoc = FinalLoc + ForwardVector * 450.f;
-			FinalLoc.Z += 50.f;
-
-			const float RandomAngleVariation = ((float)rand() * 0.00109866634f) - 18.f;
-			const float FinalAngle = RandomAngleVariation * 0.017453292519943295f;
-
-			FinalLoc.X += cos(FinalAngle) * 100.f;
-			FinalLoc.Y += sin(FinalAngle) * 100.f;
-
-			auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
-
-			if (Pawn && Pickup)
-			{
-				Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
-				PlayerController->ClientMessage(FString(L"Gave item!"), FName(), 1.f);
-			}
-			else
-			{
-				PlayerController->ClientMessage(FString(L"Failed to give item (no pawn or pickup)."), FName(), 1.f);
-			}
-		}
-		else if (command == "spawnpickup")
-		{
-			if (args.size() != 2 && args.size() != 3)
-			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
-			}
-
-			auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(args[1].begin(), args[1].end()));
-			if (!ItemDefinition)
-				ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(args[1].c_str());
-
-			if (!ItemDefinition)
-				return PlayerController->ClientMessage(FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"), FName(), 1);
-
-			long Count = 1;
-
-			if (args.size() == 3)
-				Count = strtol(args[2].c_str(), nullptr, 10);
-
-			if (PlayerController->Pawn)
-			{
-				AFortInventory::SpawnPickup(PlayerController->Pawn->K2_GetActorLocation(), ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetTossed(), EFortPickupSpawnSource::GetUnset(), PlayerController->Pawn);
-				PlayerController->ClientMessage(FString(L"Spawned pickup!"), FName(), 1.f);
-			}
-		}
-		else if (command == "getloc" || command == "a" || command == "getlocation")
-		{
-			auto Pawn = PlayerController->Pawn;
-
-			if (!Pawn)
-			{
-				PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
-				return;
-			}
-
-			auto Location = Pawn->K2_GetActorLocation();
-
-			if (Location.X == 0.f && Location.Y == 0.f && Location.Z == 0.f)
-			{
-				PlayerController->ClientMessage(FString(L"Location is (0,0,0)! Cannot provide location."), FName(), 1.f);
-				return;
-			}
-
-			Memcury::Util::CopyToClipboard(std::to_string(Location.X) + " " + std::to_string(Location.Y) + " " + std::to_string(Location.Z));
-			PlayerController->ClientMessage(FString(L"Copied player location to clipboard!"), FName(), 1.f);
-		}
-		else if (command == "spawnactor" || command == "summon" || command == "spawn")
-		{
-			if (args.size() != 2)
-			{
-				PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-				return;
-			}
-
-			auto Loc = PlayerController->Pawn->K2_GetActorLocation();
-			Loc.Z += 200.f;
-
-			auto Rotation = PlayerController->Pawn->K2_GetActorRotation();
-			FQuat NewQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
-			FRotator RotatorFromQuat = NewQuat.Rotator();
-
-			// auto Transform = PlayerController->Pawn->GetTransform(); // proper, but at what cost?
-
-			auto Class = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
-
-			if (!Class)
-				Class = FindClass(args[1].c_str());
-
-			if (!Class)
-			{
-				auto ShortNames = Misc::ObjectNames.find(args[1].c_str());
-
-				if (ShortNames != Misc::ObjectNames.end())
-					Class = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
-			}
-
-			if (Class)
-			{
-				UWorld::SpawnActor(Class, Loc, RotatorFromQuat);
-				PlayerController->ClientMessage(FString(L"Spawned actor!"), FName(), 1.f);
-			}
-			else
-			{
-				return PlayerController->ClientMessage(FString(L"Failed to find class! Try passing it as a path or check your spelling & casing"), FName(), 1);
-			}
-		}
-		else if (command == "skydive")
-		{
-			auto Pawn = PlayerController->Pawn;
-			if (!Pawn)
-				return;
-
-			static bool bInVortex = false;
-			bInVortex ^= 1;
-
-			Pawn->SetInVortex(bInVortex);
-		}
-		else if (command == "resetbuilds" || command == "reset")
-		{
-			TArray<ABuildingSMActor*> Builds;
-			Utils::GetAll<ABuildingSMActor>(Builds);
-			
-			for (auto& Build : Builds)
-				if (Build->bPlayerPlaced)
-					Build->K2_DestroyActor();
-
-			Builds.Free();
+				goto _help;
 		}
 		else
-			goto _help;
+		{
+			PlayerController->ClientMessage(FString(L"Commands are currently disabled for this session."), FName(), 1.f);
+			return;
+		}
 	}
 }
 
@@ -4212,8 +4227,7 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	if (VersionInfo.FortniteVersion >= 15)
 		Utils::ExecHook(GetDefaultObj()->GetFunction("ServerClientIsReadyToRespawn"), ServerClientIsReadyToRespawn);
 
-	if (FConfiguration::bEnableCheats)
-		Utils::ExecHook(GetDefaultObj()->GetFunction("ServerCheat"), ServerCheat);
+	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerCheat"), ServerCheat);
 
 	auto ServerAttemptInteractPC = GetDefaultObj()->GetFunction("ServerAttemptInteract");
 	if (!ServerAttemptInteractPC)
