@@ -124,8 +124,12 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
     TArray<TPair<FString, int>> Slot2;
     Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_Standard_Athena_C_Ore_T03.WID_Shotgun_Standard_Athena_C_Ore_T03"), 1));
     Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_Standard_Athena_UC_Ore_T03.WID_Shotgun_Standard_Athena_UC_Ore_T03"), 1));
-    Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_SemiAuto_Athena_R_Ore_T03.WID_Shotgun_SemiAuto_Athena_R_Ore_T03"), 1));
-    Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_SemiAuto_Athena_VR_Ore_T03.WID_Shotgun_SemiAuto_Athena_VR_Ore_T03"), 1));
+
+    if (VersionInfo.FortniteVersion <= 8.51)
+    {
+        Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_SemiAuto_Athena_R_Ore_T03.WID_Shotgun_SemiAuto_Athena_R_Ore_T03"), 1));
+        Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_SemiAuto_Athena_VR_Ore_T03.WID_Shotgun_SemiAuto_Athena_VR_Ore_T03"), 1));
+    }
 
     if (VersionInfo.FortniteVersion >= 3.31)
     {

@@ -1199,25 +1199,33 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (GUI::IsArenaPlaylist())
 				KillerPlayerState->ClientReportTournamentStatUpdate();
 
-			for (auto& Damager : PlayerController->Pawn->Damagers)
+			AFortPlayerPawnAthena* VictimPawn = PlayerController->Pawn;
+
+			if (VictimPawn)
 			{
-				if (Damager.DamageCauser != KillerPlayerController && Damager.DamageCauser->IsA<AFortPlayerControllerAthena>())
+				for (auto& Damager : VictimPawn->Damagers)
 				{
-					FGameplayTagContainer TargetTags{};
-					auto DamagerController = (AFortPlayerControllerAthena*)Damager.DamageCauser;
+					if (!Damager.DamageCauser)
+						continue;
 
-					auto Interface = (IGameplayTagAssetInterface*)PlayerController->Pawn->GetInterface(IGameplayTagAssetInterface::StaticClass());
-					if (Interface)
+					if (Damager.DamageCauser != KillerPlayerController && Damager.DamageCauser->IsA<AFortPlayerControllerAthena>())
 					{
-						auto GetOwnedGameplayTags = (void(*)(IGameplayTagAssetInterface*, FGameplayTagContainer*))Interface->Vft[0x2];
-						GetOwnedGameplayTags(Interface, &TargetTags);
-						//Interface->GetOwnedGameplayTags(&TargetTags);
+						FGameplayTagContainer TargetTags{};
+						auto DamagerController = (AFortPlayerControllerAthena*)Damager.DamageCauser;
+
+						auto Interface = (IGameplayTagAssetInterface*)VictimPawn->GetInterface(IGameplayTagAssetInterface::StaticClass());
+						if (Interface)
+						{
+							auto GetOwnedGameplayTags = (void(*)(IGameplayTagAssetInterface*, FGameplayTagContainer*))Interface->Vft[0x2];
+							GetOwnedGameplayTags(Interface, &TargetTags);
+							//Interface->GetOwnedGameplayTags(&TargetTags);
+						}
+
+						DamagerController->GetQuestManager(1)->SendStatEvent(DamagerController, EFortQuestObjectiveStatEvent::GetKillContribution(), 1, false, PlayerController->Pawn, TargetTags);
+
+						TargetTags.GameplayTags.Free();
+						TargetTags.ParentTags.Free();
 					}
-
-					DamagerController->GetQuestManager(1)->SendStatEvent(DamagerController, EFortQuestObjectiveStatEvent::GetKillContribution(), 1, false, PlayerController->Pawn, TargetTags);
-
-					TargetTags.GameplayTags.Free();
-					TargetTags.ParentTags.Free();
 				}
 			}
 
@@ -1329,22 +1337,45 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					GameState->OnRep_WinningPlayerState();
 				}
 
-				/*auto DeadPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
+				auto DeadPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
 				auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+
+				UNetDriver* Driver = static_cast<UNetDriver*>(UWorld::GetWorld()->NetDriver);
+
+				auto FindConnectionByPlayerState = [&](AFortPlayerStateAthena* PS) -> UNetConnection*
+				{
+					if (!PS || !Driver)
+						return nullptr;
+
+					for (int i = 0; i < Driver->ClientConnections.Num(); i++)
+					{
+						auto Conn = Driver->ClientConnections[i];
+						if (!Conn || !Conn->PlayerController)
+							continue;
+
+						if (Conn->PlayerController->PlayerState == PS)
+							return Conn;
+					}
+
+					return nullptr;
+				};
 
 				float KillDistanceCm = KillerPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
 				int KillDistanceMeters = static_cast<int>(KillDistanceCm / 100.f);
 
-				FString EliminatedPlayerName = DeadPlayerState->GetPlayerName();
-				FString KillerName = KillerPlayerState ? KillerPlayerState->GetPlayerName() : L"Player";
+				auto KillerConn = FindConnectionByPlayerState(KillerPlayerState);
+				auto DeadConn = FindConnectionByPlayerState(DeadPlayerState);
 
-				std::string KillerPlayer = KillerName.ToFString();
-				std::string EliminatedPlayer = EliminatedPlayerName.ToFString();
+				std::string KillerName = GUI::GetPlayerName(KillerPlayerState, KillerConn);
+				std::string DeadName = GUI::GetPlayerName(DeadPlayerState, DeadConn);
+
 				std::string Distance = std::to_string(KillDistanceMeters);
 
-				FConfiguration::Elim_KillerName = KillerPlayer;
-				FConfiguration::Elim_EliminatedName = EliminatedPlayer;
-				FConfiguration::Elim_Distance = Distance;*/
+				FConfiguration::ElimKillerName = KillerName;
+				FConfiguration::ElimEliminatedName = DeadName;
+				FConfiguration::ElimDistance = Distance;
+				// FConfiguration::ElimWeaponName = KillerWeapon->Name.ToString();
+				FConfiguration::ElimStatusMessage = ":3";
 			}
 		}
 

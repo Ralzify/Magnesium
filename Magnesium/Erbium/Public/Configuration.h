@@ -16,9 +16,10 @@ struct FConfiguration
 
     // wip
     static inline std::string ElimStatusMessage = "";
-    static inline std::string Elim_KillerName = "";
-    static inline std::string Elim_EliminatedName = "";
-    static inline std::string Elim_Distance = "";
+    static inline std::string ElimKillerName = "";
+    static inline std::string ElimEliminatedName = "";
+    static inline std::string ElimDistance = "";
+	static inline FName ElimWeaponName;
 
     static inline auto Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../Engine/Public/NetDriver.h"
+
 enum EGSStatus
 {
     NotReady,
@@ -76,6 +78,67 @@ public:
     static bool IsArenaPlaylist()
     {
         return GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav);
+    }
+
+    static inline FString* GetRequestURL(UObject* Connection)
+    {
+        if (VersionInfo.EngineVersion <= 4.20)
+            return (FString*)(__int64(Connection) + 432);
+        if (std::floor(VersionInfo.FortniteVersion) >= 5 && VersionInfo.EngineVersion < 4.24)
+            return (FString*)(__int64(Connection) + 424);
+        else if (VersionInfo.EngineVersion >= 4.24)
+            return (FString*)(__int64(Connection) + 440);
+
+        return nullptr;
+    }
+
+    static std::string GetPlayerNameFromConnection(UNetConnection* Connection)
+    {
+        if (!Connection)
+            return {};
+
+        FString* ReqPtr = GetRequestURL(Connection);
+
+        if (!ReqPtr || !ReqPtr->Data || !ReqPtr->NumElements)
+            return {};
+
+        FString URLStr = ReqPtr->ToString();
+
+        if (!URLStr.Data || !URLStr.NumElements)
+            return {};
+
+        std::string URL = URLStr.ToUtf8();
+
+        auto pos = URL.find("Name=");
+
+        if (pos == std::string::npos)
+            return {};
+
+        auto end = URL.find('?', pos);
+
+        if (end != std::string::npos)
+            return URL.substr(pos + 5, end - (pos + 5));
+
+        return URL.substr(pos + 5);
+    }
+
+    static std::string GetPlayerName(AFortPlayerStateAthena* PlayerState, UNetConnection* Connection)
+    {
+        if (Connection)
+        {
+            auto Name = GUI::GetPlayerNameFromConnection(Connection);
+            if (!Name.empty())
+                return Name;
+        }
+
+        if (PlayerState)
+        {
+            FString PSName = PlayerState->GetPlayerName();
+            if (PSName.Data && PSName.NumElements)
+                return std::string(PSName.ToString().begin(), PSName.ToString().end());
+        }
+
+        return "Unknown";
     }
 };
 

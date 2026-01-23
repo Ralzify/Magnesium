@@ -56,18 +56,6 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
-inline FString* GetRequestURL(UObject* Connection)
-{
-    if (VersionInfo.EngineVersion <= 4.20)
-        return (FString*)(__int64(Connection) + 432);
-    if (std::floor(VersionInfo.FortniteVersion) >= 5 && VersionInfo.EngineVersion < 4.24)
-        return (FString*)(__int64(Connection) + 424);
-    else if (VersionInfo.EngineVersion >= 4.24)
-        return (FString*)(__int64(Connection) + 440);
-
-    return nullptr;
-}
-
 auto WindowWidth = 800;
 auto WindowHeight = 600;
 
@@ -373,45 +361,6 @@ void GUI::Init()
                 ImGui::Text("- Players: %d", AliveCount);
 
                 ImGui::Text((std::string("- Uptime: ") + std::to_string((int)floor(UGameplayStatics::GetTimeSeconds(GameMode))) + "s").c_str());
-
-                /*static std::string LastElimStatusMessage;
-                static std::chrono::high_resolution_clock::time_point AddMessageTime;
-
-                if (!FConfiguration::ElimStatusMessage.empty() && FConfiguration::ElimStatusMessage != LastElimStatusMessage)
-                {
-                    LastElimStatusMessage = FConfiguration::ElimStatusMessage;
-                    AddMessageTime = std::chrono::high_resolution_clock::now();
-                }
-
-                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 15)
-                {
-                    ImVec4 KillerColor = ImVec4(0x4e / 255.f, 0x86 / 255.f, 0xa5 / 255.f, 1.0f); // #4e86a5
-                    ImVec4 EliminatedColor = ImVec4(0xa5 / 255.f, 0x56 / 255.f, 0x4c / 255.f, 1.0f); // #a5564c
-
-                    ImGui::TextUnformatted("- ");
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextColored(KillerColor, "%s", FConfiguration::Elim_KillerName.c_str());
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextUnformatted(" eliminated ");
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextColored(EliminatedColor, "%s", FConfiguration::Elim_EliminatedName.c_str());
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextUnformatted(" from ");
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::Text("%sm!", FConfiguration::Elim_Distance.c_str());
-                }
-                else
-                {
-                    LastElimStatusMessage.clear();
-                    FConfiguration::ElimStatusMessage.clear();
-                }
-
-                ImGui::NewLine();*/
             }
 
             if (gsStatus <= Joinable)
@@ -847,35 +796,6 @@ void GUI::Init()
                 AllControllers.push_back(std::make_pair((AFortPlayerControllerAthena*)Connection->PlayerController, Connection));
             }
 
-            auto ExtractNameFromConnection = [&](UNetConnection* Connection) -> std::string
-            {
-                if (!Connection)
-                    return std::string();
-
-                FString* ReqPtr = GetRequestURL(Connection);
-                if (!ReqPtr)
-                    return std::string();
-
-                FString RequestURL = *ReqPtr;
-                if (RequestURL.Data && RequestURL.NumElements)
-                {
-                    auto RequestURLStr = RequestURL.ToString();
-                    std::string RequestURLStdStr(RequestURLStr.begin(), RequestURLStr.end());
-                    std::size_t pos = RequestURLStdStr.find("Name=");
-
-                    if (pos != std::string::npos)
-                    {
-                        std::size_t end_pos = RequestURLStdStr.find('?', pos);
-                        if (end_pos != std::string::npos)
-                            return RequestURLStdStr.substr(pos + 5, end_pos - pos - 5);
-                        else
-                            return RequestURLStdStr.substr(pos + 5);
-                    }
-                }
-
-                return std::string();
-            };
-
             if (!bIsInspecting)
             {
                 ImGui::Text(("Players Connected: " + std::to_string(AllControllers.size())).c_str());
@@ -893,7 +813,7 @@ void GUI::Init()
                     }
 
                     auto Connection = CurrentPair.second;
-                    auto RequestURL = GetRequestURL(Connection);
+                    auto RequestURL = GUI::GetRequestURL(Connection);
 
                     if (RequestURL && RequestURL->Data && RequestURL->NumElements)
                     {
@@ -919,6 +839,46 @@ void GUI::Init()
                             bIsInspecting = true;
                         }
                     }
+                }
+
+                ImGui::NewLine();
+
+                static std::string LastElimStatusMessage;
+                static std::chrono::high_resolution_clock::time_point AddMessageTime;
+
+                if (!FConfiguration::ElimStatusMessage.empty() && FConfiguration::ElimStatusMessage != LastElimStatusMessage)
+                {
+                    LastElimStatusMessage = FConfiguration::ElimStatusMessage;
+                    AddMessageTime = std::chrono::high_resolution_clock::now();
+                }
+
+                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 15)
+                {
+                    ImVec4 KillerColor = ImVec4(0x4e / 255.f, 0x86 / 255.f, 0xa5 / 255.f, 1.0f); // #4e86a5
+                    ImVec4 EliminatedColor = ImVec4(0xa5 / 255.f, 0x56 / 255.f, 0x4c / 255.f, 1.0f); // #a5564c
+
+                    ImGui::TextUnformatted("- ");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextColored(KillerColor, "%s", FConfiguration::ElimKillerName.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(" eliminated ");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextColored(EliminatedColor, "%s", FConfiguration::ElimEliminatedName.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(" from ");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::Text("%sm!", FConfiguration::ElimDistance.c_str());
+                    printf("- %s eliminated %s from %sm!\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str());
+                }
+                else
+                {
+                    LastElimStatusMessage.clear();
+                    FConfiguration::ElimStatusMessage.clear();
                 }
             }
             else
@@ -948,14 +908,12 @@ void GUI::Init()
                 ImGui::Text("Player Information:");
                 SmallSeparator(Width);
 
-                std::string DisplayName = ExtractNameFromConnection(AllControllers[InspectedPlayerIdx].second);
+                std::string DisplayName = GUI::GetPlayerNameFromConnection(AllControllers[InspectedPlayerIdx].second);
 
                 if (DisplayName.empty())
                 {
                     DisplayName = std::string("Player ") + std::to_string(InspectedPlayerIdx);
                 }
-
-                //ImGui::Text("Inspecting Player: %s", DisplayName.c_str());
 
                 ImGui::TextUnformatted("Inspecting Player: ");
                 ImGui::SameLine(0.0f, 0.0f);
@@ -963,7 +921,7 @@ void GUI::Init()
 
 				ImGui::Text("Join Order: #%d", InspectedPlayerIdx + 1);
 
-                ImGui::Text("Ping: %.0f ms", TargetPS->GetPingInMilliseconds());
+                // ImGui::Text("Ping: %.0f ms", TargetPS->GetPingInMilliseconds());
                 // ImGui::Text("Kills: %.0f", TargetPS->HasKillScore() ? TargetPS->KillScore : TargetPS->Kills); // why does this not work
 
                 ImGui::TextUnformatted("Health: ");

@@ -75,7 +75,7 @@ public:
     DEFINE_PROP(WorldPlayerId, int16);
     DEFINE_PROP(PlayerTeam, FPlayerTeam*);
 
-    DEFINE_FUNC(GetPlayerName, UEAllocatedString);
+    DEFINE_FUNC(GetPlayerName, FString);
     DEFINE_FUNC(OnRep_SquadId, void);
     DEFINE_FUNC(OnRep_DeathInfo, void);
     DEFINE_STATIC_FUNC(ToDeathCause, uint8);

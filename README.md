@@ -20,7 +20,7 @@ Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OGFN game
 - Players Tab ✅
 - Auto Dump & Remove Tab / Fix Dumping
 - Pickaxe Stutter ✅
-- Meters in UI/Log
+- Meters in Player Tab ✅
 - Creative Tab in UI : Custom Plots ✅ (island loading is broken rn but when fixed this should work)
 - Trickshot Tab
 - Logs Tab?
