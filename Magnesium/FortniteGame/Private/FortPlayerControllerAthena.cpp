@@ -13,6 +13,7 @@
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../Erbium/Public/GUI.h"
 #include "../Public/FortAthenaCreativePortal.h"
+#include "../Public/FortInventory.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../Erbium/Public/Misc.h"
 
@@ -2007,13 +2008,13 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			}
 			else if (command == "god")
 			{
-				bool bUseMin = false;
-
-				float MinValue = bUseMin ? 1.f : 100.f;
-				auto& Health = PlayerController->MyFortPawn->HealthSet->Health;
-
 				auto Pawn = PlayerController->Pawn;
 				auto PlayerState = PlayerController->PlayerState;
+
+				bool bUseMin = false;
+
+				float MinValue = bUseMin ? 1.f : Pawn->GetMaxHealth();
+				auto& Health = PlayerController->MyFortPawn->HealthSet->Health;
 
 				float MaxHealth = Pawn->GetMaxHealth();
 				float MaxShield = Pawn->GetMaxShield();
@@ -2195,6 +2196,133 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				Pawn->SetGravityMultiplier(Multiplier);
 
 				PlayerController->ClientMessage(FString(L"Gravity multiplier set!"), FName(), 1.f);
+			}
+			else if (command == "straightbloom" || command == "nobloom" || command == "nospread")
+			{
+				auto Pawn = PlayerController->Pawn;
+				auto CurrentWeapon = Pawn->HasCurrentWeapon() ? (AFortWeapon*)Pawn->CurrentWeapon : nullptr;
+
+				if (!Pawn || !Pawn->HasCurrentWeapon())
+				{
+					PlayerController->ClientMessage(FString(L"No weapon equipped! (or no pawn)"), FName(), 1.f);
+					return;
+				}
+
+				auto Weapon = static_cast<AFortWeapon*>(Pawn->CurrentWeapon);
+
+				if (!Weapon)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find weapon!"), FName(), 1.f);
+					return;
+				}
+
+				auto WeaponDef = Weapon ? Weapon->WeaponData : nullptr;
+
+				if (!WeaponDef)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find WeaponDef!"), FName(), 1.f);
+					return;
+				}
+
+				auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([Weapon](FFortItemEntry& entry)
+					{ return entry.ItemGuid == Weapon->ItemEntryGuid; }, FFortItemEntry::Size());
+
+				if (!ItemEntry)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to get item entry!"), FName(), 1.f);
+					return;
+				}
+
+				int32 LoadedAmmo = ItemEntry->LoadedAmmo;
+
+				auto Stats = AFortInventory::GetStats(WeaponDef);
+
+				if (!Stats)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to get weapon stats."), FName(), 1.f);
+					return;
+				}
+
+				Stats->Spread = 0.f;
+				Stats->SpreadDownsights = 0.f;
+				Stats->StandingStillSpreadMultiplier = 0.f;
+				Stats->AthenaCrouchingSpreadMultiplier = 0.f;
+				Stats->AthenaJumpingFallingSpreadMultiplier = 0.f;
+				Stats->AthenaSprintingSpreadMultiplier = 0.f;
+				Stats->MinSpeedForSpreadMultiplier = 0.f;
+				Stats->MaxSpeedForSpreadMultiplier = 0.f;
+
+				if (Stats->HasAthenaSlidingSpreadMultiplier())
+					Stats->AthenaSlidingSpreadMultiplier = 0.f;
+
+				Weapon->ForceNetUpdate();
+
+				/*auto WorldInventory = PlayerController->WorldInventory;
+
+				WorldInventory->RemoveWeaponAbilities(Weapon);
+				WorldInventory->Remove(ItemEntry->ItemGuid);
+
+				auto NewItem = WorldInventory->GiveItem(WeaponDef, 1, LoadedAmmo, 0, true, true);*/
+
+				PlayerController->ClientMessage(FString(L"Gave no spread to your equipped weapon!"), FName(), 1.f); // this goes through, but the stats dont actually apply
+			}
+			else if (command == "rapidfire")
+			{
+				auto Pawn = PlayerController->Pawn;
+				auto CurrentWeapon = Pawn->HasCurrentWeapon() ? (AFortWeapon*)Pawn->CurrentWeapon : nullptr;
+
+				if (!Pawn || !Pawn->HasCurrentWeapon())
+				{
+					PlayerController->ClientMessage(FString(L"No weapon equipped! (or no pawn)"), FName(), 1.f);
+					return;
+				}
+
+				auto Weapon = static_cast<AFortWeapon*>(Pawn->CurrentWeapon);
+
+				if (!Weapon)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find weapon!"), FName(), 1.f);
+					return;
+				}
+
+				auto WeaponDef = Weapon ? Weapon->WeaponData : nullptr;
+
+				if (!WeaponDef)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find WeaponDef!"), FName(), 1.f);
+					return;
+				}
+
+				auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([Weapon](FFortItemEntry& entry)
+					{ return entry.ItemGuid == Weapon->ItemEntryGuid; }, FFortItemEntry::Size());
+
+				if (!ItemEntry)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to get item entry!"), FName(), 1.f);
+					return;
+				}
+
+				int32 LoadedAmmo = ItemEntry->LoadedAmmo;
+
+				auto Stats = AFortInventory::GetStats(WeaponDef);
+
+				if (!Stats)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to get weapon stats."), FName(), 1.f);
+					return;
+				}
+
+				Stats->FiringRate *= 50.f;
+				Stats->ReloadTime *= 0.01f;
+
+				auto WorldInventory = PlayerController->WorldInventory;
+
+				WorldInventory->RemoveWeaponAbilities(Weapon);
+				WorldInventory->Remove(ItemEntry->ItemGuid);
+
+				auto NewItem = WorldInventory->GiveItem(WeaponDef, 1, LoadedAmmo, 0, true, true);
+
+				PlayerController->ClientMessage(FString(L"Enabled rapid fire to your equipped weapon!"), FName(), 1.f);
 			}
 			else if (command == "regen")
 			{

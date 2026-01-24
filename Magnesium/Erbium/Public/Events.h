@@ -14,6 +14,7 @@ struct FEvent
     std::vector<FEventFunction> EventFunctions;
     double EventVersion;
     const wchar_t* LoaderFuncPath;
+	const wchar_t* PlaylistPath;
 };
 
 class Events
@@ -30,7 +31,8 @@ public:
 				FEventFunction{ false, L"/Game/Athena/Maps/Test/Events/BP_GeodeScripting.BP_GeodeScripting_C.LaunchSequence" }
 			},
 			4.5,
-			nullptr
+			nullptr,
+			L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo"
 		},
 		FEvent
 		{
@@ -41,7 +43,8 @@ public:
 				FEventFunction{ true, L"/Game/Athena/Prototype/Blueprints/Cube/CUBE.CUBE_C.Final" }
 			},
 			5.30,
-			nullptr
+			nullptr,
+			L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo"
 		},
 		FEvent
 		{
@@ -51,7 +54,8 @@ public:
 				FEventFunction{ true, L"/Game/Athena/Prototype/Blueprints/Island/BP_Butterfly.BP_Butterfly_C.ButterflySequence" }
 			},
 			6.21,
-			L"/Game/Athena/Prototype/Blueprints/Island/BP_Butterfly.BP_Butterfly_C.LoadButterflySublevel"
+			L"/Game/Athena/Prototype/Blueprints/Island/BP_Butterfly.BP_Butterfly_C.LoadButterflySublevel",
+			L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo"
 		},
 		FEvent
 		{
@@ -62,7 +66,8 @@ public:
 				FEventFunction{ false, L"/Game/Athena/Prototype/Blueprints/Mooney/BP_MooneyScripting.BP_MooneyScripting_C.BeginIceKingEvent" },
 			},
 			7.20,
-			L"/Game/Athena/Prototype/Blueprints/Mooney/BP_MooneyLoader.BP_MooneyLoader_C.LoadMap"
+			L"/Game/Athena/Prototype/Blueprints/Mooney/BP_MooneyLoader.BP_MooneyLoader_C.LoadMap",
+			L"/Game/Athena/Playlists/Deimos/Playlist_Deimos_Solo_Winter.Playlist_Deimos_Solo_Winter"
 		},
 		FEvent
 		{
@@ -73,7 +78,8 @@ public:
 				FEventFunction{ false, L"/Game/Athena/Environments/Festivus/Blueprints/BP_FestivusManager.BP_FestivusManager_C.ServerPlayFestivus" },
 			},
 			7.30,
-			nullptr
+			nullptr,
+			L"/Game/Athena/Playlists/Music/Playlist_Music_High.Playlist_Music_High"
 		},
 		FEvent
 		{
@@ -83,7 +89,8 @@ public:
 				FEventFunction{ false, L"/Game/Athena/Prototype/Blueprints/White/BP_SnowScripting.BP_SnowScripting_C.FinalSequence" }
 			},
 			8.51,
-			L"/Game/Athena/Prototype/Blueprints/White/BP_SnowScripting.BP_SnowScripting_C.LoadSnowLevel"
+			L"/Game/Athena/Prototype/Blueprints/White/BP_SnowScripting.BP_SnowScripting_C.LoadSnowLevel",
+			L"/Game/Athena/Playlists/Music/Playlist_Music_High.Playlist_Music_High"
 		},
 		FEvent
 		{
@@ -94,7 +101,8 @@ public:
 				FEventFunction{ true, L"/Game/Athena/Prototype/Blueprints/Cattus/BP_CattusDoggus_Scripting.BP_CattusDoggus_Scripting_C.startevent" }
 			},
 			9.40,
-			L"/Game/Athena/Prototype/Blueprints/Cattus/BP_CattusDoggus_Scripting.BP_CattusDoggus_Scripting_C.LoadCattusLevel"
+			L"/Game/Athena/Prototype/Blueprints/Cattus/BP_CattusDoggus_Scripting.BP_CattusDoggus_Scripting_C.LoadCattusLevel",
+			L"/Game/Athena/Playlists/Music/Playlist_Music_High.Playlist_Music_High"
 		},
 		FEvent
 		{
@@ -105,7 +113,8 @@ public:
 				FEventFunction{ true, L"/Game/Athena/Prototype/Blueprints/Cattus/BP_CattusDoggus_Scripting.BP_CattusDoggus_Scripting_C.startevent" }
 			},
 			9.41,
-			L"/Game/Athena/Prototype/Blueprints/Cattus/BP_CattusDoggus_Scripting.BP_CattusDoggus_Scripting_C.LoadCattusLevel"
+			L"/Game/Athena/Prototype/Blueprints/Cattus/BP_CattusDoggus_Scripting.BP_CattusDoggus_Scripting_C.LoadCattusLevel",
+			L"/Game/Athena/Playlists/Music/Playlist_Music_High.Playlist_Music_High"
 		},
 		FEvent
 		{
@@ -116,7 +125,8 @@ public:
 				FEventFunction{ false, L"/Game/Athena/Prototype/Blueprints/NightNight/BP_NightNight_Scripting.BP_NightNight_Scripting_C.startevent" }
 			},
 			10.40,
-			L"/Game/Athena/Prototype/Blueprints/NightNight/BP_NightNight_Scripting.BP_NightNight_Scripting_C.LoadNightNightLevel"
+			L"/Game/Athena/Prototype/Blueprints/NightNight/BP_NightNight_Scripting.BP_NightNight_Scripting_C.LoadNightNightLevel",
+			L"/Game/Athena/Playlists/Music/Playlist_Music_High.Playlist_Music_High"
 		},
 		FEvent
 		{
@@ -128,6 +138,7 @@ public:
 				FEventFunction{ false, L"/Game/Athena/Events/NewYear/BP_NewYearTimer.BP_NewYearTimer_C.TimeOfDaySetup" }
 			},
 			11.31,
+			nullptr,
 			nullptr
 		},
 		FEvent
@@ -140,7 +151,8 @@ public:
 				FEventFunction{ true, L"/CycloneJerky/Gameplay/BP_Jerky_Loader.BP_Jerky_Loader_C.startevent" }
 			},
 			12.41,
-			nullptr
+			nullptr,
+			L"/Game/Athena/Playlists/Music/Playlist_Music_High.Playlist_Music_High"
 		},
 		FEvent
 		{
@@ -152,7 +164,8 @@ public:
 				FEventFunction{ true, L"/Fritter/BP_Fritter_Loader.BP_Fritter_Loader_C.startevent" }
 			},
 			12.61,
-			nullptr
+			nullptr,
+			L"/Game/Athena/Playlists/Fritter/Playlist_Fritter_High.Playlist_Fritter_High"
 		},
 		FEvent
 		{
@@ -163,7 +176,8 @@ public:
 				FEventFunction{ false, L"/Junior/Blueprints/BP_Junior_Scripting.BP_Junior_Scripting_C.startevent" }
 			},
 			14.60,
-			L"/Junior/Blueprints/BP_Junior_Loader.BP_Junior_Loader_C.LoadJuniorLevel"
+			L"/Junior/Blueprints/BP_Junior_Loader.BP_Junior_Loader_C.LoadJuniorLevel",
+			L"/Game/Athena/Playlists/Music/Playlist_Junior_32.Playlist_Junior_32"
 		},
 		FEvent
 		{
@@ -173,7 +187,8 @@ public:
 				FEventFunction{ false, L"/Script/SpecialEventGameplayRuntime.SpecialEventScript.StartEventAtIndex" }
 			},
 			17.30,
-			nullptr
+			nullptr,
+			L"/BuffetPlaylist/Playlist/Playlist_Buffet.Playlist_Buffet"
 		},
 		FEvent
 		{
@@ -183,7 +198,8 @@ public:
 				FEventFunction{ false, L"/Script/SpecialEventGameplayRuntime.SpecialEventScript.StartEventAtIndex" }
 			},
 			17.50,
-			nullptr
+			nullptr,
+			L"/KiwiPlaylist/Playlists/Playlist_Kiwi.Playlist_Kiwi"
 		},
 		FEvent
 		{
@@ -193,7 +209,8 @@ public:
 				FEventFunction{ false, L"/Script/SpecialEventGameplayRuntime.SpecialEventScript.StartEventAtIndex" }
 			},
 			18.40,
-			nullptr
+			nullptr,
+			L"/GuavaPlaylist/Playlist/Playlist_Guava.Playlist_Guava"
 		},
 		FEvent
 		{
@@ -203,7 +220,9 @@ public:
 				FEventFunction{ false, L"/Script/SpecialEventGameplayRuntime.SpecialEventScript.StartEventAtIndex" }
 			},
 			22.40,
-			nullptr
+			nullptr,
+			L"/Radish/Playlist/Playlist_Radish.Playlist_Radish"
+
 		},
 		FEvent
 		{
@@ -213,7 +232,8 @@ public:
 				FEventFunction{ false, L"/Script/SpecialEventGameplayRuntime.SpecialEventScript.StartEventAtIndex" }
 			},
 			27.11,
-			nullptr
+			nullptr,
+			L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian"
 		}
 	};
 

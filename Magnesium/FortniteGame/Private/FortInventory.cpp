@@ -326,6 +326,17 @@ FFortRangedWeaponStats* AFortInventory::GetStats(const UFortWeaponItemDefinition
     return Val ? *(FFortRangedWeaponStats**)Val : nullptr;
 }
 
+FFortRangedWeaponStats* AFortInventory::CloneStats(const UFortWeaponItemDefinition* Def)
+{
+    auto BaseStats = GetStats(Def);
+    if (!BaseStats)
+        return nullptr;
+
+    auto NewStats = (FFortRangedWeaponStats*)FMemory::Malloc(sizeof(FFortRangedWeaponStats));
+    FMemory::Memcpy(NewStats, BaseStats, sizeof(FFortRangedWeaponStats));
+
+    return NewStats;
+}
 
 FFortItemEntry* AFortInventory::MakeItemEntry(const UFortItemDefinition* ItemDefinition, int32 Count, int32 Level)
 {

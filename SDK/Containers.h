@@ -427,6 +427,11 @@ namespace UC
 		{
 			ReallocForType<T>(ptr, 0);
 		}
+
+		static inline void Memcpy(void* Dest, const void* Src, size_t Size)
+		{
+			memcpy(Dest, Src, Size);
+		}
 	};
 
 

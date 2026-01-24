@@ -358,6 +358,14 @@ void GUI::Init()
                 if (GameMode)
                     AliveCount = GameMode->AlivePlayers.Num();
 
+                if (FConfiguration::bInfiniteRender)
+                {
+                    Color = ImVec4(0.0f, 1.0f, 0.0f, 1.0f); // green
+                    ImGui::Text("- Infinite Render: ");
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::TextColored(Color, "Enabled");
+                }
+
                 ImGui::Text("- Players: %d", AliveCount);
 
                 ImGui::Text((std::string("- Uptime: ") + std::to_string((int)floor(UGameplayStatics::GetTimeSeconds(GameMode))) + "s").c_str());
@@ -369,16 +377,24 @@ void GUI::Init()
                 ImGui::Spacing();
 
                 auto GavMap = wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn");
+                bool IsEventPlaylist = false;
 
-                ImGui::Text("Pre-Game Configuration:");
-                SmallSeparator(Width);
+                if (VersionInfo.FortniteVersion == Events::EventsArray[0].EventVersion)
+                    IsEventPlaylist = true;
 
                 if (GavMap)
                 {
                     ImGui::Text("- Playing Gav 1v1 Map.");
 				}
+                else if (IsEventPlaylist)
+                {
+					ImGui::Text("- Playing Event Playlist.");
+                }
                 else
                 {
+                    ImGui::Text("Pre-Game Configuration:");
+                    SmallSeparator(Width);
+
                     ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
 
                     if (!FConfiguration::bReadyToStart)
@@ -609,6 +625,8 @@ void GUI::Init()
         }
         case 1:
         {
+            std::string DefPlaylist = "/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
+
             ImGui::Text("Gamemodes:");
             SmallSeparator(Width);
 
@@ -630,6 +648,14 @@ void GUI::Init()
             ImGui::RadioButton("Arena Squads", &SelectedPlaylist, (int)Playlist::TournamentSquads);
             ImGui::RadioButton("Creative ", &SelectedPlaylist, (int)Playlist::Creative);
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
+
+            for (auto& Event : Events::EventsArray)
+            {
+                if (Event.EventVersion == VersionInfo.FortniteVersion)
+                {
+                    ImGui::RadioButton("Event Playlist", &SelectedPlaylist, (int)Playlist::Event);
+                }
+            }
 
             if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11)
             {
@@ -754,6 +780,12 @@ void GUI::Init()
                 FConfiguration::bLateGame = false;
                 break;
             }
+            case (int)Playlist::Event:
+            {
+                auto& Event = Events::EventsArray[0];
+                FConfiguration::Playlist = Event.PlaylistPath;
+                break;
+            }
             case (int)Playlist::Custom:
             {
                 break;
@@ -762,6 +794,12 @@ void GUI::Init()
             {
                 break;
             }
+            }
+
+            if (SelectedPlaylist == (int)Playlist::Custom)
+            {
+                ImGui::NewLine();
+                ImGui::InputText("Playlist", &DefPlaylist);
             }
 
             break;

@@ -325,11 +325,47 @@ public:
     DEFINE_PROP(WeaponModSlots, TArray<void*>);
 };
 
-struct FFortRangedWeaponStats
+struct FFortBaseWeaponStats : public UObject
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FFortBaseWeaponStats);
+
+    DEFINE_STRUCT_PROP(ReloadTime, float);
+    DEFINE_STRUCT_PROP(AmmoCostPerFire, int32_t);
+    DEFINE_STRUCT_PROP(MinChargeTime, float);
+    DEFINE_STRUCT_PROP(MaxChargeTime, float);
+    DEFINE_STRUCT_PROP(ChargeDownTime, float);
+    DEFINE_STRUCT_PROP(MinChargeDamageMultiplier, float);
+    DEFINE_STRUCT_PROP(MaxChargeDamageMultiplier, float);
+};
+
+struct FFortMeleeWeaponStats : public FFortBaseWeaponStats
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FFortMeleeWeaponStats);
+
+    DEFINE_STRUCT_PROP(SwingPlaySpeed, float);
+};
+
+struct FFortRangedWeaponStats : public FFortBaseWeaponStats
 {
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FFortRangedWeaponStats);
 
+    DEFINE_STRUCT_PROP(Spread, float);
+    DEFINE_STRUCT_PROP(SpreadDownsights, float);
+    DEFINE_STRUCT_PROP(StandingStillSpreadMultiplier, float);
+    DEFINE_STRUCT_PROP(AthenaCrouchingSpreadMultiplier, float);
+    DEFINE_STRUCT_PROP(AthenaSlidingSpreadMultiplier, float);
+    DEFINE_STRUCT_PROP(AthenaJumpingFallingSpreadMultiplier, float);
+    DEFINE_STRUCT_PROP(AthenaSprintingSpreadMultiplier, float);
+    DEFINE_STRUCT_PROP(MinSpeedForSpreadMultiplier, float);
+    DEFINE_STRUCT_PROP(MaxSpeedForSpreadMultiplier, float);
+    DEFINE_STRUCT_PROP(RecoilVert, float);
+    DEFINE_STRUCT_PROP(RecoilVertScaleGamepad, float);
+    DEFINE_STRUCT_PROP(RecoilHoriz, float);
+    DEFINE_STRUCT_PROP(BulletsPerCartridge, int32_t);
+    DEFINE_STRUCT_PROP(FiringRate, float);
     DEFINE_STRUCT_PROP(ClipSize, int32);
     DEFINE_STRUCT_PROP(InitialClips, int32);
 };
@@ -414,7 +450,6 @@ public:
     UCLASS_COMMON_MEMBERS(UFortEditToolItemDefinition);
 };
 
-
 class AFortInventory : public AActor
 {
 public:
@@ -437,6 +472,7 @@ public:
     static AFortPickupAthena* SpawnPickup(ABuildingContainer*, FFortItemEntry&, AFortPlayerPawnAthena* = nullptr, int = -1);
     static FFortItemEntry* MakeItemEntry(const UFortItemDefinition*, int32, int32);
     static FFortRangedWeaponStats* GetStats(const UFortWeaponItemDefinition*);
+    static FFortRangedWeaponStats* CloneStats(const UFortWeaponItemDefinition* Def);
     static bool IsPrimaryQuickbar(const UFortItemDefinition*);
     void UpdateEntry(FFortItemEntry&);
     void SetRequiresUpdate();
