@@ -379,8 +379,11 @@ void GUI::Init()
                 auto GavMap = wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn");
                 bool IsEventPlaylist = false;
 
-                if (VersionInfo.FortniteVersion == Events::EventsArray[0].EventVersion)
-                    IsEventPlaylist = true;
+                if (SelectedPlaylist == static_cast<int>(Playlist::Event))
+					IsEventPlaylist = true;
+
+                ImGui::Text("Pre-Game Configuration:");
+                SmallSeparator(Width);
 
                 if (GavMap)
                 {
@@ -392,9 +395,6 @@ void GUI::Init()
                 }
                 else
                 {
-                    ImGui::Text("Pre-Game Configuration:");
-                    SmallSeparator(Width);
-
                     ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
 
                     if (!FConfiguration::bReadyToStart)
@@ -890,10 +890,11 @@ void GUI::Init()
                     AddMessageTime = std::chrono::high_resolution_clock::now();
                 }
 
-                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 15)
+                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 30)
                 {
-                    ImVec4 KillerColor = ImVec4(0x4e / 255.f, 0x86 / 255.f, 0xa5 / 255.f, 1.0f); // #4e86a5
-                    ImVec4 EliminatedColor = ImVec4(0xa5 / 255.f, 0x56 / 255.f, 0x4c / 255.f, 1.0f); // #a5564c
+                    ImVec4 KillerColor = ImVec4(0x4e / 255.f, 0x86 / 255.f, 0xa5 / 255.f, 1.0f);
+                    ImVec4 EliminatedColor = ImVec4(0xa5 / 255.f, 0x56 / 255.f, 0x4c / 255.f, 1.0f);
+                    ImVec4 WeaponColor = ImVec4(1.0f, 0.84f, 0.0f, 1.0f);
 
                     ImGui::TextUnformatted("- ");
                     ImGui::SameLine(0.0f, 0.0f);
@@ -911,7 +912,17 @@ void GUI::Init()
                     ImGui::SameLine(0.0f, 0.0f);
 
                     ImGui::Text("%sm!", FConfiguration::ElimDistance.c_str());
-                    printf("- %s eliminated %s from %sm!\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(" (");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextColored(WeaponColor, "%s", FConfiguration::ElimWeaponName.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(")");
+
+                    printf("- %s eliminated %s from %sm! (%s)\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str(), FConfiguration::ElimWeaponName.c_str());
                 }
                 else
                 {

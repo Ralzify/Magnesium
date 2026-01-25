@@ -1375,8 +1375,11 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				FConfiguration::ElimKillerName = KillerName;
 				FConfiguration::ElimEliminatedName = DeadName;
 				FConfiguration::ElimDistance = Distance;
-				// FConfiguration::ElimWeaponName = KillerWeapon->Name.ToString();
 				FConfiguration::ElimStatusMessage = ":3";
+
+				FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
+				FConfiguration::ElimWeaponName = Name.ToString();
+
 			}
 		}
 

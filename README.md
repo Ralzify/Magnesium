@@ -14,7 +14,6 @@ Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OGFN game
 
 # TODO:
 - Fix One Shot FX (GE per Playlist)
-- Fix <cheat summon> on 13.40.
 - Fix Dormant Henchmen ❓
 - Fix Randomize Lootpool ✅
 - Players Tab ✅
