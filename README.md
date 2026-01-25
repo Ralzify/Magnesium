@@ -13,6 +13,7 @@ Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OGFN game
 - Default Settings Changes : Stuff like Infinite Ammo & Infinite Materials are already on by default now!
 
 # TODO:
+- Fix 22.40 lategame crash
 - Fix One Shot FX (GE per Playlist)
 - Fix Dormant Henchmen ❓
 - Fix Randomize Lootpool ✅
