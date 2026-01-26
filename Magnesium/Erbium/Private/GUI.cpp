@@ -395,16 +395,16 @@ void GUI::Init()
                 }
                 else
                 {
-                    ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
-
-                    if (!FConfiguration::bReadyToStart)
+                    if (gsStatus < Joinable)
                     {
-                        if (VersionInfo.FortniteVersion <= 23.50)
-                            ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
-                    }
+                        ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
 
-                    if (gsStatus <= Joinable)
-                    {
+                        if (!FConfiguration::bReadyToStart)
+                        {
+                            if (VersionInfo.FortniteVersion <= 23.50)
+                                ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
+                        }
+
                         static bool bInitializedZone = false;
 
                         if (!bInitializedZone)
@@ -417,35 +417,46 @@ void GUI::Init()
 
                         if (FConfiguration::bLateGame)
                         {
-                            ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
-
                             if (FConfiguration::bForceRespawns)
                             {
-                                ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
-								ImGui::Checkbox("Toggle Permanant Respawn", &FConfiguration::PermanentRespawn);
-							}
+                                // ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
+                                ImGui::Checkbox("Toggle Permanant Respawn", &FConfiguration::PermanentRespawn);
+                            }
+
+                            ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
 
                             ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
+
+                            ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
 
                             ImGui::PushItemWidth(Width);
                             ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
                             ImGui::PopItemWidth();
                         }
-                    }
 
-                    ImGui::Spacing();
-
-                    if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
-                    {
-                        if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+                        if (FConfiguration::bAutoBusStart)
                         {
-                            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
-                            //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
-
-                            //GamePhaseLogic->StartAircraftPhase();
+                            ImGui::PushItemWidth(Width);
+                            ImGui::SliderFloat("Bus Start Delay", &FConfiguration::BusStartDelay, 0.0f, 300.0f, "%.1f seconds");
+                            ImGui::PopItemWidth();
                         }
-                        else
-                            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
+                    }
+                }
+
+                ImGui::Spacing();
+
+                if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
+                {
+                    if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+                    {
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
+                        //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
+
+                        //GamePhaseLogic->StartAircraftPhase();
+                    }
+                    else
+                    {
+                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
                     }
                 }
             }
@@ -784,6 +795,7 @@ void GUI::Init()
             {
                 auto& Event = Events::EventsArray[0];
                 FConfiguration::Playlist = Event.PlaylistPath;
+                FConfiguration::bLateGame = false;
                 break;
             }
             case (int)Playlist::Custom:

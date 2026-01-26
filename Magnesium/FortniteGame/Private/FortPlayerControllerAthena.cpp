@@ -1168,65 +1168,42 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		if (KillerPlayerState && KillerPawn && KillerPawn->Controller && KillerPawn->Controller != PlayerController)
 		{
 			if (KillerPlayerState->HasKillScore())
-			{
 				KillerPlayerState->KillScore++;
-			}
 			else
-			{
 				KillerPlayerState->Kills++;
-			}
-
 			KillerPlayerState->OnRep_Kills();
-
-			struct DeadPlayer 
-			{ 
-				AFortPlayerStateAthena* PS; 
-				uint8_t Offset[0x8]; 
-			};
-
-			DeadPlayer DeadPlayerState { PlayerState };
-
-			KillerPlayerState->ClientReportKill(DeadPlayerState);
-
 			if (KillerPlayerState->HasTeamKillScore())
 			{
 				KillerPlayerState->TeamKillScore++;
 				KillerPlayerState->OnRep_TeamKillScore();
 			}
 
+			struct Test { AFortPlayerStateAthena* ps; uint8_t p[0x8]; };
+
+			Test t{ PlayerState };
+			KillerPlayerState->ClientReportKill(t);
 			if (KillerPlayerState->HasTeamKillScore())
 				KillerPlayerState->ClientReportTeamKill(KillerPlayerState->TeamKillScore);
 
-			if (GUI::IsArenaPlaylist())
-				KillerPlayerState->ClientReportTournamentStatUpdate();
-
-			AFortPlayerPawnAthena* VictimPawn = PlayerController->Pawn;
-
-			if (VictimPawn)
+			for (auto& Damager : PlayerController->Pawn->Damagers)
 			{
-				for (auto& Damager : VictimPawn->Damagers)
+				if (Damager.DamageCauser != KillerPlayerController && Damager.DamageCauser->IsA<AFortPlayerControllerAthena>())
 				{
-					if (!Damager.DamageCauser)
-						continue;
+					FGameplayTagContainer TargetTags{};
+					auto DamagerController = (AFortPlayerControllerAthena*)Damager.DamageCauser;
 
-					if (Damager.DamageCauser != KillerPlayerController && Damager.DamageCauser->IsA<AFortPlayerControllerAthena>())
+					auto Interface = (IGameplayTagAssetInterface*)PlayerController->Pawn->GetInterface(IGameplayTagAssetInterface::StaticClass());
+					if (Interface)
 					{
-						FGameplayTagContainer TargetTags{};
-						auto DamagerController = (AFortPlayerControllerAthena*)Damager.DamageCauser;
-
-						auto Interface = (IGameplayTagAssetInterface*)VictimPawn->GetInterface(IGameplayTagAssetInterface::StaticClass());
-						if (Interface)
-						{
-							auto GetOwnedGameplayTags = (void(*)(IGameplayTagAssetInterface*, FGameplayTagContainer*))Interface->Vft[0x2];
-							GetOwnedGameplayTags(Interface, &TargetTags);
-							//Interface->GetOwnedGameplayTags(&TargetTags);
-						}
-
-						DamagerController->GetQuestManager(1)->SendStatEvent(DamagerController, EFortQuestObjectiveStatEvent::GetKillContribution(), 1, false, PlayerController->Pawn, TargetTags);
-
-						TargetTags.GameplayTags.Free();
-						TargetTags.ParentTags.Free();
+						auto GetOwnedGameplayTags = (void(*)(IGameplayTagAssetInterface*, FGameplayTagContainer*))Interface->Vft[0x2];
+						GetOwnedGameplayTags(Interface, &TargetTags);
+						//Interface->GetOwnedGameplayTags(&TargetTags);
 					}
+
+					DamagerController->GetQuestManager(1)->SendStatEvent(DamagerController, EFortQuestObjectiveStatEvent::GetKillContribution(), 1, false, PlayerController->Pawn, TargetTags);
+
+					TargetTags.GameplayTags.Free();
+					TargetTags.ParentTags.Free();
 				}
 			}
 
@@ -1244,6 +1221,11 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 			TargetTags.GameplayTags.Free();
 			TargetTags.ParentTags.Free();
+		}
+
+		if (GUI::IsArenaPlaylist() && VersionInfo.FortniteVersion < 21.00)
+		{
+			KillerPlayerState->ClientReportTournamentStatUpdate();
 		}
 
 		static auto IsRespawningAllowedFunc = GameState->GetFunction("IsRespawningAllowed");
@@ -1344,22 +1326,22 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				UNetDriver* Driver = static_cast<UNetDriver*>(UWorld::GetWorld()->NetDriver);
 
 				auto FindConnectionByPlayerState = [&](AFortPlayerStateAthena* PS) -> UNetConnection*
-				{
-					if (!PS || !Driver)
-						return nullptr;
-
-					for (int i = 0; i < Driver->ClientConnections.Num(); i++)
 					{
-						auto Conn = Driver->ClientConnections[i];
-						if (!Conn || !Conn->PlayerController)
-							continue;
+						if (!PS || !Driver)
+							return nullptr;
 
-						if (Conn->PlayerController->PlayerState == PS)
-							return Conn;
-					}
+						for (int i = 0; i < Driver->ClientConnections.Num(); i++)
+						{
+							auto Conn = Driver->ClientConnections[i];
+							if (!Conn || !Conn->PlayerController)
+								continue;
 
-					return nullptr;
-				};
+							if (Conn->PlayerController->PlayerState == PS)
+								return Conn;
+						}
+
+						return nullptr;
+					};
 
 				float KillDistanceCm = KillerPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
 				int KillDistanceMeters = static_cast<int>(KillDistanceCm / 100.f);
@@ -1379,7 +1361,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 				FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
 				FConfiguration::ElimWeaponName = Name.ToString();
-
 			}
 		}
 
@@ -1464,7 +1445,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (GameMode->bAllowSpectateAfterDeath)
 			{
 				PlayerController->PlayerToSpectateOnDeath = KillerPawn ? KillerPawn : (GameMode->AlivePlayers.Num() > 0 ? ((AFortPlayerControllerAthena*)GameMode->AlivePlayers[rand() % GameMode->AlivePlayers.Num()])->Pawn : nullptr);
-				
+
 				UKismetSystemLibrary::K2_SetTimer(PlayerController, FString(L"SpectateOnDeath"), 5.f, false);
 			}
 		}
@@ -2199,133 +2180,6 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				Pawn->SetGravityMultiplier(Multiplier);
 
 				PlayerController->ClientMessage(FString(L"Gravity multiplier set!"), FName(), 1.f);
-			}
-			else if (command == "straightbloom" || command == "nobloom" || command == "nospread")
-			{
-				auto Pawn = PlayerController->Pawn;
-				auto CurrentWeapon = Pawn->HasCurrentWeapon() ? (AFortWeapon*)Pawn->CurrentWeapon : nullptr;
-
-				if (!Pawn || !Pawn->HasCurrentWeapon())
-				{
-					PlayerController->ClientMessage(FString(L"No weapon equipped! (or no pawn)"), FName(), 1.f);
-					return;
-				}
-
-				auto Weapon = static_cast<AFortWeapon*>(Pawn->CurrentWeapon);
-
-				if (!Weapon)
-				{
-					PlayerController->ClientMessage(FString(L"Could not find weapon!"), FName(), 1.f);
-					return;
-				}
-
-				auto WeaponDef = Weapon ? Weapon->WeaponData : nullptr;
-
-				if (!WeaponDef)
-				{
-					PlayerController->ClientMessage(FString(L"Could not find WeaponDef!"), FName(), 1.f);
-					return;
-				}
-
-				auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([Weapon](FFortItemEntry& entry)
-					{ return entry.ItemGuid == Weapon->ItemEntryGuid; }, FFortItemEntry::Size());
-
-				if (!ItemEntry)
-				{
-					PlayerController->ClientMessage(FString(L"Failed to get item entry!"), FName(), 1.f);
-					return;
-				}
-
-				int32 LoadedAmmo = ItemEntry->LoadedAmmo;
-
-				auto Stats = AFortInventory::GetStats(WeaponDef);
-
-				if (!Stats)
-				{
-					PlayerController->ClientMessage(FString(L"Failed to get weapon stats."), FName(), 1.f);
-					return;
-				}
-
-				Stats->Spread = 0.f;
-				Stats->SpreadDownsights = 0.f;
-				Stats->StandingStillSpreadMultiplier = 0.f;
-				Stats->AthenaCrouchingSpreadMultiplier = 0.f;
-				Stats->AthenaJumpingFallingSpreadMultiplier = 0.f;
-				Stats->AthenaSprintingSpreadMultiplier = 0.f;
-				Stats->MinSpeedForSpreadMultiplier = 0.f;
-				Stats->MaxSpeedForSpreadMultiplier = 0.f;
-
-				if (Stats->HasAthenaSlidingSpreadMultiplier())
-					Stats->AthenaSlidingSpreadMultiplier = 0.f;
-
-				Weapon->ForceNetUpdate();
-
-				/*auto WorldInventory = PlayerController->WorldInventory;
-
-				WorldInventory->RemoveWeaponAbilities(Weapon);
-				WorldInventory->Remove(ItemEntry->ItemGuid);
-
-				auto NewItem = WorldInventory->GiveItem(WeaponDef, 1, LoadedAmmo, 0, true, true);*/
-
-				PlayerController->ClientMessage(FString(L"Gave no spread to your equipped weapon!"), FName(), 1.f); // this goes through, but the stats dont actually apply
-			}
-			else if (command == "rapidfire")
-			{
-				auto Pawn = PlayerController->Pawn;
-				auto CurrentWeapon = Pawn->HasCurrentWeapon() ? (AFortWeapon*)Pawn->CurrentWeapon : nullptr;
-
-				if (!Pawn || !Pawn->HasCurrentWeapon())
-				{
-					PlayerController->ClientMessage(FString(L"No weapon equipped! (or no pawn)"), FName(), 1.f);
-					return;
-				}
-
-				auto Weapon = static_cast<AFortWeapon*>(Pawn->CurrentWeapon);
-
-				if (!Weapon)
-				{
-					PlayerController->ClientMessage(FString(L"Could not find weapon!"), FName(), 1.f);
-					return;
-				}
-
-				auto WeaponDef = Weapon ? Weapon->WeaponData : nullptr;
-
-				if (!WeaponDef)
-				{
-					PlayerController->ClientMessage(FString(L"Could not find WeaponDef!"), FName(), 1.f);
-					return;
-				}
-
-				auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([Weapon](FFortItemEntry& entry)
-					{ return entry.ItemGuid == Weapon->ItemEntryGuid; }, FFortItemEntry::Size());
-
-				if (!ItemEntry)
-				{
-					PlayerController->ClientMessage(FString(L"Failed to get item entry!"), FName(), 1.f);
-					return;
-				}
-
-				int32 LoadedAmmo = ItemEntry->LoadedAmmo;
-
-				auto Stats = AFortInventory::GetStats(WeaponDef);
-
-				if (!Stats)
-				{
-					PlayerController->ClientMessage(FString(L"Failed to get weapon stats."), FName(), 1.f);
-					return;
-				}
-
-				Stats->FiringRate *= 50.f;
-				Stats->ReloadTime *= 0.01f;
-
-				auto WorldInventory = PlayerController->WorldInventory;
-
-				WorldInventory->RemoveWeaponAbilities(Weapon);
-				WorldInventory->Remove(ItemEntry->ItemGuid);
-
-				auto NewItem = WorldInventory->GiveItem(WeaponDef, 1, LoadedAmmo, 0, true, true);
-
-				PlayerController->ClientMessage(FString(L"Enabled rapid fire to your equipped weapon!"), FName(), 1.f);
 			}
 			else if (command == "regen")
 			{
@@ -3088,10 +2942,18 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				{
 					auto ShortNames = Misc::ItemNames.find(args[1].c_str());
 
-					std::replace(args[1].begin(), args[1].end(), '-', '_');
-
 					if (ShortNames != Misc::ItemNames.end())
-						ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(ShortNames->second.c_str());
+					{
+						const std::string& Value = ShortNames->second;
+
+						ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(Value.c_str());
+
+						if (!ItemDefinition && Value.find('/') != std::string::npos)
+						{
+							auto Item = StaticLoadObject(UEAllocatedWString(Value.begin(), Value.end()).c_str(), UFortItemDefinition::StaticClass());
+							ItemDefinition = Item->Cast<UFortItemDefinition>();
+						}
+					}
 				}
 
 				if (!ItemDefinition)

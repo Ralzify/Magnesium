@@ -34,9 +34,13 @@ struct FConfiguration
     static inline auto LateGameZone = 4; // starting zone
     static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
     static inline auto bEnableCheats = true;
+	static inline auto bMovingBus = true;
+	static inline auto BusStartDelay = 90.f;
 
     static inline auto bSiphon = false;
     static inline auto SiphonAmount = 50;
+
+    static inline auto bEnableTrickshotTab = false;
 
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;

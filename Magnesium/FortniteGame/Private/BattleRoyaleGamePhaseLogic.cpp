@@ -39,7 +39,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::HandleMatchHasStarted(A
 	if (!bSkipWarmup)
 	{
 		auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-		auto WarmupDuration = FConfiguration::bAutoBusStart ? 90.f : 99999999.f;
+		auto WarmupDuration = FConfiguration::bAutoBusStart ? FConfiguration::BusStartDelay : 99999999.f;
 
 		GamePhaseLogic->WarmupCountdownStartTime = Time;
 		GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
@@ -525,17 +525,30 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 			FVector Loc = StormCircles[FConfiguration::LateGameZone + 2].Center;
 			Loc.Z = 25000.f;
 
-			bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
-			auto OffsetDistance = IsSmallZone ? 10000.0f : 25000.0f;
-			auto OffsetRotation = FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
-			auto OffsetDirection = OffsetRotation.Vector();
+			if (FConfiguration::bMovingBus)
+			{
+				bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
+				auto OffsetRotation = FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
+				auto OffsetDirection = OffsetRotation.Vector();
 
-			FlightInfo.FlightStartLocation = Loc;
-			FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
-			FlightInfo.TimeTillFlightEnd = 7.f;
-			//FlightInfo.TimeTillDropStart = 0.f;
-			FlightInfo.TimeTillDropEnd -= ((FlightInfo.TimeTillDropEnd - FlightInfo.TimeTillDropStart) / 2);
-			//GameState->SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 8.f;
+				FlightInfo.FlightStartLocation = Loc;
+				FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
+				FlightInfo.TimeTillFlightEnd = 10.f;
+				FlightInfo.TimeTillDropStart = 0.f;
+				FlightInfo.TimeTillDropEnd = 10.f /*-= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2)*/;
+				//GameState->SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 8.f;
+			}
+			else
+			{
+				FlightInfo.FlightSpeed = 0.f;
+
+				FlightInfo.FlightStartLocation = Loc;
+				FlightInfo.TimeTillFlightEnd = 5.f;
+				FlightInfo.TimeTillDropEnd = 5.f;
+				FlightInfo.TimeTillDropStart = 0.f;
+				//GameState->bAircraftIsLocked = false;
+				//GameState->SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 8.f;
+			}
 		}
 
 		if (!GameState->MapInfo->AircraftClass.Get())

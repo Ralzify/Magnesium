@@ -975,7 +975,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     if (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 25.20 && !*Ret)
     {
         auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-        auto WarmupDuration = 90.f;
+        auto WarmupDuration = FConfiguration::BusStartDelay;
 
         if (GameState->HasWarmupCountdownEndTime()) // gamephaselogic builds
         {
@@ -1401,37 +1401,73 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             Loc = GameMode->SafeZoneLocations.Get(FConfiguration::LateGameZone + (VersionInfo.FortniteVersion >= 24 ? 3 : 0) - 1, FVector::Size());
         }
 
-        bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
-        auto OffsetDistance = IsSmallZone ? 10000.0f : 25000.0f;
-        auto OffsetRotation = Aircraft->FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
-        auto OffsetDirection = OffsetRotation.Vector();
-
-        if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
+        if (FConfiguration::bMovingBus)
         {
-            GameState->DefaultParachuteDeployTraceForGroundDistance = 2500.f;
-        }
+            bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
+            auto OffsetDistance = IsSmallZone ? 10000.0f : 25000.0f;
+            auto OffsetRotation = Aircraft->FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
+            auto OffsetDirection = OffsetRotation.Vector();
 
-        if (Aircraft->HasFlightInfo())
-        {
-            Aircraft->FlightInfo.FlightStartLocation = Loc;
-            Aircraft->FlightInfo.FlightStartLocation.Z = 25000.f;
-            Aircraft->FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
-            Aircraft->FlightInfo.TimeTillFlightEnd = 7.f;
-            Aircraft->FlightInfo.TimeTillDropStart = 0.f;
-            Aircraft->FlightInfo.TimeTillDropEnd -= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2);
+            if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
+            {
+                GameState->DefaultParachuteDeployTraceForGroundDistance = 2500.f;
+            }
 
+            if (Aircraft->HasFlightInfo())
+            {
+                Aircraft->FlightInfo.FlightStartLocation = Loc;
+                Aircraft->FlightInfo.FlightStartLocation.Z = 25000.f;
+                Aircraft->FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
+                Aircraft->FlightInfo.TimeTillFlightEnd = 10.f;
+                Aircraft->FlightInfo.TimeTillDropStart = 0.f;
+                Aircraft->FlightInfo.TimeTillDropEnd = 10.f /*-= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2)*/;
+
+            }
+            else
+            {
+                Aircraft->FlightSpeed /= IsSmallZone ? 10 : 5;
+
+                Aircraft->FlightInfo.FlightStartLocation = Loc;
+                Aircraft->FlightInfo.FlightStartLocation.Z = 25000.f;
+
+                if (Aircraft->HasTimeTillFlightEnd())
+                {
+                    Aircraft->TimeTillFlightEnd = 10.f;
+                    Aircraft->TimeTillDropEnd = 10.f /*-= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2)*/;
+                    Aircraft->TimeTillDropStart = 0.f;
+                }
+            }
         }
         else
         {
-            Aircraft->FlightSpeed /= IsSmallZone ? 10 : 5;
+            Loc.Z = 17500.f;
 
-            Aircraft->FlightInfo.FlightStartLocation = Loc;
-            Aircraft->FlightInfo.FlightStartLocation.Z = 25000.f;
+            if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
+            {
+                GameState->DefaultParachuteDeployTraceForGroundDistance = 2500.f;
+            }
+
+            if (Aircraft->HasFlightInfo())
+            {
+                Aircraft->FlightInfo.FlightSpeed = 0.f;
+
+                Aircraft->FlightInfo.FlightStartLocation = Loc;
+
+                Aircraft->FlightInfo.TimeTillFlightEnd = 7.f;
+                Aircraft->FlightInfo.TimeTillDropEnd = 7.f;
+                Aircraft->FlightInfo.TimeTillDropStart = 0.f;
+            }
+            else
+            {
+                Aircraft->FlightSpeed = 0.f;
+
+                Aircraft->FlightStartLocation = Loc;
+            }
 
             if (Aircraft->HasTimeTillFlightEnd())
             {
                 Aircraft->TimeTillFlightEnd = 7.f;
-                Aircraft->TimeTillDropEnd -= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2);
+                Aircraft->TimeTillDropEnd = 7.f;
                 Aircraft->TimeTillDropStart = 0.f;
             }
         }

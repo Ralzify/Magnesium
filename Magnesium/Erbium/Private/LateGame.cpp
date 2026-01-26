@@ -449,6 +449,11 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/CorruptionGameplay/Gameplay/Items/Consumables/IcyGrapple/WID_Athena_IcyGrapple.WID_Athena_IcyGrapple"), 1));
     }
 
+    if (std::floor(VersionInfo.FortniteVersion) == 19)
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/ParallelGameplay/Items/WestSausage/WID_WestSausage_Parallel.WID_WestSausage_Parallel"), 1));
+    }
+
     if (VersionInfo.FortniteVersion >= 19.01)
     {
         Slot5.Add(TPair<FString, int>(TEXT("/FlipperGameplay/Items/ShieldGenerator/WID_Athena_ShieldGenerator.WID_Athena_ShieldGenerator"), 2));
@@ -590,12 +595,6 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetOSLoadout()
     Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_R_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_R_Ore_T03"), 1));
     Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_VR_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_VR_Ore_T03"), 1));
     Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_SR_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_SR_Ore_T03"), 1));
-
-    if (VersionInfo.FortniteVersion >= 3.10)
-    {
-        Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_NoScope_Athena_UC_Ore_T03.WID_Sniper_NoScope_Athena_UC_Ore_T03"), 1));
-        Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_NoScope_Athena_R_Ore_T03.WID_Sniper_NoScope_Athena_R_Ore_T03"), 1));
-    }
 
     if (VersionInfo.FortniteVersion >= 5.21)
     {
