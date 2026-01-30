@@ -1,4 +1,4 @@
-// https://github.com/kem0x/memcury
+﻿// https://github.com/kem0x/memcury
 
 #pragma once
 
@@ -117,17 +117,36 @@ namespace Memcury
             return { dllStart, dllEnd };
         }
 
-        inline auto CopyToClipboard(std::string str)
+        inline void CopyToClipboard(const std::string& str)
         {
-            auto mem = GlobalAlloc(GMEM_FIXED, str.size() + 1);
-            memcpy(mem, str.c_str(), str.size() + 1);
+            if (!OpenClipboard(nullptr))
+                return;
 
-            OpenClipboard(nullptr);
             EmptyClipboard();
-            SetClipboardData(CF_TEXT, mem);
-            CloseClipboard();
 
-            GlobalFree(mem);
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, str.size() + 1);
+
+            if (!hMem)
+            {
+                CloseClipboard();
+                return;
+            }
+
+            void* ptr = GlobalLock(hMem);
+
+            if (!ptr)
+            {
+                GlobalFree(hMem);
+                CloseClipboard();
+                return;
+            }
+
+            memcpy(ptr, str.c_str(), str.size() + 1);
+            GlobalUnlock(hMem);
+
+            SetClipboardData(CF_TEXT, hMem);
+
+            CloseClipboard();
         }
     }
 

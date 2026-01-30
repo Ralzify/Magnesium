@@ -1,6 +1,6 @@
 #pragma once
 #include "../../pch.h"
-#include "../../../Erbium/Engine/Public/CurveTable.h"
+#include "../../../Magnesium/Engine/Public/CurveTable.h"
 
 struct FUIExtension final
 {

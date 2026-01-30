@@ -1,9 +1,9 @@
 #include "pch.h"
 #include "../Public/FortPlaylistAthena.h"
+#include "../../../Magnesium/Erbium/Public/Configuration.h"
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/Client.h"
-#include "../../../Magnesium/Erbium/Public/Configuration.h"
-#include "../../../Magnesium/Erbium/Public/Utils.h"
+#include "../../../Magnesium/FortniteGame/Public/FortPlayerPawnAthena.h"
 
 bool bEOREnabled = false;
 bool bDisablePreEdits = false;
@@ -190,7 +190,7 @@ void Client::Init()
 				Skip++;
 			}
 		}
-		
+
 		auto rdataSect = Memcury::PE::Section::GetSection(".rdata");
 		for (int i = 1; i < 0x5000; i++)
 		{

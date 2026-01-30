@@ -596,6 +596,11 @@ namespace SDK
 		DEFINE_FUNC(GetDistanceTo, float);
 		DEFINE_FUNC(SetLifeSpan, void);
 		DEFINE_FUNC(K2_AttachToComponent, void);
+
+		bool HasAuthority() const
+		{
+			return Role >= 2;
+		}
 	};
 
 	class UGameplayStatics : public SDK::UObject

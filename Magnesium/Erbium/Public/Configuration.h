@@ -25,6 +25,9 @@ struct FConfiguration
 
     static inline auto CreativePlot = L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium";
 
+	static inline auto CustomMap = L"";
+    static inline auto bIsCustomMap = false;
+
     static inline std::string BotName = "Magnesium Bot ";
     static inline auto UseCustomBotNames = false;
     static inline auto BotHealth = 21;
@@ -41,6 +44,9 @@ struct FConfiguration
     static inline auto SiphonAmount = 50;
 
     static inline auto bEnableTrickshotTab = false;
+    static inline auto bInfiniteRender = false;
+    static inline auto bFModCannon = false;
+	static inline auto CannonLaunchMultiplier = 1.f;
 
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;
@@ -50,9 +56,7 @@ struct FConfiguration
     static inline auto bJoinInProgress = false;
 	static inline auto PermanentRespawn = false;
 
-    static inline auto bAutoBusStart = true; // im not sure this even works properly tbh might need to fix
-
-    static inline auto bInfiniteRender = false;
+    static inline auto bAutoBusStart = true;
 
     static inline auto bAutoRestart = false;
 

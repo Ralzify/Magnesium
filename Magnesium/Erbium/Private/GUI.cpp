@@ -258,6 +258,24 @@ void GUI::Init()
                     ImGui::EndTabItem();
                 }
 
+                if (SelectedPlaylist == static_cast<int>(Playlist::Creative))
+                {
+                    if (ImGui::BeginTabItem("Creative"))
+                    {
+                        SelectedUI = 5;
+                        ImGui::EndTabItem();
+                    }
+                }
+
+                if (FConfiguration::bIsCustomMap)
+                {
+                    if (ImGui::BeginTabItem("Custom Map"))
+                    {
+                        SelectedUI = 6;
+                        ImGui::EndTabItem();
+					}
+                }
+
                 if (ImGui::BeginTabItem("Player Bot"))
                 {
                     SelectedUI = 4;
@@ -278,15 +296,6 @@ void GUI::Init()
             {
                 SelectedUI = 3;
                 ImGui::EndTabItem();
-            }
-
-            if (SelectedPlaylist == static_cast<int>(Playlist::Creative) && !FConfiguration::bReadyToStart)
-            {
-                if (ImGui::BeginTabItem("Creative"))
-                {
-                    SelectedUI = 5;
-                    ImGui::EndTabItem();
-                }
             }
 
             ImGui::EndTabBar();
@@ -376,16 +385,15 @@ void GUI::Init()
                 ImGui::Spacing();
                 ImGui::Spacing();
 
-                auto GavMap = wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn");
-                bool IsEventPlaylist = false;
-
-                if (SelectedPlaylist == static_cast<int>(Playlist::Event))
-					IsEventPlaylist = true;
+                bool IsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
+                bool IsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
+				bool bIsRetrac1v1 = (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1));
+				bool bIsRetracTurtle = (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle));
 
                 ImGui::Text("Pre-Game Configuration:");
                 SmallSeparator(Width);
 
-                if (GavMap)
+                if (IsGavMap)
                 {
                     ImGui::Text("- Playing Gav 1v1 Map.");
 				}
@@ -393,17 +401,18 @@ void GUI::Init()
                 {
 					ImGui::Text("- Playing Event Playlist.");
                 }
+                else if (bIsRetrac1v1 || bIsRetracTurtle)
+                {
+                    ImGui::Text("- Playing Retrac Custom Map.");
+                }
                 else
                 {
                     if (gsStatus < Joinable)
                     {
                         ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
 
-                        if (!FConfiguration::bReadyToStart)
-                        {
-                            if (VersionInfo.FortniteVersion <= 23.50)
-                                ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
-                        }
+                        if (VersionInfo.FortniteVersion <= 23.50)
+                            ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
 
                         static bool bInitializedZone = false;
 
@@ -412,6 +421,8 @@ void GUI::Init()
                             FConfiguration::LateGameZone = FConfiguration::IsS27() ? 3 : 4;
                             bInitializedZone = true;
                         }
+
+                        ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
 
                         ImGui::Checkbox("Lategame", &FConfiguration::bLateGame);
 
@@ -445,18 +456,21 @@ void GUI::Init()
 
                 ImGui::Spacing();
 
-                if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
+				if (!IsGavMap || !IsEventPlaylist || !bIsRetrac1v1 || !bIsRetracTurtle)
                 {
-                    if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+                    if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                     {
-                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
-                        //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
+                        if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+                        {
+                            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
+                            //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
 
-                        //GamePhaseLogic->StartAircraftPhase();
-                    }
-                    else
-                    {
-                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
+                            //GamePhaseLogic->StartAircraftPhase();
+                        }
+                        else
+                        {
+                            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
+                        }
                     }
                 }
             }
@@ -517,22 +531,27 @@ void GUI::Init()
                 ImGui::Text("Storm Settings:");
                 SmallSeparator(Width);
 
-                if (ImGui::Button("Pause Safe Zone", ImVec2(Width, Height)))
+                if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone)
                 {
-                    UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = true;
-                    auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                    if (GameMode->HasbSafeZonePaused())
-                        GameMode->bSafeZonePaused = true;
-                    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
+                    if (ImGui::Button("Pause Safe Zone", ImVec2(Width, Height)))
+                    {
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = true;
+                        auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                        if (GameMode->HasbSafeZonePaused())
+                            GameMode->bSafeZonePaused = true;
+                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
+                    }
                 }
-
-                if (ImGui::Button("Resume Safe Zone", ImVec2(Width, Height)))
+                else
                 {
-                    UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = false;
-                    auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                    if (GameMode->HasbSafeZonePaused())
-                        GameMode->bSafeZonePaused = false;
-                    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startsafezone"), nullptr);
+                    if (ImGui::Button("Resume Safe Zone", ImVec2(Width, Height)))
+                    {
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = false;
+                        auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                        if (GameMode->HasbSafeZonePaused())
+                            GameMode->bSafeZonePaused = false;
+                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startsafezone"), nullptr);
+                    }
                 }
 
                 if (ImGui::Button("Skip Safe Zone", ImVec2(Width, Height)))
@@ -934,7 +953,13 @@ void GUI::Init()
 
                     ImGui::TextUnformatted(")");
 
-                    printf("- %s eliminated %s from %sm! (%s)\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str(), FConfiguration::ElimWeaponName.c_str());
+                    static bool bHasLogged = false;
+
+                    if (!bHasLogged)
+                    {
+                        printf("- %s eliminated %s from %sm! (%s)\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str(), FConfiguration::ElimWeaponName.c_str());
+						bHasLogged = true;
+                    }
                 }
                 else
                 {
@@ -1513,6 +1538,141 @@ void GUI::Init()
             }
             case (int)Plot::Custom:
             {
+                break;
+            }
+            default:
+            {
+                break;
+            }
+            }
+
+            break;
+        }
+        case 6:
+        {
+            ImGui::Text("Use Custom Map (VERY EXPERIMENTAL):");
+            SmallSeparator(Width);
+
+            ImGui::RadioButton("Papaya (Party Royale)", &SelectedMap, (int)Map::Papaya);
+            ImGui::RadioButton("The Combine", &SelectedMap, (int)Map::Crucible);
+            ImGui::RadioButton("Tutorial Map", &SelectedMap, (int)Map::TutorialMap);
+            ImGui::RadioButton("Titled Deathmatch", &SelectedMap, (int)Map::TiltedDeathmatch);
+            ImGui::RadioButton("Athena", &SelectedMap, (int)Map::Ch1);
+            ImGui::RadioButton("Apollo", &SelectedMap, (int)Map::Ch2);
+            ImGui::RadioButton("Snow Map 01", &SelectedMap, (int)Map::Ch2);
+            ImGui::RadioButton("Flat Grid", &SelectedMap, (int)Map::FlatGrid);
+            ImGui::RadioButton("Escape", &SelectedMap, (int)Map::Escape);
+            ImGui::RadioButton("Prop Hunt", &SelectedMap, (int)Map::PropHunt);
+            ImGui::RadioButton("Loki 02", &SelectedMap, (int)Map::Loki02);
+            ImGui::RadioButton("Loki 03", &SelectedMap, (int)Map::Loki03);
+            ImGui::RadioButton("Loki 04", &SelectedMap, (int)Map::Loki04);
+            ImGui::RadioButton("Loki 06", &SelectedMap, (int)Map::Loki06);
+
+            switch (SelectedMap)
+            {
+            case (int)Map::Papaya:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Apollo/Maps/Special/Papaya/Apollo_Papaya";
+                break;
+            }
+            case (int)Map::Crucible:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Crucible/Athena_Crucible";
+                break;
+            }
+            case (int)Map::TutorialMap:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Tutorial/Athena_Tutorial_Map_A";
+                break;
+            }
+            case (int)Map::EmptyTest:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Athena_EmptyTest";
+                break;
+            }
+            case (int)Map::Faceoff:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Athena_Faceoff";
+                break;
+            }
+            case (int)Map::Playground:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Athena_Playground";
+                break;
+            }
+            case (int)Map::Deimos:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Deimos_Gameplay";
+                break;
+            }
+            case (int)Map::TiltedDeathmatch:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Playsets/Deathmatch_24x24a";
+                break;
+            }
+            case (int)Map::DADBRO:
+            {
+                FConfiguration::CustomMap = L"open /Game/Athena/Playlists/DADBRO/Athena_DADBRO_Apollo_Island";
+                break;
+            }
+            case (int)Map::Arid:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Desert/Arid_Island_105x105";
+                break;
+            }
+            case (int)Map::Escape:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Escape/Escape_Island_105x105_M";
+                break;
+            }
+            case (int)Map::Ch1:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/FlatGrass/FlatGrass_Island_105x105_Meshes";
+                break;
+            }
+            case (int)Map::Ch2:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/FlatGrass/Apollo_FlatGrass_Island_105x105_Mesh";
+                break;
+            }
+            case (int)Map::Snow01:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/FlatSnow/FlatSnow_Island_105x105_Mesh";
+                break;
+            }
+            case (int)Map::Kevin:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Kevin/Kevin_Floating_Island_105x105_Mesh";
+                break;
+            }
+            case (int)Map::FlatGrid:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/FlatGrid/FlatGrid_Island_105x105";
+                break;
+            }
+            case (int)Map::PropHunt:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M";
+                break;
+            }
+            case (int)Map::Loki02:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_02";
+                break;
+            }
+            case (int)Map::Loki03:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_03";
+                break;
+            }
+            case (int)Map::Loki04:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_04";
+                break;
+            }
+            case (int)Map::Loki06:
+            {
+                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_06";
                 break;
             }
             default:

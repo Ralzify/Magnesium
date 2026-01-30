@@ -1,6 +1,7 @@
 #pragma once
 #include "../../pch.h"
 #include "FortInventory.h"
+#include "../../../Magnesium/Erbium/Public/Configuration.h"
 
 class AFortPhysicsPawn : public AActor
 {
@@ -58,12 +59,60 @@ public:
     }
 };
 
+
 class AFortAthenaVehicle : public AActor
 {
 public:
     UCLASS_COMMON_MEMBERS(AFortAthenaVehicle);
 
-    //DEFINE_FUNC(FindSeatIndex, int32);
+    DEFINE_FUNC(FindSeatIndex, int32);
+};
+
+class AFortAthenaSKPushCannon : public AFortAthenaVehicle
+{
+public:
+
+    UCLASS_COMMON_MEMBERS(AFortAthenaSKPushCannon);
+
+	DEFINE_FUNC(MultiCastPushCannonLaunchedPlayer, void);
+    DEFINE_FUNC(OnLaunchPawn, void);
+    DEFINE_FUNC(OnPreLaunchPawn, void);
+
+    AFortPlayerPawnAthena* GetPawnAtSeat(int32 SeatIndex)
+    {
+        auto* SeatComponent = (UFortVehicleSeatComponent*)this->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
+
+        if (!SeatComponent)
+            return nullptr;
+
+        if (SeatIndex < 0 || SeatIndex >= SeatComponent->PlayerSlots.Num())
+            return nullptr;
+
+        auto& PlayerSlot = SeatComponent->PlayerSlots.Get(SeatIndex, FAthenaCarPlayerSlot::Size());
+        return PlayerSlot.Player;
+    }
+
+    void ShootPawnOut(const FVector& LaunchDir)
+    {
+        auto PawnToShoot = this->GetPawnAtSeat(1);
+
+        if (!PawnToShoot)
+            return;
+
+        this->OnPreLaunchPawn(PawnToShoot, LaunchDir);
+        PawnToShoot->ServerOnExitVehicle();
+
+        if (FConfiguration::bFModCannon)
+        {
+            PawnToShoot->LaunchCharacterJump(LaunchDir.X * 6000 * FConfiguration::CannonLaunchMultiplier, LaunchDir.Y * 5000 * FConfiguration::CannonLaunchMultiplier, LaunchDir.Z * 7500 * FConfiguration::CannonLaunchMultiplier);
+        }
+        else
+        {
+			this->OnLaunchPawn(PawnToShoot, LaunchDir);
+        }
+
+        this->MultiCastPushCannonLaunchedPlayer();
+    }
 };
 
 class AFortCharacterVehicle : public AActor
@@ -134,4 +183,60 @@ public:
     UCLASS_COMMON_MEMBERS(AFortDagwoodVehicle);
 
     DEFINE_FUNC(SetFuel, float);
+};
+
+class AFortMountedCannon : public AFortAthenaVehicle
+{
+public:
+    UCLASS_COMMON_MEMBERS(AFortMountedCannon);
+
+    DEFINE_FUNC(OnLaunchPawn, void);
+
+    AFortPlayerPawnAthena* GetPawnAtSeat(int32 SeatIndex)
+    {
+        auto* SeatComponent = (UFortVehicleSeatComponent*)this->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
+
+        if (!SeatComponent)
+            return nullptr;
+
+        if (SeatIndex < 0 || SeatIndex >= SeatComponent->PlayerSlots.Num())
+            return nullptr;
+
+        auto& PlayerSlot = SeatComponent->PlayerSlots.Get(SeatIndex, FAthenaCarPlayerSlot::Size());
+        return PlayerSlot.Player;
+    }
+
+    void ShootPawnOut()
+    {
+        auto PawnToShoot = this->GetPawnAtSeat(1);
+
+        if (!PawnToShoot)
+            return;
+
+		PawnToShoot->ServerOnExitVehicle();
+		this->OnLaunchPawn(PawnToShoot);
+    }
+};
+
+class AFortWeaponRangedMountedCannon : public AActor
+{
+public:
+    UCLASS_COMMON_MEMBERS(AFortWeaponRangedMountedCannon);
+
+    bool FireActorInCannon(FVector LaunchDir, bool bIsServer);
+    static void ServerFireActorInCannonHook(AFortWeaponRangedMountedCannon* Cannon, FVector LaunchDir);
+
+    AFortPlayerPawnAthena* GetPawnAtSeat(int32 SeatIndex)
+    {
+        auto* SeatComponent = (UFortVehicleSeatComponent*)this->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
+
+        if (!SeatComponent)
+            return nullptr;
+
+        if (SeatIndex < 0 || SeatIndex >= SeatComponent->PlayerSlots.Num())
+            return nullptr;
+
+        auto& PlayerSlot = SeatComponent->PlayerSlots.Get(SeatIndex, FAthenaCarPlayerSlot::Size());
+        return PlayerSlot.Player;
+    }
 };

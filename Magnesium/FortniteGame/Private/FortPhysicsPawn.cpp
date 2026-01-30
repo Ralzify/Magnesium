@@ -196,6 +196,60 @@ void OnRep_ReplicatedAttachedInfo(AFortOctopusTowhookAttachableProjectile* _this
     //printf("CALLED!!!!\n");
 }
 
+bool AFortWeaponRangedMountedCannon::FireActorInCannon(FVector LaunchDir, bool bIsServer)
+{
+    printf("FireActorInCannon\n");
+	printf("Name: %s\n", this->Name.ToString().c_str());
+	printf("LaunchDir: %f %f %f\n", LaunchDir.X, LaunchDir.Y, LaunchDir.Z);
+
+	auto Vehicle = this->Cast<AFortAthenaVehicle>();
+
+	printf("Vehicle: %s\n", Vehicle->Name.ToString().c_str());
+
+    if (!Vehicle)
+        return false;
+
+	auto PushCannon = Vehicle->Cast<AFortAthenaSKPushCannon>();
+
+	printf("PushCannon: %s\n", PushCannon ? "true" : "false");
+
+    if (!PushCannon)
+    {
+		auto MountedCannon = Vehicle->Cast<AFortMountedCannon>();
+
+		printf("MountedCannon: %s\n", MountedCannon ? "true" : "false");
+
+        if (MountedCannon)
+        {
+            if (bIsServer && MountedCannon->HasAuthority())
+            {
+                MountedCannon->ShootPawnOut();
+            }
+        }
+
+        return false;
+    }
+
+    auto PawnAtSeat = GetPawnAtSeat(1);
+
+    if (!PawnAtSeat)
+        return false;
+
+    if (bIsServer)
+    {
+        if (Vehicle->HasAuthority())
+            PushCannon->ShootPawnOut(LaunchDir);
+	}
+
+    return true;
+}
+
+void AFortWeaponRangedMountedCannon::ServerFireActorInCannonHook(AFortWeaponRangedMountedCannon* Cannon, FVector LaunchDir)
+{
+    Cannon->FireActorInCannon(LaunchDir, true);
+    return;
+}
+
 void AFortPhysicsPawn::Hook()
 {
     auto DefaultPhysPawn = GetDefaultObj();
@@ -265,4 +319,11 @@ void AFortPhysicsPawn::Hook()
 
         Utils::Hook<AFortOctopusTowhookAttachableProjectile>(OnRep_ReplicatedAttachedInfoIdx, OnRep_ReplicatedAttachedInfo, OnRep_ReplicatedAttachedInfoOG);
     }
+
+    auto MountedCannonVehicle = AFortWeaponRangedMountedCannon::GetDefaultObj();
+
+    if (MountedCannonVehicle)
+    {
+        Utils::ExecHook(MountedCannonVehicle->GetFunction("FireActorInCannon"), AFortWeaponRangedMountedCannon::ServerFireActorInCannonHook);
+	}
 }

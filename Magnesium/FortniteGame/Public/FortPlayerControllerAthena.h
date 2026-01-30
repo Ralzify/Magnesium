@@ -398,6 +398,7 @@ public:
     DEFINE_FUNC(ServerExecuteInventoryItem, void);
     DEFINE_FUNC(ClientEquipItem, void);
     DEFINE_FUNC(OnRep_PlayerState, void);
+    DEFINE_FUNC(OnRep_Pawn, void);
     DEFINE_FUNC(ServerChangeName, void);
     DEFINE_FUNC(ClientIgnoreMoveInput, void);
     DEFINE_FUNC(ClientIgnoreLookInput, void);
@@ -434,6 +435,7 @@ public:
     static void ServerRepairBuildingActor(UObject*, FFrame&);
     static void ServerAttemptInventoryDrop(UObject*, FFrame&);
     static void ServerPlayEmoteItem(UObject*, FFrame&);
+    static void PlayEmoteInternal(AFortPlayerControllerAthena* PC, UObject* Asset);
     static void ServerClientIsReadyToRespawn(UObject*, FFrame&);
     static void ServerCheat(UObject*, FFrame&);
     DefHookOg(void, ClientOnPawnDied, AFortPlayerControllerAthena*, FFortPlayerDeathReport&);

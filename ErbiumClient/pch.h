@@ -11,7 +11,7 @@
 #include "framework.h"
 #include "../SDK/Includes.h"
 using namespace SDK;
-#include "../Erbium/Erbium/Public/Utils.h"
+#include "../Magnesium/Erbium/Public/Utils.h"
 #include <numeric>
 #include <algorithm>
 

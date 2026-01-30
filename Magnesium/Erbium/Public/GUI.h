@@ -67,6 +67,31 @@ enum class Plot : int
     Custom
 };
 
+enum class Map : int
+{
+    Papaya,
+    Crucible,
+    TutorialMap,
+    EmptyTest,
+    Faceoff,
+    Playground,
+    Deimos,
+    TiltedDeathmatch,
+    DADBRO,
+    Arid,
+    Ch1,
+    Ch2,
+    Snow01,
+    Kevin,
+    FlatGrid,
+    Escape,
+    PropHunt,
+    Loki02,
+    Loki03,
+    Loki04,
+    Loki06
+};
+
 class GUI
 {
 public:
@@ -74,6 +99,7 @@ public:
     static inline EGSStatus gsStatus = NotReady;
     static inline int SelectedPlaylist = static_cast<int>(Playlist::Solos);
     static inline int SelectedPlot = static_cast<int>(Plot::Temperate);
+	static inline int SelectedMap = static_cast<int>(Map::Crucible);
     static void Init();
 
     static bool IsArenaPlaylist()

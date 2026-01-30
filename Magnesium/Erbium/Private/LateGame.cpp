@@ -34,11 +34,11 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Suppressed_Athena_SR_Ore_T03.WID_Assault_Suppressed_Athena_SR_Ore_T03"), 1));
     }
 
-    if (VersionInfo.FortniteVersion >= 8.40)
+    /*if (VersionInfo.FortniteVersion >= 8.40)
     {
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Infantry_Athena_VR.WID_Assault_Infantry_Athena_VR"), 1));
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Infantry_Athena_SR.WID_Assault_Infantry_Athena_SR"), 1));
-    }
+    }*/
 
     if (VersionInfo.FortniteVersion >= 9.01)
     {
@@ -54,7 +54,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/Boss/WID_Boss_Midas.WID_Boss_Midas"), 1));
     }
 
-    if (VersionInfo.FortniteVersion >= 12.30)
+    if (VersionInfo.FortniteVersion >= 12.30 && VersionInfo.FortniteVersion < 13.00)
     {
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Pistol_Donut.WID_Pistol_Donut"), 1));
     }

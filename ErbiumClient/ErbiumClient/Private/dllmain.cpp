@@ -2,7 +2,7 @@
 #include "pch.h"
 #include "../Public/Client.h"
 #include <thread>
-#include "../../../Erbium/Erbium/Public/Configuration.h"
+#include "../../../Magnesium/Erbium/Public/Configuration.h"
 
 void ForceIris(uintptr_t IrisBool)
 {
