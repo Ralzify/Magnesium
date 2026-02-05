@@ -78,6 +78,8 @@ public:
     DEFINE_FUNC(OnLaunchPawn, void);
     DEFINE_FUNC(OnPreLaunchPawn, void);
 
+    static bool FireActorInCannon(UObject* Context, FFrame& Stack);
+
     AFortPlayerPawnAthena* GetPawnAtSeat(int32 SeatIndex)
     {
         auto* SeatComponent = (UFortVehicleSeatComponent*)this->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
@@ -222,9 +224,6 @@ class AFortWeaponRangedMountedCannon : public AActor
 {
 public:
     UCLASS_COMMON_MEMBERS(AFortWeaponRangedMountedCannon);
-
-    bool FireActorInCannon(FVector LaunchDir, bool bIsServer);
-    static void ServerFireActorInCannonHook(AFortWeaponRangedMountedCannon* Cannon, FVector LaunchDir);
 
     AFortPlayerPawnAthena* GetPawnAtSeat(int32 SeatIndex)
     {

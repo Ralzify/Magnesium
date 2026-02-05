@@ -117,6 +117,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	auto Num = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num();
 
 	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 	
     auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
 	if (Playlist && Playlist->RespawnType > 0 && Num > 0)
@@ -145,6 +146,23 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			}
 		}
 	}
+
+	static auto IsRespawningAllowedFunc = GameState->GetFunction("IsRespawningAllowed");
+
+	bool bRespawnAllowed = false;
+
+	if (!IsRespawningAllowedFunc)
+	{
+		auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+
+		// respawn except storm needs to be fixed
+		bRespawnAllowed = Playlist ? Playlist->RespawnType > 0 : false;
+	}
+	else
+		bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerController->PlayerState);
+
+	if (bRespawnAllowed && FConfiguration::HasCustomRespawnPoint)
+		FortPawn->K2_TeleportTo(FConfiguration::CustomRespawnPoint, FRotator(0.f, 0.f, 0.f));
 
 	if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1") && VersionInfo.FortniteVersion == 14.40)
 	{
@@ -1577,6 +1595,85 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				PlayerController->Pawn->CharacterMovement->ProcessEvent(PlayerController->Pawn->CharacterMovement->GetFunction("DisableMovement"), nullptr);
 			}
 
+			if (FConfiguration::bIsCustomMap && FConfiguration::AutoEndGame)
+			{
+				GUI::gsStatus = Ended;
+
+				auto KillerWeapon = DamageCauser ? DamageCauser->WeaponData : nullptr;
+
+				KillerPlayerController->PlayWinEffects(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause, false);
+				KillerPlayerController->ClientNotifyWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
+				KillerPlayerController->ClientNotifyTeamWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
+
+				if (KillerPlayerState != PlayerState && VersionInfo.FortniteVersion >= 19)
+				{
+					auto Crown = FindObject<UFortItemDefinition>(L"/VictoryCrownsGameplay/Items/AGID_VictoryCrown.AGID_VictoryCrown");
+
+					TArray<FFortItemEntryStateValue> StateValues{};
+					auto Value = (FFortItemEntryStateValue*)malloc(FFortItemEntryStateValue::Size());
+					memset((PBYTE)Value, 0, FFortItemEntryStateValue::Size());
+
+					Value->IntValue = 1;
+					Value->StateType = 2;
+					StateValues.Add(*Value, FFortItemEntryStateValue::Size());
+
+					free(Value);
+					KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
+					StateValues.Free();
+				}
+
+				GameState->WinningTeam = KillerPlayerState->TeamIndex;
+				GameState->OnRep_WinningTeam();
+
+				if (GameState->HasWinningPlayerState())
+				{
+					GameState->WinningPlayerState = KillerPlayerState;
+					GameState->OnRep_WinningPlayerState();
+				}
+
+				auto DeadPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
+				auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+
+				UNetDriver* Driver = static_cast<UNetDriver*>(UWorld::GetWorld()->NetDriver);
+
+				auto FindConnectionByPlayerState = [&](AFortPlayerStateAthena* PS) -> UNetConnection*
+					{
+						if (!PS || !Driver)
+							return nullptr;
+
+						for (int i = 0; i < Driver->ClientConnections.Num(); i++)
+						{
+							auto Conn = Driver->ClientConnections[i];
+							if (!Conn || !Conn->PlayerController)
+								continue;
+
+							if (Conn->PlayerController->PlayerState == PS)
+								return Conn;
+						}
+
+						return nullptr;
+					};
+
+				float KillDistanceCm = KillerPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
+				int KillDistanceMeters = static_cast<int>(KillDistanceCm / 100.f);
+
+				auto KillerConn = FindConnectionByPlayerState(KillerPlayerState);
+				auto DeadConn = FindConnectionByPlayerState(DeadPlayerState);
+
+				std::string KillerName = GUI::GetPlayerName(KillerPlayerState, KillerConn);
+				std::string DeadName = GUI::GetPlayerName(DeadPlayerState, DeadConn);
+
+				std::string Distance = std::to_string(KillDistanceMeters);
+
+				FConfiguration::ElimKillerName = KillerName;
+				FConfiguration::ElimEliminatedName = DeadName;
+				FConfiguration::ElimDistance = Distance;
+				FConfiguration::ElimStatusMessage = ":3";
+
+				FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
+				FConfiguration::ElimWeaponName = Name.ToString();
+			}
+
 			if (PlayerController->Pawn && KillerPlayerState && KillerPlayerState != PlayerState && KillerPlayerState->Place == 1)
 			{
 				/*if (PlayerState->Place == 1)
@@ -2041,6 +2138,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
 	auto fullCommand = Msg.ToString();
 
@@ -2091,6 +2189,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 	cheat botemote - Makes your bot emote
     cheat startevent - Starts the event for the current version
 	cheat getlocation - Copies your current location to the clipboard
+	cheat setrespawnpoint - Sets your respawn point to a specified location
     cheat tp <X> <Y> <Z> - Teleports to a location
     cheat launch <X> <Y> <Z> - Launches the player
     cheat savewaypoint - Saves your current location as a waypoint
@@ -2098,6 +2197,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
     cheat skydive - Toggles skydiving
     cheat giveitem <WID/path> <Count = 1> - Gives you an item
     cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
+	cheat clearinventory - Clears your inventory of all items that are droppable
     cheat spawnactor <class/path> - Spawns an actor at your location + 5 meters)"), FName(), 1);
 	}
 	else
@@ -2421,7 +2521,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				LateGame::EquipLoadout(PlayerController);
 				PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
 			}
-			/*else if (command == "revive" || command == "res")
+			else if (command == "revive" || command == "res")
 			{
 				auto Pawn = PlayerController->Pawn;
 
@@ -2439,12 +2539,28 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 					return;
 				}
 
+				auto AbilitySystemComp = PlayerState->AbilitySystemComponent;
+
+				if (!AbilitySystemComp)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find an ability system component!"), FName(), 1.f);
+					return;
+				}
+
 				if (Pawn->IsDBNO())
 				{
-					Pawn->SetDBNO(false);
-					Pawn->SetHealth(30.f);
-					Pawn->IsDBNO(false);
+					for (auto& Ability : AbilitySystemComp->ActivatableAbilities.Items)
+					{
+						AbilitySystemComp->ServerCancelAbility(Ability.Handle, Ability.ActivationInfo);
+						AbilitySystemComp->ServerEndAbility(Ability.Handle, Ability.ActivationInfo, Ability.ActivationInfo.PredictionKeyWhenActivated);
+						AbilitySystemComp->ClientCancelAbility(Ability.Handle, Ability.ActivationInfo);
+						AbilitySystemComp->ClientEndAbility(Ability.Handle, Ability.ActivationInfo);
+					}
 
+					Pawn->IsDBNO(false);
+					Pawn->bPlayedDying(false);
+
+					Pawn->SetHealth(30.f);
 					Pawn->OnRep_IsDBNO();
 
 					PlayerController->ClientOnPawnRevived(PlayerController);
@@ -2452,12 +2568,75 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 					PlayerController->ClientMessage(FString(L"Player revived!"), FName(), 1.f);
 				}
-			}*/
+			}
+			else if (command == "setrespawnpoint")
+			{
+				if (args.size() != 4)
+				{
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					return;
+				}
+
+				static auto IsRespawningAllowedFunc = GameState->GetFunction("IsRespawningAllowed");
+
+				bool bRespawnAllowed = false;
+
+				if (!IsRespawningAllowedFunc)
+				{
+					auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+
+					// respawn except storm needs to be fixed
+					bRespawnAllowed = Playlist ? Playlist->RespawnType > 0 : false;
+				}
+				else
+					bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerController->PlayerState);
+
+				if (bRespawnAllowed)
+				{
+					double X = 0., Y = 0., Z = 0.;
+
+					X = strtod(args[1].c_str(), nullptr);
+					Y = strtod(args[2].c_str(), nullptr);
+					Z = strtod(args[3].c_str(), nullptr);
+
+					FConfiguration::CustomRespawnPoint = FVector((float)X, (float)Y, (float)Z);
+					PlayerController->ClientMessage(FString(L"Set the respawn point!"), FName(), 1.f);
+				}
+				else
+				{
+					PlayerController->ClientMessage(FString(L"You are not on a respawning playlist!"), FName(), 1.f);
+					return;
+				}
+			}
+			else if (command == "clearinventory" || command == "wipeinventory" || command == "clearinv" || command == "clearall" || command == "wipeall")
+			{
+				std::vector<std::pair<FGuid, int>> GuidsAndCountsToRemove;
+				auto& ItemInstances = PlayerController->WorldInventory->Inventory.ItemInstances;
+
+				for (int i = 0; i < ItemInstances.Num(); ++i)
+				{
+					auto ItemInstance = ItemInstances[i];
+					auto& ItemEntry = ItemInstance->GetItemEntry();
+					const auto ItemDefinition = ItemEntry.ItemDefinition;
+
+					if (ItemDefinition->HasbCanBeDropped() ? ItemDefinition->bCanBeDropped : (ItemDefinition->GetPickupComponent() ? ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false))
+					{
+						GuidsAndCountsToRemove.push_back({ ItemEntry.ItemGuid, ItemEntry.Count });
+					}
+				}
+
+				for (auto& [Guid, Count] : GuidsAndCountsToRemove)
+				{
+					PlayerController->WorldInventory->Remove(Guid);
+				}
+
+				PlayerController->ClientMessage(FString(L"Cleared the inventory!"), FName(), 1.f);
+			}
 			else if (command == "gravity")
 			{
 				if (args.size() < 2)
 				{
-					PlayerController->ClientMessage(FString(L"Usage: gravity <multiplier>"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Please specify the amount you'd like to modify the gravity!"), FName(), 1.f);
 					return;
 				}
 

@@ -1022,6 +1022,13 @@ void GUI::Init()
                 ImGui::Text("Configure Player:");
                 SmallSeparator(Width);
 
+                if (ImGui::Button("Copy Player's Location", ImVec2(Width, Height)))
+                {
+                    auto Location = TargetPawn->K2_GetActorLocation();
+
+                    Memcury::Util::CopyToClipboard(std::to_string(Location.X) + " " + std::to_string(Location.Y) + " " + std::to_string(Location.Z));
+				}
+
                 if (ImGui::Button("Regenerate Health & Shield", ImVec2(Width, Height)))
                 {
                     TargetPawn->SetHealth(TargetPawn->GetMaxHealth());
@@ -1550,6 +1557,14 @@ void GUI::Init()
         }
         case 6:
         {
+            ImGui::Text("Custom Map Configuration:");
+            SmallSeparator(Width);
+
+			ImGui::Checkbox("One Kill Ends Game", &FConfiguration::AutoEndGame);
+
+            ImGui::Spacing();
+			ImGui::Spacing();
+
             ImGui::Text("Use Custom Map (VERY EXPERIMENTAL):");
             SmallSeparator(Width);
 
@@ -1559,7 +1574,7 @@ void GUI::Init()
             ImGui::RadioButton("Titled Deathmatch", &SelectedMap, (int)Map::TiltedDeathmatch);
             ImGui::RadioButton("Athena", &SelectedMap, (int)Map::Ch1);
             ImGui::RadioButton("Apollo", &SelectedMap, (int)Map::Ch2);
-            ImGui::RadioButton("Snow Map 01", &SelectedMap, (int)Map::Ch2);
+            ImGui::RadioButton("Snow Map 01", &SelectedMap, (int)Map::Snow01);
             ImGui::RadioButton("Flat Grid", &SelectedMap, (int)Map::FlatGrid);
             ImGui::RadioButton("Escape", &SelectedMap, (int)Map::Escape);
             ImGui::RadioButton("Prop Hunt", &SelectedMap, (int)Map::PropHunt);

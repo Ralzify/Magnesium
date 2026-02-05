@@ -27,6 +27,7 @@ struct FConfiguration
 
 	static inline auto CustomMap = L"";
     static inline auto bIsCustomMap = false;
+    static inline auto AutoEndGame = false;
 
     static inline std::string BotName = "Magnesium Bot ";
     static inline auto UseCustomBotNames = false;
@@ -38,7 +39,10 @@ struct FConfiguration
     static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
     static inline auto bEnableCheats = true;
 	static inline auto bMovingBus = true;
-	static inline auto BusStartDelay = 90.f;
+	static inline auto BusStartDelay = 60.f;
+
+    static inline auto HasCustomRespawnPoint = false;
+	static inline auto CustomRespawnPoint = FVector(0.f, 0.f, 0.f);
 
     static inline auto bSiphon = false;
     static inline auto SiphonAmount = 50;

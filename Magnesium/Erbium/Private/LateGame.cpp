@@ -760,7 +760,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetOSLoadout()
 
 void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
 {
-    if (!PlayerController /* || !PlayerController->HasAuthority() */)
+    if (!PlayerController || !PlayerController->HasAuthority())
         return;
 
     auto WorldInventory = PlayerController->WorldInventory;

@@ -130,7 +130,8 @@ public:
     DEFINE_FUNC(OnCapsuleBeginOverlap, void);
     DEFINE_FUNC(ServerHandlePickup, void);
     DEFINE_FUNC(IsDBNO, bool);
-    DEFINE_FUNC(SetDBNO, void);
+    DEFINE_FUNC(bIsDying, bool);
+    DEFINE_FUNC(bPlayedDying, bool);
     DEFINE_FUNC(PickUpActor, void);
     DEFINE_FUNC(OnRep_IsInAnyStorm, void);
     DEFINE_FUNC(OnRep_IsInsideSafeZone, void);

@@ -1,5 +1,6 @@
 #pragma once
 #include "../../pch.h"
+#include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
 
 struct FGameplayAbilitySpecHandle
 {
@@ -35,6 +36,24 @@ public:
     DEFINE_STRUCT_PROP(Current, int16);
 };
 
+enum class EGameplayAbilityActivationMode : uint8
+{
+    Authority = 0,
+    NonAuthority = 1,
+    Predicting = 2,
+    Confirmed = 3,
+	Rejected = 4,
+};
+
+struct FGameplayAbilityActivationInfo
+{
+    public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FGameplayAbilityActivationInfo);
+
+    DEFINE_STRUCT_PROP(ActivationMode, EGameplayAbilityActivationMode);
+	DEFINE_STRUCT_PROP(PredictionKeyWhenActivated, FPredictionKey);
+};
+
 struct FGameplayAbilitySpec : public FFastArraySerializerItem
 {
 public:
@@ -44,6 +63,7 @@ public:
     DEFINE_STRUCT_PROP(Ability, UFortGameplayAbility*);
     DEFINE_STRUCT_PROP(Level, int32);
     DEFINE_STRUCT_PROP(InputID, int32);
+    DEFINE_STRUCT_PROP(ActivationInfo, FGameplayAbilityActivationInfo);
     DEFINE_STRUCT_NEWOBJ_PROP(SourceObject, UObject);
     DEFINE_STRUCT_BITFIELD_PROP(InputPressed);
 };
@@ -150,6 +170,24 @@ public:
     UCLASS_COMMON_MEMBERS(IFortAbilitySystemInterface);
 };
 
+enum class ETenacityType : uint8
+{
+    Default = 0,
+    MaxHealth = 1,
+    Custom = 2,
+};
+
+class UGAB_AthenaDBNO_C : public UFortGameplayAbility
+{
+public:
+    UCLASS_COMMON_MEMBERS(UGAB_AthenaDBNO_C);
+
+    DEFINE_BITFIELD_PROP(ImprovedDBNO, bool);
+    DEFINE_PROP(FortPlayerPawn, AFortPlayerPawnAthena*);
+    DEFINE_PROP(TenacityAmount, float);
+    DEFINE_PROP(TeacityType, ETenacityType);
+};
+
 class UAbilitySystemComponent : public UActorComponent
 {
 public:
@@ -158,6 +196,10 @@ public:
     DEFINE_PROP(ActivatableAbilities, FGameplayAbilitySpecContainer);
     DEFINE_PROP(ActiveGameplayEffects, FActiveGameplayEffectsContainer);
 
+    DEFINE_FUNC(ServerCancelAbility, void);
+    DEFINE_FUNC(ServerEndAbility, void);
+    DEFINE_FUNC(ClientCancelAbility, void);
+    DEFINE_FUNC(ClientEndAbility, void);
     DEFINE_FUNC(ClientActivateAbilityFailed, void);
     DEFINE_FUNC(NetMulticast_InvokeGameplayCueAdded, void);
     DEFINE_FUNC(NetMulticast_InvokeGameplayCueAdded_WithParams, void);

@@ -551,7 +551,7 @@ void AFortPlayerPawnAthena::EndSkydiving(AFortPlayerPawnAthena* Pawn)
 	if (PlayerController && Pawn->bIsSkydiving)
 		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetLand(), 1, Pawn);
 
-	if (Pawn->bIsSkydivingFromBus)
+	if (Pawn && Pawn->bIsSkydivingFromBus)
 	{
 		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetVisit(), 1, Pawn);
 	}
@@ -564,6 +564,35 @@ void AFortPlayerPawnAthena::ServerReviveFromDBNO(UObject* Context, FFrame& Stack
 	Stack.StepCompiledIn(&EventInstigator);
 	Stack.IncrementCode();
 	auto Pawn = (AFortPlayerPawnAthena*)Context;
+	auto Controller = (AFortPlayerControllerAthena*)Pawn->Controller;
+	auto PlayerState = (AFortPlayerStateAthena*)Pawn->PlayerState;
+
+	if (!Controller || !PlayerState)
+		return;
+
+	bool bIsSelfRevive = (EventInstigator == Controller);
+
+	auto AbilitySystemComp = PlayerState->AbilitySystemComponent;
+
+	for (auto& Ability : AbilitySystemComp->ActivatableAbilities.Items)
+	{
+		if (Ability.Ability->Class == UGAB_AthenaDBNO_C::StaticClass())
+		{
+			AbilitySystemComp->ServerCancelAbility(Ability.Handle, Ability.ActivationInfo);
+			AbilitySystemComp->ServerEndAbility(Ability.Handle, Ability.ActivationInfo, Ability.ActivationInfo.PredictionKeyWhenActivated);
+			AbilitySystemComp->ClientCancelAbility(Ability.Handle, Ability.ActivationInfo);
+			AbilitySystemComp->ClientEndAbility(Ability.Handle, Ability.ActivationInfo);
+		}
+	}
+
+	Pawn->IsDBNO(false);
+	Pawn->bPlayedDying(false);
+
+	Pawn->SetHealth(30.f);
+	Pawn->OnRep_IsDBNO();
+
+	Controller->ClientOnPawnRevived(EventInstigator);
+	Controller->RespawnPlayerAfterDeath(false);
 }
 
 void AFortPlayerPawnAthena::ServerThrowCarriedPlayer_(UObject* Context, FFrame& Stack)
