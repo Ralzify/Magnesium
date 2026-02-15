@@ -30,6 +30,7 @@ class LateGame
 public:
     static TArray<TArray<TPair<FString, int>>> GetLoadout();
     static TArray<TArray<TPair<FString, int>>> GetOSLoadout();
+    static TArray<TArray<TPair<FString, int>>> GetCustomLoadout();
 
     static void EquipLoadout(AFortPlayerControllerAthena* PlayerController);
 };

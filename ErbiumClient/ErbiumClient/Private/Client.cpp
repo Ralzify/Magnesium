@@ -149,7 +149,7 @@ void Client::Init()
 					{
 						Playlist->RespawnTime.Curve.CurveTable = nullptr;
 						Playlist->RespawnTime.Curve.RowName = FName();
-						Playlist->RespawnTime.Value = 3;
+						Playlist->RespawnTime.Value = FConfiguration::RespawnTime;
 					}
 					Playlist->RespawnType = 2; // InfiniteRespawnExceptStorm
 					if (Playlist->HasbAllowJoinInProgress())

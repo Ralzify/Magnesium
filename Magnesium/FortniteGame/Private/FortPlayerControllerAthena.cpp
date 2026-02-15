@@ -1686,11 +1686,14 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 				auto KillerWeapon = DamageCauser ? DamageCauser->WeaponData : nullptr;
 
-				if (VersionInfo.FortniteVersion >= 16.00)
+				if (FConfiguration::bUseWinLines)
 				{
-					KillerPlayerController->PlayWinEffects(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause, false);
-					KillerPlayerController->ClientNotifyWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
-					KillerPlayerController->ClientNotifyTeamWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
+					if (VersionInfo.FortniteVersion >= 16.00)
+					{
+						KillerPlayerController->PlayWinEffects(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause, false);
+						KillerPlayerController->ClientNotifyWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
+						KillerPlayerController->ClientNotifyTeamWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
+					}
 				}
 
 				if (KillerPlayerState != PlayerState && VersionInfo.FortniteVersion >= 19)
@@ -4531,7 +4534,10 @@ void AFortPlayerControllerAthena::ServerLoadingScreenDropped_(UObject* Context, 
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
-	callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerLoadingScreenDropped);
+	if (!PlayerController)
+		return callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerLoadingScreenDropped);
+
+	return callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerLoadingScreenDropped);
 }
 
 void AFortPlayerControllerAthena::ServerCreativeSetFlightSpeedIndex(UObject* Context, FFrame& Stack)

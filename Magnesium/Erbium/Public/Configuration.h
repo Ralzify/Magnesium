@@ -25,9 +25,11 @@ struct FConfiguration
 
     static inline auto CreativePlot = L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium";
 
-	static inline auto CustomMap = L"";
     static inline auto bIsCustomMap = false;
     static inline auto AutoEndGame = false;
+    static inline auto CustomMap = L"";
+
+    static inline auto bAutoDump = true;
 
     static inline std::string BotName = "Magnesium Bot ";
     static inline auto UseCustomBotNames = false;
@@ -44,10 +46,13 @@ struct FConfiguration
     static inline auto HasCustomRespawnPoint = false;
 	static inline auto CustomRespawnPoint = FVector(0.f, 0.f, 0.f);
 
+    static inline auto bRideableProjectiles = false;
+
     static inline auto bSiphon = false;
     static inline auto SiphonAmount = 50;
 
     static inline auto bEnableTrickshotTab = false;
+    static inline auto bUseWinLines = true;
     static inline auto bInfiniteRender = false;
     static inline auto bFModCannon = false;
 	static inline auto CannonLaunchMultiplier = 1.f;
@@ -55,10 +60,25 @@ struct FConfiguration
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;
 
+    static inline auto bUseCustomLoadout = false;
+    static inline FString Primary;
+    static inline FString Secondary;
+    static inline FString Tertiary;
+    static inline FString Quaternary;
+    static inline FString Quinary;
+    static inline FString Traps;
+    static inline auto PrimaryAmount = 1;
+    static inline auto SecondaryAmount = 1;
+    static inline auto TertiaryAmount = 1;
+    static inline auto QuaternaryAmount = 1;
+    static inline auto QuinaryAmount = 1;
+    static inline auto TrapsAmount = 6;
+
     static inline auto bForceRespawns = false; // build your client with this too!
     static inline auto bKeepInventory = false;
     static inline auto bJoinInProgress = false;
 	static inline auto PermanentRespawn = false;
+    static inline auto RespawnTime = 3;
 
     static inline auto bAutoBusStart = true;
 

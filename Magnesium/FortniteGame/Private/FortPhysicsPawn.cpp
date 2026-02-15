@@ -23,20 +23,6 @@ public:
     DEFINE_STRUCT_PROP(AngularVelocity, FVector);
 };
 
-class UPrimitiveComponent : public UObject
-{
-public:
-    UCLASS_COMMON_MEMBERS(UPrimitiveComponent);
-
-    DEFINE_BITFIELD_PROP(bComponentToWorldUpdated);
-
-    DEFINE_FUNC(K2_SetWorldLocationAndRotation, void);
-    DEFINE_FUNC(K2_SetWorldTransform, void);
-    DEFINE_FUNC(SetPhysicsLinearVelocity, void);
-    DEFINE_FUNC(SetPhysicsAngularVelocityInDegrees, void);
-    DEFINE_FUNC(SetPhysicsAngularVelocityInRadians, void);
-};
-
 void AFortPhysicsPawn::ServerMove(UObject* Context, FFrame& Stack)
 {
     FQuat Rotation;

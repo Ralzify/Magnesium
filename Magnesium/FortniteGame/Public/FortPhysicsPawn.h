@@ -59,6 +59,55 @@ public:
     }
 };
 
+class UPrimitiveComponent : public UObject
+{
+public:
+    UCLASS_COMMON_MEMBERS(UPrimitiveComponent);
+
+    DEFINE_BITFIELD_PROP(bComponentToWorldUpdated);
+
+    DEFINE_FUNC(CanCharacterStepUp, bool);
+    DEFINE_FUNC(K2_SetWorldLocationAndRotation, void);
+    DEFINE_FUNC(K2_SetWorldTransform, void);
+    DEFINE_FUNC(SetPhysicsLinearVelocity, void);
+    DEFINE_FUNC(SetPhysicsAngularVelocityInDegrees, void);
+    DEFINE_FUNC(SetPhysicsAngularVelocityInRadians, void);
+};
+
+enum class ECollisionEnabled : uint8
+{
+    NoCollision = 0,
+    QueryOnly = 1,
+    PhysicsOnly = 2,
+    QueryAndPhysics = 3,
+	ECollisionEnabled_MAX = 4
+};
+
+enum class ECollisionResponse : uint8
+{
+    ECR_Ignore = 0,
+    ECR_Overlap = 1,
+    ECR_Block = 2,
+	ECollisionResponse_MAX = 3
+};
+
+enum class EWalkableSlopeBehavior : uint8
+{
+    WalkableSlope_Default = 0,
+    WalkableSlope_Increase = 1,
+    WalkableSlope_Decrease = 2,
+    WalkableSlope_Unwalkable = 3,
+	WalkableSlope_Max = 4
+};
+
+struct FWalkableSlopeOverride
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FWalkableSlopeOverride);
+
+    DEFINE_STRUCT_PROP(WalkableSlopeBehavior, EWalkableSlopeBehavior)
+    DEFINE_STRUCT_PROP(WalkableSlopeAngle, float);
+};
 
 class AFortAthenaVehicle : public AActor
 {

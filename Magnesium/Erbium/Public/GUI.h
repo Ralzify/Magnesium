@@ -33,6 +33,8 @@ enum class Playlist : int
     Gav,
     Retrac1v1,
     RetracTurtle,
+    TiltedZW,
+    RewindDZW,
     Event,
     Custom
 };

@@ -7,9 +7,11 @@
 #include "../../ImGui/imgui_impl_dx11.h"
 #include "../Public/Configuration.h"
 #include "../Public/Events.h"
+#include "../Public/Misc.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
 #include "../../Engine/Public/NetDriver.h"
+#include "../../FortniteGame/Public/FortPhysicsPawn.h"
 #include <sstream>
 #include <fstream>
 #include <string>
@@ -281,6 +283,15 @@ void GUI::Init()
                     SelectedUI = 4;
                     ImGui::EndTabItem();
                 }
+
+                if (FConfiguration::bLateGame)
+                {
+                    if (ImGui::BeginTabItem("LateGame"))
+                    {
+                        SelectedUI = 3;
+                        ImGui::EndTabItem();
+                    }
+                }
             }
 
             if (gsStatus >= Joinable)
@@ -292,10 +303,13 @@ void GUI::Init()
                 }
             }
 
-            if (ImGui::BeginTabItem("Dump"))
+            if (FConfiguration::bEnableTrickshotTab)
             {
-                SelectedUI = 3;
-                ImGui::EndTabItem();
+                if (ImGui::BeginTabItem("Trickshot"))
+                {
+                    SelectedUI = 7;
+                    ImGui::EndTabItem();
+                }
             }
 
             ImGui::EndTabBar();
@@ -385,19 +399,21 @@ void GUI::Init()
                 ImGui::Spacing();
                 ImGui::Spacing();
 
-                bool IsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
-                bool IsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
+                bool bIsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
+                bool bIsDesertZW = (SelectedPlaylist == static_cast<int>(Playlist::RewindDZW));
+                bool bIsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
 				bool bIsRetrac1v1 = (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1));
 				bool bIsRetracTurtle = (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle));
+                bool bIsCreative = (SelectedPlaylist == static_cast<int>(Playlist::Creative));
 
                 ImGui::Text("Pre-Game Configuration:");
                 SmallSeparator(Width);
 
-                if (IsGavMap)
+                if (bIsGavMap)
                 {
                     ImGui::Text("- Playing Gav 1v1 Map.");
 				}
-                else if (IsEventPlaylist)
+                else if (bIsEventPlaylist)
                 {
 					ImGui::Text("- Playing Event Playlist.");
                 }
@@ -405,14 +421,21 @@ void GUI::Init()
                 {
                     ImGui::Text("- Playing Retrac Custom Map.");
                 }
+                else if (bIsCreative)
+                {
+                    ImGui::Text("- Playing Creative.");
+				}
+                else if (bIsDesertZW)
+                {
+                    ImGui::Text("- Playing Rewind Custom Map.");
+				}
                 else
                 {
                     if (gsStatus < Joinable)
                     {
-                        ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
+                        ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
 
-                        if (VersionInfo.FortniteVersion <= 23.50)
-                            ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
+                        ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
 
                         static bool bInitializedZone = false;
 
@@ -422,28 +445,11 @@ void GUI::Init()
                             bInitializedZone = true;
                         }
 
+						ImGui::Checkbox("Auto Dump Items", &FConfiguration::bAutoDump);
+
                         ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
 
                         ImGui::Checkbox("Lategame", &FConfiguration::bLateGame);
-
-                        if (FConfiguration::bLateGame)
-                        {
-                            if (FConfiguration::bForceRespawns)
-                            {
-                                // ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
-                                ImGui::Checkbox("Toggle Permanant Respawn", &FConfiguration::PermanentRespawn);
-                            }
-
-                            ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
-
-                            ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
-
-                            ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
-
-                            ImGui::PushItemWidth(Width);
-                            ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
-                            ImGui::PopItemWidth();
-                        }
 
                         if (FConfiguration::bAutoBusStart)
                         {
@@ -456,7 +462,7 @@ void GUI::Init()
 
                 ImGui::Spacing();
 
-				if (!IsGavMap || !IsEventPlaylist || !bIsRetrac1v1 || !bIsRetracTurtle)
+				if (!bIsGavMap || !bIsEventPlaylist || !bIsRetrac1v1 || !bIsRetracTurtle)
                 {
                     if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                     {
@@ -486,6 +492,7 @@ void GUI::Init()
                 ImGui::Checkbox("Infinite Materials", &FConfiguration::bInfiniteMats);
                 ImGui::Checkbox("Infinite Ammo", &FConfiguration::bInfiniteAmmo);
                 ImGui::Checkbox("Toggle Cheat Commands", &FConfiguration::bEnableCheats);
+                ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
                 ImGui::Checkbox("Siphon", &FConfiguration::bSiphon);
 
                 if (FConfiguration::bSiphon)
@@ -499,7 +506,7 @@ void GUI::Init()
                     TArray<ABuildingSMActor*> Builds;
                     Utils::GetAll<ABuildingSMActor>(Builds);
 
-                    for (auto& Build : Builds) // this
+                    for (auto& Build : Builds)
                     {
                         if (Build && Build->bPlayerPlaced)
                             Build->SilentDie(true);
@@ -627,7 +634,7 @@ void GUI::Init()
                 ImGui::SetNextItemWidth(260.0f);
                 ImGui::InputText("", commandBuffer, IM_ARRAYSIZE(commandBuffer));
 
-                if (ImGui::Button("Execute"))
+                if (ImGui::Button("Execute Console Command", ImVec2(Width, Height)))
                 {
                     std::string str = commandBuffer;
                     auto wstr = std::wstring(str.begin(), str.end());
@@ -687,7 +694,7 @@ void GUI::Init()
                 }
             }
 
-            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11)
+            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 29.00)
             {
                 ImGui::Spacing();
 
@@ -695,12 +702,20 @@ void GUI::Init()
                 SmallSeparator(Width);
 
                 if (VersionInfo.FortniteVersion == 27.11)
+                {
                     ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
+                    ImGui::RadioButton("Rewind Desert Zone Wars", &SelectedPlaylist, (int)Playlist::RewindDZW);
+                }
 
                 if (VersionInfo.FortniteVersion == 14.40)
                 {
                     ImGui::RadioButton("Retrac 1v1 Map", &SelectedPlaylist, (int)Playlist::Retrac1v1);
                     ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
+                }
+
+                if (VersionInfo.FortniteVersion == 29.00)
+                {
+                    ImGui::RadioButton("Tilted Zone Wars", &SelectedPlaylist, (int)Playlist::TiltedZW);
                 }
             }
 
@@ -758,7 +773,7 @@ void GUI::Init()
             }
             case (int)Playlist::SlideSolos:
             {
-                FConfiguration::Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Slide/Playlist_Slide_Solo.Playlist_Slide_Solo";
                 break;
             }
             case (int)Playlist::SlideDuos:
@@ -810,6 +825,18 @@ void GUI::Init()
                 FConfiguration::bLateGame = false;
                 break;
             }
+            case (int)Playlist::TiltedZW:
+            {
+                FConfiguration::Playlist = L"/Game/Jett/Playlist_TiltedZW.Playlist_TiltedZW";
+                FConfiguration::bLateGame = false;
+                break;
+			}
+            case (int)Playlist::RewindDZW:
+            {
+                FConfiguration::Playlist = L"/Game/Rewind/Playlist_DesertMode.Playlist_DesertMode";
+                FConfiguration::bLateGame = false;
+                break;
+			}
             case (int)Playlist::Event:
             {
                 auto& Event = Events::EventsArray[0];
@@ -1271,102 +1298,223 @@ void GUI::Init()
                     }
 				}
 
+                ImGui::Spacing();
+                ImGui::Spacing();
+
+                std::string nameStr;
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputText("New Name", &nameStr);
+
+				if (ImGui::Button("Change Player's Name", ImVec2(Width, Height)))
+                {
+                    if (nameStr.empty())
+                        nameStr = TargetPS->GetPlayerName().ToString();
+
+                    std::wstring nameW(nameStr.begin(), nameStr.end());
+                    FString NewName = FString(nameW.c_str());
+
+                    if (!TargetPC)
+                        return;
+
+                    TargetPC->ServerChangeName(NewName);
+                    TargetPS->OnRep_PlayerName();
+                }
             }
 
             break;
         }
         case 3:
         {
-            static auto PlaylistClass = UFortPlaylistAthena::StaticClass();
+            ImGui::Text("LateGame Options:");
+            SmallSeparator(Width);
 
-            if (ImGui::Button("Dump Items"))
+            ImGui::Checkbox("Late Game", &FConfiguration::bLateGame);
+            ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
+            ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
+            ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
+            ImGui::Checkbox("Use Custom LateGame Loadout", &FConfiguration::bUseCustomLoadout);
+
+            if (FConfiguration::bForceRespawns)
             {
-                std::stringstream ss;
+                ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
+                ImGui::Checkbox("Toggle Permanant Respawn", &FConfiguration::PermanentRespawn);
 
-                ss << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
-                char version[6];
+                ImGui::PushItemWidth(Width);
+                ImGui::SliderInt("Respawn Time", &FConfiguration::RespawnTime, 1, 10);
+                ImGui::PopItemWidth();
+            }
 
-                sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
-                ss << "Fortnite Version: " << version << "\n\n";
+            ImGui::PushItemWidth(Width);
+            ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
+            ImGui::PopItemWidth();
 
-                auto RarityEnum = EFortRarity::StaticEnum();
-                for (int i = 0; i < TUObjectArray::Num(); i++)
+            static char PrimaryWeaponBuffer[256] = { 0 };
+            static char SecondaryWeaponBuffer[256] = { 0 };
+            static char TertiaryWeaponBuffer[256] = { 0 };
+            static char QuaternaryWeaponBuffer[256] = { 0 };
+            static char QuinaryWeaponBuffer[256] = { 0 };
+            static char TrapsBuffer[256] = { 0 };
+
+            static int PrimaryAmountBuffer = 1;
+            static int SecondaryAmountBuffer = 1;
+            static int TertiaryAmountBuffer = 1;
+            static int QuaternaryAmountBuffer = 1;
+            static int QuinaryAmountBuffer = 1;
+            static int TrapsAmountBuffer = 6;
+
+            static bool bBuffersInitialized = false;
+            static std::string LoadoutStatusMessage;
+            static std::chrono::high_resolution_clock::time_point StatusMessageTime;
+            static std::string ApplyLoadoutStatusMessage;
+            static std::chrono::high_resolution_clock::time_point ApplyStatusMessageTime;
+
+            if (FConfiguration::bUseCustomLoadout)
+            {
+                if (!bBuffersInitialized)
                 {
-                    auto Object = TUObjectArray::GetObjectByIndex(i);
-                    if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortWorldItemDefinition>())
-                        continue;
-                    auto Item = (UFortWorldItemDefinition*)Object;
+                    strcpy_s(PrimaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Primary));
+                    strcpy_s(SecondaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Secondary));
+                    strcpy_s(TertiaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Tertiary));
+                    strcpy_s(QuaternaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Quaternary));
+                    strcpy_s(QuinaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Quinary));
+                    strcpy_s(TrapsBuffer, TCHAR_TO_UTF8(*FConfiguration::Traps));
 
-                    FString Name = UKismetTextLibrary::Conv_TextToString(Item->HasDisplayName() ? Item->DisplayName : Item->ItemName);
+                    PrimaryAmountBuffer = FConfiguration::PrimaryAmount;
+                    SecondaryAmountBuffer = FConfiguration::SecondaryAmount;
+                    TertiaryAmountBuffer = FConfiguration::TertiaryAmount;
+                    QuaternaryAmountBuffer = FConfiguration::QuaternaryAmount;
+                    QuinaryAmountBuffer = FConfiguration::QuinaryAmount;
+                    TrapsAmountBuffer = FConfiguration::TrapsAmount;
 
-                    ss << "- " << UKismetSystemLibrary::GetPathName(Item).ToString() << "\n";
-                    ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
+                    bBuffersInitialized = true;
+                }
 
-                    auto Names = *(TArray<TPair<FName, int64>>*)(__int64(RarityEnum) + 0x40);
+                ImGui::NewLine();
 
-                    for (int i = 0; i < Names.Num(); i++)
+                ImGui::Text("Custom Loadout Slots:");
+                SmallSeparator(Width);
+
+                ImGui::PushItemWidth(Width);
+                ImGui::InputText("Slot 1", PrimaryWeaponBuffer, sizeof(PrimaryWeaponBuffer));
+                ImGui::InputInt("Slot 1 Amount", &PrimaryAmountBuffer);
+
+                ImGui::InputText("Slot 2", SecondaryWeaponBuffer, sizeof(SecondaryWeaponBuffer));
+                ImGui::InputInt("Slot 2 Amount", &SecondaryAmountBuffer);
+
+                ImGui::InputText("Slot 3", TertiaryWeaponBuffer, sizeof(TertiaryWeaponBuffer));
+                ImGui::InputInt("Slot 3 Amount", &TertiaryAmountBuffer);
+
+                ImGui::InputText("Slot 4", QuaternaryWeaponBuffer, sizeof(QuaternaryWeaponBuffer));
+                ImGui::InputInt("Slot 4 Amount", &QuaternaryAmountBuffer);
+
+                ImGui::InputText("Slot 5", QuinaryWeaponBuffer, sizeof(QuinaryWeaponBuffer));
+                ImGui::InputInt("Slot 5 Amount", &QuinaryAmountBuffer);
+
+                ImGui::InputText("Trap", TrapsBuffer, sizeof(TrapsBuffer));
+                ImGui::InputInt("Trap Amount", &TrapsAmountBuffer);
+                ImGui::PopItemWidth();
+
+                if (ImGui::Button("Apply Loadout", ImVec2(Width, Height)))
+                {
+                    FConfiguration::Primary = FString(PrimaryWeaponBuffer);
+                    FConfiguration::Secondary = FString(SecondaryWeaponBuffer);
+                    FConfiguration::Tertiary = FString(TertiaryWeaponBuffer);
+                    FConfiguration::Quaternary = FString(QuaternaryWeaponBuffer);
+                    FConfiguration::Quinary = FString(QuinaryWeaponBuffer);
+                    FConfiguration::Traps = FString(TrapsBuffer);
+
+                    FConfiguration::PrimaryAmount = PrimaryAmountBuffer;
+                    FConfiguration::SecondaryAmount = SecondaryAmountBuffer;
+                    FConfiguration::TertiaryAmount = TertiaryAmountBuffer;
+                    FConfiguration::QuaternaryAmount = QuaternaryAmountBuffer;
+                    FConfiguration::QuinaryAmount = QuinaryAmountBuffer;
+                    FConfiguration::TrapsAmount = TrapsAmountBuffer;
+
+                    printf("Saved current loadout.\n");
+                    ApplyLoadoutStatusMessage = "Loadout saved successfully!";
+                    ApplyStatusMessageTime = std::chrono::high_resolution_clock::now();
+
+                    if (!ApplyLoadoutStatusMessage.empty())
                     {
-                        auto& Pair = Names[i];
-                        auto& Name = Pair.Key();
-                        auto& Value = Pair.Value();
+                        auto Elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - StatusMessageTime).count();
 
-                        if (Value == Item->Rarity)
+                        if (Elapsed < 5)
                         {
-                            auto str = Name.ToString();
-                            auto colcolIdx = str.find_last_of("::");
+                            ImVec4 StatusColor = (ApplyLoadoutStatusMessage.find("Failed.") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
 
-                            auto RealName = colcolIdx == -1 ? str : str.substr(colcolIdx + 1);
-
-                            ss << "-     Rarity: " << RealName << "\n";
+                            ImGui::TextColored(StatusColor, "%s", LoadoutStatusMessage.c_str());
+                        }
+                        else
+                        {
+                            ApplyLoadoutStatusMessage.clear();
                         }
                     }
                 }
 
-                std::ofstream of("DumpedItems.txt", std::ios::trunc);
+                ImGui::Spacing();
 
-                of << ss.str();
-                of.close();
-            }
-            else if (PlaylistClass && ImGui::Button("Dump Playlists"))
-            {
-                std::stringstream ss;
+                ImGui::Text("Save/Load Loadout:");
+                SmallSeparator(Width);
 
-                ss << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
-                char version[6];
-
-                sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
-                ss << "Fortnite Version: " << version << "\n\n";
-
-                auto RarityEnum = EFortRarity::StaticEnum();
-                for (int i = 0; i < TUObjectArray::Num(); i++)
+                if (ImGui::Button("Save Loadout to File", ImVec2(Width, Height)))
                 {
-                    auto Object = TUObjectArray::GetObjectByIndex(i);
-                    if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortPlaylistAthena>())
-                        continue;
-                    auto Playlist = (UFortPlaylistAthena*)Object;
+                    if (LoadoutManager::SaveLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
+                    {
+                        LoadoutStatusMessage = "Loadout saved successfully!";
+                        printf("Loadout saved to: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
+                    }
+                    else
+                    {
+                        LoadoutStatusMessage = "Failed to save loadout!";
+                    }
 
-                    FString Name = UKismetTextLibrary::Conv_TextToString(Playlist->UIDisplayName);
-
-                    ss << "- " << UKismetSystemLibrary::GetPathName(Playlist).ToString() << "\n";
-                    ss << "-     Name: " << (Name.GetData() ? Name.ToString() : "None") << "\n";
-                    if (Playlist->HasMaxPlayers())
-                        ss << "-     Max Players: " << std::to_string(Playlist->MaxPlayers) << "\n";
-                    if (Playlist->HasMaxSquadSize())
-                        ss << "-     Squad Size: " << std::to_string(Playlist->MaxSquadSize) << "\n";
+                    StatusMessageTime = std::chrono::high_resolution_clock::now();
                 }
 
-                std::ofstream of("DumpedPlaylists.txt", std::ios::trunc);
+                if (ImGui::Button("Load Loadout from File", ImVec2(Width, Height)))
+                {
+                    if (LoadoutManager::LoadLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
+                    {
+                        LoadoutStatusMessage = "Loadout loaded successfully!";
+                        printf("Loadout loaded from: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
+                    }
+                    else
+                    {
+                        LoadoutStatusMessage = "Failed to load loadout! File may not exist.";
+                    }
 
-                of << ss.str();
-                of.close();
+                    StatusMessageTime = std::chrono::high_resolution_clock::now();
+                }
+
+                if (!LoadoutStatusMessage.empty())
+                {
+                    auto Elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - StatusMessageTime).count();
+
+                    if (Elapsed < 5)
+                    {
+                        ImVec4 StatusColor = (LoadoutStatusMessage.find("Failed") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+
+                        ImGui::TextColored(StatusColor, "%s", LoadoutStatusMessage.c_str());
+                    }
+                    else
+                    {
+                        LoadoutStatusMessage.clear();
+                    }
+                }
             }
 
             break;
         }
         case 4:
         {
+            ImGui::Text("Customize Player Bot:");
+            SmallSeparator(Width);
+
+            ImGui::PushItemWidth(Width);
             ImGui::InputInt("Bot Health", &FConfiguration::BotHealth);
             ImGui::InputInt("Bot Shield", &FConfiguration::BotShield);
+            ImGui::PopItemWidth();
 
             ImGui::Spacing();
 
@@ -1379,9 +1527,11 @@ void GUI::Init()
                 if (BotNameBuffer[0] == '\0' && !FConfiguration::BotName.empty())
                     strncpy_s(BotNameBuffer, sizeof(BotNameBuffer), FConfiguration::BotName.c_str(), _TRUNCATE);
 
+                ImGui::PushItemWidth(Width);
                 ImGui::InputText("Bot Name", BotNameBuffer, sizeof(BotNameBuffer));
+                ImGui::PopItemWidth();
 
-                if (ImGui::Button("Apply Bot Name"))
+                if (ImGui::Button("Apply Bot Name", ImVec2(Width, Height)))
                 {
                     FConfiguration::BotName = BotNameBuffer;
                 }
@@ -1571,7 +1721,7 @@ void GUI::Init()
             ImGui::RadioButton("Papaya (Party Royale)", &SelectedMap, (int)Map::Papaya);
             ImGui::RadioButton("The Combine", &SelectedMap, (int)Map::Crucible);
             ImGui::RadioButton("Tutorial Map", &SelectedMap, (int)Map::TutorialMap);
-            ImGui::RadioButton("Titled Deathmatch", &SelectedMap, (int)Map::TiltedDeathmatch);
+            ImGui::RadioButton("Tilted Deathmatch", &SelectedMap, (int)Map::TiltedDeathmatch);
             ImGui::RadioButton("Athena", &SelectedMap, (int)Map::Ch1);
             ImGui::RadioButton("Apollo", &SelectedMap, (int)Map::Ch2);
             ImGui::RadioButton("Snow Map 01", &SelectedMap, (int)Map::Snow01);
@@ -1696,6 +1846,106 @@ void GUI::Init()
             }
             }
 
+            break;
+        }
+        case 7:
+        {
+            if (gsStatus < Joinable)
+            {
+                if (VersionInfo.FortniteVersion >= 16.00)
+                    ImGui::Checkbox("Toggle Swag Lines", &FConfiguration::bUseWinLines);
+
+                if (VersionInfo.FortniteVersion <= 23.50)
+                    ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
+            }
+
+            ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);
+
+            if (FConfiguration::bRideableProjectiles)
+            {
+                static char ProjClassBuffer[512] = {};
+
+                ImGui::InputText("Class", ProjClassBuffer, IM_ARRAYSIZE(ProjClassBuffer));
+
+                if (ImGui::Button("Apply", ImVec2(Width, Height)))
+                {
+                    if (ProjClassBuffer[0] != '\0')
+                    {
+                        std::string ProjClass = ProjClassBuffer;
+                        UClass* ProjectileClass = (UClass*)SDK::StaticLoadObject(UEAllocatedWString(ProjClass.begin(), ProjClass.end()).c_str(), SDK::UClass::StaticClass());
+
+                        if (ProjectileClass)
+                        {
+                            static auto ProjectileBaseClass = FindClass("FortProjectileBase");
+
+                            if (ProjectileClass->IsA(ProjectileBaseClass))
+                            {
+                                auto DefaultObject = ProjectileClass->GetDefaultObj();
+
+                                if (DefaultObject)
+                                {
+                                    static auto CapsuleComponentOffset = ProjectileClass->GetOffset("CapsuleComponent");
+
+                                    if (CapsuleComponentOffset != -1)
+                                    {
+                                        auto CapsuleComponent = GetFromOffset<UPrimitiveComponent*>(DefaultObject, CapsuleComponentOffset);
+
+                                        if (CapsuleComponent)
+                                        {
+                                            static auto CanCharacterStepUpOnOffset = CapsuleComponent->GetOffset("bCanCharacterStepUpOn");
+
+                                            if (CanCharacterStepUpOnOffset != -1)
+                                            {
+                                                GetFromOffset<bool>(CapsuleComponent, CanCharacterStepUpOnOffset) = true;
+                                            }
+
+                                            static auto WalkableSlopeOverrideOffset = CapsuleComponent->GetOffset("WalkableSlopeOverride");
+
+                                            if (WalkableSlopeOverrideOffset != -1)
+                                            {
+                                                auto& SlopeOverride = GetFromOffset<FWalkableSlopeOverride>(CapsuleComponent, WalkableSlopeOverrideOffset);
+                                                SlopeOverride.WalkableSlopeBehavior = EWalkableSlopeBehavior::WalkableSlope_Increase;
+                                                SlopeOverride.WalkableSlopeAngle = 90.0f;
+                                            }
+
+                                            static auto CollisionEnabledOffset = CapsuleComponent->GetOffset("CollisionEnabled");
+
+                                            if (CollisionEnabledOffset != -1)
+                                            {
+                                                GetFromOffset<ECollisionEnabled>(CapsuleComponent, CollisionEnabledOffset) = ECollisionEnabled::QueryOnly;
+                                            }
+
+                                            static auto SetCollisionEnabledFunc = CapsuleComponent->Class->GetFunction("SetCollisionEnabled");
+
+                                            if (SetCollisionEnabledFunc)
+                                            {
+                                                struct { ECollisionEnabled NewType; } Params;
+                                                Params.NewType = ECollisionEnabled::QueryOnly;
+                                                CapsuleComponent->ProcessEvent(SetCollisionEnabledFunc, &Params);
+                                            }
+
+                                            static auto SetCollisionResponseToChannelFunc = CapsuleComponent->Class->GetFunction("SetCollisionResponseToChannel");
+
+                                            if (SetCollisionResponseToChannelFunc)
+                                            {
+                                                struct { uint8 Channel; ECollisionResponse NewResponse; } Params;
+                                                Params.Channel = 1;
+                                                Params.NewResponse = ECollisionResponse::ECR_Block;
+                                                CapsuleComponent->ProcessEvent(SetCollisionResponseToChannelFunc, &Params);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            break;
+        }
+        default:
+        {
             break;
         }
         }

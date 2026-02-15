@@ -235,6 +235,28 @@ void Main()
         FConfiguration::bKeepInventory = true;
         FConfiguration::MaxTickRate = 60.f;
     }
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/Playlist_TiltedZW.Playlist_TiltedZW"))
+    {
+        terrainOpen = L"open /Game/Jett/HeliosTiltedZW";
+        FConfiguration::bSiphon = true;
+        FConfiguration::SiphonAmount = 200;
+        FConfiguration::bInfiniteAmmo = true;
+        FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+        FConfiguration::MaxTickRate = 60.f;
+    }
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Rewind/Playlist_DesertMode.Playlist_DesertMode"))
+    {
+        terrainOpen = L"open /Game/Rewind/DesertZoneWars.DesertZoneWars";
+        FConfiguration::bSiphon = true;
+        FConfiguration::SiphonAmount = 50;
+        FConfiguration::bInfiniteAmmo = true;
+        FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+        FConfiguration::MaxTickRate = 60.f;
+    }
     else if (FConfiguration::bIsCustomMap && FConfiguration::CustomMap && FConfiguration::CustomMap[0] != L'\0')
     {
         terrainOpen = FConfiguration::CustomMap;

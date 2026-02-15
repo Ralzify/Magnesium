@@ -4,6 +4,7 @@
 #include "../../FortniteGame/Public/FortInventory.h"
 #include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
 #include "../Magnesium/Erbium/Public/Misc.h"
+#include "../Public/Configuration.h"
 
 #include <random>
 #include <chrono>
@@ -758,6 +759,157 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetOSLoadout()
     return Slots;
 }
 
+TArray<TArray<TPair<FString, int>>> LateGame::GetCustomLoadout()
+{
+    std::random_device rd;
+    std::mt19937 rng(rd());
+
+    TArray<TArray<TPair<FString, int>>> Slots;
+
+    TArray<TPair<FString, int>> Slot1;
+
+    auto PrimaryItemDefinition = FindObject<UFortWorldItemDefinition>(FConfiguration::Primary.CStr());
+
+    if (!PrimaryItemDefinition)
+        PrimaryItemDefinition = TUObjectArray::FindObject<UFortWorldItemDefinition>(FString(FConfiguration::Primary).ToUtf8().c_str());
+
+    if (PrimaryItemDefinition)
+    {
+        FString PrimaryFullPath = UKismetSystemLibrary::GetPathName((UObject*)PrimaryItemDefinition);
+        Slot1.Add(TPair<FString, int>(PrimaryFullPath, FConfiguration::PrimaryAmount));
+    }
+
+    Slots.Add(Slot1);
+
+    TArray<TPair<FString, int>> Slot2;
+
+    auto SecondaryItemDefinition = FindObject<UFortWorldItemDefinition>(FConfiguration::Secondary.CStr());
+
+    if (!SecondaryItemDefinition)
+        SecondaryItemDefinition = TUObjectArray::FindObject<UFortWorldItemDefinition>(FString(FConfiguration::Secondary).ToUtf8().c_str());
+
+    if (SecondaryItemDefinition)
+    {
+        FString SecondaryFullPath = UKismetSystemLibrary::GetPathName((UObject*)SecondaryItemDefinition);
+        Slot2.Add(TPair<FString, int>(SecondaryFullPath, FConfiguration::SecondaryAmount));
+    }
+
+    Slots.Add(Slot2);
+
+    TArray<TPair<FString, int>> Slot3;
+
+    auto TertiaryItemDefinition = FindObject<UFortWorldItemDefinition>(FConfiguration::Tertiary.CStr());
+
+    if (!TertiaryItemDefinition)
+        TertiaryItemDefinition = TUObjectArray::FindObject<UFortWorldItemDefinition>(FString(FConfiguration::Tertiary).ToUtf8().c_str());
+
+    if (TertiaryItemDefinition)
+    {
+        FString TertiaryFullPath = UKismetSystemLibrary::GetPathName((UObject*)TertiaryItemDefinition);
+        Slot3.Add(TPair<FString, int>(TertiaryFullPath, FConfiguration::TertiaryAmount));
+    }
+
+    Slots.Add(Slot3);
+
+    TArray<TPair<FString, int>> Slot4;
+
+    auto QuaternaryItemDefinition = FindObject<UFortWorldItemDefinition>(FConfiguration::Quaternary.CStr());
+
+    if (!QuaternaryItemDefinition)
+        QuaternaryItemDefinition = TUObjectArray::FindObject<UFortWorldItemDefinition>(FString(FConfiguration::Quaternary).ToUtf8().c_str());
+
+    if (QuaternaryItemDefinition)
+    {
+        FString QuaternaryFullPath = UKismetSystemLibrary::GetPathName((UObject*)QuaternaryItemDefinition);
+        Slot4.Add(TPair<FString, int>(QuaternaryFullPath, FConfiguration::QuaternaryAmount));
+    }
+
+    Slots.Add(Slot4);
+
+    TArray<TPair<FString, int>> Slot5;
+
+    auto QuinaryItemDefinition = FindObject<UFortWorldItemDefinition>(FConfiguration::Quinary.CStr());
+
+    if (!QuinaryItemDefinition)
+        QuinaryItemDefinition = TUObjectArray::FindObject<UFortWorldItemDefinition>(FString(FConfiguration::Quinary).ToUtf8().c_str());
+
+    if (QuinaryItemDefinition)
+    {
+        FString QuinaryFullPath = UKismetSystemLibrary::GetPathName((UObject*)QuinaryItemDefinition);
+        Slot5.Add(TPair<FString, int>(QuinaryFullPath, FConfiguration::QuinaryAmount));
+    }
+    
+    Slots.Add(Slot5);
+
+    TArray<TPair<FString, int>> Slot6;
+
+    auto TrapsItemDefinition = FindObject<UFortWorldItemDefinition>(FConfiguration::Traps.CStr());
+
+    if (!TrapsItemDefinition)
+        TrapsItemDefinition = TUObjectArray::FindObject<UFortWorldItemDefinition>(FString(FConfiguration::Traps).ToUtf8().c_str());
+
+    if (TrapsItemDefinition)
+    {
+        FString TrapsFullPath = UKismetSystemLibrary::GetPathName((UObject*)TrapsItemDefinition);
+        Slot6.Add(TPair<FString, int>(TrapsFullPath, FConfiguration::TrapsAmount));
+    }
+
+    Slots.Add(Slot6);
+
+    std::uniform_int_distribution<int> Mats(186, 646);
+    std::uniform_int_distribution<int> Gold(1200, 7500);
+
+    TArray<TPair<FString, int>> Materials;
+    Materials.Add(TPair<FString, int>(TEXT("/Game/Items/ResourcePickups/WoodItemData.WoodItemData"), Mats(rng)));
+    Materials.Add(TPair<FString, int>(TEXT("/Game/Items/ResourcePickups/StoneItemData.StoneItemData"), Mats(rng)));
+    Materials.Add(TPair<FString, int>(TEXT("/Game/Items/ResourcePickups/MetalItemData.MetalItemData"), Mats(rng)));
+
+    if (VersionInfo.FortniteVersion >= 15)
+    {
+        Materials.Add(TPair<FString, int>(TEXT("/Game/Items/ResourcePickups/Athena_WadsItemData.Athena_WadsItemData"), Gold(rng)));
+    }
+
+    Slots.Add(Materials);
+    // Slot 7 End
+
+    // Slot 8 (Ammo)
+    std::uniform_int_distribution<int> Heavy(50, 576);
+    std::uniform_int_distribution<int> Shells(87, 576);
+    std::uniform_int_distribution<int> Medium(124, 824);
+    std::uniform_int_distribution<int> Light(186, 824);
+    std::uniform_int_distribution<int> Rockets(3, 12);
+    std::uniform_int_distribution<int> STW(186, 999);
+    std::uniform_int_distribution<int> Arrows(12, 30);
+
+    TArray<TPair<FString, int>> Ammo;
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsHeavy.AthenaAmmoDataBulletsHeavy"), Heavy(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataShells.AthenaAmmoDataShells"), Shells(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsMedium.AthenaAmmoDataBulletsMedium"), Medium(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsLight.AthenaAmmoDataBulletsLight"), Light(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AmmoDataRockets.AmmoDataRockets"), 12));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataExplosive.AmmoDataExplosive"), STW(rng))); // make these and below optional???
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataEnergyCell.AmmoDataEnergyCell"), STW(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataBulletsHeavy.AmmoDataBulletsHeavy"), STW(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataBulletsMedium.AmmoDataBulletsMedium"), STW(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataBulletsLight.AmmoDataBulletsLight"), STW(rng)));
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataShells.AmmoDataShells"), STW(rng)));
+
+    if (VersionInfo.FortniteVersion >= 16.00)
+    {
+        Ammo.Add(TPair<FString, int>(TEXT("/PrimalGameplay/Items/Ammo/AthenaAmmoDataArrows.AthenaAmmoDataArrows"), Arrows(rng)));
+    }
+
+    if (VersionInfo.FortniteVersion >= 17.00)
+    {
+        Ammo.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Scooter/Ammo_Athena_Mother_Scooter.Ammo_Athena_Mother_Scooter"), 999));
+    }
+
+    Slots.Add(Ammo);
+    // Slot 8 End
+
+    return Slots;
+}
+
 void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
 {
     if (!PlayerController || !PlayerController->HasAuthority())
@@ -768,7 +920,7 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
     if (!WorldInventory)
         return;
 
-    auto Slots = IsOneShot() ? GetOSLoadout() : GetLoadout();
+	auto Slots = IsOneShot() ? GetOSLoadout() : (FConfiguration::bUseCustomLoadout ? GetCustomLoadout() : GetLoadout());
 
     std::random_device rd;
     std::mt19937 rng(rd());

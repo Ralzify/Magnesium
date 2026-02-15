@@ -15,13 +15,12 @@ Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OGFN game
 # TODO:
 - Fix 22.40 lategame crash
 - Fix One Shot FX (GE per Playlist)
-- Fix Dormant Henchmen ❓
 - Fix Randomize Lootpool ✅
 - Players Tab ✅
-- Auto Dump & Remove Tab / Fix Dumping
+- Auto Dump & Remove Tab / Fix Dumping ✅
 - Pickaxe Stutter ✅
 - Meters in Player Tab ✅
 - Creative Tab in UI : Custom Plots ✅ (island loading is broken rn but when fixed this should work)
-- Trickshot Tab
+- Trickshot Tab ✅
 - Logs Tab?
 - Bus Start uses countdown over executeconsolecommand/phase -> avoids crash

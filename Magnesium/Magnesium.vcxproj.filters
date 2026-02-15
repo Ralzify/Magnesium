@@ -46,6 +46,9 @@
     <Filter Include="Magnesium\Plugins\CrashReporter\Private">
       <UniqueIdentifier>{b6e07165-4ce4-4e5b-b75a-897e3c381e85}</UniqueIdentifier>
     </Filter>
+    <Filter Include="nlohmann">
+      <UniqueIdentifier>{ee2eebe6-3e64-4614-90e9-a34ad0fe2a29}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -224,6 +227,9 @@
     </ClInclude>
     <ClInclude Include="C:\Users\andre\Downloads\imgui-master\imgui-master\misc\cpp\imgui_stdlib.h">
       <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="json.hpp">
+      <Filter>nlohmann</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
