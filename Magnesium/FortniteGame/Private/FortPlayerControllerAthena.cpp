@@ -1822,7 +1822,14 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 			KillerPawn->SetHealth(Health);
 			KillerPawn->SetShield(Shield);
-			//forgot to add this back
+
+			static auto WoodItemData = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/WoodItemData.WoodItemData");
+			static auto StoneItemData = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/StoneItemData.StoneItemData");
+			static auto MetalItemData = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/MetalItemData.MetalItemData");
+
+			KillerPlayerController->WorldInventory->GiveItem(WoodItemData, FConfiguration::SiphonAmount);
+			KillerPlayerController->WorldInventory->GiveItem(StoneItemData, FConfiguration::SiphonAmount);
+			KillerPlayerController->WorldInventory->GiveItem(MetalItemData, FConfiguration::SiphonAmount);
 		}
 
 		if (GUI::IsArenaPlaylist())
@@ -2550,7 +2557,49 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 				{
 					if (args[1].contains("versionized") || args[1].contains("v"))
 					{
-						FConfiguration::bUseVersionizedLoadout;
+						FConfiguration::bUseVersionizedLoadout = true;
+						LateGame::EquipLoadout(PlayerController);
+						FConfiguration::bUseVersionizedLoadout = false;
+						PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
+						return;
+					}
+					else if (args[1].contains("oneshot") || args[1].contains("os"))
+					{
+						IsOneShot() == true;
+						LateGame::EquipLoadout(PlayerController);
+						IsOneShot() == false;
+						PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
+						return;
+					}
+					else if (args[1].contains("customloadout") || args[1].contains("cl"))
+					{
+						if (!FConfiguration::Primary.IsEmpty() || !FConfiguration::Secondary.IsEmpty() || !FConfiguration::Tertiary.IsEmpty() || !FConfiguration::Quaternary.IsEmpty() || !FConfiguration::Quinary.IsEmpty())
+						{
+							if (FConfiguration::PrimaryAmount != 0 || FConfiguration::SecondaryAmount != 0 || FConfiguration::TertiaryAmount != 0 || FConfiguration::QuaternaryAmount != 0 || FConfiguration::QuinaryAmount != 0 || FConfiguration::TrapsAmount != 0)
+							{
+								FConfiguration::bUseCustomLoadout = true;
+								LateGame::EquipLoadout(PlayerController);
+								FConfiguration::bUseCustomLoadout = false;
+								PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
+								return;
+							}
+							else
+							{
+								PlayerController->ClientMessage(FString(L"One or more of your slots amount is 0!"), FName(), 1.f);
+								return;
+							}
+						}
+						else
+						{
+							PlayerController->ClientMessage(FString(L"Could not find a custom loadout."), FName(), 1.f);
+							return;
+						}
+					}
+					else if (args[1].contains("loadout") || args[1].contains("l"))
+					{
+						LateGame::EquipLoadout(PlayerController);
+						PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
+						return;
 					}
 				}
 
@@ -3359,50 +3408,50 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 				try
 				{
-					if (Arguments == 3 && args[1].size() > 0 && !isdigit(args[1][0]))
+					if (Arguments == 3 && args[2].size() > 0 && !isdigit(args[2][0]))
 					{
-						std::string Dir = args[1].c_str();
-						float Mag = std::stof(args[2].c_str());
+						float Mag = std::stof(args[1].c_str());
+						std::string Dir = args[2].c_str();
 
 						std::transform(Dir.begin(), Dir.end(), Dir.begin(), ::toupper);
 
-						if (Dir == "N" || Dir == "north")
+						if (Dir == "N" || Dir == "NORTH")
 						{
 							X = Mag; Z = Mag;
 						}
-						else if (Dir == "S" || Dir == "south")
+						else if (Dir == "S" || Dir == "SOUTH")
 						{
 							X = -Mag; Z = Mag;
 						}
-						else if (Dir == "E" || Dir == "east")
-						{ 
+						else if (Dir == "E" || Dir == "EAST")
+						{
 							Y = Mag; Z = Mag;
 						}
-						else if (Dir == "W" || Dir == "west")
+						else if (Dir == "W" || Dir == "WEST")
 						{
 							Y = -Mag; Z = Mag;
 						}
-						else if (Dir == "NE" || Dir == "northeast")
+						else if (Dir == "NE" || Dir == "NORTHEAST")
 						{
 							X = Mag; Y = Mag; Z = Mag;
 						}
-						else if (Dir == "NW" || Dir == "northwest")
+						else if (Dir == "NW" || Dir == "NORTHWEST")
 						{
 							X = Mag; Y = -Mag; Z = Mag;
 						}
-						else if (Dir == "SE" || Dir == "southeast")
+						else if (Dir == "SE" || Dir == "SOUTHEAST")
 						{
 							X = -Mag; Y = Mag; Z = Mag;
 						}
-						else if (Dir == "SW" || Dir == "southwest")
+						else if (Dir == "SW" || Dir == "SOUTHWEST")
 						{
 							X = -Mag; Y = -Mag; Z = Mag;
 						}
-						else if (Dir == "U" || Dir == "up")
+						else if (Dir == "U" || Dir == "UP")
 						{
 							Z = Mag;
 						}
-						else if (Dir == "D" || Dir == "down")
+						else if (Dir == "D" || Dir == "DOWN")
 						{
 							Z = -Mag;
 						}

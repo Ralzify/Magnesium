@@ -446,7 +446,7 @@ void GUI::Init()
                             bInitializedZone = true;
                         }
 
-						ImGui::Checkbox("Auto Dump Items", &FConfiguration::bAutoDump);
+						ImGui::Checkbox("Auto Dump Text", &FConfiguration::bAutoDump);
 
                         // ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
 
