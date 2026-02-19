@@ -21,6 +21,8 @@
 #include <sstream>
 #include <fstream>
 
+#include <random>
+#include <chrono>
 #include <algorithm>
 #include <vector>
 #include <iostream>
@@ -506,6 +508,18 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	else if (FConfiguration::bLateGame && (!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
 	{
 		LateGame::EquipLoadout(PlayerController);
+
+		if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
+		{
+			std::random_device rd;
+			std::mt19937 rng(rd());
+
+			std::uniform_int_distribution<int> RandomAmount(6732, 14684);
+
+			int AlivePlayers = GameMode->AlivePlayers.Num();
+
+			PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
+		}
 	}
 }
 
@@ -595,7 +609,13 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 	UFortItemDefinition* ItemDefinition = (UFortItemDefinition*)entry->ItemDefinition;
 
 	if (auto Gadget = ItemDefinition->Cast<UFortGadgetItemDefinition>())
-		ItemDefinition = Gadget->GetWeaponItemDefinition();
+	{
+		auto WeaponDef = Gadget->GetWeaponItemDefinition();
+		if (WeaponDef)
+			ItemDefinition = WeaponDef;
+		else
+			return;
+	}
 	else if (ItemDefinition->IsA(UFortDecoItemDefinition::StaticClass()))
 	{
 		PlayerController->MyFortPawn->PickUpActor(nullptr, ItemDefinition);
@@ -608,8 +628,14 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 		return;
 	}
 
+	if (!ItemDefinition)
+		return;
 
 	auto Weapon = PlayerController->MyFortPawn->EquipWeaponDefinition(ItemDefinition, ItemGuid, entry->HasTrackerGuid() ? entry->TrackerGuid : FGuid(), false);
+
+	if (!Weapon)
+		return;
+
 	if (VersionInfo.FortniteVersion <= 2.5)
 	{
 		static auto BuildingToolClass = FindClass("FortWeap_BuildingTool");
@@ -649,7 +675,6 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 			ContextTrapTool->ContextTrapItemDefinition = (UFortContextTrapItemDefinition*)ItemDefinition;
 	}
 }
-
 
 void AFortPlayerControllerAthena::ServerExecuteInventoryWeapon(UObject* Context, FFrame& Stack)
 {
@@ -2521,6 +2546,14 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			}
 			else if (command == "randomize")
 			{
+				if (args.size() > 1)
+				{
+					if (args[1].contains("versionized") || args[1].contains("v"))
+					{
+						FConfiguration::bUseVersionizedLoadout;
+					}
+				}
+
 				LateGame::EquipLoadout(PlayerController);
 				PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
 			}
@@ -3320,17 +3353,86 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			}
 			else if (command == "launch" || command == "launchpawn")
 			{
-				if (args.size() != 4)
+				float X = 0.0f, Y = 0.0f, Z = 0.0f;
+
+				int Arguments = args.size();
+
+				try
 				{
-					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					if (Arguments == 3 && args[1].size() > 0 && !isdigit(args[1][0]))
+					{
+						std::string Dir = args[1].c_str();
+						float Mag = std::stof(args[2].c_str());
+
+						std::transform(Dir.begin(), Dir.end(), Dir.begin(), ::toupper);
+
+						if (Dir == "N" || Dir == "north")
+						{
+							X = Mag; Z = Mag;
+						}
+						else if (Dir == "S" || Dir == "south")
+						{
+							X = -Mag; Z = Mag;
+						}
+						else if (Dir == "E" || Dir == "east")
+						{ 
+							Y = Mag; Z = Mag;
+						}
+						else if (Dir == "W" || Dir == "west")
+						{
+							Y = -Mag; Z = Mag;
+						}
+						else if (Dir == "NE" || Dir == "northeast")
+						{
+							X = Mag; Y = Mag; Z = Mag;
+						}
+						else if (Dir == "NW" || Dir == "northwest")
+						{
+							X = Mag; Y = -Mag; Z = Mag;
+						}
+						else if (Dir == "SE" || Dir == "southeast")
+						{
+							X = -Mag; Y = Mag; Z = Mag;
+						}
+						else if (Dir == "SW" || Dir == "southwest")
+						{
+							X = -Mag; Y = -Mag; Z = Mag;
+						}
+						else if (Dir == "U" || Dir == "up")
+						{
+							Z = Mag;
+						}
+						else if (Dir == "D" || Dir == "down")
+						{
+							Z = -Mag;
+						}
+						else
+						{
+							PlayerController->ClientMessage(FString(L"Invalid direction. Use N, S, E, W, NE, NW, SE, SW, U, or D."), FName(), 1.f);
+							return;
+						}
+					}
+					else if (Arguments == 2)
+					{
+						Z = std::stof(args[1].c_str());
+					}
+					else if (Arguments == 3)
+					{
+						X = std::stof(args[1].c_str());
+						Z = std::stof(args[2].c_str());
+					}
+					else if (Arguments == 4)
+					{
+						X = std::stof(args[1].c_str());
+						Y = std::stof(args[2].c_str());
+						Z = std::stof(args[3].c_str());
+					}
+				}
+				catch (...)
+				{
+					PlayerController->ClientMessage(FString(L"Invalid input. Please provide numeric values."), FName(), 1.f);
 					return;
 				}
-
-				double X = 0., Y = 0., Z = 0.;
-
-				X = strtod(args[1].c_str(), nullptr);
-				Y = strtod(args[2].c_str(), nullptr);
-				Z = strtod(args[3].c_str(), nullptr);
 
 				if (PlayerController->Pawn)
 				{
@@ -3581,18 +3683,14 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			}
 			else if (command == "spawnactor" || command == "summon" || command == "spawn")
 			{
-				if (args.size() != 2)
-				{
-					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-					return;
-				}
-
+				bool HasLocation = false;
 				auto Loc = PlayerController->Pawn->K2_GetActorLocation();
 				Loc.Z += 200.f;
 
 				auto Rotation = PlayerController->Pawn->K2_GetActorRotation();
 				FQuat NewQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
-				FRotator RotatorFromQuat = NewQuat.Rotator();
+
+				int Count = 1;
 
 				// auto Transform = PlayerController->Pawn->GetTransform(); // proper, but at what cost?
 
@@ -3609,9 +3707,73 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 						Class = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
 				}
 
+				std::map<std::wstring, float> DirectionToYaw = {
+					{L"N", 0.0f}, {L"E", 90.0f}, {L"S", 180.0f}, {L"W", 270.0f},
+					{L"NE", 45.0f}, {L"SE", 135.0f}, {L"SW", 225.0f}, {L"NW", 315.0f}
+				};
+
+				try
+				{
+					if (args.size() >= 5)
+					{
+						Loc.X = std::stof(args[2].c_str());
+						Loc.Y = std::stof(args[3].c_str());
+						Loc.Z = std::stof(args[4].c_str() - 75);
+						HasLocation = true;
+					}
+
+					for (size_t i = (HasLocation ? 5 : 2); i < args.size(); ++i)
+					{
+						try
+						{
+							int PossibleCount = std::stoi(args[i].c_str());
+							Count = PossibleCount;
+							continue;
+						}
+						catch (...) {}
+
+						std::wstring WideArg(args[i].begin(), args[i].end());
+						std::transform(WideArg.begin(), WideArg.end(), WideArg.begin(), ::towupper);
+						auto it = DirectionToYaw.find(WideArg);
+
+						if (it != DirectionToYaw.end())
+						{
+							Rotation.Yaw = it->second;
+							continue;
+						}
+					}
+				}
+				catch (const std::invalid_argument&)
+				{
+					PlayerController->ClientMessage(FString(L"Invalid input for coordinates or count!"), FName(), 1.f);
+					return;
+				}
+				catch (const std::out_of_range&)
+				{
+					PlayerController->ClientMessage(FString(L"Input value out of range!"), FName(), 1.f);
+					return;
+				}
+
+				int Max = 100;
+
+				if (Count > Max)
+				{
+					PlayerController->ClientMessage(FString(L"dawg your trying too much"), FName(), 1.f);
+					Count = Max;
+				}
+
 				if (Class)
 				{
-					UWorld::SpawnActor(Class, Loc, RotatorFromQuat);
+					int AmountSpawned = 0;
+
+					for (int i = 0; i < Count; i++)
+					{
+						FTransform SpawnTransform(Loc, NewQuat, FVector(1.f, 1.f, 1.f));
+						auto Actor = UWorld::SpawnActor(Class, SpawnTransform);
+						Actor->ForceNetUpdate();
+						AmountSpawned++;
+					}
+
 					PlayerController->ClientMessage(FString(L"Spawned actor!"), FName(), 1.f);
 				}
 				else

@@ -319,6 +319,7 @@ void GUI::Init()
         float Height = 0.0f;
 
         static char commandBuffer[1024] = { 0 };
+        static char playlistBuffer[1024] = { 0 };
         switch (SelectedUI)
         {
         case 0:
@@ -447,7 +448,7 @@ void GUI::Init()
 
 						ImGui::Checkbox("Auto Dump Items", &FConfiguration::bAutoDump);
 
-                        ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
+                        // ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
 
                         ImGui::Checkbox("Lategame", &FConfiguration::bLateGame);
 
@@ -662,29 +663,58 @@ void GUI::Init()
         }
         case 1:
         {
-            std::string DefPlaylist = "/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
-
             ImGui::Text("Gamemodes:");
             SmallSeparator(Width);
 
             ImGui::RadioButton("Solos", &SelectedPlaylist, (int)Playlist::Solos);
             ImGui::RadioButton("Duos", &SelectedPlaylist, (int)Playlist::Duos);
-            ImGui::RadioButton("Trios", &SelectedPlaylist, (int)Playlist::Trios);
+
+            if (VersionInfo.FortniteVersion >= 7.40) // 7.30 content update idfk
+            {
+                ImGui::RadioButton("Trios", &SelectedPlaylist, (int)Playlist::Trios);
+            }
+
             ImGui::RadioButton("Squads", &SelectedPlaylist, (int)Playlist::Squads);
-            ImGui::RadioButton("One Shot Solos", &SelectedPlaylist, (int)Playlist::OneShotSolos);
-            ImGui::RadioButton("One Shot Duos", &SelectedPlaylist, (int)Playlist::OneShotDuos);
-            ImGui::RadioButton("One Shot Squads", &SelectedPlaylist, (int)Playlist::OneShotSquads);
-            ImGui::RadioButton("Siphon Solos", &SelectedPlaylist, (int)Playlist::SiphonSolos);
-            ImGui::RadioButton("Siphon Duos", &SelectedPlaylist, (int)Playlist::SiphonDuos);
-            ImGui::RadioButton("Siphon Squads", &SelectedPlaylist, (int)Playlist::SiphonSquads);
-            ImGui::RadioButton("Slide Solos", &SelectedPlaylist, (int)Playlist::SlideSolos);
-            ImGui::RadioButton("Slide Duos", &SelectedPlaylist, (int)Playlist::SlideDuos);
-            ImGui::RadioButton("Arena Solos", &SelectedPlaylist, (int)Playlist::TournamentSolos);
-            ImGui::RadioButton("Arena Duos", &SelectedPlaylist, (int)Playlist::TournamentDuos);
-            ImGui::RadioButton("Arena Trios", &SelectedPlaylist, (int)Playlist::TournamentTrios);
-            ImGui::RadioButton("Arena Squads", &SelectedPlaylist, (int)Playlist::TournamentSquads);
-            ImGui::RadioButton("Creative ", &SelectedPlaylist, (int)Playlist::Creative);
-            ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
+
+            if (VersionInfo.FortniteVersion >= 7.10)
+            {
+                ImGui::RadioButton("One Shot Solos", &SelectedPlaylist, (int)Playlist::OneShotSolos);
+                ImGui::RadioButton("One Shot Duos", &SelectedPlaylist, (int)Playlist::OneShotDuos);
+                ImGui::RadioButton("One Shot Squads", &SelectedPlaylist, (int)Playlist::OneShotSquads);
+                ImGui::RadioButton("Siphon Solos", &SelectedPlaylist, (int)Playlist::SiphonSolos);
+                ImGui::RadioButton("Siphon Duos", &SelectedPlaylist, (int)Playlist::SiphonDuos);
+                ImGui::RadioButton("Siphon Squads", &SelectedPlaylist, (int)Playlist::SiphonSquads);
+                ImGui::RadioButton("Slide Solos", &SelectedPlaylist, (int)Playlist::SlideSolos);
+                ImGui::RadioButton("Slide Duos", &SelectedPlaylist, (int)Playlist::SlideDuos);
+            }
+
+            if (VersionInfo.FortniteVersion >= 8.20)
+            {
+                if ((VersionInfo.FortniteVersion >= 8.20 && VersionInfo.FortniteVersion <= 10.40) || VersionInfo.FortniteVersion >= 15.20)
+                {
+                    ImGui::RadioButton("Floor Is Lava Solos", &SelectedPlaylist, (int)Playlist::FILSolos);
+                    ImGui::RadioButton("Floor Is Lava Duos", &SelectedPlaylist, (int)Playlist::FILDuos);
+                    ImGui::RadioButton("Floor Is Lava Squads", &SelectedPlaylist, (int)Playlist::FILSquads);
+                }
+
+                ImGui::RadioButton("Arena Solos", &SelectedPlaylist, (int)Playlist::ArenaSolos);
+                ImGui::RadioButton("Arena Duos", &SelectedPlaylist, (int)Playlist::ArenaDuos);
+                ImGui::RadioButton("Arena Trios", &SelectedPlaylist, (int)Playlist::ArenaTrios);
+                ImGui::RadioButton("Arena Squads", &SelectedPlaylist, (int)Playlist::ArenaSquads);
+            }
+
+            if (VersionInfo.FortniteVersion >= 6.10)
+            {
+                ImGui::RadioButton("Tournament Solos", &SelectedPlaylist, (int)Playlist::TournamentSolos);
+                ImGui::RadioButton("Tournament Duos", &SelectedPlaylist, (int)Playlist::TournamentDuos);
+                ImGui::RadioButton("Tournament Trios", &SelectedPlaylist, (int)Playlist::TournamentTrios);
+                ImGui::RadioButton("Tournament Squads", &SelectedPlaylist, (int)Playlist::TournamentSquads);
+            }
+
+            if (VersionInfo.FortniteVersion >= 7.00)
+            {
+                ImGui::RadioButton("Creative ", &SelectedPlaylist, (int)Playlist::Creative);
+            }
 
             for (auto& Event : Events::EventsArray)
             {
@@ -693,6 +723,8 @@ void GUI::Init()
                     ImGui::RadioButton("Event Playlist", &SelectedPlaylist, (int)Playlist::Event);
                 }
             }
+
+            ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
 
             if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 29.00)
             {
@@ -783,12 +815,12 @@ void GUI::Init()
             }
             case (int)Playlist::TournamentSolos:
             {
-                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Solo.Playlist_ShowdownAlt_Solo";
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Solo.Playlist_Showdown_Solo";
                 break;
             }
             case (int)Playlist::TournamentDuos:
             {
-                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Duos.Playlist_ShowdownAlt_Duos";
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Duos.Playlist_Showdown_Duos";
                 break;
             }
             case (int)Playlist::TournamentTrios:
@@ -799,6 +831,50 @@ void GUI::Init()
             case (int)Playlist::TournamentSquads:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_Showdown_Squads.Playlist_Showdown_Squads";
+                break;
+            }
+            case (int)Playlist::ArenaSolos:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Solo.Playlist_ShowdownAlt_Solo";
+                break;
+            }
+            case (int)Playlist::ArenaDuos:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Duos.Playlist_ShowdownAlt_Duos";
+                break;
+            }
+            case (int)Playlist::ArenaTrios:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Trios.Playlist_ShowdownAlt_Trios";
+                break;
+            }
+            case (int)Playlist::FILSolos:
+            {
+                if (VersionInfo.FortniteVersion <= 10.40)
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Fill/Playlist_Fill_Solo.Playlist_Fill_Solo";
+                else
+                    FConfiguration::Playlist = L"/Melt/Playlists/Playlist_Melt_Solo.Playlist_Melt_Solo";
+                break;
+            }
+            case (int)Playlist::FILDuos:
+            {
+                if (VersionInfo.FortniteVersion <= 10.40)
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Fill/Playlist_Fill_Duos.Playlist_Fill_Duos";
+                else
+                    FConfiguration::Playlist = L"/Melt/Playlists/Playlist_Melt_Duos.Playlist_Melt_Duos";
+                break;
+            }
+            case (int)Playlist::FILSquads:
+            {
+                if (VersionInfo.FortniteVersion <= 10.40)
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Fill/Playlist_Fill_Squads.Playlist_Fill_Squads";
+                else
+                    FConfiguration::Playlist = L"/Melt/Playlists/Playlist_Melt_Squads.Playlist_Melt_Squads";
+                break;
+            }
+            case (int)Playlist::ArenaSquads:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Squads.Playlist_ShowdownAlt_Squads";
                 break;
             }
             case (int)Playlist::Creative:
@@ -856,8 +932,17 @@ void GUI::Init()
 
             if (SelectedPlaylist == (int)Playlist::Custom)
             {
-                ImGui::NewLine();
-                ImGui::InputText("Playlist", &DefPlaylist);
+                ImGui::SetNextItemWidth(260.0f);
+                ImGui::InputText("", playlistBuffer, IM_ARRAYSIZE(playlistBuffer));
+
+                if (ImGui::Button("Set Playlist", ImVec2(Width, Height)))
+                {
+                    std::string str = playlistBuffer;
+                    static std::wstring persistentWstr;
+                    persistentWstr = std::wstring(str.begin(), str.end());
+
+                    FConfiguration::Playlist = persistentWstr.c_str();
+                }
             }
 
             break;
@@ -1326,14 +1411,15 @@ void GUI::Init()
         }
         case 3:
         {
-            ImGui::Text("LateGame Options:");
+            ImGui::Text("Lategame Options:");
             SmallSeparator(Width);
 
             ImGui::Checkbox("Late Game", &FConfiguration::bLateGame);
             ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
             ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
             ImGui::Checkbox("Infinite Respawns (Requires Console DLL)", &FConfiguration::bForceRespawns);
-            ImGui::Checkbox("Use Custom LateGame Loadout", &FConfiguration::bUseCustomLoadout);
+            ImGui::Checkbox("Use Versionized Lategame Loadouts", &FConfiguration::bUseVersionizedLoadout);
+            ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);
 
             if (FConfiguration::bForceRespawns)
             {
@@ -1857,6 +1943,9 @@ void GUI::Init()
 
                 if (VersionInfo.FortniteVersion <= 23.50)
                     ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
+
+                if (GUI::IsArenaPlaylist() && FConfiguration::bLateGame && !FConfiguration::bForceRespawns)
+                    ImGui::Checkbox("Randomize Arena Points", &FConfiguration::RandomizeArenaPoints);
             }
 
             ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);

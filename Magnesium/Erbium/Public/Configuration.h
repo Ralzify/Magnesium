@@ -53,6 +53,7 @@ struct FConfiguration
 
     static inline auto bEnableTrickshotTab = false;
     static inline auto bUseWinLines = true;
+    static inline auto RandomizeArenaPoints = false;
     static inline auto bInfiniteRender = false;
     static inline auto bFModCannon = false;
 	static inline auto CannonLaunchMultiplier = 1.f;
@@ -60,6 +61,7 @@ struct FConfiguration
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;
 
+    static inline auto bUseVersionizedLoadout = true;
     static inline auto bUseCustomLoadout = false;
     static inline FString Primary;
     static inline FString Secondary;
