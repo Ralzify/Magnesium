@@ -1950,6 +1950,9 @@ void GUI::Init()
 
             ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);
 
+            if (VersionInfo.FortniteVersion >= 19.00)
+                ImGui::Checkbox("Toggle Crown Slomo", &FConfiguration::bCrownSlomo);
+
             if (FConfiguration::bRideableProjectiles)
             {
                 static char ProjClassBuffer[512] = {};

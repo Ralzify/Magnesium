@@ -57,6 +57,7 @@ struct FConfiguration
     static inline auto bInfiniteRender = false;
     static inline auto bFModCannon = false;
 	static inline auto CannonLaunchMultiplier = 1.f;
+    static inline auto bCrownSlomo = true;
 
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;

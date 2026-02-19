@@ -1642,9 +1642,12 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					Value->StateType = 2;
 					StateValues.Add(*Value, FFortItemEntryStateValue::Size());
 
-					free(Value);
-					KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
-					StateValues.Free();
+					if (FConfiguration::bCrownSlomo)
+					{
+						free(Value);
+						KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
+						StateValues.Free();
+					}
 				}
 
 				GameState->WinningTeam = KillerPlayerState->TeamIndex;
@@ -1733,9 +1736,12 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					Value->StateType = 2;
 					StateValues.Add(*Value, FFortItemEntryStateValue::Size());
 
-					free(Value);
-					KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
-					StateValues.Free();
+					if (FConfiguration::bCrownSlomo)
+					{
+						free(Value);
+						KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
+						StateValues.Free();
+					}
 				}
 
 				GameState->WinningTeam = KillerPlayerState->TeamIndex;
