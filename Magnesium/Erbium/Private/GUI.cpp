@@ -1,4 +1,4 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "../Public/GUI.h"
 #include <d3d11.h>
 #include "../../ImGui/imgui.h"
@@ -16,12 +16,85 @@
 #include <fstream>
 #include <string>
 #include <Windows.h>
+#include <Shellapi.h>
 #include <chrono>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#include "EmbeddedImage.h"
+
 #pragma comment(lib, "d3d11.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
+
+ID3D11ShaderResourceView* g_EmbedTexture = nullptr;
+int EmbedWidth = 0;
+int EmbedHeight = 0;
+
+bool LoadTextureFromMemory(const unsigned char* buffer, int buffer_size, ID3D11Device* d3dDevice, ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height)
+{
+    int image_width = 0;
+    int image_height = 0;
+    unsigned char* image_data = stbi_load_from_memory(buffer, buffer_size, &image_width, &image_height, NULL, 4);
+
+    if (image_data == NULL)
+        return false;
+
+    D3D11_TEXTURE2D_DESC desc;
+    ZeroMemory(&desc, sizeof(desc));
+    desc.Width = image_width;
+    desc.Height = image_height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = 0;
+
+    ID3D11Texture2D* pTexture = NULL;
+    D3D11_SUBRESOURCE_DATA subResource;
+    subResource.pSysMem = image_data;
+    subResource.SysMemPitch = desc.Width * 4;
+    subResource.SysMemSlicePitch = 0;
+    d3dDevice->CreateTexture2D(&desc, &subResource, &pTexture);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
+    ZeroMemory(&srvDesc, sizeof(srvDesc));
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = desc.MipLevels;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    d3dDevice->CreateShaderResourceView(pTexture, &srvDesc, out_srv);
+    pTexture->Release();
+
+    *out_width = image_width;
+    *out_height = image_height;
+
+    stbi_image_free(image_data);
+
+    return true;
+}
+
+void Hyperlink(const char* label, const char* url)
+{
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
+    ImGui::Text("%s", label);
+    ImGui::PopStyleColor();
+
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip("Would you like to be redirected to this link?");
+    }
+
+    if (ImGui::IsItemClicked())
+    {
+        ShellExecuteA(0, "open", url, 0, 0, SW_SHOWNORMAL);
+    }
+}
 
 void SmallSeparator(float Width, float Thickness = 1.0f)
 {
@@ -106,6 +179,8 @@ void GUI::Init()
         res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
     if (res != S_OK)
         return;
+
+    LoadTextureFromMemory(embedded_image, sizeof(embedded_image), g_pd3dDevice, &g_EmbedTexture, &EmbedWidth, &EmbedHeight);
 
     ID3D11RenderTargetView* g_mainRenderTargetView;
 
@@ -312,6 +387,12 @@ void GUI::Init()
                 }
             }
 
+            if (ImGui::BeginTabItem("Credits"))
+            {
+                SelectedUI = 8;
+                ImGui::EndTabItem();
+            }
+
             ImGui::EndTabBar();
         }
 
@@ -395,17 +476,18 @@ void GUI::Init()
                 ImGui::Text((std::string("- Uptime: ") + std::to_string((int)floor(UGameplayStatics::GetTimeSeconds(GameMode))) + "s").c_str());
             }
 
+            bool bIsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
+            bool bIsDesertZW = (SelectedPlaylist == static_cast<int>(Playlist::RewindDZW));
+            bool bIsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
+            bool bIsRetrac1v1 = (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1));
+            bool bIsRetracTurtle = (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle));
+            bool bIsCreative = (SelectedPlaylist == static_cast<int>(Playlist::Creative));
+            bool bIsOnlyUp = (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp));
+
             if (gsStatus <= Joinable)
             {
                 ImGui::Spacing();
                 ImGui::Spacing();
-
-                bool bIsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
-                bool bIsDesertZW = (SelectedPlaylist == static_cast<int>(Playlist::RewindDZW));
-                bool bIsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
-				bool bIsRetrac1v1 = (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1));
-				bool bIsRetracTurtle = (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle));
-                bool bIsCreative = (SelectedPlaylist == static_cast<int>(Playlist::Creative));
 
                 ImGui::Text("Pre-Game Configuration:");
                 SmallSeparator(Width);
@@ -430,6 +512,10 @@ void GUI::Init()
                 {
                     ImGui::Text("- Playing Rewind Custom Map.");
 				}
+                else if (bIsOnlyUp)
+                {
+                    ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
+                }
                 else
                 {
                     if (gsStatus < Joinable)
@@ -489,6 +575,9 @@ void GUI::Init()
 
                 ImGui::Text("Match Settings:");
                 SmallSeparator(Width);
+
+                if (bIsOnlyUp)
+                    ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
 
                 ImGui::Checkbox("Infinite Materials", &FConfiguration::bInfiniteMats);
                 ImGui::Checkbox("Infinite Ammo", &FConfiguration::bInfiniteAmmo);
@@ -737,6 +826,7 @@ void GUI::Init()
                 {
                     ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
                     ImGui::RadioButton("Rewind Desert Zone Wars", &SelectedPlaylist, (int)Playlist::RewindDZW);
+                    ImGui::RadioButton("Only Up Map", &SelectedPlaylist, (int)Playlist::OnlyUp);
                 }
 
                 if (VersionInfo.FortniteVersion == 14.40)
@@ -910,6 +1000,12 @@ void GUI::Init()
             case (int)Playlist::RewindDZW:
             {
                 FConfiguration::Playlist = L"/Game/Rewind/Playlist_DesertMode.Playlist_DesertMode";
+                FConfiguration::bLateGame = false;
+                break;
+			}
+            case (int)Playlist::OnlyUp:
+            {
+                FConfiguration::Playlist = L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett";
                 FConfiguration::bLateGame = false;
                 break;
 			}
@@ -1936,6 +2032,9 @@ void GUI::Init()
         }
         case 7:
         {
+            ImGui::Text("Trickshot Customization:");
+            SmallSeparator(Width);
+
             if (gsStatus < Joinable)
             {
                 if (VersionInfo.FortniteVersion >= 16.00)
@@ -1946,6 +2045,8 @@ void GUI::Init()
 
                 if (GUI::IsArenaPlaylist() && FConfiguration::bLateGame && !FConfiguration::bForceRespawns)
                     ImGui::Checkbox("Randomize Arena Points", &FConfiguration::RandomizeArenaPoints);
+
+                ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
             }
 
             ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);
@@ -2036,6 +2137,63 @@ void GUI::Init()
 
             break;
         }
+        case 8:
+        {
+            ImGui::Text("Credits:");
+            SmallSeparator(Width);
+
+            Hyperlink("- Erbium : Base of the project.", "https://github.com/plooshi/Erbium");
+
+            //ImGui::Spacing();
+
+            //Hyperlink("- Epic Games", "https://www.fortnite.com/");
+
+            if (FConfiguration::bInfiniteRender)
+            {
+                ImGui::Spacing();
+
+                Hyperlink("- Sweefy/Milxnor : Helped with figuring out Infinite Render", "https://x.com/Sweefyyy");
+            }
+
+            if (SelectedPlaylist == static_cast<int>(Playlist::Gav))
+            {
+                ImGui::Spacing();
+
+                Hyperlink("- Gav : Maker of 27.11 1v1 Map", "https://github.com/gavbowersdomain/27.11-Mods/tree/main/Mods/1v1");
+            }
+
+            if (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1) || (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle)))
+            {
+                ImGui::Spacing();
+
+                Hyperlink("- Retrac : Creators of 1v1 & Turtle Fights Maps", "https://discord.gg/retrac");
+            }
+
+            if (SelectedPlaylist == static_cast<int>(Playlist::RewindDZW))
+            {
+                ImGui::Spacing();
+
+                Hyperlink("- Rewind : Creators of Desert Zone Wars Map", "https://discord.gg/retrac");
+            }
+
+            if (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp) || (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW)))
+            {
+                ImGui::Spacing();
+
+                Hyperlink("- Jett : Maker of Only Up & Tilted Zone Wars Maps", "https://discord.com/channels/1469866169635962884/1473850399994806362/1473850399994806362");
+            }
+
+            if (g_EmbedTexture)
+            {
+                ImGui::NewLine();
+                ImGui::NewLine();
+
+                ImGui::Text(":3");
+                ImGui::Image((void*)g_EmbedTexture, ImVec2((float)EmbedWidth / 3.0f, (float)EmbedHeight / 3.0f));
+            }
+
+            break;
+        }
         default:
         {
             break;
@@ -2060,6 +2218,9 @@ void GUI::Init()
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+
+    if (g_EmbedTexture)
+        g_EmbedTexture->Release();
 
     g_pSwapChain->Release();
     g_pd3dDeviceContext->Release();

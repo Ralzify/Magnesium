@@ -49,6 +49,9 @@
     <Filter Include="nlohmann">
       <UniqueIdentifier>{ee2eebe6-3e64-4614-90e9-a34ad0fe2a29}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Magnesium\Hex">
+      <UniqueIdentifier>{c0b9cd8c-373d-4cf3-9008-8cd5ebbbf2d6}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -230,6 +233,15 @@
     </ClInclude>
     <ClInclude Include="json.hpp">
       <Filter>nlohmann</Filter>
+    </ClInclude>
+    <ClInclude Include="stb_image.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="SplashImage.h">
+      <Filter>Magnesium\Hex</Filter>
+    </ClInclude>
+    <ClInclude Include="EmbeddedImage.h">
+      <Filter>Magnesium\Hex</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

@@ -2,6 +2,9 @@
 
 #include "../../Engine/Public/NetDriver.h"
 
+#include <Windows.h>
+#include <Shellapi.h>
+
 enum EGSStatus
 {
     NotReady,
@@ -42,6 +45,7 @@ enum class Playlist : int
     RetracTurtle,
     TiltedZW,
     RewindDZW,
+    OnlyUp,
     Event,
     Custom
 };

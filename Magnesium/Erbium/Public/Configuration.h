@@ -11,6 +11,8 @@ struct FConfiguration
     static inline auto MaxTickRate = 30.f;
     static inline auto Port = 7777;
     static inline constexpr auto bGUI = true;
+    static inline auto bUseSplashAnim = true;
+    static inline auto bUseDarkMode = false;
     static inline constexpr auto bCustomCrashReporter = true;
     static inline constexpr auto bUseStdoutLog = true;
 
@@ -58,6 +60,7 @@ struct FConfiguration
     static inline auto bFModCannon = false;
 	static inline auto CannonLaunchMultiplier = 1.f;
     static inline auto bCrownSlomo = true;
+    static inline auto bDisableJumpFatigue = false;
 
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;

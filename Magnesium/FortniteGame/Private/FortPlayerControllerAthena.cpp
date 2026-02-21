@@ -434,6 +434,13 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		else
 			for (auto& AbilitySet : AFortGameMode::AbilitySets)
 				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+
+		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
+		{
+			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(FortPawn->GetCharacterMovement());
+			if (MovementCompAthena->HasJumpPenaltyResetTime())
+				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
+		}
 	}
 
 	if (Num == 0)
@@ -585,6 +592,13 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 		FVector NewLoc = AircraftLocation + Offset;
 
 		PlayerController->MyFortPawn->K2_SetActorLocation(NewLoc, false, nullptr, true);
+
+		if (FConfiguration::bDisableJumpFatigue && PlayerController->MyFortPawn->HasCharacterMovement())
+		{
+			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(PlayerController->MyFortPawn->GetCharacterMovement());
+			if (MovementCompAthena->HasJumpPenaltyResetTime())
+				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
+		}
 	}
 }
 
@@ -1943,6 +1957,13 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 					AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(FallDamageGE, 1.0f, Context);
 				}
 			}
+		}
+
+		if (FConfiguration::bDisableJumpFatigue && NewPawn->HasCharacterMovement())
+		{
+			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(NewPawn->GetCharacterMovement());
+			if (MovementCompAthena->HasJumpPenaltyResetTime())
+				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 
 		auto Interface = PlayerController->PlayerState->GetInterface(IFortAbilitySystemInterface::StaticClass());

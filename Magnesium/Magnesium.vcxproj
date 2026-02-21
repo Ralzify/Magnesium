@@ -167,6 +167,7 @@
     <ClInclude Include="..\SDK\Memcury.h" />
     <ClInclude Include="..\SDK\Offsets.h" />
     <ClInclude Include="C:\Users\andre\Downloads\imgui-master\imgui-master\misc\cpp\imgui_stdlib.h" />
+    <ClInclude Include="EmbeddedImage.h" />
     <ClInclude Include="Engine\Public\AbilitySystemComponent.h" />
     <ClInclude Include="Engine\Public\CurveTable.h" />
     <ClInclude Include="Engine\Public\DataTable.h" />
@@ -219,6 +220,8 @@
     <ClInclude Include="ImGui\imstb_truetype.h" />
     <ClInclude Include="json.hpp" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="SplashImage.h" />
+    <ClInclude Include="stb_image.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="C:\Users\andre\Downloads\imgui-master\imgui-master\misc\cpp\imgui_stdlib.cpp" />
