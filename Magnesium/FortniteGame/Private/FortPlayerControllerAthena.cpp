@@ -2270,7 +2270,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 		auto& IP = PlayerController->PlayerState->GetSavedNetworkAddress();
 		auto IPStr = IP.ToString();
 
-		if (FConfiguration::bEnableCheats || (!FConfiguration::bEnableCheats && IPStr == "127.0.0.1"))
+		if (FConfiguration::bEnableCheats || (!FConfiguration::bEnableCheats && IPStr == "127.0.0.1" && GUI::SelectedPlaylist != static_cast<int>(Playlist::OnlyUp)))
 		{
 			if (command == "startaircraft")
 			{
@@ -3808,6 +3808,17 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 						}
 						catch (...) {}
 
+						if (args[i].size() > 1 && (args[i][0] == 'p' || (args[i][0] == 'r')))
+						{
+							try
+							{
+								float PitchValue = std::stof(args[i].substr(1).c_str());
+								Rotation.Pitch = PitchValue;
+								continue;
+							}
+							catch (...) {}
+						}
+
 						std::wstring WideArg(args[i].begin(), args[i].end());
 						std::transform(WideArg.begin(), WideArg.end(), WideArg.begin(), ::towupper);
 						auto it = DirectionToYaw.find(WideArg);
@@ -3832,7 +3843,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 				int Max = 100;
 
-				if (Count > Max)
+				if (Count > Max && !FConfiguration::bEnableCheats)
 				{
 					PlayerController->ClientMessage(FString(L"dawg your trying too much"), FName(), 1.f);
 					Count = Max;
@@ -3844,7 +3855,8 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 					for (int i = 0; i < Count; i++)
 					{
-						FTransform SpawnTransform(Loc, NewQuat, FVector(1.f, 1.f, 1.f));
+						FQuat SpawnQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
+						FTransform SpawnTransform(Loc, SpawnQuat, FVector(1.f, 1.f, 1.f));
 						auto Actor = UWorld::SpawnActor(Class, SpawnTransform);
 						Actor->ForceNetUpdate();
 						AmountSpawned++;

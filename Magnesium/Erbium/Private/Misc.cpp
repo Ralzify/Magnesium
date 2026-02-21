@@ -166,7 +166,7 @@ const std::unordered_map<std::string, std::string> Misc::ItemNames = {
 	{ "infantry_vr", "WID_Assault_Infantry_Athena_VR" },
 	{ "infantry_sr", "WID_Assault_Infantry_Athena_SR" },
 	{ "infantry", "WID_Assault_Infantry_Athena_SR" },
-	{ "ironman", VersionInfo.FortniteVersion > 8.50 && std::floor(VersionInfo.FortniteVersion) != 14 ? "WID_HighTower_Tomato_Repulsor_CoreBR" : "AGID_AshtonPack_Indigo" },
+	{ "ironman", std::floor(VersionInfo.FortniteVersion) == 14 ? "AGID_AshtonPack_Indigo" : "WID_HighTower_Tomato_Repulsor_CoreBR" },
 	{ "jules", "WID_Boss_GrapplingHoot" },
 	{ "julesgrap", "WID_Boss_GrapplingHoot" },
 	{ "julesgrappler", "WID_Boss_GrapplingHoot" },
