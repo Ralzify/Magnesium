@@ -243,9 +243,9 @@ void Main()
         FConfiguration::bJoinInProgress = true;
         FConfiguration::MaxTickRate = 60.f;
     }
-    else if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/Playlist_TiltedZW.Playlist_TiltedZW"))
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett"))
     {
-        terrainOpen = L"open /Game/Jett/HeliosTiltedZW";
+        terrainOpen = L"open /Game/Jett/TiltedZW/TiltedZW_Jett";
         FConfiguration::bSiphon = true;
         FConfiguration::SiphonAmount = 50;
         FConfiguration::bInfiniteAmmo = true;
@@ -258,7 +258,7 @@ void Main()
     {
         terrainOpen = L"open /Game/Rewind/DesertZoneWars.DesertZoneWars";
         FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 50;
+        FConfiguration::SiphonAmount = 200;
         FConfiguration::bInfiniteAmmo = true;
         FConfiguration::bInfiniteMats = true;
         FConfiguration::bJoinInProgress = true;

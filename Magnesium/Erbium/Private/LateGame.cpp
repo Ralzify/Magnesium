@@ -1066,12 +1066,12 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/LTM/WID_Sniper_NoScope_Athena_SR_Ore_T03.WID_Sniper_NoScope_Athena_SR_Ore_T03"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion >= 5.21 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion == 11.31) || (std::floor(VersionInfo.FortniteVersion) == 12) || (VersionInfo.FortniteVersion >= 20.20 && VersionInfo.FortniteVersion < 22.00) || (VersionInfo.FortniteVersion == 23.40) || (VersionInfo.FortniteVersion >= 24.00 && VersionInfo.FortniteVersion < 25.11) || (VersionInfo.FortniteVersion == 27.11))
+    if ((VersionInfo.FortniteVersion >= 5.21 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion == 11.31) || (std::floor(VersionInfo.FortniteVersion) == 12) || (VersionInfo.FortniteVersion >= 20.10 && VersionInfo.FortniteVersion < 22.00) || (VersionInfo.FortniteVersion == 23.40) || (VersionInfo.FortniteVersion >= 24.00 && VersionInfo.FortniteVersion < 25.11) || (VersionInfo.FortniteVersion == 27.11))
     {
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_Heavy_Athena_VR_Ore_T03.WID_Sniper_Heavy_Athena_VR_Ore_T03"), 1));
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_Heavy_Athena_SR_Ore_T03.WID_Sniper_Heavy_Athena_SR_Ore_T03"), 1));
 
-        if (VersionInfo.FortniteVersion >= 20.10)
+        if ((VersionInfo.FortniteVersion >= 20.10 && VersionInfo.FortniteVersion < 22.00) || (VersionInfo.FortniteVersion == 23.40) || (VersionInfo.FortniteVersion >= 24.00 && VersionInfo.FortniteVersion < 25.11))
         {
             Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_Heavy_Athena_R_Ore_T03.WID_Sniper_Heavy_Athena_R_Ore_T03"), 1));
         }

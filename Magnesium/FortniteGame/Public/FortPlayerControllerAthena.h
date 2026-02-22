@@ -8,18 +8,6 @@
 #include "FortCheatManager.h"
 #include "FortQuestManager.h"
 
-enum class EMovementMode : uint8_t
-{
-    MOVE_None = 0,
-    MOVE_Walking = 1,
-    MOVE_NavWalking = 2,
-    MOVE_Falling = 3,
-    MOVE_Swimming = 4,
-    MOVE_Flying = 5,
-    MOVE_Custom = 6,
-    MOVE_MAX = 7,
-};
-
 class UAthenaPickaxeItemDefinition : public UFortItemDefinition
 {
 public:
@@ -418,6 +406,7 @@ public:
     DEFINE_FUNC(GetQuestManager, UFortQuestManager*);
     DEFINE_FUNC(OnRep_IsCreativeQuickbarEnabled, void);
     DEFINE_FUNC(ServerAwardVehicleTrickPoints, void);
+    DEFINE_FUNC(UnPossess, void);
     DEFINE_FUNC(ClientOnPawnRevived, void);
     DEFINE_FUNC(ServerSuicide, void);
     DEFINE_FUNC(ClientReportTournamentPlacementPointsScored, void);

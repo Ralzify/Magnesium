@@ -358,6 +358,42 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		PlayerController->WorldInventory->GiveItem(LightAmmo, 500);
 	}
 
+	if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett") && VersionInfo.FortniteVersion == 27.11)
+	{
+		FortPawn->SetShield(100.f);
+
+		std::random_device rd;
+		std::mt19937 rng(rd());
+
+		std::uniform_int_distribution<int> Heavy(50, 576);
+		std::uniform_int_distribution<int> ShellAmmo(87, 576);
+		std::uniform_int_distribution<int> Medium(124, 824);
+		std::uniform_int_distribution<int> Light(186, 824);
+
+		std::uniform_int_distribution<int> Mats(186, 646);
+		std::uniform_int_distribution<int> Gold(1200, 7500);
+
+		auto RifleAmmo = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsMedium.AthenaAmmoDataBulletsMedium");
+		auto Shells = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AthenaAmmoDataShells.AthenaAmmoDataShells");
+		auto LightAmmo = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsLight.AthenaAmmoDataBulletsLight");
+		auto HeavyAmmo = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsHeavy.AthenaAmmoDataBulletsHeavy");
+		auto RocketAmmo = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AmmoDataRockets.AmmoDataRockets");
+
+		auto Wood = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/WoodItemData.WoodItemData");
+		auto Stone = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/StoneItemData.StoneItemData");
+		auto Metal = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/MetalItemData.MetalItemData");
+
+		PlayerController->WorldInventory->GiveItem(RifleAmmo, Medium(rng));
+		PlayerController->WorldInventory->GiveItem(Shells, ShellAmmo(rng));
+		PlayerController->WorldInventory->GiveItem(LightAmmo, Light(rng));
+		PlayerController->WorldInventory->GiveItem(HeavyAmmo, Heavy(rng));
+		PlayerController->WorldInventory->GiveItem(RocketAmmo, 12);
+
+		PlayerController->WorldInventory->GiveItem(Wood, Mats(rng));
+		PlayerController->WorldInventory->GiveItem(Stone, Mats(rng));
+		PlayerController->WorldInventory->GiveItem(Metal, Mats(rng));
+	}
+
 	if ((!FConfiguration::bKeepInventory || FConfiguration::bLateGame) && PlayerController->WorldInventory)
 	{	
 		UEAllocatedVector<FGuid> GuidsToRemove;
@@ -3104,53 +3140,42 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 			}
 			else if (command == "fly")
 			{
-				auto Pawn = PlayerController->Pawn;
+				PlayerController->MyFortPawn->bActorEnableCollision = true;
+				auto MovementComp = PlayerController->MyFortPawn->CharacterMovement;
 
-				if (!Pawn)
-				{
-					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
-					return;
-				}
-
-				Pawn->SetActorEnableCollision(true);
-
-				if (Pawn->CharacterMovement)
-				{
-					Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
-
-					if (Pawn->CharacterMovement->bCheatFlying)
-					{
-						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
-						PlayerController->ClientMessage(FString(L"Enabled flying!"), FName(), 1.f);
-					}
-					else
-					{
-						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
-						PlayerController->ClientMessage(FString(L"Disabled flying"), FName(), 1.f);
-					}
-				}
+				MovementComp->bCheatFlying ^= 1;
+				MovementComp->SetMovementMode(MovementComp->bCheatFlying ? 5 : 3, 67);
+				PlayerController->ClientMessage(MovementComp->bCheatFlying ? FString(L"Flying is now enabled!") : FString("Flying is now disabled!"), FName(), 1.f);
 			}
 			else if (command == "ghost")
 			{
-				auto Pawn = PlayerController->Pawn;
+				PlayerController->MyFortPawn->bActorEnableCollision = !PlayerController->MyFortPawn->bActorEnableCollision;
+				auto MovementComp = PlayerController->MyFortPawn->CharacterMovement;
 
-				if (!Pawn)
+				MovementComp->bCheatFlying ^= 1;
+				MovementComp->SetMovementMode(MovementComp->bCheatFlying ? 5 : 3, 67);
+				PlayerController->ClientMessage(MovementComp->bCheatFlying ? FString(L"Flying is now enabled!") : FString("Flying is now disabled!"), FName(), 1.f);
+			}
+			else if (command == "flyspeed")
+			{
+				if (args.size() != 2)
 				{
-					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
 					return;
 				}
 
-				Pawn->SetActorEnableCollision(!Pawn->bActorEnableCollision);
+				int Index = 1;
 
-				if (Pawn->CharacterMovement)
+				try
 				{
-					Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
-
-					if (Pawn->CharacterMovement->bCheatFlying)
-						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
-					else
-						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+					Index = std::stoi(args[1].c_str(), nullptr);
 				}
+				catch (...)
+				{
+				}
+
+				PlayerController->FlyingModifierIndex = Index;
+				PlayerController->OnRep_FlyingModifierIndex();
 			}
 			else if (command == "timeofday" || command == "time" || command == "t")
 			{
@@ -4957,6 +4982,16 @@ void AFortPlayerControllerAthena::ServerAwardVehicleTrickPoints_(UObject* Contex
 	TargetTags.ParentTags.Free();
 }
 
+void ServerRestartPlayer(AFortPlayerControllerAthena* _this)
+{
+	if (_this->Pawn)
+		_this->UnPossess(_this->Pawn);
+
+	auto GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
+
+	GameMode->RestartPlayer(_this);
+}
+
 void AFortPlayerControllerAthena::PostLoadHook()
 {
 	if (VersionInfo.FortniteVersion >= 27)
@@ -4985,6 +5020,9 @@ void AFortPlayerControllerAthena::PostLoadHook()
 		auto ServerRestartPlayerIdx = GetDefaultObj()->GetFunction("ServerRestartPlayer")->GetVTableIndex();
 		auto DefaultFortPCZone = DefaultObjImpl("FortPlayerControllerZone");
 		Utils::Hook<AFortPlayerControllerAthena>(ServerRestartPlayerIdx, DefaultFortPCZone->Vft[ServerRestartPlayerIdx]);
+
+		if (VersionInfo.FortniteVersion >= 15)
+			Utils::Hook(uint64_t(DefaultObjImpl("PlayerController")->Vft[ServerRestartPlayerIdx]), ServerRestartPlayer);
 	}
 
 	auto ServerSuicideIdx = GetDefaultObj()->GetFunction("ServerSuicide")->GetVTableIndex();
@@ -5032,8 +5070,8 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	auto ClientOnPawnDiedAddr = FindFunctionCall(L"ClientOnPawnDied", VersionInfo.EngineVersion == 4.16 ? std::vector<uint8_t>{ 0x48, 0x89, 0x54 } : (VersionInfo.FortniteVersion >= 24 && VersionInfo.FortniteVersion < 25 ? std::vector<uint8_t>{ 0x48, 0x8B, 0xC4 } : std::vector<uint8_t>{ 0x48, 0x89, 0x5C }));
 	Utils::Hook(ClientOnPawnDiedAddr, ClientOnPawnDied, ClientOnPawnDiedOG);
 
-	if (VersionInfo.FortniteVersion >= 15)
-		Utils::ExecHook(GetDefaultObj()->GetFunction("ServerClientIsReadyToRespawn"), ServerClientIsReadyToRespawn);
+	// if (VersionInfo.FortniteVersion >= 15)
+		// Utils::ExecHook(GetDefaultObj()->GetFunction("ServerClientIsReadyToRespawn"), ServerClientIsReadyToRespawn);
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerCheat"), ServerCheat);
 

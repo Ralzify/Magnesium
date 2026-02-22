@@ -117,7 +117,7 @@ public:
 
     static bool IsArenaPlaylist()
     {
-        return GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav);
+        return GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TiltedZW);
     }
 
     static inline FString* GetRequestURL(UObject* Connection)

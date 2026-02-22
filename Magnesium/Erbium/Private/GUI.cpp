@@ -483,6 +483,7 @@ void GUI::Init()
             bool bIsRetracTurtle = (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle));
             bool bIsCreative = (SelectedPlaylist == static_cast<int>(Playlist::Creative));
             bool bIsOnlyUp = (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp));
+            bool bIsTiltedZW = (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW));
 
             if (gsStatus <= Joinable)
             {
@@ -511,6 +512,10 @@ void GUI::Init()
                 else if (bIsDesertZW)
                 {
                     ImGui::Text("- Playing Rewind Custom Map.");
+				}
+                else if (bIsTiltedZW)
+                {
+                    ImGui::Text("- Playing Tilted Zone Wars Map.");
 				}
                 else if (bIsOnlyUp)
                 {
@@ -815,7 +820,7 @@ void GUI::Init()
 
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
 
-            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 29.00)
+            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11)
             {
                 ImGui::Spacing();
 
@@ -827,17 +832,13 @@ void GUI::Init()
                     ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
                     ImGui::RadioButton("Rewind Desert Zone Wars", &SelectedPlaylist, (int)Playlist::RewindDZW);
                     ImGui::RadioButton("Only Up Map", &SelectedPlaylist, (int)Playlist::OnlyUp);
+                    ImGui::RadioButton("Tilted Zone Wars", &SelectedPlaylist, (int)Playlist::TiltedZW);
                 }
 
                 if (VersionInfo.FortniteVersion == 14.40)
                 {
                     ImGui::RadioButton("Retrac 1v1 Map", &SelectedPlaylist, (int)Playlist::Retrac1v1);
                     ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
-                }
-
-                if (VersionInfo.FortniteVersion == 29.00)
-                {
-                    ImGui::RadioButton("Tilted Zone Wars", &SelectedPlaylist, (int)Playlist::TiltedZW);
                 }
             }
 
@@ -993,7 +994,7 @@ void GUI::Init()
             }
             case (int)Playlist::TiltedZW:
             {
-                FConfiguration::Playlist = L"/Game/Jett/Playlist_TiltedZW.Playlist_TiltedZW";
+                FConfiguration::Playlist = L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett";
                 FConfiguration::bLateGame = false;
                 break;
 			}
