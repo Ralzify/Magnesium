@@ -5021,8 +5021,8 @@ void AFortPlayerControllerAthena::PostLoadHook()
 		auto DefaultFortPCZone = DefaultObjImpl("FortPlayerControllerZone");
 		Utils::Hook<AFortPlayerControllerAthena>(ServerRestartPlayerIdx, DefaultFortPCZone->Vft[ServerRestartPlayerIdx]);
 
-		if (VersionInfo.FortniteVersion >= 15)
-			Utils::Hook(uint64_t(DefaultObjImpl("PlayerController")->Vft[ServerRestartPlayerIdx]), ServerRestartPlayer);
+		// if (VersionInfo.FortniteVersion >= 15)
+			// Utils::Hook(uint64_t(DefaultObjImpl("PlayerController")->Vft[ServerRestartPlayerIdx]), ServerRestartPlayer);
 	}
 
 	auto ServerSuicideIdx = GetDefaultObj()->GetFunction("ServerSuicide")->GetVTableIndex();
@@ -5070,8 +5070,8 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	auto ClientOnPawnDiedAddr = FindFunctionCall(L"ClientOnPawnDied", VersionInfo.EngineVersion == 4.16 ? std::vector<uint8_t>{ 0x48, 0x89, 0x54 } : (VersionInfo.FortniteVersion >= 24 && VersionInfo.FortniteVersion < 25 ? std::vector<uint8_t>{ 0x48, 0x8B, 0xC4 } : std::vector<uint8_t>{ 0x48, 0x89, 0x5C }));
 	Utils::Hook(ClientOnPawnDiedAddr, ClientOnPawnDied, ClientOnPawnDiedOG);
 
-	// if (VersionInfo.FortniteVersion >= 15)
-		// Utils::ExecHook(GetDefaultObj()->GetFunction("ServerClientIsReadyToRespawn"), ServerClientIsReadyToRespawn);
+	if (VersionInfo.FortniteVersion >= 15)
+		Utils::ExecHook(GetDefaultObj()->GetFunction("ServerClientIsReadyToRespawn"), ServerClientIsReadyToRespawn);
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerCheat"), ServerCheat);
 
