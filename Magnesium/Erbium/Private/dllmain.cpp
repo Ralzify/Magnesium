@@ -238,6 +238,7 @@ void Main()
     else if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett"))
     {
         terrainOpen = L"open /Game/Jett/OnlyUp";
+        FConfiguration::bEnableCheats = false;
         FConfiguration::bInfiniteAmmo = false;
         FConfiguration::bInfiniteMats = false;
         FConfiguration::bJoinInProgress = true;
@@ -247,7 +248,7 @@ void Main()
     {
         terrainOpen = L"open /Game/Jett/TiltedZW/TiltedZW_Jett";
         FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 50;
+        FConfiguration::SiphonAmount = 200;
         FConfiguration::bInfiniteAmmo = true;
         FConfiguration::bInfiniteMats = true;
         FConfiguration::bJoinInProgress = true;

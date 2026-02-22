@@ -37,6 +37,7 @@ struct FConfiguration
     static inline auto UseCustomBotNames = false;
     static inline auto BotHealth = 21;
     static inline auto BotShield = 21;
+    static inline auto bHasPickaxe = true;
 
     static inline auto bLateGame = true;
     static inline auto LateGameZone = 4; // starting zone

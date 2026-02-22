@@ -519,7 +519,11 @@ void GUI::Init()
 				}
                 else if (bIsOnlyUp)
                 {
-                    ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
+                    if (gsStatus < Joinable)
+                    {
+                        ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
+                        ImGui::Checkbox("Player Has Pickaxe", &FConfiguration::bHasPickaxe);
+                    }
                 }
                 else
                 {
@@ -581,9 +585,6 @@ void GUI::Init()
                 ImGui::Text("Match Settings:");
                 SmallSeparator(Width);
 
-                if (bIsOnlyUp)
-                    ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
-
                 ImGui::Checkbox("Infinite Materials", &FConfiguration::bInfiniteMats);
                 ImGui::Checkbox("Infinite Ammo", &FConfiguration::bInfiniteAmmo);
                 ImGui::Checkbox("Toggle Cheat Commands", &FConfiguration::bEnableCheats);
@@ -596,7 +597,7 @@ void GUI::Init()
                     ImGui::InputInt("Siphon Amount", &FConfiguration::SiphonAmount);
                 }
 
-                if (ImGui::Button("Reset Builds", ImVec2(Width, Height)))
+                if (ImGui::Button("Reset Player Builds", ImVec2(Width, Height)))
                 {
                     TArray<ABuildingSMActor*> Builds;
                     Utils::GetAll<ABuildingSMActor>(Builds);

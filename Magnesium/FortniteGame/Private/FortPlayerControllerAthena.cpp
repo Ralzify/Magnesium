@@ -564,6 +564,45 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
 		}
 	}
+
+	if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett") && VersionInfo.FortniteVersion == 27.11)
+	{
+		if (!FConfiguration::bHasPickaxe)
+		{
+			for (auto& UncastedPC : GameMode->AlivePlayers)
+			{
+				auto PlayerController = (AFortPlayerControllerAthena*)UncastedPC;
+
+				auto PickaxeInstance = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
+					{
+						return entry.ItemDefinition->Cast<UFortWeaponMeleeItemDefinition>();
+					}, FFortItemEntry::Size());
+
+				if (PickaxeInstance)
+					PlayerController->WorldInventory->Remove(PickaxeInstance->ItemGuid);
+
+				auto Hands = FindObject<UFortItemDefinition>(L"/EventMode/Items/WID_EventMode_Hands_Activator.WID_EventMode_Hands_Activator");
+
+				PlayerController->WorldInventory->GiveItem(Hands);
+			}
+		}
+
+		if (UAbilitySystemComponent* AbilitySystemComponent = PlayerController->PlayerState->AbilitySystemComponent)
+		{
+			static auto NoBuildGE = FindObject<UClass>(L"/Game/Athena/Items/Quests/HardcoreChallenges/NoBuilding/GE_HCChallenge_NoBuilding.GE_HCChallenge_NoBuilding_C");
+
+			if (NoBuildGE)
+			{
+				FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+				Context.Instigator = PlayerController;
+				Context.Causer = FortPawn;
+				Context.AddSourceObject(FortPawn);
+
+				AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(NoBuildGE, 1.0f, Context);
+			}
+		}
+	}
 }
 
 uint32 ServerAttemptAircraftJumpVft;
@@ -2256,47 +2295,46 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 	{
 	_help:
 		PlayerController->ClientMessage(FString(LR"(Command List:
-    cheat startaircraft - Starts the battle bus
-    cheat resumesafezone - Resumes the storm
-    cheat pausesafezone - Pauses the storm
-    cheat skipsafezone - Skips to the next safe zone
-    cheat startshrinksafezone - Starts shrinking the safe zone
-    cheat infiniteammo - Toggles infinite ammo
-    cheat infinitemats - Toggles infinite materials
-	cheat fly - Toggles fly mode
-	cheat ghost - Toggles no-clip flying
-    cheat gravity <Scale> - Sets the gravity scale
-    cheat changename <Name> - Changes your player name
-    cheat keepinventory - Toggles keeping inventory on death
-    cheat spawnactor <class/path> - Spawns an actor near your location
-	cheat destroyall <class/path> - Destroys all actors of a class
-    cheat sethealth <amount> - Sets your pawn's health (0-100)
-    cheat setshield <amount> - Sets your pawn's shield (0-100)
-	cheat setmaxhealth <amount> - Sets your pawn's maximum health
-	cheat setmaxshield <amount> - Sets your pawn's maximum shield
-	cheat regen - Regenerates health and shield to the maximum value
-	cheat setkills - Sets your kill count
-	cheat setarenapoints - Sets your arena points : Use a negative number to take away points
-    cheat demospeed <Speed> - Sets the speed of the server
-    cheat god - Toggles god mode
-    cheat speed <Speed> - Sets the player's movement speed
-    cheat timeofday <Hour> - Sets the time of day (0-23)
-	cheat pausetimeofday - Pauses/Unpauses the time of day
-    cheat spawnbot - Spawns a player bot at your location (WIP)
-	cheat tpbot - Teleports your bot to your location
-	cheat botemote - Makes your bot emote
-    cheat startevent - Starts the event for the current version
-	cheat getlocation - Copies your current location to the clipboard
-	cheat setrespawnpoint - Sets your respawn point to a specified location
-    cheat tp <X> <Y> <Z> - Teleports to a location
-    cheat launch <X> <Y> <Z> - Launches the player
-    cheat savewaypoint - Saves your current location as a waypoint
-    cheat waypoint <Name> - Loads a saved waypoint
-    cheat skydive - Toggles skydiving
-    cheat giveitem <WID/path> <Count = 1> - Gives you an item
-    cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
-	cheat clearinventory - Clears your inventory of all items that are droppable
-    cheat spawnactor <class/path> - Spawns an actor at your location + 5 meters)"), FName(), 1);
+cheat startaircraft - Starts the battle bus
+cheat resumesafezone - Resumes the storm
+cheat pausesafezone - Pauses the storm
+cheat skipsafezone - Skips to the next safe zone
+cheat startshrinksafezone - Starts shrinking the safe zone
+cheat infiniteammo - Toggles infinite ammo
+cheat infinitemats - Toggles infinite materials
+cheat fly - Toggles fly mode
+cheat ghost - Toggles no-clip flying
+cheat gravity <Scale> - Sets the gravity scale
+cheat changename <Name> - Changes your player name
+cheat keepinventory - Toggles keeping inventory on death
+cheat spawnactor <class/path> - Spawns an actor near your location
+cheat destroyall <class/path> - Destroys all actors of a class
+cheat sethealth <amount> - Sets your pawn's health (0-100)
+cheat setshield <amount> - Sets your pawn's shield (0-100)
+cheat setmaxhealth <amount> - Sets your pawn's maximum health
+cheat setmaxshield <amount> - Sets your pawn's maximum shield
+cheat regen - Regenerates health and shield to the maximum value
+cheat setkills - Sets your kill count
+cheat setarenapoints - Sets your arena points : Use a negative number to take away points
+cheat demospeed <Speed> - Sets the speed of the server
+cheat god - Toggles god mode
+cheat speed <Speed> - Sets the player's movement speed
+cheat timeofday <Hour> - Sets the time of day (0-23)
+cheat pausetimeofday - Pauses/Unpauses the time of day
+cheat spawnbot - Spawns a player bot at your location (WIP)
+cheat tpbot - Teleports your bot to your location
+cheat startevent - Starts the event for the current version
+cheat getlocation - Copies your current location to the clipboard
+cheat setrespawnpoint - Sets your respawn point to a specified location
+cheat tp <X> <Y> <Z> - Teleports to a location
+cheat launch <X> <Y> <Z> - Launches the player
+cheat savewaypoint - Saves your current location as a waypoint
+cheat waypoint <Name> - Loads a saved waypoint
+cheat skydive - Toggles skydiving
+cheat giveitem <WID/path> <Count = 1> - Gives you an item
+cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
+cheat clearinventory - Clears your inventory of all items that are droppable
+cheat spawn <class/path> - Spawns an actor at your location + 5 meters)"), FName(), 1);
 	}
 	else
 	{
@@ -3113,6 +3151,13 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 						ActorClass = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
 				}
 
+				if (args[1].contains("volume"))
+				{
+					UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"destroyall volume"), nullptr);
+					PlayerController->ClientMessage(FString(L"Destroyed the barrier!"), FName(), 1.f);
+					return;
+				}
+
 				if (!ActorClass)
 				{
 					PlayerController->ClientMessage(FString(L"Invalid class path!"), FName(), 1.f);
@@ -3154,7 +3199,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 
 				MovementComp->bCheatFlying ^= 1;
 				MovementComp->SetMovementMode(MovementComp->bCheatFlying ? 5 : 3, 67);
-				PlayerController->ClientMessage(MovementComp->bCheatFlying ? FString(L"Flying is now enabled!") : FString("Flying is now disabled!"), FName(), 1.f);
+				PlayerController->ClientMessage(MovementComp->bCheatFlying ? FString(L"Ghost mode is now enabled!") : FString("Ghost mode is now disabled!"), FName(), 1.f);
 			}
 			else if (command == "flyspeed")
 			{
