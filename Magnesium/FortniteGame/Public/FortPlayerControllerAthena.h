@@ -56,6 +56,29 @@ public:
     DEFINE_PROP(HeroDefinition, UFortHeroType*);
 };
 
+class UMaterialInterface : public UObject
+{
+public:
+    UCLASS_COMMON_MEMBERS(UMaterialInterface);
+};
+
+class UAthenaCosmeticItemDefinition : public UFortItemDefinition
+{
+public:
+    UCLASS_COMMON_MEMBERS(UAthenaCosmeticItemDefinition);
+
+    DEFINE_PROP(ItemVariants, TArray<UObject*>);
+};
+
+class UAthenaItemWrapDefinition : public UAthenaCosmeticItemDefinition
+{
+public:
+    UCLASS_COMMON_MEMBERS(UAthenaItemWrapDefinition);
+
+    DEFINE_PROP(ItemWrapModifierBlueprint, TSoftClassPtr<UClass>);
+    DEFINE_PROP(ItemWrapMaterial, TSoftObjectPtr<UMaterialInterface>);
+};
+
 struct FPartVariantDef
 {
 public:
@@ -71,14 +94,6 @@ public:
     UCLASS_COMMON_MEMBERS(UFortCosmeticCharacterPartVariant);
 
     DEFINE_PROP(PartOptions, TArray<FPartVariantDef>);
-};
-
-class UAthenaCosmeticItemDefinition : public UFortItemDefinition
-{
-public:
-    UCLASS_COMMON_MEMBERS(UAthenaCosmeticItemDefinition);
-
-    DEFINE_PROP(ItemVariants, TArray<UObject*>);
 };
 
 struct FMcpVariantChannelInfo
@@ -411,6 +426,8 @@ public:
     DEFINE_FUNC(ServerSuicide, void);
     DEFINE_FUNC(ClientReportTournamentPlacementPointsScored, void);
     DEFINE_FUNC(IsInRespawnCountdown, bool);
+    DEFINE_FUNC(ServerApplyOverrideWrapToItem, UAthenaItemWrapDefinition*);
+    DEFINE_FUNC(ServerApplyOverrideWrapToVehicle, void);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);

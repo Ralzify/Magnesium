@@ -43,9 +43,11 @@ enum class Playlist : int
     Gav,
     Retrac1v1,
     RetracTurtle,
+    RetracWater,
     TiltedZW,
     RewindDZW,
     OnlyUp,
+    Twine1v1,
     Event,
     Custom
 };
@@ -117,7 +119,7 @@ public:
 
     static bool IsArenaPlaylist()
     {
-        return GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TiltedZW);
+        return GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TiltedZW) || GUI::SelectedPlaylist == static_cast<int>(Playlist::RetracWater);
     }
 
     static inline FString* GetRequestURL(UObject* Connection)

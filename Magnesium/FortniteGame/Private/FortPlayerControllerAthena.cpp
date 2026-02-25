@@ -365,7 +365,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		std::random_device rd;
 		std::mt19937 rng(rd());
 
-		std::uniform_int_distribution<int> Heavy(50, 576);
+		std::uniform_int_distribution<int> Heavy(50, 186);
 		std::uniform_int_distribution<int> ShellAmmo(87, 576);
 		std::uniform_int_distribution<int> Medium(124, 824);
 		std::uniform_int_distribution<int> Light(186, 824);
@@ -2509,7 +2509,7 @@ cheat spawn <class/path> - Spawns an actor at your location + 5 meters)"), FName
 			else if (command == "suicide")
 			{
 				PlayerController->ServerSuicide();
-				PlayerController->ClientMessage(FString(L"Killed pawn!"), FName(), 1.f);
+				PlayerController->ClientMessage(FString(L"Killed player!"), FName(), 1.f);
 			}
 			else if (command == "infiniteammo")
 				FConfiguration::bInfiniteAmmo ^= 1;
@@ -3951,6 +3951,65 @@ cheat spawn <class/path> - Spawns an actor at your location + 5 meters)"), FName
 				Pawn->SetInVortex(bInVortex);
 				PlayerController->ClientMessage(FString(L"Toggled skydiving!"), FName(), 1.f);
 			}
+			else if (command == "applywrap" || command == "wrap")
+			{
+				std::wstring WrapName(args[1].begin(), args[1].end());
+
+				std::wstring FullPath = L"/Game/Athena/Items/Cosmetics/ItemWraps/" + WrapName + L"." + WrapName;
+
+				auto ItemWrap = FindObject<UAthenaItemWrapDefinition>(FullPath.c_str());
+
+				if (!ItemWrap)
+				{
+					PlayerController->ClientMessage(FString(L"Wrap not found!"), FName(), 1.f);
+					return;
+				}
+
+				TArray<FGuid> AllWeaponGuids;
+				auto& ItemInstances = PlayerController->WorldInventory->Inventory.ItemInstances;
+
+				for (int i = 0; i < ItemInstances.Num(); ++i)
+				{
+					auto ItemInstance = ItemInstances[i];
+					auto& ItemEntry = ItemInstance->GetItemEntry();
+					const auto ItemDefinition = ItemEntry.ItemDefinition;
+
+					if (ItemDefinition->HasbCanBeDropped() ? ItemDefinition->bCanBeDropped : (ItemDefinition->GetPickupComponent() ? ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false))
+					{
+						AllWeaponGuids.Add(ItemEntry.ItemGuid);
+					}
+				}
+
+				if (AllWeaponGuids.Num() > 0)
+				{
+					PlayerController->ServerApplyOverrideWrapToItem(AllWeaponGuids, ItemWrap);
+				}
+				else
+				{
+					PlayerController->ClientMessage(FString(L"Could not find applicable weapons."), FName(), 1.f);
+					return;
+				}
+
+				PlayerController->ClientMessage(FString(L"Applying wrap to all weapons!"), FName(), 1.f);
+			}
+			else if (command == "wraptest")
+			{
+				auto ItemWrap = FindObject<UAthenaItemWrapDefinition>(L"/Game/Athena/Items/Cosmetics/ItemWraps/Wrap_258_Celestial.Wrap_258_Celestial");
+
+				if (!ItemWrap)
+				{
+					PlayerController->ClientMessage(FString(L"could not find wrap :c"), FName(), 1.f);
+					return;
+				}
+
+				auto PickaxeInstance = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
+					{
+						return entry.ItemDefinition->Cast<UFortWeaponMeleeItemDefinition>();
+					}, FFortItemEntry::Size());
+
+				PlayerController->ServerApplyOverrideWrapToItem(PickaxeInstance->ItemGuid, ItemWrap);
+				PlayerController->ClientMessage(FString(L"so sigma bro plz apply"), FName(), 1.f);
+			}
 			else if (command == "resetbuilds" || command == "reset")
 			{
 				TArray<ABuildingSMActor*> Builds;
@@ -3970,8 +4029,138 @@ cheat spawn <class/path> - Spawns an actor at your location + 5 meters)"), FName
 		}
 		else
 		{
-			PlayerController->ClientMessage(FString(L"Commands are currently disabled for this session."), FName(), 1.f);
-			return;
+			if (command == "suicide")
+			{
+				PlayerController->ServerSuicide();
+				PlayerController->ClientMessage(FString(L"Killed player!"), FName(), 1.f);
+			}
+			else
+			{
+				PlayerController->ClientMessage(FString(L"Commands are currently disabled for this session."), FName(), 1.f);
+				return;
+			}
+
+			if (GUI::SelectedPlaylist == static_cast<int>(Playlist::OnlyUp))
+			{
+				if (command == "savewaypoint" || command == "s")
+				{
+					if (args.size() < 2)
+					{
+						PlayerController->ClientMessage(FString(L"Please provide a phrase to save the waypoint to."), FName(), 1.f);
+						return;
+					}
+
+					auto Pawn = PlayerController->Pawn;
+
+					if (!Pawn)
+					{
+						PlayerController->ClientMessage(FString(L"Couldn't find a pawn!"), FName(), 1.f);
+						return;
+					}
+
+					FVector PawnLocation(Pawn->K2_GetActorLocation().X, Pawn->K2_GetActorLocation().Y, Pawn->K2_GetActorLocation().Z);
+
+					if (PawnLocation.X == 0.0f && PawnLocation.Y == 0.0f && PawnLocation.Z == 0.0f)
+					{
+						PlayerController->ClientMessage(FString(L"Failed to save a waypoint."), FName(), 1.f);
+						return;
+					}
+
+					std::string Phrase = args[1].c_str();
+
+					auto It = Waypoints.find(Phrase);
+
+					if (It != Waypoints.end())
+					{
+						if (args.size() >= 3 && (args[2] == "override" || args[2] == "o"))
+						{
+							It->second.clear();
+							It->second.push_back(PawnLocation);
+
+							PlayerController->ClientMessage(FString(L"Waypoint overridden successfully!"), FName(), 1.f);
+						}
+						else
+						{
+							PlayerController->ClientMessage(FString(L"A waypoint with this phrase already exists! Use 'waypoint {phrase} override' to override it."), FName(), 1);
+						}
+					}
+					else
+					{
+						std::vector<FVector> Locations;
+						Locations.push_back(PawnLocation);
+						Waypoints[Phrase] = Locations;
+
+						PlayerController->ClientMessage(FString(L"Waypoint saved! Use \" cheat waypoint (phrase) \" to teleport to that location!"), FName(), 1);
+					}
+				}
+				else if (command == "waypoint" || command == "w")
+				{
+					if (args.size() < 2)
+					{
+						PlayerController->ClientMessage(FString(L"Please provide a waypoint phrase to teleport to."), FName(), 1.f);
+						return;
+					}
+
+					std::string Phrase = args[1].c_str();
+
+					auto It = Waypoints.find(Phrase);
+
+					if (It == Waypoints.end() || It->second.empty())
+					{
+						PlayerController->ClientMessage(FString(L"A saved waypoint with this phrase was not found!"), FName(), 1.f);
+						return;
+					}
+
+					const auto& WaypointList = It->second;
+
+					if (args.size() >= 3 && (args[2] == "previous" || args[2] == "p"))
+					{
+						if (WaypointList.size() < 2)
+						{
+							PlayerController->ClientMessage(FString(L"No previous waypoint available for this phrase!"), FName(), 1.f);
+							return;
+						}
+
+						FVector Destination = Waypoints[Phrase][Waypoints[Phrase].size() - 2];
+
+						auto Pawn = PlayerController->Pawn;
+
+						if (Pawn)
+						{
+							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
+							Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+							PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
+						}
+						else
+						{
+							PlayerController->ClientMessage(FString(L"Couldn't find a pawn to teleport!"), FName(), 1.f);
+						}
+					}
+					else
+					{
+						FVector Destination = WaypointList.back();
+
+						if (Destination.X == 0.0f && Destination.Y == 0.0f && Destination.Z == 0.0f)
+						{
+							PlayerController->ClientMessage(FString(L"Waypoint is invalid (0, 0, 0)! Aborting teleport."), FName(), 1.f);
+							return;
+						}
+
+						auto Pawn = PlayerController->Pawn;
+
+						if (Pawn)
+						{
+							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
+							Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+							PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
+						}
+						else
+						{
+							PlayerController->ClientMessage(FString(L"Couldn't find a pawn to teleport!"), FName(), 1.f);
+						}
+					}
+				}
+			}
 		}
 	}
 }

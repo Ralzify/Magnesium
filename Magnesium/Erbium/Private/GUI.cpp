@@ -444,7 +444,7 @@ void GUI::Init()
             }
 
             ImGui::Text("- Server Port: %d", FConfiguration::Port);
-            // ImGui::Text("- MaxTickRate: %.1f", FConfiguration::MaxTickRate);
+            ImGui::Text("- Server Tick Rate: %.1f", FConfiguration::MaxTickRate);
 
             if (gsStatus >= Joinable)
             {
@@ -469,6 +469,8 @@ void GUI::Init()
                     ImGui::Text("- Infinite Render: ");
                     ImGui::SameLine(0.0f, 0.0f);
                     ImGui::TextColored(Color, "Enabled");
+
+                    ImGui::Text("NOTE: Infinite Render only works on the last player to join!");
                 }
 
                 ImGui::Text("- Players: %d", AliveCount);
@@ -484,6 +486,7 @@ void GUI::Init()
             bool bIsCreative = (SelectedPlaylist == static_cast<int>(Playlist::Creative));
             bool bIsOnlyUp = (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp));
             bool bIsTiltedZW = (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW));
+            bool bIsTwine = (SelectedPlaylist == static_cast<int>(Playlist::Twine1v1));
 
             if (gsStatus <= Joinable)
             {
@@ -517,6 +520,10 @@ void GUI::Init()
                 {
                     ImGui::Text("- Playing Tilted Zone Wars Map.");
 				}
+                else if (bIsTwine)
+                {
+                    ImGui::Text("- Playing Twine 1v1 Map.");
+                }
                 else if (bIsOnlyUp)
                 {
                     if (gsStatus < Joinable)
@@ -553,6 +560,10 @@ void GUI::Init()
                             ImGui::SliderFloat("Bus Start Delay", &FConfiguration::BusStartDelay, 0.0f, 300.0f, "%.1f seconds");
                             ImGui::PopItemWidth();
                         }
+
+                        ImGui::PushItemWidth(Width);
+                        ImGui::SliderFloat("Max Tick Rate", &FConfiguration::MaxTickRate, 5.0f, 180.0f, "%.1f seconds");
+                        ImGui::PopItemWidth();
                     }
                 }
 
@@ -840,6 +851,8 @@ void GUI::Init()
                 {
                     ImGui::RadioButton("Retrac 1v1 Map", &SelectedPlaylist, (int)Playlist::Retrac1v1);
                     ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
+                    //ImGui::RadioButton("Retrac Water Map", &SelectedPlaylist, (int)Playlist::RetracWater);
+                    //ImGui::RadioButton("Twine 1v1 Map", &SelectedPlaylist, (int)Playlist::Twine1v1);
                 }
             }
 
@@ -993,6 +1006,12 @@ void GUI::Init()
                 FConfiguration::bLateGame = false;
                 break;
             }
+            case (int)Playlist::RetracWater:
+            {
+				FConfiguration::Playlist = L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac";
+                FConfiguration::bLateGame = false;
+                break;
+            }
             case (int)Playlist::TiltedZW:
             {
                 FConfiguration::Playlist = L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett";
@@ -1008,6 +1027,12 @@ void GUI::Init()
             case (int)Playlist::OnlyUp:
             {
                 FConfiguration::Playlist = L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett";
+                FConfiguration::bLateGame = false;
+                break;
+			}
+            case (int)Playlist::Twine1v1:
+            {
+                FConfiguration::Playlist = L"/Buddy/Playlists/Playlist_1v1Twine.Playlist_1v1Twine";
                 FConfiguration::bLateGame = false;
                 break;
 			}

@@ -266,6 +266,28 @@ void Main()
         FConfiguration::bKeepInventory = true;
         FConfiguration::MaxTickRate = 60.f;
     }
+    else if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlists/Playlist_1v1Twine.Playlist_1v1Twine"))
+    {
+        terrainOpen = L"open /Game/Twine/GameModes/1v1/GameMode_1v1";
+        FConfiguration::bSiphon = true;
+        FConfiguration::SiphonAmount = 200;
+        FConfiguration::bInfiniteAmmo = true;
+        FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+        FConfiguration::MaxTickRate = 60.f;
+    }
+    /*else if (wcsstr(FConfiguration::Playlist, L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac"))
+    {
+        terrainOpen = L"open /Game/Retrac/Maps/WaterMap";
+        FConfiguration::bSiphon = true;
+        FConfiguration::SiphonAmount = 200;
+        FConfiguration::bInfiniteAmmo = true;
+        FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+        FConfiguration::MaxTickRate = 60.f;
+    }*/
     else if (FConfiguration::bIsCustomMap && FConfiguration::CustomMap && FConfiguration::CustomMap[0] != L'\0')
     {
         terrainOpen = FConfiguration::CustomMap;

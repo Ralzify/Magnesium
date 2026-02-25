@@ -539,7 +539,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
     // Slot 7 End
 
     // Slot 8 (Ammo)
-    std::uniform_int_distribution<int> Heavy(50, 576);
+    std::uniform_int_distribution<int> Heavy(50, 186);
     std::uniform_int_distribution<int> Shells(87, 576);
     std::uniform_int_distribution<int> Medium(124, 824);
     std::uniform_int_distribution<int> Light(186, 824);
@@ -727,6 +727,11 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/HighTower/Items/Tomato/Tomato_Rifle/WID_Assault_Stark_Athena_SR_Ore_T03.WID_Assault_Stark_Athena_SR_Ore_T03"), 1));
     }
 
+    if (VersionInfo.FortniteVersion == 14.40)
+    {
+        Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/Boss/WID_Boss_GhostMidas.WID_Boss_GhostMidas"), 1));
+    }
+
     if ((VersionInfo.FortniteVersion == 11.3) || (std::floor(VersionInfo.FortniteVersion) == 15) || (VersionInfo.FortniteVersion == 20.30) || (VersionInfo.FortniteVersion >= 21.10 && VersionInfo.FortniteVersion < 22.00) || (VersionInfo.FortniteVersion == 22.30) || (VersionInfo.FortniteVersion == 29.40))
     {
         if (std::floor(VersionInfo.FortniteVersion) == 15)
@@ -750,6 +755,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Exotics/PastaRipper/WID_Assault_PastaRipper_Athena_VR_Ore_T03.WID_Assault_PastaRipper_Athena_VR_Ore_T03"), 1));
         Slot1.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Exotics/PastaRipper/WID_Assault_PastaRipper_Athena_SR_Ore_T03.WID_Assault_PastaRipper_Athena_SR_Ore_T03"), 1));
         Slot1.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Exotics/PastaRipper/WID_Assault_PastaRipper_Athena_Boss.WID_Assault_PastaRipper_Athena_Boss"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/LlamaRoaster/WID_Assault_LlamaRoaster_Boss.WID_Assault_LlamaRoaster_Boss"), 1));
     }
 
     if (VersionInfo.FortniteVersion >= 17.40 && VersionInfo.FortniteVersion < 18.00)
@@ -1111,6 +1117,16 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_Weather_Athena_SR.WID_Sniper_Weather_Athena_SR"), 1));
     }
 
+    if ((VersionInfo.FortniteVersion >= 15.00 && VersionInfo.FortniteVersion < 16.00) || (std::floor(VersionInfo.FortniteVersion) == 17) || (std::floor(VersionInfo.FortniteVersion) == 20))
+    {
+        Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WaffleTruck/WID_WaffleTruck_Sniper_StormScout.WID_WaffleTruck_Sniper_StormScout"), 1));
+    }
+
+    if ((VersionInfo.FortniteVersion >= 15.10 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 18.00 && VersionInfo.FortniteVersion < 20.00) || (VersionInfo.FortniteVersion >= 24.00 && VersionInfo.FortniteVersion < 26))
+    {
+        Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WaffleTruck/WID_WaffleTruck_Sniper_DragonBreath.WID_WaffleTruck_Sniper_DragonBreath"), 1));
+    }
+
     if (VersionInfo.FortniteVersion >= 15.10 && VersionInfo.FortniteVersion < 16.00)
     {
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_Cowboy_Athena_UC.WID_Sniper_Cowboy_Athena_UC"), 1));
@@ -1312,6 +1328,29 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_RC_Rocket_Athena_SR_T03.WID_RC_Rocket_Athena_SR_T03"), 1));
     }
 
+    static std::mt19937 FixedRNG(std::random_device{}());
+    std::uniform_int_distribution<int> Dist(1, 100);
+
+    if (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 19.00)
+    {
+        int Roll = Dist(FixedRNG);
+
+        if (Roll == 1)
+        {
+            Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/Bucket/Nice/WID_Athena_Bucket_Nice.WID_Athena_Bucket_Nice"), 1));
+        }
+    }
+
+    if ((VersionInfo.FortniteVersion >= 3.30 && VersionInfo.FortniteVersion < 6.00) || (std::floor(VersionInfo.FortniteVersion) == 12) || (std::floor(VersionInfo.FortniteVersion) == 20) || (VersionInfo.FortniteVersion >= 26 && VersionInfo.FortniteVersion < 28.00))
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/C4/Athena_C4.Athena_C4"), 6));
+    }
+
+    if ((VersionInfo.FortniteVersion >= 1.11 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion == 11.31) || (std::floor(VersionInfo.FortniteVersion) == 14) || (VersionInfo.FortniteVersion == 20.20) || (VersionInfo.FortniteVersion >= 21.30 && VersionInfo.FortniteVersion < 22.10) || (VersionInfo.FortniteVersion == 27.00) || (VersionInfo.FortniteVersion == 30.00))
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/DanceGrenade/Athena_DanceGrenade.Athena_DanceGrenade"), 3));
+    }
+
     if ((VersionInfo.FortniteVersion >= 3.5 && VersionInfo.FortniteVersion < 7.00) || (std::floor(VersionInfo.FortniteVersion) == 14) || (VersionInfo.FortniteVersion >= 21.20 && VersionInfo.FortniteVersion < 22.00) || (VersionInfo.FortniteVersion == 27.00))
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/TowerGrenade/Athena_TowerGrenade.Athena_TowerGrenade"), 2));
@@ -1438,6 +1477,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     if (std::floor(VersionInfo.FortniteVersion) == 13)
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/Boss/WID_Boss_GrapplingHoot.WID_Boss_GrapplingHoot"), 1));
+        Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Launcher_Shockwave_Athena_UR_Ore_T03.WID_Launcher_Shockwave_Athena_UR_Ore_T03"), 1));
     }
 
     if (std::floor(VersionInfo.FortniteVersion) == 14)
@@ -1628,7 +1668,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     // Slot 7 End
 
     // Slot 8 (Ammo)
-    std::uniform_int_distribution<int> Heavy(50, 576);
+    std::uniform_int_distribution<int> Heavy(50, 186);
     std::uniform_int_distribution<int> Shells(87, 576);
     std::uniform_int_distribution<int> Medium(124, 824);
     std::uniform_int_distribution<int> Light(186, 824);
@@ -1838,7 +1878,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetOSLoadout()
     // Slot 7 End
 
     // Slot 8 (Ammo)
-    std::uniform_int_distribution<int> Heavy(50, 576);
+    std::uniform_int_distribution<int> Heavy(50, 186);
 
     TArray<TPair<FString, int>> Ammo;
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsHeavy.AthenaAmmoDataBulletsHeavy"), Heavy(rng)));
@@ -1968,7 +2008,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetCustomLoadout()
     // Slot 7 End
 
     // Slot 8 (Ammo)
-    std::uniform_int_distribution<int> Heavy(50, 576);
+    std::uniform_int_distribution<int> Heavy(50, 186);
     std::uniform_int_distribution<int> Shells(87, 576);
     std::uniform_int_distribution<int> Medium(124, 824);
     std::uniform_int_distribution<int> Light(186, 824);
