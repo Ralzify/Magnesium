@@ -61,10 +61,6 @@ void Main()
         }
     }
 
-    if (VersionInfo.EngineVersion >= 5.0)
-    {
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogFortUIDirector None"), nullptr);
-    }
     if (VersionInfo.EngineVersion >= 5.1)
     {
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"net.AllowEncryption 0"), nullptr);
@@ -277,7 +273,7 @@ void Main()
         FConfiguration::bKeepInventory = true;
         FConfiguration::MaxTickRate = 60.f;
     }
-    /*else if (wcsstr(FConfiguration::Playlist, L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac"))
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac"))
     {
         terrainOpen = L"open /Game/Retrac/Maps/WaterMap";
         FConfiguration::bSiphon = true;
@@ -287,7 +283,7 @@ void Main()
         FConfiguration::bJoinInProgress = true;
         FConfiguration::bKeepInventory = true;
         FConfiguration::MaxTickRate = 60.f;
-    }*/
+    }
     else if (FConfiguration::bIsCustomMap && FConfiguration::CustomMap && FConfiguration::CustomMap[0] != L'\0')
     {
         terrainOpen = FConfiguration::CustomMap;

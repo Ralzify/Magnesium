@@ -548,6 +548,9 @@ void GUI::Init()
                             bInitializedZone = true;
                         }
 
+                        if (VersionInfo.FortniteVersion == 19.20)
+                            FConfiguration::bAutoDump = false;
+
 						ImGui::Checkbox("Auto Dump Text", &FConfiguration::bAutoDump);
 
                         // ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
@@ -569,7 +572,7 @@ void GUI::Init()
 
                 ImGui::Spacing();
 
-				if (!bIsGavMap || !bIsEventPlaylist || !bIsRetrac1v1 || !bIsRetracTurtle)
+				if (!bIsGavMap || !bIsEventPlaylist || !bIsRetrac1v1 || !bIsRetracTurtle || !bIsTiltedZW || !bIsCreative || !bIsDesertZW || !bIsOnlyUp || !bIsTwine)
                 {
                     if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                     {
@@ -2080,6 +2083,9 @@ void GUI::Init()
 
             if (VersionInfo.FortniteVersion >= 19.00)
                 ImGui::Checkbox("Toggle Crown Slomo", &FConfiguration::bCrownSlomo);
+
+            if (VersionInfo.FortniteVersion >= 23.20 && VersionInfo.FortniteVersion < 25.20)
+                ImGui::Checkbox("Negate Velocity on Win", &FConfiguration::bCancelVelocityOnWin);
 
             if (FConfiguration::bRideableProjectiles)
             {

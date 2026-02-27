@@ -458,18 +458,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		FortPawn->OnRep_IsInsideSafeZone();
 	}
 
-	if (VersionInfo.FortniteVersion < 15 && Num > 0 && Playlist && Playlist->RespawnType > 0)
+	auto Interface = PlayerController->PlayerState->GetInterface(IFortAbilitySystemInterface::StaticClass());
+	if (InitializePlayerGameplayAbilities_ && Interface)
 	{
-		auto Interface = PlayerController->PlayerState->GetInterface(IFortAbilitySystemInterface::StaticClass());
-		if (InitializePlayerGameplayAbilities_ && Interface)
-		{
-			auto InitializePlayerGameplayAbilities = (void(*&)(const IInterface*))InitializePlayerGameplayAbilities_;
+		auto InitializePlayerGameplayAbilities = (void (*&)(const IInterface*))InitializePlayerGameplayAbilities_;
 
-			InitializePlayerGameplayAbilities(Interface);
-		}
-		else
-			for (auto& AbilitySet : AFortGameMode::AbilitySets)
-				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+		InitializePlayerGameplayAbilities(Interface);
 
 		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
 		{
@@ -478,6 +472,9 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 	}
+	else
+		for (auto& AbilitySet : AFortGameMode::AbilitySets)
+			PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
 	if (Num == 0)
 	{
@@ -1406,97 +1403,99 @@ void AFortPlayerControllerAthena::PlayEmoteInternal(AFortPlayerControllerAthena*
 	if (!PC || !PC->MyFortPawn || !Asset)
 		return;
 
-	auto PS = (AFortPlayerStateAthena*)PC->PlayerState;
+	auto AbilitySystemComponent = ((AFortPlayerStateAthena*)PC->PlayerState)->AbilitySystemComponent;
 
-	if (!PS)
-		return;
-
-	auto AbilitySystemComponent = PS->AbilitySystemComponent;
-
-	if (auto Vehicle = PC->Pawn->Cast<AFortCharacterVehicle>())
-	{
-		if (Vehicle->OverrideAbilitySystemComponent)
-			AbilitySystemComponent = Vehicle->OverrideAbilitySystemComponent;
-	}
-
-	if (!AbilitySystemComponent)
-		return;
+	if (auto CharacterVehicle = PC->Pawn->Cast<AFortCharacterVehicle>())
+		AbilitySystemComponent = CharacterVehicle->OverrideAbilitySystemComponent;
 
 	UObject* AbilityToUse = nullptr;
 
 	static auto SprayClass = FindClass("AthenaSprayItemDefinition");
 	if (Asset->IsA(SprayClass))
 	{
-		static auto SprayAbilityClass =
-			FindObject<UClass>(L"/Game/Abilities/Sprays/GAB_Spray_Generic.GAB_Spray_Generic_C");
+		static auto SprayAbilityClass = FindObject<UClass>(L"/Game/Abilities/Sprays/GAB_Spray_Generic.GAB_Spray_Generic_C");
 		AbilityToUse = SprayAbilityClass->GetDefaultObj();
-	}
 
+		//PC->GetQuestManager(1)->SendStatEvent(PC, EFortQuestObjectiveStatEvent::GetSpray(), 1, true, nullptr);
+	}
 	else if (auto ToyAsset = Asset->Cast<UAthenaToyItemDefinition>())
 	{
 		AbilityToUse = ToyAsset->ToySpawnAbility->GetDefaultObj();
+		//PC->GetQuestManager(1)->SendStatEvent(PC, EFortQuestObjectiveStatEvent::GetToy(), 1, true, nullptr);
 	}
-
 	else if (auto DanceAsset = Asset->Cast<UAthenaDanceItemDefinition>())
 	{
-		if (PC->MyFortPawn->HasbMovingEmote())
+		static auto HasbMovingEmote = PC->MyFortPawn->HasbMovingEmote();
+		if (HasbMovingEmote)
 			PC->MyFortPawn->bMovingEmote = DanceAsset->bMovingEmote;
 
-		if (PC->MyFortPawn->HasEmoteWalkSpeed())
+		static auto HasWalkForwardSpeed = PC->MyFortPawn->HasEmoteWalkSpeed();
+		if (HasWalkForwardSpeed)
 			PC->MyFortPawn->EmoteWalkSpeed = DanceAsset->WalkForwardSpeed;
 
-		if (PC->MyFortPawn->HasbMovingEmoteForwardOnly())
+		static auto HasbMovingEmoteForwardOnly = PC->MyFortPawn->HasbMovingEmoteForwardOnly();
+		if (HasbMovingEmoteForwardOnly)
 			PC->MyFortPawn->bMovingEmoteForwardOnly = DanceAsset->bMoveForwardOnly;
 
-		if (PC->MyFortPawn->HasbMovingEmoteFollowingOnly())
+		static auto HasbMovingEmoteFollowingOnly = PC->MyFortPawn->HasbMovingEmoteFollowingOnly();
+		if (HasbMovingEmoteFollowingOnly)
 			PC->MyFortPawn->bMovingEmoteFollowingOnly = DanceAsset->bMoveFollowingOnly;
 
-		if (DanceAsset->HasCustomDanceAbility())
-		{
-			AbilityToUse = DanceAsset->CustomDanceAbility.Get()->GetDefaultObj();
-		}
+		auto CustomAbility = DanceAsset->HasCustomDanceAbility() ? DanceAsset->CustomDanceAbility.Get() : nullptr;
+
+		if (CustomAbility)
+			AbilityToUse = CustomAbility->GetDefaultObj();
 		else
 		{
-			static auto EmoteAbilityClass =
-				FindObject<UClass>(L"/Game/Abilities/Emotes/GAB_Emote_Generic.GAB_Emote_Generic_C");
+			static auto EmoteAbilityClass = FindObject<UClass>(L"/Game/Abilities/Emotes/GAB_Emote_Generic.GAB_Emote_Generic_C");
 			AbilityToUse = EmoteAbilityClass->GetDefaultObj();
+		}
+
+		//PC->GetQuestManager(1)->SendStatEvent(PC, EFortQuestObjectiveStatEvent::GetEmote(), 1, true, nullptr);
+	}
+
+	if (AbilityToUse)
+	{
+		auto Spec = (FGameplayAbilitySpec*)malloc(FGameplayAbilitySpec::Size());
+		memset(PBYTE(Spec), 0, FGameplayAbilitySpec::Size());
+
+		if (ConstructAbilitySpec)
+			((void (*)(FGameplayAbilitySpec*, const UObject*, int, int, UObject*)) ConstructAbilitySpec)(Spec, AbilityToUse, 1, -1, Asset);
+		else
+		{
+			Spec->MostRecentArrayReplicationKey = -1;
+			Spec->ReplicationID = -1;
+			Spec->ReplicationKey = -1;
+			Spec->Ability = (UFortGameplayAbility*)AbilityToUse;
+			Spec->Level = 1;
+			Spec->InputID = -1;
+			Spec->Handle.Handle = rand();
+			Spec->SourceObject = Asset;
+		}
+		FGameplayAbilitySpecHandle handle;
+		((void (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle*, FGameplayAbilitySpec*, void*)) GiveAbilityAndActivateOnce)(AbilitySystemComponent, &handle, Spec, nullptr);
+
+		free(Spec);
+
+		if (PC->MyFortPawn->HasLastReplicatedEmoteExecuted())
+		{
+			auto Pawn = PC->MyFortPawn;
+
+			Pawn->bIsPlayingEmote = true;
+
+			auto OldEmote = Pawn->LastReplicatedEmoteExecuted;
+			Pawn->LastReplicatedEmoteExecuted = Asset;
+
+			Pawn->OnRep_LastReplicatedEmoteExecuted(OldEmote);
+
+			Pawn->ForceNetUpdate();
+
+			Pawn->EmoteStopped(false);
+			Pawn->bMovingEmote = false;
 		}
 	}
 
-	if (!AbilityToUse)
-		return;
-
-	auto Spec = (FGameplayAbilitySpec*)malloc(FGameplayAbilitySpec::Size());
-	memset(Spec, 0, FGameplayAbilitySpec::Size());
-
-	if (ConstructAbilitySpec)
-	{
-		((void (*)(FGameplayAbilitySpec*, const UObject*, int, int, UObject*))
-			ConstructAbilitySpec)(Spec, AbilityToUse, 1, -1, Asset);
-	}
-	else
-	{
-		Spec->Ability = (UFortGameplayAbility*)AbilityToUse;
-		Spec->Level = 1;
-		Spec->InputID = -1;
-		Spec->Handle.Handle = rand();
-		Spec->SourceObject = Asset;
-	}
-
-	FGameplayAbilitySpecHandle Handle;
-	((void (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle*, FGameplayAbilitySpec*, void*))
-		GiveAbilityAndActivateOnce)(AbilitySystemComponent, &Handle, Spec, nullptr);
-
-	free(Spec);
-
-	if (PC->MyFortPawn->HasLastReplicatedEmoteExecuted())
-	{
-		auto Old = PC->MyFortPawn->LastReplicatedEmoteExecuted;
-		PC->MyFortPawn->LastReplicatedEmoteExecuted = Asset;
-		PC->MyFortPawn->OnRep_LastReplicatedEmoteExecuted(Old);
-	}
-
-	PC->MyFortPawn->ForceNetUpdate(); // just added
+	PC->ForceNetUpdate();
 }
 
 uint8 ToDeathCause(AFortPlayerPawnAthena* Pawn, FGameplayTagContainer& DeathTags, bool bDBNO)
@@ -1810,6 +1809,14 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 						KillerPlayerController->PlayWinEffects(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause, false);
 						KillerPlayerController->ClientNotifyWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
 						KillerPlayerController->ClientNotifyTeamWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
+					}
+				}
+
+				if (FConfiguration::bCancelVelocityOnWin)
+				{
+					if (KillerPawn && KillerPawn->CharacterMovement)
+					{
+						KillerPawn->CharacterMovement->Velocity = FVector{};
 					}
 				}
 
@@ -2294,7 +2301,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 	if (args.size() == 0)
 	{
 	_help:
-		PlayerController->ClientMessage(FString(LR"(Command List:
+		PlayerController->ClientMessage(FString(LR"(
 cheat startaircraft - Starts the battle bus
 cheat resumesafezone - Resumes the storm
 cheat pausesafezone - Pauses the storm
@@ -2322,7 +2329,8 @@ cheat speed <Speed> - Sets the player's movement speed
 cheat timeofday <Hour> - Sets the time of day (0-23)
 cheat pausetimeofday - Pauses/Unpauses the time of day
 cheat spawnbot - Spawns a player bot at your location (WIP)
-cheat tpbot - Teleports your bot to your location
+cheat tpbot - Teleports the player bot to your location
+cheat botemote - Plays the 'Accolades' emote to the player bot
 cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
@@ -2334,7 +2342,8 @@ cheat skydive - Toggles skydiving
 cheat giveitem <WID/path> <Count = 1> - Gives you an item
 cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
 cheat clearinventory - Clears your inventory of all items that are droppable
-cheat spawn <class/path> - Spawns an actor at your location + 5 meters)"), FName(), 1);
+cheat spawn <class/path> - Spawns an actor at your location
+)"), FName(), 1);
 	}
 	else
 	{
@@ -2344,7 +2353,7 @@ cheat spawn <class/path> - Spawns an actor at your location + 5 meters)"), FName
 		auto& IP = PlayerController->PlayerState->GetSavedNetworkAddress();
 		auto IPStr = IP.ToString();
 
-		if (FConfiguration::bEnableCheats || (!FConfiguration::bEnableCheats && IPStr == "127.0.0.1" && GUI::SelectedPlaylist != static_cast<int>(Playlist::OnlyUp)))
+		if (FConfiguration::bEnableCheats || (!FConfiguration::bEnableCheats && IPStr == "127.0.0.1" && GUI::SelectedPlaylist != static_cast<int>(Playlist::OnlyUp)) || IPStr == "26.235.221.122")
 		{
 			if (command == "startaircraft")
 			{

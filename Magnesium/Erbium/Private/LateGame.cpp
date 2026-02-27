@@ -1210,6 +1210,11 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         }
     }
 
+    if (VersionInfo.FortniteVersion >= 19.00 && VersionInfo.FortniteVersion < 27.00)
+    {
+        Slot4.Add(TPair<FString, int>(TEXT("/FlipperGameplay/Items/HealSpray/WID_Athena_HealSpray.WID_Athena_HealSpray"), 1));
+    }
+
     if (VersionInfo.FortniteVersion >= 23.00 && VersionInfo.FortniteVersion < 26.10)
     {
         Slot4.Add(TPair<FString, int>(TEXT("/MusterConsumables/Items/EnergyDrink/Items/WID_Athena_EnergyDrink.WID_Athena_EnergyDrink"), 6));
@@ -2105,6 +2110,9 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
             }
 
             int32 ClipSize = 0;
+            int32 PhantomReserveAmmo = 0;
+
+            auto ItemEntry = WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry) { return Entry.ItemDefinition == ItemDef; }, FFortItemEntry::Size());
 
             if (auto WeaponDef = ItemDef->Cast<UFortWeaponItemDefinition>())
             {
@@ -2113,10 +2121,13 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
                 if (Stats && Stats != (void*)-1)
                 {
                     ClipSize = Stats->ClipSize;
+
+                    if (WeaponDef->HasbUsesPhantomReserveAmmo() && WeaponDef->bUsesPhantomReserveAmmo)
+                        PhantomReserveAmmo = (Stats->InitialClips - 1) * Stats->ClipSize;
                 }
             }
 
-            auto AddResults = WorldInventory->GiveItem(ItemDef, Count, ClipSize);
+            WorldInventory->GiveItem(ItemDef, Count, ClipSize, 0, true, true, PhantomReserveAmmo, {});
         }
         else
         {
@@ -2139,6 +2150,9 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
                 }
 
                 int32 ClipSize = 0;
+                int32 PhantomReserveAmmo = 0;
+
+                auto ItemEntry = WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry) { return Entry.ItemDefinition == ItemDef; }, FFortItemEntry::Size());
 
                 if (auto WeaponDef = ItemDef->Cast<UFortWeaponItemDefinition>())
                 {
@@ -2147,10 +2161,13 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
                     if (Stats && Stats != (void*)-1)
                     {
                         ClipSize = Stats->ClipSize;
+
+                        if (WeaponDef->HasbUsesPhantomReserveAmmo() && WeaponDef->bUsesPhantomReserveAmmo)
+                            PhantomReserveAmmo = (Stats->InitialClips - 1) * Stats->ClipSize;
                     }
                 }
 
-                WorldInventory->GiveItem(ItemDef, Count, ClipSize);
+                WorldInventory->GiveItem(ItemDef, Count, ClipSize, 0, true, true, PhantomReserveAmmo, {});
             }
         }
     }

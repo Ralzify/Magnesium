@@ -96,6 +96,8 @@ namespace SDK
 		//float Y;
 		//float Z;
 
+
+
 		FVector(double _X = 0, double _Y = 0, double _Z = 0)
 		{
 			X = _X;

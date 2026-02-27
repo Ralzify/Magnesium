@@ -62,6 +62,7 @@ struct FConfiguration
 	static inline auto CannonLaunchMultiplier = 1.f;
     static inline auto bCrownSlomo = true;
     static inline auto bDisableJumpFatigue = false;
+    static inline auto bCancelVelocityOnWin = false;
 
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;
