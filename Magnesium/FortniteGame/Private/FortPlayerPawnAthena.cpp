@@ -420,7 +420,7 @@ void AFortPlayerPawnAthena::Athena_MedConsumable_Triggered(UObject* Context, FFr
 	return Athena_MedConsumable_TriggeredOG(Context, Stack);
 }
 
-void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack, AActor** Ret)
+void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack)
 {
 	struct FVehicleExitData { uint8_t Pad[0x30]; };
 
@@ -438,6 +438,9 @@ void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack
 	Stack.IncrementCode();
 
 	auto Pawn = (AFortPlayerPawnAthena*)Context;
+
+	if (!Pawn)
+		return;
 
 	static auto GetVehicleFunc = Pawn->GetFunction("GetVehicleActor");
 	if (!GetVehicleFunc)
@@ -470,6 +473,22 @@ void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Pawn->Controller;
 
+	if (!PlayerController || !PlayerController->WorldInventory)
+	{
+		if (VersionInfo.FortniteVersion >= 29)
+			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
+		else
+			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
+	}
+
+	if (!SeatComponent)
+	{
+		if (VersionInfo.FortniteVersion >= 29)
+			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
+		else
+			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
+	}
+
 	auto SeatIdx = SeatComponent->FindSeatIndex(Pawn);
 
 	UFortWeaponItemDefinition* Weapon = nullptr;
@@ -497,9 +516,9 @@ void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack
 		}
 	}
 	if (VersionInfo.FortniteVersion >= 29)
-		*Ret = callOGWithRet(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
+		callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
 	else
-		*Ret = callOGWithRet(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
+		callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
 
 	if (Weapon)
 	{

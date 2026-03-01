@@ -182,52 +182,32 @@ void OnRep_ReplicatedAttachedInfo(AFortOctopusTowhookAttachableProjectile* _this
     //printf("CALLED!!!!\n");
 }
 
-bool AFortAthenaSKPushCannon::FireActorInCannon(UObject* Context, FFrame& Stack)
+void AFortWeaponRangedMountedCannon::ServerFireActorInCannon(UObject* Context, FFrame& Stack)
 {
     FVector LaunchDir;
-    bool bIsServer;
 
     Stack.StepCompiledIn(&LaunchDir);
-    Stack.StepCompiledIn(&bIsServer);
     Stack.IncrementCode();
 
-    printf("FireActorInCannon\n");
-	printf("Name: %s\n", Context->Name.ToString().c_str());
-	printf("LaunchDir: %f %f %f\n", LaunchDir.X, LaunchDir.Y, LaunchDir.Z);
+    auto Vehicle = (AFortWeaponRangedMountedCannon*)Context;
 
-    auto PushCannon = (AFortAthenaSKPushCannon*)Context;
+    if (!Vehicle)
+        return;
 
-	printf("PushCannon: %s\n", PushCannon ? "true" : "false");
+    auto PushCannon = Vehicle->Cast<AFortAthenaSKPushCannon>();
 
     if (!PushCannon)
+        return;
+
+    if (auto TargetPawn = PushCannon->GetPawnAtSeat(1))
     {
-		auto MountedCannon = (AFortMountedCannon*)Context;
+        PushCannon->OnPreLaunchPawn(TargetPawn, LaunchDir);
 
-		printf("MountedCannon: %s\n", MountedCannon ? "true" : "false");
+        TargetPawn->ServerOnExitVehicle();
 
-        if (MountedCannon)
-        {
-            if (bIsServer && MountedCannon->HasAuthority())
-            {
-                MountedCannon->ShootPawnOut();
-            }
-        }
-
-        return false;
+        PushCannon->OnLaunchPawn(TargetPawn, LaunchDir);
+        PushCannon->MultiCastPushCannonLaunchedPlayer();
     }
-
-    auto PawnAtSeat = PushCannon->GetPawnAtSeat(1);
-
-    if (!PawnAtSeat)
-        return false;
-
-    if (bIsServer)
-    {
-        if (PushCannon->HasAuthority())
-            PushCannon->ShootPawnOut(LaunchDir);
-	}
-
-    return true;
 }
 
 void AFortPhysicsPawn::Hook()
@@ -300,10 +280,10 @@ void AFortPhysicsPawn::Hook()
         Utils::Hook<AFortOctopusTowhookAttachableProjectile>(OnRep_ReplicatedAttachedInfoIdx, OnRep_ReplicatedAttachedInfo, OnRep_ReplicatedAttachedInfoOG);
     }
 
-    auto MountedCannonVehicle = AFortAthenaSKPushCannon::GetDefaultObj();
+    auto MountedCannonVehicle = AFortWeaponRangedMountedCannon::GetDefaultObj();
 
     if (MountedCannonVehicle)
     {
-        Utils::ExecHook(MountedCannonVehicle->GetFunction("FireActorInCannon"), AFortAthenaSKPushCannon::FireActorInCannon);
+        Utils::ExecHook(MountedCannonVehicle->GetFunction("ServerFireActorInCannon"), AFortWeaponRangedMountedCannon::ServerFireActorInCannon);
 	}
 }

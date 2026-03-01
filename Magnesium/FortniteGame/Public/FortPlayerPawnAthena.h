@@ -2,6 +2,13 @@
 #include "../../pch.h"
 #include "GameplayTagContainer.h"
 
+enum class ETryExitVehicleBehavior : uint8
+{
+    DoNotForce = 0,
+    ForceOnBlocking = 1,
+    ForceAlways = 2
+};
+
 class UCharacterMovementComponent : public UObject
 {
 public:
@@ -139,7 +146,7 @@ public:
     DEFINE_FUNC(OnRep_IsDBNO, void);
     DEFINE_FUNC(ServerSetAttachment, void);
     DEFINE_FUNC(GetActiveZipline, AFortAscenderZipline*);
-    DEFINE_FUNC(ServerOnExitVehicle, AActor*);
+    DEFINE_FUNC(ServerOnExitVehicle, void);
     DEFINE_FUNC(SetInVortex, void);
     DEFINE_FUNC(ClientInternalEquipWeapon, void);
     DEFINE_FUNC(ServerInternalEquipWeapon, void);
@@ -159,7 +166,7 @@ public:
     DefUHookOg(OnCapsuleBeginOverlap_);
     static void MovingEmoteStopped(UObject*, FFrame&);
     DefUHookOg(Athena_MedConsumable_Triggered);
-    DefUHookOgRet(AActor*, ServerOnExitVehicle_);
+    DefUHookOg(ServerOnExitVehicle_);
     DefUHookOg(EmoteStopped_);
     static void ServerHandlePickupWithRequestedSwap(UObject*, FFrame&);
     DefHookOg(void, EndSkydiving, AFortPlayerPawnAthena*);

@@ -126,44 +126,7 @@ public:
 	DEFINE_FUNC(MultiCastPushCannonLaunchedPlayer, void);
     DEFINE_FUNC(OnLaunchPawn, void);
     DEFINE_FUNC(OnPreLaunchPawn, void);
-
-    static bool FireActorInCannon(UObject* Context, FFrame& Stack);
-
-    AFortPlayerPawnAthena* GetPawnAtSeat(int32 SeatIndex)
-    {
-        auto* SeatComponent = (UFortVehicleSeatComponent*)this->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
-
-        if (!SeatComponent)
-            return nullptr;
-
-        if (SeatIndex < 0 || SeatIndex >= SeatComponent->PlayerSlots.Num())
-            return nullptr;
-
-        auto& PlayerSlot = SeatComponent->PlayerSlots.Get(SeatIndex, FAthenaCarPlayerSlot::Size());
-        return PlayerSlot.Player;
-    }
-
-    void ShootPawnOut(const FVector& LaunchDir)
-    {
-        auto PawnToShoot = this->GetPawnAtSeat(1);
-
-        if (!PawnToShoot)
-            return;
-
-        this->OnPreLaunchPawn(PawnToShoot, LaunchDir);
-        PawnToShoot->ServerOnExitVehicle();
-
-        if (FConfiguration::bFModCannon)
-        {
-            PawnToShoot->LaunchCharacterJump(LaunchDir.X * 6000 * FConfiguration::CannonLaunchMultiplier, LaunchDir.Y * 5000 * FConfiguration::CannonLaunchMultiplier, LaunchDir.Z * 7500 * FConfiguration::CannonLaunchMultiplier);
-        }
-        else
-        {
-			this->OnLaunchPawn(PawnToShoot, LaunchDir);
-        }
-
-        this->MultiCastPushCannonLaunchedPlayer();
-    }
+    DEFINE_FUNC(GetPawnAtSeat, AFortPlayerPawnAthena*);
 };
 
 class AFortCharacterVehicle : public AActor
@@ -208,6 +171,7 @@ public:
 
     DEFINE_PROP(NetTowhookAimDir, FVector);
     DEFINE_PROP(ReplicatedAttachState, FNetTowhookAttachState);
+    DEFINE_PROP(LocalAttachState, FNetTowhookAttachState);
 
     DEFINE_FUNC(OnRep_NetTowhookAimDir, void);
     DEFINE_FUNC(OnRep_ReplicatedAttachState, void);
@@ -256,17 +220,6 @@ public:
         auto& PlayerSlot = SeatComponent->PlayerSlots.Get(SeatIndex, FAthenaCarPlayerSlot::Size());
         return PlayerSlot.Player;
     }
-
-    void ShootPawnOut()
-    {
-        auto PawnToShoot = this->GetPawnAtSeat(1);
-
-        if (!PawnToShoot)
-            return;
-
-		PawnToShoot->ServerOnExitVehicle();
-		this->OnLaunchPawn(PawnToShoot);
-    }
 };
 
 class AFortWeaponRangedMountedCannon : public AActor
@@ -274,17 +227,5 @@ class AFortWeaponRangedMountedCannon : public AActor
 public:
     UCLASS_COMMON_MEMBERS(AFortWeaponRangedMountedCannon);
 
-    AFortPlayerPawnAthena* GetPawnAtSeat(int32 SeatIndex)
-    {
-        auto* SeatComponent = (UFortVehicleSeatComponent*)this->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
-
-        if (!SeatComponent)
-            return nullptr;
-
-        if (SeatIndex < 0 || SeatIndex >= SeatComponent->PlayerSlots.Num())
-            return nullptr;
-
-        auto& PlayerSlot = SeatComponent->PlayerSlots.Get(SeatIndex, FAthenaCarPlayerSlot::Size());
-        return PlayerSlot.Player;
-    }
+    static void ServerFireActorInCannon(UObject* Context, FFrame& Stack);
 };
