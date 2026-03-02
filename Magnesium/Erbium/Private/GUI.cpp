@@ -476,6 +476,61 @@ void GUI::Init()
                 ImGui::Text("- Players: %d", AliveCount);
 
                 ImGui::Text((std::string("- Uptime: ") + std::to_string((int)floor(UGameplayStatics::GetTimeSeconds(GameMode))) + "s").c_str());
+
+                static std::string LastElimStatusMessage;
+                static std::chrono::high_resolution_clock::time_point AddMessageTime;
+
+                if (!FConfiguration::ElimStatusMessage.empty() && FConfiguration::ElimStatusMessage != LastElimStatusMessage)
+                {
+                    LastElimStatusMessage = FConfiguration::ElimStatusMessage;
+                    AddMessageTime = std::chrono::high_resolution_clock::now();
+                }
+
+                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 30)
+                {
+                    ImVec4 KillerColor = ImVec4(0x4e / 255.f, 0x86 / 255.f, 0xa5 / 255.f, 1.0f);
+                    ImVec4 EliminatedColor = ImVec4(0xa5 / 255.f, 0x56 / 255.f, 0x4c / 255.f, 1.0f);
+                    ImVec4 WeaponColor = ImVec4(1.0f, 0.84f, 0.0f, 1.0f);
+
+                    ImGui::TextUnformatted("- ");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextColored(KillerColor, "%s", FConfiguration::ElimKillerName.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(" eliminated ");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextColored(EliminatedColor, "%s", FConfiguration::ElimEliminatedName.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(" from ");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::Text("%sm!", FConfiguration::ElimDistance.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(" (");
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextColored(WeaponColor, "%s", FConfiguration::ElimWeaponName.c_str());
+                    ImGui::SameLine(0.0f, 0.0f);
+
+                    ImGui::TextUnformatted(")");
+
+                    static bool bHasLogged = false;
+
+                    if (!bHasLogged)
+                    {
+                        printf("- %s eliminated %s from %sm! (%s)\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str(), FConfiguration::ElimWeaponName.c_str());
+                        bHasLogged = true;
+                    }
+                }
+                else
+                {
+                    LastElimStatusMessage.clear();
+                    FConfiguration::ElimStatusMessage.clear();
+                }
             }
 
             bool bIsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
@@ -553,7 +608,7 @@ void GUI::Init()
 
 						ImGui::Checkbox("Auto Dump Text", &FConfiguration::bAutoDump);
 
-                        // ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
+                        ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
 
                         ImGui::Checkbox("Lategame", &FConfiguration::bLateGame);
 
@@ -859,6 +914,9 @@ void GUI::Init()
                 }
             }
 
+            if (VersionInfo.FortniteVersion == 11.31 || VersionInfo.FortniteVersion == 12.41)
+                SelectedPlaylist == static_cast<int>(Playlist::SiphonSolos);
+
             switch (SelectedPlaylist)
             {
             case (int)Playlist::Solos:
@@ -1146,63 +1204,6 @@ void GUI::Init()
                             bIsInspecting = true;
                         }
                     }
-                }
-
-                ImGui::NewLine();
-
-                static std::string LastElimStatusMessage;
-                static std::chrono::high_resolution_clock::time_point AddMessageTime;
-
-                if (!FConfiguration::ElimStatusMessage.empty() && FConfiguration::ElimStatusMessage != LastElimStatusMessage)
-                {
-                    LastElimStatusMessage = FConfiguration::ElimStatusMessage;
-                    AddMessageTime = std::chrono::high_resolution_clock::now();
-                }
-
-                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 30)
-                {
-                    ImVec4 KillerColor = ImVec4(0x4e / 255.f, 0x86 / 255.f, 0xa5 / 255.f, 1.0f);
-                    ImVec4 EliminatedColor = ImVec4(0xa5 / 255.f, 0x56 / 255.f, 0x4c / 255.f, 1.0f);
-                    ImVec4 WeaponColor = ImVec4(1.0f, 0.84f, 0.0f, 1.0f);
-
-                    ImGui::TextUnformatted("- ");
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextColored(KillerColor, "%s", FConfiguration::ElimKillerName.c_str());
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextUnformatted(" eliminated ");
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextColored(EliminatedColor, "%s", FConfiguration::ElimEliminatedName.c_str());
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextUnformatted(" from ");
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::Text("%sm!", FConfiguration::ElimDistance.c_str());
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextUnformatted(" (");
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextColored(WeaponColor, "%s", FConfiguration::ElimWeaponName.c_str());
-                    ImGui::SameLine(0.0f, 0.0f);
-
-                    ImGui::TextUnformatted(")");
-
-                    static bool bHasLogged = false;
-
-                    if (!bHasLogged)
-                    {
-                        printf("- %s eliminated %s from %sm! (%s)\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str(), FConfiguration::ElimWeaponName.c_str());
-						bHasLogged = true;
-                    }
-                }
-                else
-                {
-                    LastElimStatusMessage.clear();
-                    FConfiguration::ElimStatusMessage.clear();
                 }
             }
             else
@@ -1930,20 +1931,11 @@ void GUI::Init()
             ImGui::Text("Use Custom Map (VERY EXPERIMENTAL):");
             SmallSeparator(Width);
 
+            ImGui::RadioButton("Athena Faceoff", &SelectedMap, (int)Map::Faceoff);
             ImGui::RadioButton("Papaya (Party Royale)", &SelectedMap, (int)Map::Papaya);
             ImGui::RadioButton("The Combine", &SelectedMap, (int)Map::Crucible);
-            ImGui::RadioButton("Tutorial Map", &SelectedMap, (int)Map::TutorialMap);
-            ImGui::RadioButton("Tilted Deathmatch", &SelectedMap, (int)Map::TiltedDeathmatch);
-            ImGui::RadioButton("Athena", &SelectedMap, (int)Map::Ch1);
-            ImGui::RadioButton("Apollo", &SelectedMap, (int)Map::Ch2);
-            ImGui::RadioButton("Snow Map 01", &SelectedMap, (int)Map::Snow01);
             ImGui::RadioButton("Flat Grid", &SelectedMap, (int)Map::FlatGrid);
-            ImGui::RadioButton("Escape", &SelectedMap, (int)Map::Escape);
             ImGui::RadioButton("Prop Hunt", &SelectedMap, (int)Map::PropHunt);
-            ImGui::RadioButton("Loki 02", &SelectedMap, (int)Map::Loki02);
-            ImGui::RadioButton("Loki 03", &SelectedMap, (int)Map::Loki03);
-            ImGui::RadioButton("Loki 04", &SelectedMap, (int)Map::Loki04);
-            ImGui::RadioButton("Loki 06", &SelectedMap, (int)Map::Loki06);
 
             switch (SelectedMap)
             {
@@ -1977,44 +1969,9 @@ void GUI::Init()
                 FConfiguration::CustomMap = L"open /Game/Athena/Maps/Athena_Playground";
                 break;
             }
-            case (int)Map::Deimos:
-            {
-                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Deimos_Gameplay";
-                break;
-            }
-            case (int)Map::TiltedDeathmatch:
-            {
-                FConfiguration::CustomMap = L"open /Game/Athena/Maps/Playsets/Deathmatch_24x24a";
-                break;
-            }
             case (int)Map::DADBRO:
             {
                 FConfiguration::CustomMap = L"open /Game/Athena/Playlists/DADBRO/Athena_DADBRO_Apollo_Island";
-                break;
-            }
-            case (int)Map::Arid:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Desert/Arid_Island_105x105";
-                break;
-            }
-            case (int)Map::Escape:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Escape/Escape_Island_105x105_M";
-                break;
-            }
-            case (int)Map::Ch1:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/FlatGrass/FlatGrass_Island_105x105_Meshes";
-                break;
-            }
-            case (int)Map::Ch2:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/FlatGrass/Apollo_FlatGrass_Island_105x105_Mesh";
-                break;
-            }
-            case (int)Map::Snow01:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/FlatSnow/FlatSnow_Island_105x105_Mesh";
                 break;
             }
             case (int)Map::Kevin:
@@ -2030,26 +1987,6 @@ void GUI::Init()
             case (int)Map::PropHunt:
             {
                 FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M";
-                break;
-            }
-            case (int)Map::Loki02:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_02";
-                break;
-            }
-            case (int)Map::Loki03:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_03";
-                break;
-            }
-            case (int)Map::Loki04:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_04";
-                break;
-            }
-            case (int)Map::Loki06:
-            {
-                FConfiguration::CustomMap = L"open /Game/Creative/Maps/Islands/105x105/Loki/Loki_Island_105x105_M_06";
                 break;
             }
             default:
@@ -2079,13 +2016,22 @@ void GUI::Init()
                 ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
             }
 
-            ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);
+            //ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);
 
             if (VersionInfo.FortniteVersion >= 19.00)
                 ImGui::Checkbox("Toggle Crown Slomo", &FConfiguration::bCrownSlomo);
 
             if (VersionInfo.FortniteVersion >= 23.20 && VersionInfo.FortniteVersion < 25.20)
                 ImGui::Checkbox("Negate Velocity on Win", &FConfiguration::bCancelVelocityOnWin);
+
+            ImGui::Checkbox("Auto Pause TODM", &FConfiguration::bAutoPauseTODM);
+            
+            if (FConfiguration::bAutoPauseTODM)
+            {
+                ImGui::PushItemWidth(Width);
+                ImGui::SliderInt("Time Of Day", &FConfiguration::TODMTime, 1, 24);
+                ImGui::PopItemWidth();
+            }
 
             if (FConfiguration::bRideableProjectiles)
             {

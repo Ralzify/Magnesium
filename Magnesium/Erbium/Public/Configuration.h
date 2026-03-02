@@ -51,7 +51,7 @@ struct FConfiguration
 
     static inline auto bRideableProjectiles = false;
 
-    static inline auto bSiphon = false;
+    static inline auto bSiphon = true;
     static inline auto SiphonAmount = 50;
 
     static inline auto bEnableTrickshotTab = false;
@@ -63,6 +63,8 @@ struct FConfiguration
     static inline auto bCrownSlomo = true;
     static inline auto bDisableJumpFatigue = false;
     static inline auto bCancelVelocityOnWin = false;
+    static inline auto bAutoPauseTODM = false;
+    static inline auto TODMTime = 7;
 
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;

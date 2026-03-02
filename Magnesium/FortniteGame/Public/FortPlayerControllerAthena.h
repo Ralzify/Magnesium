@@ -428,6 +428,7 @@ public:
     DEFINE_FUNC(IsInRespawnCountdown, bool);
     DEFINE_FUNC(ServerApplyOverrideWrapToItem, UAthenaItemWrapDefinition*);
     DEFINE_FUNC(ServerApplyOverrideWrapToVehicle, void);
+    DEFINE_FUNC(ClientSendConfirmationMessage, FText);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);

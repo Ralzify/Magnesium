@@ -437,6 +437,65 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 *(uint8_t*)(__int64(MeshNetworkSubsystem) + MeshNetworkSubsystem->GetOffset("NodeType")) = 2;
         }
 
+        if (std::floor(VersionInfo.FortniteVersion) == 10)
+        {
+            int GeyserAmount = 1;
+
+            auto GeyserClass = FindObject<UClass>(UEAllocatedWString(L"/Game/Athena/Environments/Blueprints/DudeBro/BGA_DudeBro_Mini.BGA_DudeBro_Mini_C"));
+
+            if (!GeyserClass) 
+                return;
+
+            std::vector<FVector> GeyserLocations = 
+            {
+                FVector(89883.523438, 2428.856934, 1721.958008),   // 1: Lazy lagoon mountain
+                FVector(61597.550781, 16848.650391, -0.744186),   // 2: Volcano 1
+                FVector(58946.187500, 24417.082031, 1928.725952),  // 3: Volcano 2
+                FVector(58226.332031, 35153.121094, 2737.305664),  // 4: Volcano 4
+                FVector(99996.023438, 36478.667969, 9136.631836),  // 5: Infront of volcano hill
+                FVector(72324.421875, 46690.652344, 9223.631836),  // 6: Zipline hill
+                FVector(48260.160156, 48935.687500, 3387.915283),  // 7: Left of s7 mountain
+                FVector(35108.128906, 63084.425781, 1170.028320),  // 8: Trailer park
+                FVector(-790.447754, 68462.484375, 3304.623535),   // 9: Desert race track mountain
+                FVector(593.079712, 51143.253906, 2322.515381),    // 10: Desert house + gas station
+                FVector(68796.078125, -5714.037598, 1946.025513),  // 11: Lazy lagoon shack 1
+                FVector(74499.101562, -1986.378906, 1325.798218),  // 12: Lazy lagoon shack 2
+                FVector(56631.031250, -9915.774414, 513.797668),   // 13: Dusty depot
+                FVector(75186.226562, 78506.148438, 2416.323242),  // 14: Middle left edge field
+                FVector(102538.367188, 78399.929688, 2883.602539), // 15: Face mountain
+                FVector(114640.531250, 62411.414062, 1057.379883), // 16: Infront of sunny steps
+                FVector(121277.882812, 43351.671875, 2909.387695), // 17: Between and below zip
+                FVector(94820.890625, 24539.779297, 8486.580078),  // 18: Top left of volcano
+                FVector(80984.421875, 22242.648438, 9638.948242),  // 19: Left of volcano
+                FVector(124880.695312, 17783.384766, 429.139496),  // 20: Brown/orange lake 1
+                FVector(122058.492188, 22701.984375, 407.454712),  // 21: Brown/orange lake 2
+                FVector(113105.117188, 24883.089844, 1560.164185), // 22: Brown/orange lake 3
+                FVector(110117.648438, 19830.042969, 1570.611206), // 23: Brown/orange lake 4
+                FVector(119679.210938, 11784.166016, -251.755707), // 24: Brown/orange lake 5
+                FVector(119306.156250, 16606.320312, 403.438782),  // 25: Brown/orange lake 6
+                FVector(106046.093750, 24800.246094, 4615.074707)  // 26: Brown/orange lake 7
+            };
+
+            for (size_t i = 0; i < GeyserLocations.size(); i++)
+            {
+                FVector AdjustedLocation = GeyserLocations[i];
+
+                AdjustedLocation.Z -= 150.0f;
+
+                FTransform SpawnTransform;
+                SpawnTransform.Translation = AdjustedLocation;
+                SpawnTransform.GetScale3D() = FVector(1, 1, 1);
+
+                auto SpawnedActor = UWorld::GetWorld()->SpawnActor<AActor>(GeyserClass, SpawnTransform);
+
+                if (SpawnedActor)
+                {
+                    SpawnedActor->ForceNetUpdate();
+                    printf("Spawned Geyser %zu at location %zu\n", i + 1, i);
+                }
+            }
+        }
+
         auto AIDirectorClass = GameMode->HasWarmupRequiredPlayerCount() ? FindClass("AthenaAIDirector") : FindObject<UClass>("/Game/AIDirector/AIDirector_Fortnite.AIDirector_Fortnite_C");
         if (!AIDirectorClass)
             AIDirectorClass = FindClass("FortAIDirector");

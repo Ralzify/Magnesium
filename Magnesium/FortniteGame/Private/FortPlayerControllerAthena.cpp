@@ -562,6 +562,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		}
 	}
 
+	if (FConfiguration::bAutoPauseTODM)
+	{
+		UFortKismetLibrary::SetTimeOfDay(UWorld::GetWorld(), FConfiguration::TODMTime);
+		UFortKismetLibrary::SetTimeOfDaySpeed(UWorld::GetWorld(), 0.f);
+	}
+
 	if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett") && VersionInfo.FortniteVersion == 27.11)
 	{
 		if (!FConfiguration::bHasPickaxe)
@@ -2309,6 +2315,7 @@ cheat skipsafezone - Skips to the next safe zone
 cheat startshrinksafezone - Starts shrinking the safe zone
 cheat infiniteammo - Toggles infinite ammo
 cheat infinitemats - Toggles infinite materials
+cheat serversendmessage - Broadcasts a message to all clients in the game
 cheat fly - Toggles fly mode
 cheat ghost - Toggles no-clip flying
 cheat gravity <Scale> - Sets the gravity scale
@@ -3449,17 +3456,34 @@ cheat spawn <class/path> - Spawns an actor at your location
 						if (BotPawn && PlayerPawn)
 						{
 							if (BotPS->bIsABot)
+							{
 								BotPawn->K2_TeleportTo(PlayerPawn->K2_GetActorLocation(), BotPawn->K2_GetActorRotation(), false, true);
+								BotPawn->K2_SetActorRotation(PlayerPawn->K2_GetActorRotation());
+							}
 						}
 					}
 				}
 			}
 			else if (command == "botemote")
 			{
-				auto Emote = FindObject<UAthenaDanceItemDefinition>(L"/Game/Athena/Items/Cosmetics/Dances/EID_Accolades.EID_Accolades");
+				const UAthenaDanceItemDefinition* Emote = nullptr;
+
+				if (args.size() > 1 && !args[1].empty())
+				{
+					Emote = FindObject<UAthenaDanceItemDefinition>(UEAllocatedWString(args[1].begin(), args[1].end()));
+
+					if (!Emote)
+						Emote = TUObjectArray::FindObject<UAthenaDanceItemDefinition>(args[1].c_str());
+				}
 
 				if (!Emote)
+					Emote = FindObject<UAthenaDanceItemDefinition>(L"/Game/Athena/Items/Cosmetics/Dances/EID_Accolades.EID_Accolades");
+
+				if (!Emote)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to find emote."), FName(), 1.f);
 					return;
+				}
 
 				for (auto& Player : GameMode->AlivePlayers)
 				{
@@ -3477,7 +3501,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					BotController->OnRep_PlayerState();
 					BotController->OnRep_Pawn();
 
-					PlayEmoteInternal(BotController, (UObject*)Emote);
+					PlayEmoteInternal(BotController, const_cast<UAthenaDanceItemDefinition*>(Emote));
 					PlayerController->ClientMessage(FString(L"Bot is now emoting!"), FName(), 1.f);
 				}
 			}
@@ -3506,7 +3530,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					PlayerController->ClientMessage(FString(L"Teleported to location!"), FName(), 1.f);
 				}
 			}
-			else if (command == "launch" || command == "launchpawn")
+			else if (command == "launch" || command == "launchpawn" || command == "l")
 			{
 				float X = 0.0f, Y = 0.0f, Z = 0.0f;
 
@@ -3681,7 +3705,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					if (Pawn)
 					{
 						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
-						Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+						Pawn->CharacterMovement->Velocity = FVector{};
 						PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
 					}
 					else
@@ -3704,7 +3728,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					if (Pawn)
 					{
 						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
-						Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+						Pawn->CharacterMovement->Velocity = FVector{};
 						PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
 					}
 					else
@@ -3732,7 +3756,17 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 					if (ShortNames != Misc::ItemNames.end())
 					{
-						const std::string& Value = ShortNames->second;
+						std::string Value = ShortNames->second;
+
+						if (Value == "logic_grappler") // stupid icl
+						{
+							if (VersionInfo.FortniteVersion >= 12.50)
+								Value = "WID_Hook_Gun_Spytech_VR_Ore_T03";
+							else if (VersionInfo.FortniteVersion >= 7.10 && VersionInfo.FortniteVersion < 12.50)
+								Value = "WID_Hook_Gun_Slide";
+							else
+								Value = "WID_Hook_Gun_VR_Ore_T03";
+						}
 
 						ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(Value.c_str());
 
@@ -3922,7 +3956,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				int Max = 100;
 
-				if (Count > Max && !FConfiguration::bEnableCheats)
+				if (Count > Max && IPStr != "127.0.0.1")
 				{
 					PlayerController->ClientMessage(FString(L"dawg your trying too much"), FName(), 1.f);
 					Count = Max;
@@ -3959,6 +3993,79 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				Pawn->SetInVortex(bInVortex);
 				PlayerController->ClientMessage(FString(L"Toggled skydiving!"), FName(), 1.f);
+			}
+			else if (command == "crazy" || command == "serversendmessage" || command == "clientsendconfirmationscreen")
+			{
+				bool bClientQuitAfterMessage = false;
+
+				auto World = UWorld::GetWorld();
+
+				if (!World)
+				{
+					PlayerController->ClientMessage(FString(L"No UWorld!"), FName(), 1.f);
+					return;
+				}
+
+				UObject* NetDriver = World->NetDriver;
+
+				if (!NetDriver)
+				{
+					PlayerController->ClientMessage(FString(L"No NetDriver!"), FName(), 1.f);
+					return;
+				}
+
+				UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
+
+				auto& ClientConnections = Driver->ClientConnections;
+
+				if (ClientConnections.Num() <= 0)
+				{
+					PlayerController->ClientMessage(FString(L"no players found dawg how tf did you send this"), FName(), 1.f);
+					return;
+				}
+
+				std::string Str;
+
+				for (size_t i = 1; i < args.size(); i++)
+				{
+					Str += std::string(args[i].begin(), args[i].end());
+					if (i + 1 < args.size())
+						Str += " ";
+				}
+
+				if (Str.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Empty message!"), FName(), 1.f);
+					return;
+				}
+
+				std::wstring WideStr(Str.begin(), Str.end());
+				FString UnrealString = FString(WideStr.c_str());
+
+				FText MessageText = FText::FromString(UnrealString);
+
+				int SentCount = 0;
+
+				for (int i = 0; i < ClientConnections.Num(); i++) // line 4015
+				{
+					UNetConnection* Connection = ClientConnections[i];
+
+					if (!Connection)
+						continue;
+
+					auto PC = Connection->PlayerController;
+
+					if (!PC)
+						continue;
+
+					if (FConfiguration::bEnableCheats)
+					{
+						PC->ClientSendConfirmationMessage(MessageText);
+						SentCount++;
+
+						PlayerController->ClientMessage(FString(L"Broadcasted message to all players!"), FName(), 1); // it was trying to say this was crashing so i temporarily commented it out
+					}
+				}
 			}
 			else if (command == "applywrap" || command == "wrap")
 			{
@@ -4137,7 +4244,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 						if (Pawn)
 						{
 							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
-							Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+							Pawn->CharacterMovement->Velocity = FVector{};
 							PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
 						}
 						else
@@ -4160,7 +4267,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 						if (Pawn)
 						{
 							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
-							Pawn->LaunchCharacterJump(FVector(0.0f, 0.0f, -10000000.0f), false, nullptr, true);
+							Pawn->CharacterMovement->Velocity = FVector{};
 							PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
 						}
 						else

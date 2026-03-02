@@ -980,7 +980,8 @@ namespace SDK
 	{
 		uint8_t Padding[0x18];
 
-
+	public:
+		static FText FromString(const FString& InString);
 		UEAllocatedString ToString();
 	};
 
@@ -1011,6 +1012,11 @@ namespace SDK
 	inline UEAllocatedString FText::ToString()
 	{
 		return UKismetTextLibrary::Conv_TextToString(*this).ToString();
+	}
+
+	inline FText FText::FromString(const FString& InString)
+	{
+		return UKismetTextLibrary::Conv_StringToText(InString);
 	}
 
 	class FOutputDevice
