@@ -111,6 +111,11 @@ public:
         return GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TiltedZW) || GUI::SelectedPlaylist == static_cast<int>(Playlist::RetracWater);
     }
 
+    static bool IsTournamentPlaylist()
+    {
+        return GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads);
+    }
+
     static inline FString* GetRequestURL(UObject* Connection)
     {
         if (VersionInfo.EngineVersion <= 4.20)

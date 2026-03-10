@@ -581,6 +581,9 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     std::random_device rd;
     std::mt19937 rng(rd());
 
+    static std::mt19937 Randomization(std::random_device{}());
+    std::uniform_int_distribution<int> Distribution(1, 5);
+
     TArray<TArray<TPair<FString, int>>> Slots;
 
     // Slot 1 (Assault Rifles)
@@ -588,7 +591,13 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
 
     if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
-        Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Auto_Athena_UC_Ore_T03.WID_Assault_Auto_Athena_UC_Ore_T03"), 1));
+        int Roll = Distribution(Randomization);
+
+        if (Roll == 1)
+        {
+            Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Auto_Athena_UC_Ore_T03.WID_Assault_Auto_Athena_UC_Ore_T03"), 1));
+        }
+
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Auto_Athena_R_Ore_T03.WID_Assault_Auto_Athena_R_Ore_T03"), 1));
     }
 
@@ -606,8 +615,13 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
 
     if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.10) || (VersionInfo.FortniteVersion == 9.30) || (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 15.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 19.00) || (VersionInfo.FortniteVersion >= 23.10 && VersionInfo.FortniteVersion < 24.00))
     {
-        Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_SemiAuto_Athena_UC_Ore_T03.WID_Assault_SemiAuto_Athena_UC_Ore_T03"), 1));
-        Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_SemiAuto_Athena_R_Ore_T03.WID_Assault_SemiAuto_Athena_R_Ore_T03"), 1));
+        int Roll = Distribution(Randomization);
+
+        if (Roll == 1)
+        {
+            Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_SemiAuto_Athena_UC_Ore_T03.WID_Assault_SemiAuto_Athena_UC_Ore_T03"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_SemiAuto_Athena_R_Ore_T03.WID_Assault_SemiAuto_Athena_R_Ore_T03"), 1));
+        }
 	}
 
     if ((VersionInfo.FortniteVersion >= 4.2 && VersionInfo.FortniteVersion < 7.30) || (VersionInfo.FortniteVersion == 9.30) || (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 15.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 19.00) || (VersionInfo.FortniteVersion >= 23.10 && VersionInfo.FortniteVersion < 24.00))
@@ -1174,7 +1188,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot4.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/ShieldSmall/Athena_ShieldSmall.Athena_ShieldSmall"), 6));
     }
 
-    if (VersionInfo.FortniteVersion >= 2.30 && VersionInfo.FortniteVersion < 28.00)
+    if ((VersionInfo.FortniteVersion >= 2.30 && VersionInfo.FortniteVersion < 11.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot4.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/SuperMedkit/Athena_SuperMedkit.Athena_SuperMedkit"), 1));
     }

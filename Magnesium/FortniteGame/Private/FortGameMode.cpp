@@ -426,7 +426,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         if (VersionInfo.FortniteVersion == 17.50)
         {
             //ShowFoundation(FindObject<ABuildingFoundation>(L"/Game/Athena/Apollo/Maps/Apollo_Mother.Apollo_Mother.PersistentLevel.farmbase_2"));
-            ShowFoundation(FindObject<ABuildingFoundation>(L"/Game/Athena/Apollo/Maps/Apollo_Mother.Apollo_Mother.PersistentLevel.Farm_Phase_03"));
+            //ShowFoundation(FindObject<ABuildingFoundation>(L"/Game/Athena/Apollo/Maps/Apollo_Mother.Apollo_Mother.PersistentLevel.Farm_Phase_03"));
         }
 
         if (VersionInfo.EngineVersion >= 4.27 && std::floor(VersionInfo.FortniteVersion) != 20) // on 20 it does some weird stuff
@@ -862,6 +862,10 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             if (VersionInfo.FortniteVersion >= 3.4)
             {
                 GameData = Playlist ? Playlist->GameData : nullptr;
+
+                if (!GameData)
+                    GameData = GameState->AthenaGameDataTable;
+
                 if (!GameData)
                     GameData = FindObject<UCurveTable>(L"/Game/Athena/Balance/DataTables/AthenaGameData.AthenaGameData");
 
@@ -872,6 +876,21 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
                     WeightMap[i] = Weight;
                     Sum += Weight;
+                }
+
+                if (FConfiguration::bDisableSupplyDrops)
+                {
+                    for (UFortSupplyDropInfo* DropInfo : GameState->MapInfo->SupplyDropInfoList)
+                    {
+                        if (DropInfo)
+                        {
+                            float EvaluatedTime = 0.f;
+                            auto SafeZoneIndex = GameMode->GetLateSafeZoneIndex();
+                            EEvaluateCurveTableResult Result{};
+
+                            UDataTableFunctionLibrary::EvaluateCurveTableRow(DropInfo->MinTimeBetweenDrops.Curve.CurveTable, DropInfo->MinTimeBetweenDrops.Curve.RowName, (float)SafeZoneIndex, &Result, &EvaluatedTime, FString());
+                        }
+                    }
                 }
 
                 UDataTableFunctionLibrary::EvaluateCurveTableRow(GameState->MapInfo->VendingMachineRarityCount.Curve.CurveTable, GameState->MapInfo->VendingMachineRarityCount.Curve.RowName, 0.f, nullptr, &Weight, FString());

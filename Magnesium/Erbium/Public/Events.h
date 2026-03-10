@@ -265,4 +265,6 @@ public:
 	{};
 #endif
     static void StartEvent();
+
+	InitHooks;
 };

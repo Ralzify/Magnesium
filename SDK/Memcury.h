@@ -47,6 +47,7 @@
 #include <Windows.h>
 #include <source_location>
 #include <DbgHelp.h>
+#include <shellapi.h>
 #pragma comment(lib, "Dbghelp.lib")
 
 #define MemcuryAssert(cond)                                              \
@@ -147,6 +148,20 @@ namespace Memcury
             SetClipboardData(CF_TEXT, hMem);
 
             CloseClipboard();
+        }
+
+        inline bool OpenURL(const std::wstring& url)
+        {
+            HINSTANCE result = ShellExecuteW(
+                nullptr,
+                L"open",
+                url.c_str(),
+                nullptr,
+                nullptr,
+                SW_SHOWNORMAL
+            );
+
+            return reinterpret_cast<intptr_t>(result) > 32;
         }
     }
 

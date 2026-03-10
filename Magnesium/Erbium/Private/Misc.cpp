@@ -128,6 +128,8 @@ const std::unordered_map<std::string, std::string> Misc::ItemNames = {
 	{ "grappler", "logic_grappler" },
 	{ "grapple", "logic_grappler" },
 	{ "grap", "logic_grappler" },
+	{ "grenade", "Athena_Grenade" },
+	{ "grenades", "Athena_Grenade" },
 	{ "guided", "WID_RC_Rocket_Athena_SR_T03" },
 	{ "guided_sr", "WID_RC_Rocket_Athena_SR_T03" },
 	{ "guided_vr", "WID_RC_Rocket_Athena_VR_T03" },

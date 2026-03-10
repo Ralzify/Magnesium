@@ -47,6 +47,9 @@ public:
     UCLASS_COMMON_MEMBERS(UFortSupplyDropInfo);
 
     DEFINE_PROP(SupplyDropClass, TSubclassOf<UObject>);
+    DEFINE_PROP(SafeZoneIndexToSpawn, int32);
+    DEFINE_PROP(MinTimeBetweenDrops, FScalableFloat);
+    DEFINE_PROP(MaxTimeBetweenDrops, FScalableFloat);
 };
 
 struct FFortSafeZoneDefinition

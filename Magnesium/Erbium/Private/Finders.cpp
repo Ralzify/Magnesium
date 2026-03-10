@@ -2973,6 +2973,29 @@ uint64 FindFinishWorldInitialization()
     return 0;
 }
 
+uint64 FindActivatePhaseAtIndex()
+{
+    auto sRef = Memcury::Scanner::FindStringRef(L"[ASpecialEventScript::ActivatePhaseAtIndex()] Invalid IndexToActivate [%d]", false, 0,
+        VersionInfo.FortniteVersion >= 19, false);
+
+    if (!sRef.IsValid())
+        return 0;
+
+    for (int i = 0; i < 2000; i++)
+    {
+        auto Ptr = (uint8_t*)(sRef.Get() - i);
+
+        if (*Ptr == 0x48 && *(Ptr + 1) == 0x8B && *(Ptr + 2) == 0xC4)
+            return uint64_t(Ptr);
+        else if (*Ptr == 0x48 && *(Ptr + 1) == 0x89 && *(Ptr + 2) == 0x5C)
+            return uint64_t(Ptr);
+        else if (*Ptr == 0x40 && *(Ptr + 1) == 0x55)
+            return uint64_t(Ptr);
+    }
+
+    return 0;
+}
+
 auto FindCmpRef(void* Pointer) -> Memcury::Scanner
 {
     Memcury::PE::Address add{ nullptr };
@@ -3080,6 +3103,47 @@ uint64 FindSetIsDoorOpen()
             else if (*Ptr == 0x40 && *(Ptr + 1) == 0x55)
                 return uint64_t(Ptr);
         }
+    }
+
+    return 0;
+}
+
+uint64 FindSelectAndSetupMyBuildingLevel() 
+{
+    auto sRef = Memcury::Scanner::FindStringRef(L"ABuildingFoundation::SelectAndSetupMyBuildingLevel - Cannot get WorldManager!!", false, 0,
+        VersionInfo.FortniteVersion >= 19, false);
+
+    if (!sRef.IsValid())
+        return 0;
+
+    uint64_t SelectAndSetupMyBuildingLevelPart = 0;
+
+    for (int i = 0; i < 2000; i++)
+    {
+        auto Ptr = (uint8_t*)(sRef.Get() - i);
+
+        if (*Ptr == 0x48 && *(Ptr + 1) == 0x83 && *(Ptr + 2) == 0xEC)
+        {
+            SelectAndSetupMyBuildingLevelPart = uint64_t(Ptr);
+            break;
+        }
+        else if (*Ptr == 0x48 && *(Ptr + 1) == 0x81 && *(Ptr + 2) == 0xEC)
+        {
+            SelectAndSetupMyBuildingLevelPart = uint64_t(Ptr);
+            break;
+        }
+    }
+
+    for (int i = 0; i < 2000; i++)
+    {
+        auto Ptr = (uint8_t*)(SelectAndSetupMyBuildingLevelPart - i);
+
+        if (*Ptr == 0x48 && *(Ptr + 1) == 0x8B && *(Ptr + 2) == 0xC4)
+            return uint64_t(Ptr);
+        else if (*Ptr == 0x48 && *(Ptr + 1) == 0x89 && *(Ptr + 2) == 0x5C)
+            return uint64_t(Ptr);
+        else if (*Ptr == 0x40 && *(Ptr + 1) == 0x55)
+            return uint64_t(Ptr);
     }
 
     return 0;
@@ -3282,16 +3346,13 @@ void FindNullsAndRetTrues()
 
         if (RequestExit)
             NullFuncs.push_back(RequestExit);
-        else
-        {
-            auto RequestExitWithStatus = Memcury::Scanner::FindPattern("48 89 5C 24 ? 57 48 83 EC 40 41 B9 ? ? ? ? 0F B6 F9 44 38 0D ? ? ? ? 0F B6 DA 72 24 89 5C 24 30 48 8D 05 ? ? ? ? 89 7C 24 28 4C 8D 05 ? ? ? ? 33 D2 48 89 44 24 ? 33 C9 E8 ? ? ? ?").Get();
-            if (!RequestExitWithStatus)
-                RequestExitWithStatus = Memcury::Scanner::FindPattern("4C 8B DC 49 89 5B 08 49 89 6B 10 49 89 73 18 49 89 7B 20 41 56 48 83 EC 30 80 3D ? ? ? ? ? 49 8B").Get();
-            if (!RequestExitWithStatus)
-                RequestExitWithStatus = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 18 88 50 10 88 48 08 57 48 83 EC 30").Get();
+        auto RequestExitWithStatus = Memcury::Scanner::FindPattern("48 89 5C 24 ? 57 48 83 EC 40 41 B9 ? ? ? ? 0F B6 F9 44 38 0D ? ? ? ? 0F B6 DA 72 24 89 5C 24 30 48 8D 05 ? " "? ? ? 89 7C 24 28 4C 8D 05 ? ? ? ? 33 D2 48 89 44 24 ? 33 C9 E8 ? ? ? ?").Get();
+        if (!RequestExitWithStatus)
+            RequestExitWithStatus = Memcury::Scanner::FindPattern("4C 8B DC 49 89 5B 08 49 89 6B 10 49 89 73 18 49 89 7B 20 41 56 48 83 EC 30 80 3D ? ? ? ? ? 49 8B").Get();
+        if (!RequestExitWithStatus)
+            RequestExitWithStatus = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 18 88 50 10 88 48 08 57 48 83 EC 30").Get();
 
-            NullFuncs.push_back(RequestExitWithStatus);
-        }
+        NullFuncs.push_back(RequestExitWithStatus);
     }
 
     if (VersionInfo.EngineVersion >= 4.21)

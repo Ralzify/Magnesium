@@ -555,6 +555,17 @@ namespace SDK
 		DEFINE_FUNC(K2_GetComponentToWorld, FTransform);
 	};
 
+	enum class ENetDormancy : uint8_t
+	{
+		DORM_Never = 0,
+		DORM_Awake = 1,
+		DORM_DormantAll = 2,
+		DORM_DormantPartial = 3,
+		DORM_Initial = 4,
+		DORN_MAX = 5,
+		ENetDormancy_MAX = 6
+	};
+
 	class AActor : public UObject
 	{
 	public:
@@ -571,6 +582,7 @@ namespace SDK
 		DEFINE_PROP(RootComponent, UActorComponent*);
 		DEFINE_PROP(Instigator, AActor*);
 		DEFINE_PROP(NetUpdateFrequency, float);
+		DEFINE_PROP(MinNetUpdateFrequency, float);
 		DEFINE_PROP(NetCullDistanceSquared, float);
 		DEFINE_BITFIELD_PROP(bAlwaysRelevant);
 		DEFINE_BITFIELD_PROP(bCanBeDamaged);
@@ -581,7 +593,7 @@ namespace SDK
 
 		DEFINE_FUNC(AddComponentByClass, UActorComponent*);
 		DEFINE_FUNC(GetComponentByClass, UActorComponent*);
-		DEFINE_FUNC(SetNetDormancy, void);
+		DEFINE_FUNC(SetNetDormancy, ENetDormancy);
 		DEFINE_FUNC(FlushNetDormancy, void);
 		DEFINE_FUNC(ForceNetUpdate, void);
 		DEFINE_FUNC(K2_GetActorLocation, FVector);

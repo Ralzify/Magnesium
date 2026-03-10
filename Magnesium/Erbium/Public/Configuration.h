@@ -63,6 +63,7 @@ struct FConfiguration
     static inline auto bCrownSlomo = true;
     static inline auto bDisableJumpFatigue = false;
     static inline auto bCancelVelocityOnWin = false;
+    static inline auto bDisableSupplyDrops = false;
     static inline auto bAutoPauseTODM = false;
     static inline auto TODMTime = 7;
 

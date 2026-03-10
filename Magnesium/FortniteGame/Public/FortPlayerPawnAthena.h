@@ -165,6 +165,7 @@ public:
     DefUHookOg(ServerSendZiplineState);
     DefUHookOg(OnCapsuleBeginOverlap_);
     static void MovingEmoteStopped(UObject*, FFrame&);
+    static void ServerNotifyPawnHit(UObject* Context, FFrame& Stack);
     DefUHookOg(Athena_MedConsumable_Triggered);
     DefUHookOg(ServerOnExitVehicle_);
     DefUHookOg(EmoteStopped_);

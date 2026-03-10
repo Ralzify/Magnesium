@@ -147,6 +147,13 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(FallDamageGE, 1.0f, Context);
 			}
 		}
+
+		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
+		{
+			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(FortPawn->GetCharacterMovement());
+			if (MovementCompAthena->HasJumpPenaltyResetTime())
+				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
+		}
 	}
 
 	static auto IsRespawningAllowedFunc = GameState->GetFunction("IsRespawningAllowed");
@@ -549,7 +556,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	{
 		LateGame::EquipLoadout(PlayerController);
 
-		if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
+		if ((GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
 		{
 			std::random_device rd;
 			std::mt19937 rng(rd());
@@ -604,6 +611,13 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 				AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(NoBuildGE, 1.0f, Context);
 			}
+		}
+
+		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
+		{
+			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(FortPawn->GetCharacterMovement());
+			if (MovementCompAthena->HasJumpPenaltyResetTime())
+				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 	}
 }
@@ -1662,7 +1676,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			TargetTags.ParentTags.Free();
 		}
 
-		if (GUI::IsArenaPlaylist() && VersionInfo.FortniteVersion < 21.00) // crashes on 20.40, test other versions
+		if ((GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) && VersionInfo.FortniteVersion < 21.00) // crashes on 20.40, test other versions
 		{
 			KillerPlayerState->ClientReportTournamentStatUpdate();
 		}
@@ -1940,7 +1954,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			KillerPlayerController->WorldInventory->GiveItem(MetalItemData, FConfiguration::SiphonAmount);
 		}
 
-		if (GUI::IsArenaPlaylist())
+		if (GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist())
 		{
 			int PlayerCount = GameMode->AlivePlayers.Num();
 			auto AwardRequirement = PlayerCount == 50 || PlayerCount == 35 || PlayerCount == 30 || PlayerCount == 25 || PlayerCount == 20 || PlayerCount == 15 || PlayerCount == 10 || PlayerCount == 5 || PlayerCount == 3 || PlayerCount == 2 || PlayerCount == 1;
@@ -2044,6 +2058,13 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 
 					AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(FallDamageGE, 1.0f, Context);
 				}
+			}
+
+			if (FConfiguration::bDisableJumpFatigue && NewPawn->HasCharacterMovement())
+			{
+				auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(NewPawn->GetCharacterMovement());
+				if (MovementCompAthena->HasJumpPenaltyResetTime())
+					MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 			}
 		}
 
@@ -2291,6 +2312,9 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
 	auto fullCommand = Msg.ToString();
+
+	std::transform(fullCommand.begin(), fullCommand.end(), fullCommand.begin(),
+		[](unsigned char c) { return std::tolower(c); });
 
 	std::vector<UEAllocatedString> args;
 
@@ -3068,7 +3092,12 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				for (int32 i = 0; i < AmountToOpen; ++i)
 				{
-					UKismetSystemLibrary::LaunchURL(URL);
+					bool bSuccess = Memcury::Util::OpenURL(std::wstring(*URL));
+
+					if (!bSuccess)
+					{
+						PlayerController->ClientMessage(FString(L"ShellExecute failed!"), FName(), 1.f);
+					}
 				}
 
 				PlayerController->ClientMessage(FString(L"Opened link!"), FName(), 1.f);
@@ -3100,13 +3129,13 @@ cheat spawn <class/path> - Spawns an actor at your location
 				}
 
 				PlayerState->OnRep_Kills();
-				PlayerController->ClientMessage(FString(L"Please choose an amount to set your max shield to!"), FName(), 1.f);
+				PlayerController->ClientMessage(FString(L"Set kills!"), FName(), 1.f);
 			}
 			else if (command == "setpoints" || command == "setarenapoints")
 			{
 				if (args.size() < 2)
 				{
-					PlayerController->ClientMessage(FString(L"Please choose an amount to set your kills to!"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Please choose an amount to set your points to!"), FName(), 1.f);
 					return;
 				}
 
@@ -3120,7 +3149,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					catch (...) {}
 				}
 
-				if (GUI::IsArenaPlaylist())
+				if (GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist())
 				{
 					PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, Points);
 
@@ -3201,21 +3230,53 @@ cheat spawn <class/path> - Spawns an actor at your location
 			}
 			else if (command == "fly")
 			{
-				PlayerController->MyFortPawn->bActorEnableCollision = true;
-				auto MovementComp = PlayerController->MyFortPawn->CharacterMovement;
+				auto Pawn = PlayerController->Pawn;
 
-				MovementComp->bCheatFlying ^= 1;
-				MovementComp->SetMovementMode(MovementComp->bCheatFlying ? 5 : 3, 67);
-				PlayerController->ClientMessage(MovementComp->bCheatFlying ? FString(L"Flying is now enabled!") : FString("Flying is now disabled!"), FName(), 1.f);
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				Pawn->SetActorEnableCollision(true);
+
+				if (Pawn->CharacterMovement)
+				{
+					Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
+
+					if (Pawn->CharacterMovement->bCheatFlying)
+					{
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
+						PlayerController->ClientMessage(FString(L"Enabled flying!"), FName(), 1.f);
+					}
+					else
+					{
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+						PlayerController->ClientMessage(FString(L"Disabled flying"), FName(), 1.f);
+					}
+				}
 			}
 			else if (command == "ghost")
 			{
-				PlayerController->MyFortPawn->bActorEnableCollision = !PlayerController->MyFortPawn->bActorEnableCollision;
-				auto MovementComp = PlayerController->MyFortPawn->CharacterMovement;
+				auto Pawn = PlayerController->Pawn;
 
-				MovementComp->bCheatFlying ^= 1;
-				MovementComp->SetMovementMode(MovementComp->bCheatFlying ? 5 : 3, 67);
-				PlayerController->ClientMessage(MovementComp->bCheatFlying ? FString(L"Ghost mode is now enabled!") : FString("Ghost mode is now disabled!"), FName(), 1.f);
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				Pawn->SetActorEnableCollision(!Pawn->bActorEnableCollision);
+
+				if (Pawn->CharacterMovement)
+				{
+					Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
+
+					if (Pawn->CharacterMovement->bCheatFlying)
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
+					else
+						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+				}
 			}
 			else if (command == "flyspeed")
 			{
@@ -3261,11 +3322,27 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				auto CallerController = PlayerController;
 				int Count = 1;
+				std::string WeaponArg = "";
 
 				if (args.size() >= 2)
 				{
-					try { Count = std::stoi(args[1].c_str(), nullptr); }
-					catch (...) {}
+					auto ShortNames = Misc::ItemNames.find(args[1].c_str());
+
+					if (ShortNames != Misc::ItemNames.end())
+					{
+						WeaponArg = args[1];
+
+						if (args.size() >= 3)
+						{
+							try { Count = std::stoi(args[2].c_str(), nullptr); }
+							catch (...) {}
+						}
+					}
+					else
+					{
+						try { Count = std::stoi(args[1].c_str(), nullptr); }
+						catch (...) {}
+					}
 				}
 
 				for (int i = 0; i < Count; i++)
@@ -3299,6 +3376,13 @@ cheat spawn <class/path> - Spawns an actor at your location
 					Pawn->SetMaxShield(FConfiguration::BotShield);
 					Pawn->SetShield(FConfiguration::BotShield);
 
+					Pawn->bReplicates = true; 
+					Pawn->bAlwaysRelevant = true; 
+					Pawn->NetCullDistanceSquared = FLT_MAX; 
+					Pawn->SetNetDormancy(ENetDormancy::DORM_Never); 
+					Pawn->NetUpdateFrequency = 100.f; 
+					Pawn->MinNetUpdateFrequency = 100.f;
+
 					PlayerState->TeamIndex = AFortGameMode::PickTeam(GameMode, 0, PC);
 					if (PlayerState->HasSquadId())
 						PlayerState->SquadId = PlayerState->TeamIndex - 3;
@@ -3330,10 +3414,18 @@ cheat spawn <class/path> - Spawns an actor at your location
 					for (auto& AbilitySet : AFortGameMode::AbilitySets)
 						PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
-					/*PC->WorldInventory = (AFortInventory*)UWorld::SpawnActor(AFortInventory::StaticClass(), FVector{});
-					PC->WorldInventory->SetOwner(PC);
-					PC->WorldInventory->InventoryType = 0;*/
-					//PC->bHasInitializedWorldInventory = true;
+					if (!PC->WorldInventory)
+					{
+						PC->WorldInventory = (AFortInventory*)UWorld::SpawnActor(AFortInventory::StaticClass(), Transform);
+
+						if (PC->WorldInventory)
+						{
+							PC->WorldInventory->SetOwner(PC);
+							PC->WorldInventory->InventoryType = 0;
+						}
+					}
+
+					PC->bHasInitializedWorldInventory = true;
 
 					GameState->PlayersLeft++;
 					GameState->OnRep_PlayersLeft();
@@ -3423,21 +3515,83 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 					PlayerState->OnRep_PlayerName();
 
-					/*static auto DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
+					static auto DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
 
-					PlayerController->WorldInventory->GiveItem(DefaultPickaxe);
+					if (DefaultPickaxe)
+						PC->WorldInventory->GiveItem(DefaultPickaxe);
 
-					static auto SmartItem	DefClass = FindClass("FortSmartBuildingItemDefinition");
+					static auto SmartItemDefClass = FindClass("FortSmartBuildingItemDefinition");
 
 					for (int i = 0; i < GameMode->StartingItems.Num(); i++)
 					{
 						auto& StartingItem = GameMode->StartingItems.Get(i, FItemAndCount::Size());
+						if (StartingItem.Count && StartingItem.Item && (!SmartItemDefClass || !StartingItem.Item->IsA(SmartItemDefClass)))
+							PC->WorldInventory->GiveItem(StartingItem.Item, StartingItem.Count);
+					}
 
-						if (StartingItem.Count && (!SmartItemDefClass || !StartingItem.Item->IsA(SmartItemDefClass)))
-							PlayerController->WorldInventory->GiveItem(StartingItem.Item, StartingItem.Count);
-					}*/
+					UFortItemDefinition* CustomWeapon = nullptr;
 
-					CallerController->ClientMessage(FString(L"Spawned a player bot!"), FName(), 1.f); // todo: fix
+					if (!WeaponArg.empty())
+					{
+						CustomWeapon = const_cast<UFortItemDefinition*>(FindObject<UFortItemDefinition>(UEAllocatedWString(WeaponArg.begin(), WeaponArg.end())));
+
+						if (!CustomWeapon)
+							CustomWeapon = const_cast<UFortItemDefinition*>(TUObjectArray::FindObject<UFortItemDefinition>(WeaponArg.c_str()));
+
+						if (!CustomWeapon)
+						{
+							auto ShortNames = Misc::ItemNames.find(WeaponArg);
+
+							if (ShortNames != Misc::ItemNames.end())
+							{
+								std::string Value = ShortNames->second;
+								CustomWeapon = const_cast<UFortItemDefinition*>(TUObjectArray::FindObject<UFortItemDefinition>(Value.c_str()));
+
+								if (!CustomWeapon && Value.find('/') != std::string::npos)
+								{
+									auto Item = StaticLoadObject(UEAllocatedWString(Value.begin(), Value.end()).c_str(), UFortItemDefinition::StaticClass());
+
+									if (Item)
+										CustomWeapon = Item->Cast<UFortItemDefinition>();
+								}
+							}
+						}
+
+						if (CustomWeapon)
+							PC->WorldInventory->GiveItem(CustomWeapon, 1);
+						else
+							CallerController->ClientMessage(FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"), FName(), 1.f);
+					}
+
+					if (VersionInfo.FortniteVersion > 3 && PC->WorldInventory && PC->WorldInventory->Inventory.ReplicatedEntries.Num() > 0)
+					{
+						FFortItemEntry* PickaxeEntry = nullptr;
+						FFortItemEntry* CustomWeaponEntry = nullptr;
+
+						for (int e = 0; e < PC->WorldInventory->Inventory.ReplicatedEntries.Num(); e++)
+						{
+							auto* Entry = (FFortItemEntry*)((PBYTE)PC->WorldInventory->Inventory.ReplicatedEntries.GetData() + (e * FFortItemEntry::Size()));
+
+							if (!Entry || !Entry->ItemDefinition)
+								continue;
+
+							if (!PickaxeEntry && Entry->ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>())
+								PickaxeEntry = Entry;
+
+							if (CustomWeapon && !CustomWeaponEntry && Entry->ItemDefinition == CustomWeapon)
+								CustomWeaponEntry = Entry;
+						}
+
+						FFortItemEntry* EntryToEquip = CustomWeaponEntry ? CustomWeaponEntry : PickaxeEntry;
+
+						if (EntryToEquip && EntryToEquip->ItemDefinition)
+						{
+							PC->ServerExecuteInventoryItem(EntryToEquip->ItemGuid);
+							PC->ClientEquipItem(EntryToEquip->ItemGuid, true);
+						}
+					}
+
+					CallerController->ClientMessage(FString(L"Spawned a player bot!"), FName(), 1.f);
 				}
 			}
 			else if (command == "tpbot" || command == "tpbots")
@@ -3504,6 +3658,80 @@ cheat spawn <class/path> - Spawns an actor at your location
 					PlayEmoteInternal(BotController, const_cast<UAthenaDanceItemDefinition*>(Emote));
 					PlayerController->ClientMessage(FString(L"Bot is now emoting!"), FName(), 1.f);
 				}
+			}
+			else if (command == "skin" || command == "applycid")
+			{
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please provide a CID!"), FName(), 1.f);
+					return;
+				}
+
+				auto Pawn = PlayerController->Pawn;
+				auto PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+
+				if (!Pawn || !PlayerState)
+					return;
+
+				auto CID = UEAllocatedWString(args[1].begin(), args[1].end());
+
+				auto Character = FindObject<UAthenaCharacterItemDefinition>(CID.c_str());
+
+				if (!Character)
+				{
+					UEAllocatedWString FullPath = L"/Game/Athena/Items/Cosmetics/Characters/" + CID + L"." + CID;
+					Character = FindObject<UAthenaCharacterItemDefinition>(FullPath.c_str());
+				}
+
+				if (!Character || !Character->HeroDefinition)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to find Character CID. Check your spelling!"), FName(), 1.f);
+					return;
+				}
+
+				PlayerState->HeroType = Character->HeroDefinition;
+
+				static auto GenderOffset = PlayerState->GetOffset("Gender");
+
+				if (GenderOffset != -1)
+					*(EFortCustomGender*)(__int64(PlayerState) + GenderOffset) = Character->Gender;
+
+				std::unordered_map<uint8_t, UObject*> NewParts;
+
+				for (auto& SoftSpec : Character->HeroDefinition->Specializations)
+				{
+					auto Specialization = SoftSpec.Get();
+
+					if (Specialization)
+					{
+						for (auto& PartSoft : Specialization->CharacterParts)
+						{
+							auto Part = PartSoft.Get();
+
+							if (Part)
+								NewParts[Part->CharacterPartType] = const_cast<UCustomCharacterPart*>(Part);
+						}
+					}
+				}
+
+				if (NewParts.size() == 0)
+				{
+					PlayerController->ClientMessage(FString(L"No parts discovered for this skin."), FName(), 1.f);
+					return;
+				}
+
+				for (auto& [PartType, Part] : NewParts)
+					Pawn->ServerChoosePart(PartType, Part); // why does this not work
+
+				UFortKismetLibrary::UpdatePlayerCustomCharacterPartsVisualization(PlayerState);
+
+				if (ApplyCharacterCustomization)
+					((void (*)(AActor*, AActor*))ApplyCharacterCustomization)(PlayerState, Pawn);
+
+				Pawn->ForceNetUpdate();
+				PlayerState->ForceNetUpdate();
+
+				PlayerController->ClientMessage(FString(L"Applied CID!"), FName(), 1.f);
 			}
 			else if (command == "startevent")
 			{

@@ -470,7 +470,7 @@ void GUI::Init()
                     ImGui::SameLine(0.0f, 0.0f);
                     ImGui::TextColored(Color, "Enabled");
 
-                    ImGui::Text("NOTE: Infinite Render only works on the last player to join!");
+                    ImGui::Text("- NOTE: Infinite Render only works on the last player to join!");
                 }
 
                 ImGui::Text("- Players: %d", AliveCount);
@@ -486,7 +486,7 @@ void GUI::Init()
                     AddMessageTime = std::chrono::high_resolution_clock::now();
                 }
 
-                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 30)
+                if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 120)
                 {
                     ImVec4 KillerColor = ImVec4(0x4e / 255.f, 0x86 / 255.f, 0xa5 / 255.f, 1.0f);
                     ImVec4 EliminatedColor = ImVec4(0xa5 / 255.f, 0x56 / 255.f, 0x4c / 255.f, 1.0f);
@@ -592,6 +592,24 @@ void GUI::Init()
                     if (gsStatus < Joinable)
                     {
                         ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
+
+                        static bool bInitializedConfig = false;
+
+                        if (FConfiguration::bEnableTrickshotTab)
+                        {
+                            if (!bInitializedConfig)
+                            {
+                                FConfiguration::bAutoPauseTODM = true;
+                                FConfiguration::bDisableSupplyDrops = true;
+
+                                if (IsArenaPlaylist() || IsTournamentPlaylist())
+                                {
+                                    FConfiguration::RandomizeArenaPoints = true;
+                                }
+
+                                bInitializedConfig = true;
+                            }
+                        }
 
                         ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
 
@@ -722,7 +740,7 @@ void GUI::Init()
                         auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
                         if (GameMode->HasbSafeZonePaused())
                             GameMode->bSafeZonePaused = false;
-                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startsafezone"), nullptr);
+                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
                     }
                 }
 
@@ -830,6 +848,16 @@ void GUI::Init()
             ImGui::Text("Gamemodes:");
             SmallSeparator(Width);
 
+            static bool bInitializedPlaylist = false;
+
+            if (!bInitializedPlaylist)
+            {
+                if (VersionInfo.FortniteVersion == 11.31 || VersionInfo.FortniteVersion == 12.41)
+                    SelectedPlaylist = static_cast<int>(Playlist::SiphonSolos);
+
+                bInitializedPlaylist = true;
+            }
+
             ImGui::RadioButton("Solos", &SelectedPlaylist, (int)Playlist::Solos);
             ImGui::RadioButton("Duos", &SelectedPlaylist, (int)Playlist::Duos);
 
@@ -914,9 +942,6 @@ void GUI::Init()
                 }
             }
 
-            if (VersionInfo.FortniteVersion == 11.31 || VersionInfo.FortniteVersion == 12.41)
-                SelectedPlaylist == static_cast<int>(Playlist::SiphonSolos);
-
             switch (SelectedPlaylist)
             {
             case (int)Playlist::Solos:
@@ -981,12 +1006,12 @@ void GUI::Init()
             }
             case (int)Playlist::TournamentSolos:
             {
-                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Solo.Playlist_Showdown_Solo";
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_Showdown_Solo.Playlist_Showdown_Solo";
                 break;
             }
             case (int)Playlist::TournamentDuos:
             {
-                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_ShowdownAlt_Duos.Playlist_Showdown_Duos";
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Showdown/Playlist_Showdown_Duos.Playlist_Showdown_Duos";
                 break;
             }
             case (int)Playlist::TournamentTrios:
@@ -2010,7 +2035,7 @@ void GUI::Init()
                 if (VersionInfo.FortniteVersion <= 23.50)
                     ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
 
-                if (GUI::IsArenaPlaylist() && FConfiguration::bLateGame && !FConfiguration::bForceRespawns)
+                if ((IsArenaPlaylist() || IsTournamentPlaylist()) && FConfiguration::bLateGame && !FConfiguration::bForceRespawns)
                     ImGui::Checkbox("Randomize Arena Points", &FConfiguration::RandomizeArenaPoints);
 
                 ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
@@ -2023,6 +2048,8 @@ void GUI::Init()
 
             if (VersionInfo.FortniteVersion >= 23.20 && VersionInfo.FortniteVersion < 25.20)
                 ImGui::Checkbox("Negate Velocity on Win", &FConfiguration::bCancelVelocityOnWin);
+
+            ImGui::Checkbox("Disable Supply Drops", &FConfiguration::bDisableSupplyDrops);
 
             ImGui::Checkbox("Auto Pause TODM", &FConfiguration::bAutoPauseTODM);
             

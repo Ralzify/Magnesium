@@ -1,5 +1,8 @@
 #include "pch.h"
 #include "../Public/FortPhysicsPawn.h"
+#include "../Public/FortPlayerControllerAthena.h"
+#include "../Public/FortWeapon.h"
+#include "../Public/BattleRoyaleGamePhaseLogic.h"
 
 struct FReplicatedPhysicsPawnState
 {
@@ -85,6 +88,238 @@ void AFortPhysicsPawn::ServerMove(UObject* Context, FFrame& Stack)
         RootComponent->SetPhysicsLinearVelocity(LinearVelocity, 0, FName(0));
         RootComponent->SetPhysicsAngularVelocityInRadians(AngularVelocity, 0, FName(0));
     }
+}
+
+void AFortPlayerPawnAthena::ServerNotifyPawnHit(UObject* Context, FFrame& Stack) // 28.00+ func for registering hits, this will be a lot of work
+{
+    /*FHitResult Hit;
+    FVector ProjectileOriginPosition;
+    float ProjectileStartTimestamp;
+    TArray<uint8> ArrayContext;
+    FVector LocalSpaceImpactPoint;
+    FVector LocalSpaceImpactNormal;
+    bool bWasTargetingWhenProjectileFired;
+
+    Stack.StepCompiledIn(&Hit);
+    Stack.StepCompiledIn(&ProjectileOriginPosition);
+    Stack.StepCompiledIn(&ProjectileStartTimestamp);
+    Stack.StepCompiledIn(&ArrayContext);
+    Stack.StepCompiledIn(&LocalSpaceImpactPoint);
+    Stack.StepCompiledIn(&LocalSpaceImpactNormal);
+    Stack.StepCompiledIn(&bWasTargetingWhenProjectileFired);
+    Stack.IncrementCode();
+
+    UFortWeaponItemDefinition* Weapon = (UFortWeaponItemDefinition*)Context;
+
+    if (!Weapon)
+        return;
+
+    AFortPlayerControllerAthena* PlayerController = (AFortPlayerControllerAthena*)Weapon->PlayerController;
+
+    auto Component = Hit.Component.Get();
+
+    if (!Component)
+        return;
+
+    auto Actor = Component->GetOwner();
+
+    if (!Actor)
+        return;
+
+    auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+
+    if (!GamePhaseLogic)
+        return;
+
+    if (Weapon->WeaponStatHandle.DataTable)
+    {
+        auto StatHandle = Weapon->WeaponStatHandle;
+
+        if (!StatHandle.DataTable)
+            return;
+
+        auto Equals = [](const FName& LeftKey, const FName& RightKey) -> bool
+            {
+                return LeftKey == RightKey;
+            };
+
+        auto Index = StatHandle.DataTable->RowMap.Find(StatHandle.RowName, Equals).GetIndex();
+        auto WeaponStats = (FFortRangedWeaponStats*)StatHandle.DataTable->RowMap[Index].Second;
+
+        if (WeaponStats)
+        {
+            if (Actor->bCanBeDamaged == 1 && PlayerController->MyFortPawn)
+            {
+                if (Actor->IsA(AFortPlayerPawn::StaticClass()))
+                {
+                    float Multiplier = 1;
+                    if (Hit.BoneName.ToString() == "Head")
+                        Multiplier = WeaponStats->DamageZone_Critical;
+
+                    float Damage = WeaponStats->DmgPB * Multiplier;
+
+                    FAthenaBatchedDamageGameplayCues_Shared SharedCue{};
+                    SharedCue.Location = (FVector_NetQuantize10)Hit.ImpactPoint;
+                    SharedCue.Normal = Hit.ImpactNormal;
+                    SharedCue.bIsCritical = Hit.BoneName.ToString() == "Head";
+                    SharedCue.Magnitude = Damage;
+                    SharedCue.bWeaponActivate = true;
+                    SharedCue.bIsFatal = false;
+                    SharedCue.bIsShield = false;
+                    SharedCue.bIsShieldDestroyed = false;
+                    SharedCue.bIsShieldApplied = false;
+                    SharedCue.bIsBallistic = false;
+                    SharedCue.bIsBeam = false;
+                    SharedCue.bIsValid = true;
+
+                    FAthenaBatchedDamageGameplayCues_NonShared NonSharedCue{};
+                    NonSharedCue.HitActor = Actor;
+                    NonSharedCue.NonPlayerHitActor = Actor;
+
+                    AFortPlayerPawnAthena* Pawn = (AFortPlayerPawnAthena*)Actor;
+                    if (Pawn->Controller && ((AFortGameStateAthena*)UWorld::GetWorld()->GameState)->CurrentPlaylistInfo.BasePlaylist->MaxSquadSize > 1)
+                    {
+                        AFortPlayerStateAthena* EnemyPlayerState = (AFortPlayerStateAthena*)Pawn->Controller->PlayerState;
+                        AFortPlayerStateAthena* PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+
+                        if (EnemyPlayerState && PlayerState)
+                        {
+                            if (EnemyPlayerState->TeamIndex == PlayerState->TeamIndex)
+                                return;
+                        }
+                    }
+
+                    if (GamePhaseLogic->GamePhase != EAthenaGamePhase::Warmup && Pawn) 
+                    {
+                        auto PlayerShield = Pawn->GetShield();
+                        auto PlayerHealth = Pawn->GetHealth();
+                        float RemainingDamage = SharedCue.Magnitude;
+
+                        if (PlayerShield > 0.f)
+                        {
+                            SharedCue.bIsShield = true;
+
+                            if (PlayerShield <= RemainingDamage)
+                            {
+                                SharedCue.bIsShieldDestroyed = true;
+
+                                RemainingDamage -= PlayerShield;
+                                Pawn->SetShield(0.f);
+                            }
+                            else
+                            {
+                                Pawn->SetShield(PlayerShield - RemainingDamage);
+                                RemainingDamage = 0.f;
+                            }
+                        }
+
+                        if (RemainingDamage > 0.f)
+                        {
+                            if (PlayerHealth <= RemainingDamage)
+                            {
+                                Pawn->ForceKill(FGameplayTag(), PlayerController, Weapon);
+                                return;
+                            }
+                            else
+                            {
+                                Pawn->SetHealth(PlayerHealth - RemainingDamage);
+                            }
+                        }
+
+                        Pawn->ForceNetUpdate();
+                    }
+
+                    PlayerController->MyFortPawn->NetMulticast_Athena_BatchedDamageCues(SharedCue, NonSharedCue);
+                }
+                else
+                {
+                    FAthenaBatchedDamageGameplayCues_Shared SharedCue{};
+
+                    SharedCue.Location = (FVector_NetQuantize10)Hit.ImpactPoint;
+                    SharedCue.Normal = Hit.ImpactNormal;
+                    SharedCue.Magnitude = WeaponStats->EnvDmgPB;
+                    SharedCue.bWeaponActivate = true;
+                    SharedCue.bIsFatal = false;
+                    SharedCue.bIsCritical = false;
+                    SharedCue.bIsBallistic = true;
+                    SharedCue.bIsBeam = false;
+                    SharedCue.bIsValid = true;
+
+                    FAthenaBatchedDamageGameplayCues_NonShared NonSharedCue{};
+                    NonSharedCue.HitActor = Actor;
+                    NonSharedCue.NonPlayerHitActor = Actor;
+
+                    PlayerController->MyFortPawn->NetMulticast_Athena_BatchedDamageCues(SharedCue, NonSharedCue);
+                    if (Actor->IsA(ABuildingSMActor::StaticClass()))
+                    {
+                        ABuildingSMActor* BuildingActor = (ABuildingSMActor*)Actor;
+                        if (BuildingActor)
+                        {
+                            float RemainingHealth = BuildingActor->GetHealth() - SharedCue.Magnitude;
+                            BuildingActor->SetHealth(RemainingHealth);
+                            BuildingActor->ForceNetUpdate();
+
+                            if (BuildingActor->GetHealth() <= 0)
+                                BuildingActor->K2_DestroyActor();
+                        }
+                    }
+                    else if (Actor->IsA(AAthenaSuperDingo::StaticClass()))
+                    {
+                        AAthenaSuperDingo* SuperDingo = (AAthenaSuperDingo*)Actor;
+                        if (SuperDingo)
+                        {
+                            float RemainingHealth = SuperDingo->GetHealth() - SharedCue.Magnitude;
+                            SuperDingo->SetHealth(RemainingHealth);
+                            SuperDingo->ForceNetUpdate();
+
+                            if (SuperDingo->GetHealth() <= 0)
+                                SuperDingo->K2_DestroyActor();
+                        }
+                    }
+                    else if (Actor->IsA(AFortAthenaVehicle::StaticClass()))
+                    {
+                        AFortAthenaVehicle* Vehicle = (AFortAthenaVehicle*)Actor;
+                        if (Vehicle)
+                        {
+                            Vehicle->HealthSet->Health.CurrentValue -= WeaponStats->EnvDmgPB;
+                            Vehicle->OnRep_HealthSet();
+
+                            if (Vehicle->HealthSet->Health.CurrentValue <= 0)
+                                Vehicle->DestroyVehicle();
+                        }
+                    }
+                    else if (Actor->IsA(ABuildingGameplayActorCrashpad::StaticClass()))
+                    {
+                        ABuildingGameplayActorCrashpad* CrashPad = (ABuildingGameplayActorCrashpad*)Actor;
+                        if (CrashPad)
+                        {
+                            float RemainingHealth = CrashPad->GetHealth() - SharedCue.Magnitude;
+                            CrashPad->SetHealth(RemainingHealth);
+                            CrashPad->ForceNetUpdate();
+
+                            if (CrashPad->GetHealth() <= 0)
+                                CrashPad->K2_DestroyActor();
+                        }
+                    }
+                    else if (Actor->IsA(ABuildingGameplayActorBalloon::StaticClass()))
+                    {
+                        ABuildingGameplayActorBalloon* Balloon = (ABuildingGameplayActorBalloon*)Actor;
+                        if (Balloon)
+                        {
+                            float RemainingHealth = Balloon->GetHealth() - SharedCue.Magnitude;
+                            Balloon->SetHealth(RemainingHealth);
+                            Balloon->ForceNetUpdate();
+
+                            if (Balloon->GetHealth() <= 0)
+                                Balloon->K2_DestroyActor();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return;*/
 }
 
 void AFortOctopusVehicle::ServerUpdateTowhook(UObject* Context, FFrame& Stack)

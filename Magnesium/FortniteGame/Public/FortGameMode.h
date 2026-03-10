@@ -7,6 +7,13 @@
 #include "FortPlayerPawnAthena.h"
 #include "FortPlayerControllerAthena.h"
 
+enum class EEvaluateCurveTableResult : uint8
+{
+    RowFound = 0,
+    RowNotFound = 1,
+    EEvaluateCurveTableResult_MAX = 2,
+};
+
 class AFortGameMode : public AActor
 {
 public:
