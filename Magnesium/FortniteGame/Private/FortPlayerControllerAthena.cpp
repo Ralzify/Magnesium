@@ -4190,6 +4190,9 @@ cheat spawn <class/path> - Spawns an actor at your location
 					Count = Max;
 				}
 
+				if (auto Car = Class->Cast<AFortDagwoodVehicle>())
+					Car->SetFuel(100.f);
+
 				if (Class)
 				{
 					int AmountSpawned = 0;
@@ -4274,7 +4277,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				int SentCount = 0;
 
-				for (int i = 0; i < ClientConnections.Num(); i++) // line 4015
+				for (int i = 0; i < ClientConnections.Num(); i++)
 				{
 					UNetConnection* Connection = ClientConnections[i];
 
