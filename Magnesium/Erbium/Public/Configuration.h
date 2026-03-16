@@ -44,19 +44,21 @@ struct FConfiguration
     static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
     static inline auto bEnableCheats = true;
 	static inline auto bMovingBus = true;
-	static inline auto BusStartDelay = 60.f;
+	static inline auto BusStartDelay = 90.f;
 
     static inline auto HasCustomRespawnPoint = false;
 	static inline auto CustomRespawnPoint = FVector(0.f, 0.f, 0.f);
 
     static inline auto bRideableProjectiles = false;
 
-    static inline auto bSiphon = true;
+    static inline auto bSiphon = false;
     static inline auto SiphonAmount = 50;
 
     static inline auto bEnableTrickshotTab = false;
     static inline auto bUseWinLines = true;
     static inline auto RandomizeArenaPoints = false;
+    static inline auto RandomizeKills = false;
+    static inline auto bEnableDBNO = true;
     static inline auto bInfiniteRender = false;
     static inline auto bFModCannon = false;
 	static inline auto CannonLaunchMultiplier = 1.f;

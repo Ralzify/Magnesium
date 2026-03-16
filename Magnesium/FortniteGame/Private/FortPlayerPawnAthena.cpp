@@ -576,42 +576,67 @@ void AFortPlayerPawnAthena::EndSkydiving(AFortPlayerPawnAthena* Pawn)
 	}
 }
 
-void AFortPlayerPawnAthena::ServerReviveFromDBNO(UObject* Context, FFrame& Stack)
+void AFortPlayerPawnAthena::ServerReviveFromDBNO_(UObject* Context, FFrame& Stack)
 {
 	AFortPlayerControllerAthena* EventInstigator;
 
 	Stack.StepCompiledIn(&EventInstigator);
 	Stack.IncrementCode();
 	auto Pawn = (AFortPlayerPawnAthena*)Context;
-	auto Controller = (AFortPlayerControllerAthena*)Pawn->Controller;
-	auto PlayerState = (AFortPlayerStateAthena*)Pawn->PlayerState;
+	auto DeadPC = (AFortPlayerControllerAthena*)Pawn->Controller;
+	auto DeadPlayerState = (AFortPlayerStateAthena*)DeadPC->PlayerState;
 
-	if (!Controller || !PlayerState)
+	if (!DeadPC || !DeadPlayerState)
 		return;
 
-	bool bIsSelfRevive = (EventInstigator == Controller);
+	bool bIsSelfRevive = (EventInstigator == DeadPC);
 
-	auto AbilitySystemComp = PlayerState->AbilitySystemComponent;
-
-	for (auto& Ability : AbilitySystemComp->ActivatableAbilities.Items)
+	if (Pawn->IsDBNO())
 	{
-		if (Ability.Ability->Class == UGAB_AthenaDBNO_C::StaticClass())
+		auto ASC = DeadPlayerState->AbilitySystemComponent;
+
+		auto& Items = ASC->ActivatableAbilities.Items;
+
+		for (int i = Items.Num() - 1; i >= 0; i--)
 		{
-			AbilitySystemComp->ServerCancelAbility(Ability.Handle, Ability.ActivationInfo);
-			AbilitySystemComp->ServerEndAbility(Ability.Handle, Ability.ActivationInfo, Ability.ActivationInfo.PredictionKeyWhenActivated);
-			AbilitySystemComp->ClientCancelAbility(Ability.Handle, Ability.ActivationInfo);
-			AbilitySystemComp->ClientEndAbility(Ability.Handle, Ability.ActivationInfo);
+			auto& Spec = Items.Get(i, FGameplayAbilitySpec::Size());
+
+			if (!Spec.Ability)
+				continue;
+
+			if (Spec.Ability->IsA(UGAB_AthenaDBNO_C::StaticClass()))
+			{
+				ASC->ServerCancelAbility(Spec.Handle, Spec.ActivationInfo);
+				ASC->ClientCancelAbility(Spec.Handle, Spec.ActivationInfo);
+			}
 		}
+
+		auto& Effects = ASC->ActiveGameplayEffects.GameplayEffects_Internal;
+
+		for (int i = Effects.Num() - 1; i >= 0; i--)
+		{
+			auto& Effect = Effects.Get(i, FActiveGameplayEffect::Size());
+
+			if (!Effect.Spec.Def)
+				continue;
+
+			auto EffectName = Effect.Spec.Def->Name.ToString();
+
+			if (EffectName.find("DBNO") != std::string::npos || EffectName.find("Downed") != std::string::npos)
+			{
+				Effects.Remove(i, FActiveGameplayEffect::Size());
+			}
+		}
+
+		Pawn->bIsDBNO = false;
+		Pawn->bPlayedDying(false);
+
+		Pawn->SetHealth(30.f);
+		Pawn->OnRep_IsDBNO();
+
+		DeadPC->ClientOnPawnRevived(EventInstigator);
+		DeadPC->RespawnPlayerAfterDeath(false);
 	}
-
-	Pawn->IsDBNO(false);
-	Pawn->bPlayedDying(false);
-
-	Pawn->SetHealth(30.f);
-	Pawn->OnRep_IsDBNO();
-
-	Controller->ClientOnPawnRevived(EventInstigator);
-	Controller->RespawnPlayerAfterDeath(false);
 }
 
 void AFortPlayerPawnAthena::ServerThrowCarriedPlayer_(UObject* Context, FFrame& Stack)
@@ -653,6 +678,6 @@ void AFortPlayerPawnAthena::PostLoadHook()
 	if (EndSkydivingFn)
 		Utils::Hook<AFortPlayerPawnAthena>(EndSkydivingFn->GetVTableIndex(), EndSkydiving, EndSkydivingOG);
 
-	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerReviveFromDBNO"), ServerReviveFromDBNO);
+	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerReviveFromDBNO"), ServerReviveFromDBNO_, ServerReviveFromDBNO_OG);
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerThrowCarriedPlayer"), ServerThrowCarriedPlayer_, ServerThrowCarriedPlayer_OG);
 }

@@ -136,7 +136,14 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             GameState->CachedSafeZoneStartUp = Playlist->SafeZoneStartUp;
 
         if (GameMode->HasbEnableDBNO())
-            GameMode->bEnableDBNO = Playlist->MaxSquadSize > 1;
+        {
+            GameMode->bEnableDBNO = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false; // ploosh's thing i dont think this even exists im ngl
+            GameMode->bAlwaysDBNO = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
+            GameMode->bDBNOEnabled = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
+
+            GameState->bDBNOEnabledForGameMode = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
+            GameState->bDBNODeathEnabled = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
+        }
 
         bIsLargeTeamGame = Playlist->bIsLargeTeamGame;
 
@@ -852,6 +859,15 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             Aircrafts.Free();
         }
 
+        static bool bTODMApplied = false;
+
+        if (!bTODMApplied)
+        {
+            UFortKismetLibrary::SetTimeOfDay(UWorld::GetWorld(), FConfiguration::TODMTime);
+            UFortKismetLibrary::SetTimeOfDaySpeed(UWorld::GetWorld(), 0.f);
+            bTODMApplied = true;
+        }
+
         if (GameState->HasMapInfo() && GameState->MapInfo)
         {
             if (SupplyDropClass)
@@ -888,7 +904,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                     {
                         if (DropInfo)
                         {
-                            float EvaluatedTime = 0.f;
+                            float EvaluatedTime = 999999999999.f;
                             auto SafeZoneIndex = GameMode->GetLateSafeZoneIndex();
                             EEvaluateCurveTableResult Result{};
 

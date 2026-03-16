@@ -53,6 +53,8 @@ public:
     DEFINE_PROP(bSafeZonePaused, bool);
     DEFINE_PROP(OnSafeZoneIndicatorSpawned, TMulticastInlineDelegate<void(AFortSafeZoneIndicator*)>);
     DEFINE_PROP(MatchState, FName);
+    DEFINE_PROP(bAlwaysDBNO, bool);
+    DEFINE_PROP(bDBNOEnabled, bool);
     DEFINE_PROP(bEnableDBNO, bool);
     DEFINE_PROP(AIDirector, AActor*);
     DEFINE_PROP(AIGoalManager, AActor*);

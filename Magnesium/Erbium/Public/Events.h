@@ -232,7 +232,8 @@ public:
 				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.UpdatePercentPulsesOccurred" }
 			},
 			20.40,
-			nullptr
+			nullptr,
+			L"/ArmadilloPlaylist/Playlist/Playlist_Armadillo.Playlist_Armadillo"
 		},
 		FEvent
 		{

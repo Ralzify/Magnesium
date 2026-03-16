@@ -57,6 +57,16 @@ void Events::StartEvent()
 				//AllLoaders.Free();
 			}
 
+		if (Event.LoaderFuncPath)
+		{
+			const UFunction* LoaderFunc = FindObject<UFunction>(Event.LoaderFuncPath);
+			if (LoaderFunc && LoaderObject)
+			{
+				LoaderObject->Call(const_cast<UFunction*>(LoaderFunc), 0.f);
+				std::this_thread::sleep_for(std::chrono::seconds(2));
+			}
+		}
+
 		for (auto& EventFunction : Event.EventFunctions)
 		{
 			const UFunction* Function = FindObject<UFunction>(EventFunction.FunctionPath);

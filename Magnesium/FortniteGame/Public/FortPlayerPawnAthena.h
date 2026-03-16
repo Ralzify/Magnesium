@@ -119,6 +119,7 @@ public:
     DEFINE_PROP(Damagers, TArray<FDamagerInfo>);
     DEFINE_PROP(LastReplicatedEmoteExecuted, UObject*);
     DEFINE_PROP(Mesh, UActorComponent*);
+    DEFINE_BITFIELD_PROP(bIsDBNO);
     DEFINE_BITFIELD_PROP(bIsSkydiving);
     DEFINE_BITFIELD_PROP(bIsSkydivingFromBus);
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
@@ -171,7 +172,7 @@ public:
     DefUHookOg(EmoteStopped_);
     static void ServerHandlePickupWithRequestedSwap(UObject*, FFrame&);
     DefHookOg(void, EndSkydiving, AFortPlayerPawnAthena*);
-    DefUHookOg(ServerReviveFromDBNO);
+    DefUHookOg(ServerReviveFromDBNO_);
     DefUHookOg(ServerThrowCarriedPlayer_);
 
     InitPostLoadHooks;

@@ -556,7 +556,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	{
 		LateGame::EquipLoadout(PlayerController);
 
-		if ((GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
+		if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
 		{
 			std::random_device rd;
 			std::mt19937 rng(rd());
@@ -567,12 +567,35 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 			PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
 		}
-	}
 
-	if (FConfiguration::bAutoPauseTODM)
-	{
-		UFortKismetLibrary::SetTimeOfDay(UWorld::GetWorld(), FConfiguration::TODMTime);
-		UFortKismetLibrary::SetTimeOfDaySpeed(UWorld::GetWorld(), 0.f);
+		if (GUI::IsTournamentPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
+		{
+			std::random_device rd;
+			std::mt19937 rng(rd());
+
+			std::uniform_int_distribution<int> RandomAmount(30, 120);
+
+			int AlivePlayers = GameMode->AlivePlayers.Num();
+
+			PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
+		}
+
+		if (FConfiguration::RandomizeKills)
+		{
+			auto PlayerState = PlayerController->PlayerState;
+
+			std::random_device rd;
+			std::mt19937 rng(rd());
+
+			std::uniform_int_distribution<int> RandomAmount(8, 31);
+
+			int RandomKills = RandomAmount(rng);
+
+			if (PlayerState->HasKillScore())
+				PlayerState->KillScore = RandomKills;
+			else
+				PlayerState->Kills = RandomKills;
+		}
 	}
 
 	if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett") && VersionInfo.FortniteVersion == 27.11)
@@ -1676,7 +1699,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			TargetTags.ParentTags.Free();
 		}
 
-		if ((GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) && VersionInfo.FortniteVersion < 21.00) // crashes on 20.40, test other versions
+		if ((GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) && VersionInfo.FortniteVersion < 20.40) // crashes on 20.40, test other versions
 		{
 			KillerPlayerState->ClientReportTournamentStatUpdate();
 		}
@@ -1954,7 +1977,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			KillerPlayerController->WorldInventory->GiveItem(MetalItemData, FConfiguration::SiphonAmount);
 		}
 
-		if (GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist())
+		if (GUI::IsArenaPlaylist())
 		{
 			int PlayerCount = GameMode->AlivePlayers.Num();
 			auto AwardRequirement = PlayerCount == 50 || PlayerCount == 35 || PlayerCount == 30 || PlayerCount == 25 || PlayerCount == 20 || PlayerCount == 15 || PlayerCount == 10 || PlayerCount == 5 || PlayerCount == 3 || PlayerCount == 2 || PlayerCount == 1;
@@ -1983,6 +2006,55 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				Points = 25;
 			else if (PlayerCount == 1)
 				Points = 50;
+
+			for (auto& Player : GameMode->AlivePlayers)
+			{
+				auto Controller = (AFortPlayerControllerAthena*)Player;
+
+				if (AwardRequirement && !Controller->IsInRespawnCountdown())
+					Controller->ClientReportTournamentPlacementPointsScored(PlayerCount, Points);
+			}
+		}
+
+		if (GUI::IsTournamentPlaylist())
+		{
+			int PlayerCount = GameMode->AlivePlayers.Num();
+			auto AwardRequirement = PlayerCount == 50 || PlayerCount == 35 || PlayerCount == 30 || PlayerCount == 25 || PlayerCount == 20 || PlayerCount == 15 || PlayerCount == 10 || PlayerCount == 5 || PlayerCount == 3 || PlayerCount == 2 || PlayerCount == 1;
+
+			int Points = 1;
+
+			if (PlayerCount == 75)
+				Points = 1;
+			else if (PlayerCount == 50)
+				Points = 1;
+			else if (PlayerCount == 40)
+				Points = 1;
+			else if (PlayerCount == 30)
+				Points = 2;
+			else if (PlayerCount == 20)
+				Points = 2;
+			else if (PlayerCount == 15)
+				Points = 2;
+			else if (PlayerCount == 10)
+				Points = 3;
+			else if (PlayerCount == 9)
+				Points = 1;
+			else if (PlayerCount == 8)
+				Points = 1;
+			else if (PlayerCount == 7)
+				Points = 1;
+			else if (PlayerCount == 6)
+				Points = 1;
+			else if (PlayerCount == 5)
+				Points = 2;
+			else if (PlayerCount == 4)
+				Points = 1;
+			else if (PlayerCount == 3)
+				Points = 3;
+			else if (PlayerCount == 2)
+				Points = 4;
+			else if (PlayerCount == 1)
+				Points = 7;
 
 			for (auto& Player : GameMode->AlivePlayers)
 			{
@@ -2757,39 +2829,59 @@ cheat spawn <class/path> - Spawns an actor at your location
 					return;
 				}
 
-				auto PlayerState = PlayerController->PlayerState;
+				auto DeadPlayerState = PlayerController->PlayerState;
 
-				if (!PlayerState)
+				if (!DeadPlayerState)
 				{
 					PlayerController->ClientMessage(FString(L"Could not find a player state!"), FName(), 1.f);
 					return;
 				}
 
-				auto AbilitySystemComp = PlayerState->AbilitySystemComponent;
-
-				if (!AbilitySystemComp)
-				{
-					PlayerController->ClientMessage(FString(L"Could not find an ability system component!"), FName(), 1.f);
-					return;
-				}
-
 				if (Pawn->IsDBNO())
 				{
-					for (auto& Ability : AbilitySystemComp->ActivatableAbilities.Items)
+					auto ASC = DeadPlayerState->AbilitySystemComponent;
+
+					auto& Items = ASC->ActivatableAbilities.Items;
+
+					for (int i = Items.Num() - 1; i >= 0; i--)
 					{
-						AbilitySystemComp->ServerCancelAbility(Ability.Handle, Ability.ActivationInfo);
-						AbilitySystemComp->ServerEndAbility(Ability.Handle, Ability.ActivationInfo, Ability.ActivationInfo.PredictionKeyWhenActivated);
-						AbilitySystemComp->ClientCancelAbility(Ability.Handle, Ability.ActivationInfo);
-						AbilitySystemComp->ClientEndAbility(Ability.Handle, Ability.ActivationInfo);
+						auto& Spec = Items.Get(i, FGameplayAbilitySpec::Size());
+
+						if (!Spec.Ability)
+							continue;
+
+						if (Spec.Ability->IsA(UGAB_AthenaDBNO_C::StaticClass()))
+						{
+							ASC->ServerCancelAbility(Spec.Handle, Spec.ActivationInfo);
+							ASC->ClientCancelAbility(Spec.Handle, Spec.ActivationInfo);
+						}
 					}
 
-					Pawn->IsDBNO(false);
+					auto& Effects = ASC->ActiveGameplayEffects.GameplayEffects_Internal;
+
+					for (int i = Effects.Num() - 1; i >= 0; i--)
+					{
+						auto& Effect = Effects.Get(i, FActiveGameplayEffect::Size());
+
+						if (!Effect.Spec.Def)
+							continue;
+
+						auto EffectName = Effect.Spec.Def->Name.ToString();
+
+						if (EffectName.find("DBNO") != std::string::npos || EffectName.find("Downed") != std::string::npos)
+						{
+							Effects.Remove(i, FActiveGameplayEffect::Size());
+						}
+					}
+
+					Pawn->bIsDBNO = false;
 					Pawn->bPlayedDying(false);
 
-					Pawn->SetHealth(30.f);
+					auto MaxHealth = Pawn->GetMaxHealth();
+					Pawn->SetHealth(MaxHealth);
 					Pawn->OnRep_IsDBNO();
 
-					PlayerController->ClientOnPawnRevived(PlayerController);
+					PlayerController->ClientOnPawnRevived(PlayerController->PlayerState);
 					PlayerController->RespawnPlayerAfterDeath(false);
 
 					PlayerController->ClientMessage(FString(L"Player revived!"), FName(), 1.f);
@@ -3057,6 +3149,42 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				Pawn->SetMaxShield(Shield);
 				PlayerController->ClientMessage(FString(L"Set pawn's max shield!"), FName(), 1.f);
+			}
+			else if (command == "applyge")
+			{
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please provide a custom Gameplay Effect."), FName(), 1.f);
+					return;
+				}
+
+				auto PlayerState = PlayerController->PlayerState;
+				auto Pawn = PlayerController->Pawn;
+
+				if (UAbilitySystemComponent* AbilitySystemComponent = PlayerState->AbilitySystemComponent)
+				{
+					auto GEClass = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
+
+					if (!GEClass)
+						GEClass = FindClass(args[1].c_str());
+
+					if (!GEClass)
+					{
+						PlayerController->ClientMessage(FString(L"Could not find a Gameplay Effect."), FName(), 1.f);
+						return;
+					}
+
+					if (GEClass)
+					{
+						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+						Context.Instigator = PlayerController;
+						Context.Causer = Pawn;
+						Context.AddSourceObject(Pawn);
+
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GEClass, 1.0f, Context);
+					}
+				}
 			}
 			else if (command == "cipher")
 			{
@@ -3537,6 +3665,12 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 						if (!CustomWeapon)
 							CustomWeapon = const_cast<UFortItemDefinition*>(TUObjectArray::FindObject<UFortItemDefinition>(WeaponArg.c_str()));
+
+						if (!CustomWeapon)
+						{
+							std::string DoubleNamed = WeaponArg + "." + WeaponArg;
+							CustomWeapon = const_cast<UFortItemDefinition*>(TUObjectArray::FindObject<UFortItemDefinition>(DoubleNamed.c_str()));
+						}
 
 						if (!CustomWeapon)
 						{

@@ -236,6 +236,8 @@ public:
     DEFINE_PROP(MissionManager, AActor*);
     DEFINE_PROP(PlayerArray, TArray<AFortPlayerStateAthena*>);
     DEFINE_BITFIELD_PROP(bInSpawningStartup);
+    DEFINE_BITFIELD_PROP(bDBNOEnabledForGameMode);
+    DEFINE_BITFIELD_PROP(bDBNODeathEnabled);
 
     DEFINE_FUNC(OnRep_CurrentPlaylistInfo, void);
     DEFINE_FUNC(OnRep_CurrentPlaylistData, void);
