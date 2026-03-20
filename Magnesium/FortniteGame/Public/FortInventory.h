@@ -323,6 +323,7 @@ public:
     DEFINE_PROP(EquippedAbilitySet, TSoftObjectPtr<class UFortAbilitySet>);
     DEFINE_BITFIELD_PROP(bUsesCustomAmmoType);
     DEFINE_PROP(WeaponModSlots, TArray<void*>);
+    DEFINE_BITFIELD_PROP(bValidForLastEquipped);
 };
 
 struct FFortBaseWeaponStats : public UObject
@@ -409,6 +410,8 @@ class UFortGadgetItemDefinition : public UFortWorldItemDefinition
 {
 public:
     UCLASS_COMMON_MEMBERS(UFortGadgetItemDefinition);
+
+    DEFINE_PROP(bValidForLastEquipped, bool);
 
     DEFINE_FUNC(GetWeaponItemDefinition, UFortWeaponItemDefinition*);
 };

@@ -215,21 +215,9 @@ public:
 		FEvent
 		{
 			nullptr,
-			L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C",
+			L"/Armadillo/Gameplay/BP_Armadillo_SpecialEventScript.BP_Armadillo_SpecialEventScript_C",
 			{
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.OnReady_9EF500F248D546EAEE76C5A03688EA2E" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.CheatPulse" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.MultiCheatPulse" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.PlayPulseActivateVFX" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.PlayPulseActivateSFX" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.StartTowerPulse" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.SetActivatePulseTrue" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.StartPulseEvents" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.UpdateEventActiveStatus" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.PlayPulseActivationCosmetics" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.SetTimerForNextPulse" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.GetPulseRadiusAtLevel" },
-				FEventFunction{ false, L"/ResolveDDMachine/Gameplay/BP_Athena_DD_Machine_Trigger.BP_Athena_DD_Machine_Trigger_C.UpdatePercentPulsesOccurred" }
+				FEventFunction{ false, L"/Script/SpecialEventGameplayRuntime.SpecialEventScript.StartEventAtIndex" }
 			},
 			20.40,
 			nullptr,

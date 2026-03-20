@@ -734,7 +734,12 @@ uint64_t FindConstructAbilitySpec()
                 ConstructAbilitySpec = Memcury::Scanner::FindPattern("80 61 29 F8 48 8B 44 24 ?").Get();
         }
         else if (VersionInfo.EngineVersion == 4.26)
-            return ConstructAbilitySpec = Memcury::Scanner::FindPattern("80 61 31 FE 0F 57 C0 80 61 29 F0 48 8B 44 24 ? 48").Get();
+        {
+            ConstructAbilitySpec = Memcury::Scanner::FindPattern("80 61 31 FE 0F 57 C0 80 61 29 F0 48 8B 44 24 ? 48").Get();
+
+            if (!ConstructAbilitySpec)
+                ConstructAbilitySpec = Memcury::Scanner::FindPattern("48 8B 44 24 ? 80 61").Get();
+        }
         else if (VersionInfo.EngineVersion == 4.27)
             return ConstructAbilitySpec = Memcury::Scanner::FindPattern("80 61 31 FE 41 83 C9 FF 80 61 29 F0 48 8B 44 24 ? 48 89 41").Get();
         else if (VersionInfo.EngineVersion == 5.0)
@@ -1571,8 +1576,12 @@ uint64 FindStartAircraftPhase()
 
             for (int i = 0; i < 150; i++)
                 if (*(uint8_t*)(sRef + i) == 0xE8)
+                {
                     if (++numCalls == 2)
                         return StartAircraftPhase = Memcury::Scanner(sRef + i).RelativeOffset(1).Get();
+                    else
+                        i += 4;
+                }
         }
         else
         {
@@ -2973,10 +2982,13 @@ uint64 FindFinishWorldInitialization()
     return 0;
 }
 
-uint64 FindActivatePhaseAtIndex()
+uint64 FindActivatePhase()
 {
-    auto sRef = Memcury::Scanner::FindStringRef(L"[ASpecialEventScript::ActivatePhaseAtIndex()] Invalid IndexToActivate [%d]", false, 0,
-        VersionInfo.FortniteVersion >= 19, false);
+    auto sRef = Memcury::Scanner::FindStringRef(
+        L"[ASpecialEventScript::ActivatePhase()] [%s] New Phase [%s] OldPhase [%s] SequenceTimeOffset [%f]", false, 0, VersionInfo.FortniteVersion >= 17, false);
+
+    if (!sRef.IsValid())
+        sRef = Memcury::Scanner::FindStringRef(L"[ASpecialEventScript::ActivatePhase()] [%s] New Phase [%s] OldPhase [%s]", false, 0, VersionInfo.FortniteVersion >= 17, false);
 
     if (!sRef.IsValid())
         return 0;
@@ -3108,10 +3120,9 @@ uint64 FindSetIsDoorOpen()
     return 0;
 }
 
-uint64 FindSelectAndSetupMyBuildingLevel() 
+uint64 FindSelectAndSetupMyBuildingLevel()
 {
-    auto sRef = Memcury::Scanner::FindStringRef(L"ABuildingFoundation::SelectAndSetupMyBuildingLevel - Cannot get WorldManager!!", false, 0,
-        VersionInfo.FortniteVersion >= 19, false);
+    auto sRef = Memcury::Scanner::FindStringRef(L"ABuildingFoundation::SelectAndSetupMyBuildingLevel - Cannot get WorldManager!!", false, 0, VersionInfo.FortniteVersion >= 19, false);
 
     if (!sRef.IsValid())
         return 0;

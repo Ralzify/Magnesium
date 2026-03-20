@@ -359,9 +359,9 @@ void GUI::Init()
                     ImGui::EndTabItem();
                 }
 
-                if (FConfiguration::bLateGame)
+                if (&FConfiguration::bLateGame)
                 {
-                    if (ImGui::BeginTabItem("LateGame"))
+                    if (ImGui::BeginTabItem("Lategame"))
                     {
                         SelectedUI = 3;
                         ImGui::EndTabItem();
@@ -542,136 +542,150 @@ void GUI::Init()
             bool bIsOnlyUp = (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp));
             bool bIsTiltedZW = (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW));
             bool bIsTwine = (SelectedPlaylist == static_cast<int>(Playlist::Twine1v1));
+            bool bIsBoxfight = (SelectedPlaylist == static_cast<int>(Playlist::Boxfight));
 
             if (gsStatus <= Joinable)
             {
                 ImGui::Spacing();
                 ImGui::Spacing();
 
-                ImGui::Text("Pre-Game Configuration:");
-                SmallSeparator(Width);
+                static bool bStartedBus = false;
 
-                if (bIsGavMap)
+                if (!bStartedBus)
                 {
-                    ImGui::Text("- Playing Gav 1v1 Map.");
-				}
-                else if (bIsEventPlaylist)
-                {
-					ImGui::Text("- Playing Event Playlist.");
-                }
-                else if (bIsRetrac1v1 || bIsRetracTurtle)
-                {
-                    ImGui::Text("- Playing Retrac Custom Map.");
-                }
-                else if (bIsCreative)
-                {
-                    ImGui::Text("- Playing Creative.");
-				}
-                else if (bIsDesertZW)
-                {
-                    ImGui::Text("- Playing Rewind Custom Map.");
-				}
-                else if (bIsTiltedZW)
-                {
-                    ImGui::Text("- Playing Tilted Zone Wars Map.");
-				}
-                else if (bIsTwine)
-                {
-                    ImGui::Text("- Playing Twine 1v1 Map.");
-                }
-                else if (bIsOnlyUp)
-                {
-                    if (gsStatus < Joinable)
+                    ImGui::Text("Pre-Game Configuration:");
+                    SmallSeparator(Width);
+
+                    if (bIsGavMap)
                     {
-                        ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
-                        ImGui::Checkbox("Player Has Pickaxe", &FConfiguration::bHasPickaxe);
+                        ImGui::Text("- Playing Gav 1v1 Map.");
                     }
-                }
-                else
-                {
-                    if (gsStatus < Joinable)
+                    else if (bIsEventPlaylist)
                     {
-                        ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
-
-                        static bool bInitializedConfig = false;
-
-                        if (FConfiguration::bEnableTrickshotTab)
+                        ImGui::Text("- Playing Event Playlist.");
+                    }
+                    else if (bIsRetrac1v1 || bIsRetracTurtle)
+                    {
+                        ImGui::Text("- Playing Retrac Custom Map.");
+                    }
+                    else if (bIsCreative)
+                    {
+                        ImGui::Text("- Playing Creative.");
+                    }
+                    else if (bIsDesertZW)
+                    {
+                        ImGui::Text("- Playing Rewind Custom Map.");
+                    }
+                    else if (bIsTiltedZW)
+                    {
+                        ImGui::Text("- Playing Tilted Zone Wars Map.");
+                    }
+                    else if (bIsTwine)
+                    {
+                        ImGui::Text("- Playing Twine 1v1 Map.");
+                    }
+                    else if (bIsBoxfight)
+                    {
+                        ImGui::Text("- Playing Boxfight Map.");
+                    }
+                    else if (bIsOnlyUp)
+                    {
+                        if (gsStatus < Joinable)
                         {
-                            if (!bInitializedConfig)
+                            ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
+                            ImGui::Checkbox("Player Has Pickaxe", &FConfiguration::bHasPickaxe);
+                        }
+                    }
+                    else
+                    {
+                        if (gsStatus <= Joinable)
+                        {
+                            if (gsStatus < Joinable)
                             {
-                                FConfiguration::RandomizeKills = true;
+                                ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
 
-                                if (IsArenaPlaylist() || IsTournamentPlaylist())
+                                static bool bInitializedConfig = false;
+
+                                if (FConfiguration::bEnableTrickshotTab)
                                 {
-                                    FConfiguration::RandomizeArenaPoints = true;
+                                    if (!bInitializedConfig)
+                                    {
+                                        FConfiguration::RandomizeKills = true;
+                                        FConfiguration::bDisableJumpFatigue = true;
+                                        FConfiguration::bAutoPauseTODM = true;
+
+                                        if (IsArenaPlaylist() || IsTournamentPlaylist())
+                                        {
+                                            FConfiguration::RandomizeArenaPoints = true;
+                                        }
+
+                                        bInitializedConfig = true;
+                                    }
                                 }
 
-                                bInitializedConfig = true;
+                                ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
+
+                                static bool bInitializedZone = false;
+
+                                if (!bInitializedZone)
+                                {
+                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 3 : 4;
+                                    bInitializedZone = true;
+                                }
+
+                                if (VersionInfo.FortniteVersion == 19.20)
+                                    FConfiguration::bAutoDump = false;
+
+                                ImGui::Checkbox("Auto Dump Text", &FConfiguration::bAutoDump);
+
+                                ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
+
+                                ImGui::Checkbox("Lategame ", &FConfiguration::bLateGame);
+
+                                if (FConfiguration::bAutoBusStart)
+                                {
+                                    ImGui::PushItemWidth(Width);
+                                    ImGui::SliderFloat("Bus Start Delay", &FConfiguration::BusStartDelay, 0.0f, 300.0f, "%.1f seconds");
+                                    ImGui::PopItemWidth();
+                                }
+
+                                ImGui::PushItemWidth(Width);
+                                ImGui::SliderFloat("Max Tick Rate", &FConfiguration::MaxTickRate, 5.0f, 180.0f, "%.1f seconds");
+                                ImGui::PopItemWidth();
                             }
-                        }
 
-                        ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
+                            ImGui::Spacing();
 
-                        static bool bInitializedZone = false;
+                            if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
+                            {
+                                /*if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+                                {
+                                    UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
+                                    //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
 
-                        if (!bInitializedZone)
-                        {
-                            FConfiguration::LateGameZone = FConfiguration::IsS27() ? 3 : 4;
-                            bInitializedZone = true;
-                        }
+                                    //GamePhaseLogic->StartAircraftPhase();
+                                }
+                                else
+                                {
+                                    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
+                                }*/
 
-                        if (VersionInfo.FortniteVersion == 19.20)
-                            FConfiguration::bAutoDump = false;
+                                auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+                                auto WarmupDuration = 10.f;
 
-						ImGui::Checkbox("Auto Dump Text", &FConfiguration::bAutoDump);
+                                auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                                auto GameState = GameMode->GameState;
 
-                        ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
+                                if (GameState->HasWarmupCountdownEndTime())
+                                {
+                                    GameState->WarmupCountdownStartTime = Time;
+                                    GameState->WarmupCountdownEndTime = Time + WarmupDuration;
+                                    GameMode->WarmupCountdownDuration = WarmupDuration;
+                                    GameMode->WarmupEarlyCountdownDuration = WarmupDuration;
+                                }
 
-                        ImGui::Checkbox("Lategame", &FConfiguration::bLateGame);
-
-                        if (FConfiguration::bAutoBusStart)
-                        {
-                            ImGui::PushItemWidth(Width);
-                            ImGui::SliderFloat("Bus Start Delay", &FConfiguration::BusStartDelay, 0.0f, 300.0f, "%.1f seconds");
-                            ImGui::PopItemWidth();
-                        }
-
-                        ImGui::PushItemWidth(Width);
-                        ImGui::SliderFloat("Max Tick Rate", &FConfiguration::MaxTickRate, 5.0f, 180.0f, "%.1f seconds");
-                        ImGui::PopItemWidth();
-                    }
-                }
-
-                ImGui::Spacing();
-
-				if (!bIsGavMap || !bIsEventPlaylist || !bIsRetrac1v1 || !bIsRetracTurtle || !bIsTiltedZW || !bIsCreative || !bIsDesertZW || !bIsOnlyUp || !bIsTwine)
-                {
-                    if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
-                    {
-                        /*if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
-                        {
-                            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
-                            //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
-
-                            //GamePhaseLogic->StartAircraftPhase();
-                        }
-                        else
-                        {
-                            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
-                        }*/
-
-                        auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-                        auto WarmupDuration = 10.f;
-
-                        auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                        auto GameState = GameMode->GameState;
-
-                        if (GameState->HasWarmupCountdownEndTime())
-                        {
-                            GameState->WarmupCountdownStartTime = Time;
-                            GameState->WarmupCountdownEndTime = Time + WarmupDuration;
-                            GameMode->WarmupCountdownDuration = WarmupDuration;
-                            GameMode->WarmupEarlyCountdownDuration = WarmupDuration;
+                                bStartedBus = true;
+                            }
                         }
                     }
                 }
@@ -808,20 +822,23 @@ void GUI::Init()
             {
                 if (hasEvent == 2)
                 {
-                    static bool bInitialized = false;
-
-                    if (!bInitialized)
+                    if (SelectedPlaylist == static_cast<int>(Playlist::Event))
                     {
-                        ImGui::Spacing();
-                        ImGui::Spacing();
+                        static bool bInitialized = false;
 
-                        ImGui::Text("Event:");
-                        SmallSeparator(Width);
-
-                        if (ImGui::Button("Start Event", ImVec2(Width, Height)))
+                        if (!bInitialized)
                         {
-                            Events::StartEvent();
-                            bInitialized = true;
+                            ImGui::Spacing();
+                            ImGui::Spacing();
+
+                            ImGui::Text("Event:");
+                            SmallSeparator(Width);
+
+                            if (ImGui::Button("Start Event", ImVec2(Width, Height)))
+                            {
+                                Events::StartEvent();
+                                bInitialized = true;
+                            }
                         }
                     }
                 }
@@ -874,7 +891,7 @@ void GUI::Init()
             if (!bInitializedPlaylist)
             {
                 if (VersionInfo.FortniteVersion == 11.31 || VersionInfo.FortniteVersion == 12.41)
-                    SelectedPlaylist = static_cast<int>(Playlist::SiphonSolos);
+                    SelectedPlaylist = static_cast<int>(Playlist::UnvSolos);
 
                 bInitializedPlaylist = true;
             }
@@ -929,6 +946,10 @@ void GUI::Init()
                 ImGui::RadioButton("Siphon Solos", &SelectedPlaylist, (int)Playlist::SiphonSolos);
                 ImGui::RadioButton("Siphon Duos", &SelectedPlaylist, (int)Playlist::SiphonDuos);
                 ImGui::RadioButton("Siphon Squads", &SelectedPlaylist, (int)Playlist::SiphonSquads);
+                ImGui::RadioButton("Unvaulted Solos", &SelectedPlaylist, (int)Playlist::UnvSolos);
+                ImGui::RadioButton("Unvaulted Duos", &SelectedPlaylist, (int)Playlist::UnvDuos);
+                ImGui::RadioButton("Unvaulted Trios", &SelectedPlaylist, (int)Playlist::UnvTrios);
+                ImGui::RadioButton("Unvaulted Squads", &SelectedPlaylist, (int)Playlist::UnvSquads);
                 ImGui::RadioButton("Slide Solos", &SelectedPlaylist, (int)Playlist::SlideSolos);
                 ImGui::RadioButton("Slide Duos", &SelectedPlaylist, (int)Playlist::SlideDuos);
             }
@@ -960,7 +981,7 @@ void GUI::Init()
 
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
 
-            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11)
+            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
             {
                 ImGui::Spacing();
 
@@ -981,6 +1002,11 @@ void GUI::Init()
                     ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
                     //ImGui::RadioButton("Retrac Water Map", &SelectedPlaylist, (int)Playlist::RetracWater);
                     //ImGui::RadioButton("Twine 1v1 Map", &SelectedPlaylist, (int)Playlist::Twine1v1);
+                }
+
+                if (VersionInfo.FortniteVersion == 30.00)
+                {
+                    ImGui::RadioButton("Boxfights", &SelectedPlaylist, (int)Playlist::Boxfight);
                 }
             }
 
@@ -1074,6 +1100,26 @@ void GUI::Init()
             case (int)Playlist::SiphonSquads:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Vamp/Playlist_Vamp_Squad.Playlist_Vamp_Squad";
+                break;
+            }
+            case (int)Playlist::UnvSolos:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Unvaulted/Playlist_Unvaulted_Solo.Playlist_Unvaulted_Solo";
+                break;
+            }
+            case (int)Playlist::UnvDuos:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Unvaulted/Playlist_Unvaulted_Duos.Playlist_Unvaulted_Duos";
+                break;
+            }
+            case (int)Playlist::UnvTrios:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Unvaulted/Playlist_Unvaulted_Trios.Playlist_Unvaulted_Trios";
+                break;
+            }
+            case (int)Playlist::UnvSquads:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Unvaulted/Playlist_Unvaulted_Squads.Playlist_Unvaulted_Squads";
                 break;
             }
             case (int)Playlist::SlideSolos:
@@ -1210,6 +1256,12 @@ void GUI::Init()
                 FConfiguration::bLateGame = false;
                 break;
 			}
+            case (int)Playlist::Boxfight:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo";
+                FConfiguration::bLateGame = false;
+                break;
+			}
             case (int)Playlist::Event:
             {
                 for (auto& Event : Events::EventsArray)
@@ -1299,31 +1351,35 @@ void GUI::Init()
                     }
 
                     auto Connection = CurrentPair.second;
+
+                    std::string ButtonLabel = GUI::GetPlayerName(CurrentPlayerState, Connection);
                     auto RequestURL = GUI::GetRequestURL(Connection);
 
                     if (RequestURL && RequestURL->Data && RequestURL->NumElements)
                     {
                         auto RequestURLStr = RequestURL->ToString();
-
                         std::size_t pos = RequestURLStr.find("Name=");
 
                         if (pos != std::string::npos)
                         {
                             std::size_t end_pos = RequestURLStr.find('?', pos);
-
                             if (end_pos != std::string::npos)
-                                RequestURLStr = RequestURLStr.substr(pos + 5, end_pos - pos - 5);
+                                ButtonLabel = RequestURLStr.substr(pos + 5, end_pos - pos - 5);
                             else
-                                RequestURLStr = RequestURLStr.substr(pos + 5);
+                                ButtonLabel = RequestURLStr.substr(pos + 5);
                         }
+                    }
 
-                        auto RequestURLCStr = RequestURLStr.c_str();
+                    if (ButtonLabel.empty())
+                        ButtonLabel = GUI::GetPlayerNameFromConnection(Connection);
 
-                        if (ImGui::Button(RequestURLCStr, ImVec2(Width, Height))) // this displays the player's name
-                        {
-                            InspectedPlayerIdx = i;
-                            bIsInspecting = true;
-                        }
+                    if (ButtonLabel.empty())
+                        ButtonLabel = std::string("Player ") + std::to_string(i + 1);
+
+                    if (ImGui::Button(ButtonLabel.c_str(), ImVec2(Width, Height)))
+                    {
+                        InspectedPlayerIdx = i;
+                        bIsInspecting = true;
                     }
                 }
             }
@@ -1354,12 +1410,13 @@ void GUI::Init()
                 ImGui::Text("Player Information:");
                 SmallSeparator(Width);
 
-                std::string DisplayName = GUI::GetPlayerNameFromConnection(AllControllers[InspectedPlayerIdx].second);
+                auto InspectedPlayerState = (AFortPlayerStateAthena*)AllControllers[InspectedPlayerIdx].first->PlayerState;
+                auto InspectedConnection = AllControllers[InspectedPlayerIdx].second;
+
+                std::string DisplayName = GUI::GetPlayerName(InspectedPlayerState, InspectedConnection);
 
                 if (DisplayName.empty())
-                {
-                    DisplayName = std::string("Player ") + std::to_string(InspectedPlayerIdx);
-                }
+                    DisplayName = std::string("Player ") + std::to_string(InspectedPlayerIdx + 1);
 
                 ImGui::TextUnformatted("Inspecting Player: ");
                 ImGui::SameLine(0.0f, 0.0f);
@@ -1367,8 +1424,9 @@ void GUI::Init()
 
 				ImGui::Text("Join Order: #%d", InspectedPlayerIdx + 1);
 
-                // ImGui::Text("Ping: %.0f ms", TargetPS->GetPingInMilliseconds());
-                // ImGui::Text("Kills: %.0f", TargetPS->HasKillScore() ? TargetPS->KillScore : TargetPS->Kills); // why does this not work
+                //ImGui::Text("Ping: %f ms", TargetPS->GetPingInMilliseconds()); // ig it js doesn't exist on some versions
+
+                ImGui::Text("Kills: %d", TargetPS->HasKillScore() ? TargetPS->KillScore : TargetPS->Kills);
 
                 ImGui::TextUnformatted("Health: ");
                 ImGui::SameLine(0.0f, 0.0f);
@@ -1405,65 +1463,15 @@ void GUI::Init()
                     free(PredictionKey);
                 }
 
-                if (ImGui::Button("Teleport Player to Me", ImVec2(Width, Height)))
-                {
-                    AFortPlayerControllerAthena* LocalPC = nullptr;
-
-                    auto World = UWorld::GetWorld();
-
-                    if (World && World->NetDriver) 
-                    {
-                        UNetDriver* NetDriver = static_cast<UNetDriver*>(World->NetDriver);
-
-                        if (NetDriver->ClientConnections.Num() > 0) 
-                        {
-                            UNetConnection* LocalConnection = NetDriver->ClientConnections[0];
-
-                            if (LocalConnection && LocalConnection->PlayerController) 
-                                LocalPC = (AFortPlayerControllerAthena*)LocalConnection->PlayerController;
-                        }
-                    }
-
-                    auto LocalPawn = (AFortPlayerPawnAthena*)LocalPC->Pawn;
-
-                    if (LocalPawn)
-                        TargetPC->K2_TeleportTo(LocalPawn->K2_GetActorLocation(), TargetPawn->K2_GetActorRotation());
-				}
-
-                if (ImGui::Button("Teleport Me to Player", ImVec2(Width, Height)))
-                {
-                    AFortPlayerControllerAthena* LocalPC = nullptr;
-
-                    auto World = UWorld::GetWorld();
-
-                    if (World && World->NetDriver)
-                    {
-                        UNetDriver* NetDriver = static_cast<UNetDriver*>(World->NetDriver);
-
-                        if (NetDriver->ClientConnections.Num() > 0)
-                        {
-                            UNetConnection* LocalConnection = NetDriver->ClientConnections[0];
-
-                            if (LocalConnection && LocalConnection->PlayerController)
-                                LocalPC = (AFortPlayerControllerAthena*)LocalConnection->PlayerController;
-                        }
-                    }
-
-                    auto LocalPawn = (AFortPlayerPawnAthena*)LocalPC->Pawn;
-
-                    if (LocalPawn)
-                        LocalPC->K2_TeleportTo(TargetPawn->K2_GetActorLocation(), TargetPawn->K2_GetActorRotation());
-				}
-
-                /*if (ImGui::Button("Rift Player", ImVec2(Width, Height)))
+                if (ImGui::Button("Rift Player", ImVec2(Width, Height)))
                 {
 					auto Loc = TargetPawn->K2_GetActorLocation();
                     FRotator Rot = FRotator(0.0f, 0.0f, 0.0f);
 
-                    auto RiftClass = FindObject<UClass>(UEAllocatedWString(L"/Game/Athena/Items/Consumables/RiftItem/BGA_RiftPortal_Item_Athena.BGA_RiftPortal_Item_Athena_C").c_str());
+                    auto RiftClass = FindObject<UClass>(L"/Game/Athena/Items/Consumables/RiftItem/BGA_RiftPortal_Item_Athena.BGA_RiftPortal_Item_Athena_C");
 
                     UWorld::SpawnActor(RiftClass, Loc, Rot);
-				}*/
+				}
 
                 auto& Health = TargetPC->MyFortPawn->HealthSet->Health;
                 float MinValue = 100.f;
@@ -1634,24 +1642,24 @@ void GUI::Init()
                 ImGui::Spacing();
                 ImGui::Spacing();
 
-                std::string nameStr;
-
+                static std::string nameStr;
                 ImGui::SetNextItemWidth(Width);
                 ImGui::InputText("New Name", &nameStr);
 
-				if (ImGui::Button("Change Player's Name", ImVec2(Width, Height)))
+                if (ImGui::Button("Change Player's Name", ImVec2(Width, Height)))
                 {
-                    if (nameStr.empty())
-                        nameStr = TargetPS->GetPlayerName().ToString();
+                    if (!nameStr.empty())
+                    {
+                        std::wstring nameW(nameStr.begin(), nameStr.end());
+                        FString NewName = FString(nameW.c_str());
 
-                    std::wstring nameW(nameStr.begin(), nameStr.end());
-                    FString NewName = FString(nameW.c_str());
+                        if (!TargetPC)
+                            return;
 
-                    if (!TargetPC)
-                        return;
-
-                    TargetPC->ServerChangeName(NewName);
-                    TargetPS->OnRep_PlayerName();
+                        TargetPC->ServerChangeName(NewName);
+                        TargetPS->OnRep_PlayerName();
+                        //nameStr.clear();
+                    }
                 }
             }
 
@@ -2161,7 +2169,7 @@ void GUI::Init()
 
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
 
-            ImGui::Checkbox("Disable Supply Drops", &FConfiguration::bDisableSupplyDrops);
+            //ImGui::Checkbox("Disable Supply Drops", &FConfiguration::bDisableSupplyDrops);
 
             ImGui::Checkbox("Auto Pause TODM", &FConfiguration::bAutoPauseTODM);
             

@@ -124,8 +124,8 @@ void Main()
         //if (SprintCVar)
         //    *SprintCVar = false;
 
-        if (HurdleCVar)
-            *HurdleCVar = false;
+        //if (HurdleCVar)
+        //    *HurdleCVar = false;
 
         if (SlideCVar)
             *SlideCVar = false;
@@ -135,7 +135,7 @@ void Main()
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.TacticalSprint 0"), nullptr);
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Hurdle 0"), nullptr);
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Sliding 0"), nullptr);
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Clambering 0"), nullptr);
+        //UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Clambering 0"), nullptr);
     }
 
 #ifdef CLIENT
@@ -278,6 +278,18 @@ void Main()
         terrainOpen = L"open /Game/Retrac/Maps/WaterMap";
         FConfiguration::bSiphon = true;
         FConfiguration::SiphonAmount = 200;
+        FConfiguration::bInfiniteAmmo = true;
+        FConfiguration::bInfiniteMats = true;
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bKeepInventory = true;
+        FConfiguration::MaxTickRate = 60.f;
+    }
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo") && VersionInfo.FortniteVersion == 30.00 && GUI::SelectedPlaylist == static_cast<int>(Playlist::Boxfight))
+    {
+        terrainOpen = L"open /Game/Sawyer/Maps/BoxfightFFA.BoxfightFFA";
+        FConfiguration::bSiphon = true;
+        FConfiguration::SiphonAmount = 500;
+        FConfiguration::bAutoBusStart = false;
         FConfiguration::bInfiniteAmmo = true;
         FConfiguration::bInfiniteMats = true;
         FConfiguration::bJoinInProgress = true;

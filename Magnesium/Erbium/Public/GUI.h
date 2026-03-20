@@ -32,6 +32,10 @@ enum class Playlist : int
     SiphonSolos,
     SiphonDuos,
     SiphonSquads,
+    UnvSolos,
+    UnvDuos,
+    UnvTrios,
+    UnvSquads,
     SlideSolos,
     SlideDuos,
     FILSolos,
@@ -57,6 +61,7 @@ enum class Playlist : int
     RewindDZW,
     OnlyUp,
     Twine1v1,
+    Boxfight,
     Event,
     Custom
 };

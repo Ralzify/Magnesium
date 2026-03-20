@@ -88,7 +88,7 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             //if (Playlist->HasbForceRespawnLocationInsideOfVolume())
             //    Playlist->bForceRespawnLocationInsideOfVolume = true;
         }
-        if (FConfiguration::bJoinInProgress)
+        if (FConfiguration::bForceRespawns || FConfiguration::bJoinInProgress)
         {
             if (Playlist->HasbAllowJoinInProgress())
                 Playlist->bAllowJoinInProgress = true;
@@ -220,10 +220,22 @@ public:
     DEFINE_PROP(bRandomizePointRotation, bool);
 };
 
+class UFortVehicleItemDefinition : public UObject
+{
+public:
+    UCLASS_COMMON_MEMBERS(UFortVehicleItemDefinition);
+
+    DEFINE_PROP(VehicleMinSpawnPercent, FScalableFloat);
+    DEFINE_PROP(VehicleMaxSpawnPercent, FScalableFloat);
+};
+
 class AFortAthenaVehicleSpawner : public AActor
 {
 public:
     UCLASS_COMMON_MEMBERS(AFortAthenaVehicleSpawner);
+
+    DEFINE_PROP(CachedFortVehicleItemDef, UFortVehicleItemDefinition*);
+    DEFINE_PROP(bForceSpawnAlways, bool);
 
     DEFINE_FUNC(GetVehicleClass, UClass*);
 };
@@ -323,13 +335,18 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
         if (Playlist)
         {
+            TArray<FPlaylistStreamedLevelData>& AdditionalPlaylistLevels
+                = *(TArray<FPlaylistStreamedLevelData>*)(__int64(GameState) + GameState->GetOffset("AdditionalPlaylistLevelsStreamed") - 0x10);
+
+            AdditionalPlaylistLevels.Free();
+
             auto AdditionalPlaylistLevelsStreamed__Off = GameState->GetOffset("AdditionalPlaylistLevelsStreamed");
             auto AdditionalLevelStruct = FAdditionalLevelStreamed::StaticStruct();
             if (Playlist->HasAdditionalLevels())
                 for (auto& Level : Playlist->AdditionalLevels)
                 {
                     bool Success = false;
-                    ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
+                    //ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
                     if (AdditionalLevelStruct)
                     {
                         auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
@@ -348,7 +365,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 for (auto& Level : Playlist->AdditionalLevelsServerOnly)
                 {
                     bool Success = false;
-                    ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
+                    //ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
 
                     if (AdditionalLevelStruct)
                     {
@@ -365,6 +382,8 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                         GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
                 }
         }
+
+        GameState->OnRep_AdditionalPlaylistLevelsStreamed();
 
         // misc C1 poi things
         if (VersionInfo.FortniteVersion >= 6 && VersionInfo.FortniteVersion < 7)
@@ -1497,6 +1516,12 @@ uint8_t AFortGameMode::PickTeam(AFortGameMode* GameMode, uint8_t PreferredTeam, 
     uint8_t ret = CurrentTeam;
     auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
 
+    if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
+    {
+        CurrentTeam++;
+        return ret;
+    }
+
     printf("Picked team %d %d\n", ret, Playlist ? Playlist->MaxSquadSize : 1);
     if (bIsLargeTeamGame)
     {
@@ -2197,13 +2222,31 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
         Spawners.Free();
     }
     // not an else here because they still use spawners for boats, and fully on s27
-    if (VersionInfo.FortniteVersion >= 4.23 && std::floor(VersionInfo.FortniteVersion) != 20 && std::floor(VersionInfo.FortniteVersion) != 21) // its auto on s20 & s21
+    if (VersionInfo.EngineVersion >= 4.23 && std::floor(VersionInfo.FortniteVersion) != 20 && std::floor(VersionInfo.FortniteVersion) != 21 && std::floor(VersionInfo.FortniteVersion) != 22) // its auto on s20, s21, and s22
     {
         TArray<AFortAthenaVehicleSpawner*> Spawners{};
         Utils::GetAll<AFortAthenaVehicleSpawner>(Spawners);
 
         for (auto& Spawner : Spawners)
         {
+            auto VehicleClass = Spawner->GetVehicleClass();
+
+            if (Spawner->HasCachedFortVehicleItemDef() && (!Spawner->HasbForceSpawnAlways() || !Spawner->bForceSpawnAlways))
+            {
+                auto VehicleDef = Spawner->CachedFortVehicleItemDef;
+                if (!VehicleDef)
+                    continue;
+
+                double Min = std::clamp(VehicleDef->VehicleMinSpawnPercent.Evaluate() * 0.01f, 0.0f, 1.0f);
+                double Max = std::clamp(VehicleDef->VehicleMaxSpawnPercent.Evaluate() * 0.01f, 0.0f, 1.0f);
+
+                auto SpawnPercent = Min + (Max - Min) * (rand() / (float)RAND_MAX);
+                auto bShouldSpawn = (rand() / (float)RAND_MAX) <= SpawnPercent;
+
+                if (!bShouldSpawn)
+                    continue;
+            }
+
             auto Vehicle = UWorld::SpawnActor<AFortAthenaVehicle>(Spawner->GetVehicleClass(), Spawner->K2_GetActorLocation(), Spawner->K2_GetActorRotation());
 
             if (auto Car = Vehicle->Cast<AFortDagwoodVehicle>())
@@ -2310,6 +2353,16 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
     //Utils::ExecHook((UFunction*)FindObject<UFunction>(L"/Game/Athena/Items/Consumables/Parents/GA_Athena_MedConsumable_Parent.GA_Athena_MedConsumable_Parent_C:Triggered_4C02BFB04B18D9E79F84848FFE6D2C32"), AFortPlayerPawnAthena::Athena_MedConsumable_Triggered, AFortPlayerPawnAthena::Athena_MedConsumable_TriggeredOG);
 }
 
+void PlayerCanRestart(UObject* Context, FFrame& Stack, bool* Ret)
+{
+    AFortPlayerControllerAthena* Controller;
+
+    Stack.StepCompiledIn(&Controller);
+    Stack.IncrementCode();
+
+    *Ret = true;
+}
+
 void AFortGameMode::Hook()
 {
     Utils::ExecHook(GetDefaultObj()->GetFunction("ReadyToStartMatch"), ReadyToStartMatch_, ReadyToStartMatch_OG);
@@ -2345,4 +2398,7 @@ void AFortGameMode::PostLoadHook()
         }
         Utils::ExecHook(L"/Script/FortniteGame.FortSafeZoneIndicator.GetPhaseInfo", GetPhaseInfo);
     }
+
+    //if (VersionInfo.FortniteVersion >= 15)
+//    Utils::ExecHook(AFortGameModeAthena::GetDefaultObj()->GetFunction("PlayerCanRestart"), PlayerCanRestart);
 }

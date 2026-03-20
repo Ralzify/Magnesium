@@ -320,6 +320,8 @@ void AFortPlayerPawnAthena::OnCapsuleBeginOverlap_(UObject* Context, FFrame& Sta
 	Stack.StepCompiledIn(&SweepResult);
 	Stack.IncrementCode();
 
+	printf("OnCapsuleBeginOverlap: %s", OtherActor->Name.ToString().c_str());
+
 	auto Pawn = (AFortPlayerPawnAthena*)Context;
 
 	static auto FortPCClass = FindClass("FortPlayerController");
@@ -339,6 +341,11 @@ void AFortPlayerPawnAthena::OnCapsuleBeginOverlap_(UObject* Context, FFrame& Sta
 	{
 		if ((!itemEntry && ((Pickup->PrimaryPickupItemEntry.ItemDefinition->HasbForceAutoPickup() && (Pickup->PrimaryPickupItemEntry.ItemDefinition->HasbForceAutoPickup() ? Pickup->PrimaryPickupItemEntry.ItemDefinition->bForceAutoPickup : (Pickup->PrimaryPickupItemEntry.ItemDefinition->GetPickupComponent() ? Pickup->PrimaryPickupItemEntry.ItemDefinition->GetPickupComponent()->bForceAutoPickup : false))) || !AFortInventory::IsPrimaryQuickbar(Pickup->PrimaryPickupItemEntry.ItemDefinition))) || (itemEntry && itemEntry->Count < MaxStack))
 			Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+	}
+
+	if (OtherActor && OtherActor->Name.ToString().contains("Launch_Pad"))
+	{
+		Pawn->LaunchCharacterJump(FVector(0.f, 0.f, 0.f), false, nullptr, true);
 	}
 
 	return callOG(Pawn, Stack.GetCurrentNativeFunction(), OnCapsuleBeginOverlap, OverlappedComp, OtherActor, OtherComp, OtherBodyIndex, bFromSweep, SweepResult);

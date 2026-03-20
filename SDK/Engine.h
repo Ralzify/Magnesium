@@ -610,6 +610,7 @@ namespace SDK
 		DEFINE_FUNC(GetDistanceTo, float);
 		DEFINE_FUNC(SetLifeSpan, void);
 		DEFINE_FUNC(K2_AttachToComponent, void);
+		DEFINE_FUNC(SetActorHiddenInGame, void);
 
 		bool HasAuthority() const
 		{
@@ -722,6 +723,14 @@ namespace SDK
 		DEFINE_BITFIELD_PROP(bIsVisible);
 	};
 
+	class UDataLayerManager : public UObject
+	{
+	public:
+		UCLASS_COMMON_MEMBERS(UDataLayerManager);
+
+		DEFINE_FUNC(SetDataLayerRuntimeState, bool);
+	};
+
 	class UWorld : public UObject
 	{
 	public:
@@ -736,6 +745,8 @@ namespace SDK
 		DEFINE_PROP(LevelCollections, TArray<FLevelCollection>);
 		DEFINE_PROP(ServerStreamingLevelsVisibility, AServerStreamingLevelsVisibility*);
 		DEFINE_PROP(NavigationSystem, UObject*);
+
+		DEFINE_FUNC(GetDataLayerManager, UDataLayerManager*);
 
 		struct GameplayStatics_BeginDeferredActorSpawnFromClass
 		{
