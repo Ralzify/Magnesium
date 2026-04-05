@@ -127,7 +127,7 @@ public:
         return GetSparseClassDataOG(Class, 1);
     }
 
-
+    DEFINE_FUNC(SetTeam, void);
     DEFINE_FUNC(GetHealth, float);
     DEFINE_FUNC(GetMaxHealth, float);
     DEFINE_FUNC(SetMirrored, void);

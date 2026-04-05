@@ -183,6 +183,9 @@
     <ClInclude Include="ImGui\imgui_impl_dx11.h">
       <Filter>ImGui</Filter>
     </ClInclude>
+    <ClInclude Include="ImGui\imgui_stdlib.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
     <ClInclude Include="Erbium\Plugins\CrashReporter\Public\CrashReporter.h">
       <Filter>Magnesium\Plugins\CrashReporter\Public</Filter>
     </ClInclude>
@@ -228,9 +231,6 @@
     <ClInclude Include="..\SDK\Engine.h">
       <Filter>SDK</Filter>
     </ClInclude>
-    <ClInclude Include="C:\Users\andre\Downloads\imgui-master\imgui-master\misc\cpp\imgui_stdlib.h">
-      <Filter>ImGui</Filter>
-    </ClInclude>
     <ClInclude Include="json.hpp">
       <Filter>nlohmann</Filter>
     </ClInclude>
@@ -242,6 +242,9 @@
     </ClInclude>
     <ClInclude Include="EmbeddedImage.h">
       <Filter>Magnesium\Hex</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\Public\Calendar.h">
+      <Filter>Magnesium\Public</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -320,6 +323,9 @@
     <ClCompile Include="ImGui\imgui_impl_dx11.cpp">
       <Filter>ImGui</Filter>
     </ClCompile>
+    <ClCompile Include="ImGui\imgui_stdlib.cpp">
+      <Filter>ImGui</Filter>
+    </ClCompile>
     <ClCompile Include="Erbium\Plugins\CrashReporter\Private\CrashReporter.cpp">
       <Filter>Magnesium\Plugins\CrashReporter\Private</Filter>
     </ClCompile>
@@ -337,9 +343,6 @@
     </ClCompile>
     <ClCompile Include="FortniteGame\Private\FortQuestManager.cpp">
       <Filter>FortniteGame\Private</Filter>
-    </ClCompile>
-    <ClCompile Include="C:\Users\andre\Downloads\imgui-master\imgui-master\misc\cpp\imgui_stdlib.cpp">
-      <Filter>ImGui</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

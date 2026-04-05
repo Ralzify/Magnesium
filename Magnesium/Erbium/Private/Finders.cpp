@@ -1455,10 +1455,9 @@ uint64_t FindClearAbility()
             // mov rcx, (rdi|rsi)
             // call ClearAbility
             // jmp
-            if (
-                *(uint8_t*)(GiveAbilityAndActivateOnce + i) == 0x48 && *(uint8_t*)(GiveAbilityAndActivateOnce + i + 1) == 0x8B &&
-                *(uint8_t*)(GiveAbilityAndActivateOnce + i + 3) == 0xE8 &&
-                (*(uint8_t*)(GiveAbilityAndActivateOnce + i + 8) == 0xE9 || *(uint8_t*)(GiveAbilityAndActivateOnce + i + 8) == 0xEB))
+            if ((*(uint8_t*)(GiveAbilityAndActivateOnce + i) & 0xF8) == 0x48 && *(uint8_t*)(GiveAbilityAndActivateOnce + i + 1) == 0x8B
+                && *(uint8_t*)(GiveAbilityAndActivateOnce + i + 3) == 0xE8 
+                && (*(uint8_t*)(GiveAbilityAndActivateOnce + i + 8) == 0xE9 || *(uint8_t*)(GiveAbilityAndActivateOnce + i + 8) == 0xEB))
             {
                 return ClearAbility = Memcury::Scanner(GiveAbilityAndActivateOnce + i + 3).RelativeOffset(1).Get();
             }

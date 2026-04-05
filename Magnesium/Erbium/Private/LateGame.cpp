@@ -565,11 +565,6 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
         Ammo.Add(TPair<FString, int>(TEXT("/PrimalGameplay/Items/Ammo/AthenaAmmoDataArrows.AthenaAmmoDataArrows"), Arrows(rng)));
     }
 
-    if (VersionInfo.FortniteVersion >= 17.00)
-    {
-        Ammo.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Scooter/Ammo_Athena_Mother_Scooter.Ammo_Athena_Mother_Scooter"), 999));
-    }
-
     Slots.Add(Ammo);
     // Slot 8 End
 
@@ -1713,11 +1708,6 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Ammo.Add(TPair<FString, int>(TEXT("/PrimalGameplay/Items/Ammo/AthenaAmmoDataArrows.AthenaAmmoDataArrows"), Arrows(rng)));
     }
 
-    if (VersionInfo.FortniteVersion >= 17.00)
-    {
-        Ammo.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Scooter/Ammo_Athena_Mother_Scooter.Ammo_Athena_Mother_Scooter"), 999));
-    }
-
     Slots.Add(Ammo);
     // Slot 8 End
 
@@ -1902,11 +1892,6 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetOSLoadout()
     TArray<TPair<FString, int>> Ammo;
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsHeavy.AthenaAmmoDataBulletsHeavy"), Heavy(rng)));
 
-    if (VersionInfo.FortniteVersion >= 17.00)
-    {
-        Ammo.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Scooter/Ammo_Athena_Mother_Scooter.Ammo_Athena_Mother_Scooter"), 999));
-    }
-
     Slots.Add(Ammo);
     // Slot 8 End
 
@@ -2051,11 +2036,6 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetCustomLoadout()
     if (VersionInfo.FortniteVersion >= 16.00)
     {
         Ammo.Add(TPair<FString, int>(TEXT("/PrimalGameplay/Items/Ammo/AthenaAmmoDataArrows.AthenaAmmoDataArrows"), Arrows(rng)));
-    }
-
-    if (VersionInfo.FortniteVersion >= 17.00)
-    {
-        Ammo.Add(TPair<FString, int>(TEXT("/MotherGameplay/Items/Scooter/Ammo_Athena_Mother_Scooter.Ammo_Athena_Mother_Scooter"), 999));
     }
 
     Slots.Add(Ammo);

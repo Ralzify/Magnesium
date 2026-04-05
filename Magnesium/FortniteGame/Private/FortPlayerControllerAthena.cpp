@@ -21,6 +21,7 @@
 #include <sstream>
 #include <fstream>
 
+#include <unordered_set>
 #include <random>
 #include <chrono>
 #include <algorithm>
@@ -98,6 +99,7 @@ void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena
 		return;
 	}
 }
+static std::unordered_set<AFortPlayerControllerAthena*> PlayersInitialized;
 
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
@@ -122,11 +124,6 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 	
     auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
-	if (Playlist && Playlist->RespawnType > 0 && Num > 0)
-	{
-		if (FConfiguration::bLateGame)
-			FortPawn->SetShield(100.f);
-	}
 
 	if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn") && VersionInfo.FortniteVersion == 27.11)
 	{
@@ -486,27 +483,30 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 	if ((!FConfiguration::bKeepInventory || FConfiguration::bLateGame) && PlayerController->WorldInventory)
 	{	
-		UEAllocatedVector<FGuid> GuidsToRemove;
-		for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
+		if (!PlayersInitialized.contains(PlayerController))
 		{
-			auto& Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
-
-			if (Entry.ItemDefinition->HasbCanBeDropped() ? Entry.ItemDefinition->bCanBeDropped : (Entry.ItemDefinition->GetPickupComponent() ? Entry.ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false))
+			UEAllocatedVector<FGuid> GuidsToRemove;
+			for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
 			{
-				//NewPlayer->WorldInventory->Inventorxy.ReplicatedEntries.Remove(i, FFortItemEntry::Size());
-				//i--;
+				auto& Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
 
-				GuidsToRemove.push_back(Entry.ItemGuid);
+				if (Entry.ItemDefinition->HasbCanBeDropped() ? Entry.ItemDefinition->bCanBeDropped : (Entry.ItemDefinition->GetPickupComponent() ? Entry.ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false))
+				{
+					//NewPlayer->WorldInventory->Inventorxy.ReplicatedEntries.Remove(i, FFortItemEntry::Size());
+					//i--;
+
+					GuidsToRemove.push_back(Entry.ItemGuid);
+				}
+				if (VersionInfo.FortniteVersion < 3 && Entry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest())
+				{
+					//PlayerController->ServerExecuteInventoryItem(Entry.ItemGuid);
+					//PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
+				}
 			}
-			if (VersionInfo.FortniteVersion < 3 && Entry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest())
-			{
-				//PlayerController->ServerExecuteInventoryItem(Entry.ItemGuid);
-				//PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
-			}
+
+			for (auto& Guid : GuidsToRemove)
+				PlayerController->WorldInventory->Remove(Guid);
 		}
-
-		for (auto& Guid : GuidsToRemove)
-			PlayerController->WorldInventory->Remove(Guid);
 	}
 
 	if (VersionInfo.FortniteVersion >= 18)
@@ -637,47 +637,54 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	}
 	else if (FConfiguration::bLateGame && (!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
 	{
-		LateGame::EquipLoadout(PlayerController);
-
-		if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
+		if (!PlayersInitialized.contains(PlayerController))
 		{
-			std::random_device rd;
-			std::mt19937 rng(rd());
+			PlayersInitialized.insert(PlayerController);
 
-			std::uniform_int_distribution<int> RandomAmount(6732, 14684);
+			FortPawn->SetShield(100.f);
 
-			int AlivePlayers = GameMode->AlivePlayers.Num();
+			LateGame::EquipLoadout(PlayerController);
 
-			PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
-		}
+			if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
+			{
+				std::random_device rd;
+				std::mt19937 rng(rd());
 
-		if (GUI::IsTournamentPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
-		{
-			std::random_device rd;
-			std::mt19937 rng(rd());
+				std::uniform_int_distribution<int> RandomAmount(6732, 14684);
 
-			std::uniform_int_distribution<int> RandomAmount(30, 120);
+				int AlivePlayers = GameMode->AlivePlayers.Num();
 
-			int AlivePlayers = GameMode->AlivePlayers.Num();
+				PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
+			}
 
-			PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
-		}
+			if (GUI::IsTournamentPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
+			{
+				std::random_device rd;
+				std::mt19937 rng(rd());
 
-		if (FConfiguration::RandomizeKills)
-		{
-			auto PlayerState = PlayerController->PlayerState;
+				std::uniform_int_distribution<int> RandomAmount(30, 120);
 
-			std::random_device rd;
-			std::mt19937 rng(rd());
+				int AlivePlayers = GameMode->AlivePlayers.Num();
 
-			std::uniform_int_distribution<int> RandomAmount(8, 31);
+				PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
+			}
 
-			int RandomKills = RandomAmount(rng);
+			if (FConfiguration::RandomizeKills)
+			{
+				auto PlayerState = PlayerController->PlayerState;
 
-			if (PlayerState->HasKillScore())
-				PlayerState->KillScore = RandomKills;
-			else
-				PlayerState->Kills = RandomKills;
+				std::random_device rd;
+				std::mt19937 rng(rd());
+
+				std::uniform_int_distribution<int> RandomAmount(8, 31);
+
+				int RandomKills = RandomAmount(rng);
+
+				if (PlayerState->HasKillScore())
+					PlayerState->KillScore = RandomKills;
+				else
+					PlayerState->Kills = RandomKills;
+			}
 		}
 	}
 
@@ -1055,7 +1062,7 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 			if (!CanAffordToPlaceBuildableClass(PlayerController, BuildingClassData))
 				return;
 		}
-		else if (!PlayerController->bBuildFree)
+		else if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
 		{
 			auto ItemP = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
 				{ return entry->ItemEntry.ItemDefinition == Resource; });
@@ -1122,9 +1129,16 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 	{
 		auto PayBuildableClassPlacementCost = (int(*)(AFortPlayerControllerAthena*, FBuildingClassData)) PayBuildableClassPlacementCost_;
 
-		PayBuildableClassPlacementCost(PlayerController, BuildingClassData);
+		if (PayBuildableClassPlacementCost)
+		{
+			PayBuildableClassPlacementCost(PlayerController, BuildingClassData);
+		}
+		else if (Item)
+		{
+			Item->ItemEntry.Count -= 10;
+			PlayerController->WorldInventory->Update(&Item->ItemEntry);
+		}
 	}
-
 
 	FGameplayTagContainer TargetTags{};
 
@@ -1146,13 +1160,6 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 	
 	if (Building->HasTeamIndex())
 		Building->TeamIndex = Building->Team;
-
-	if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
-	{
-		auto PayBuildableClassPlacementCost = (int(*)(AFortPlayerControllerAthena*, FBuildingClassData)) PayBuildableClassPlacementCost_;
-
-		PayBuildableClassPlacementCost(PlayerController, BuildingClassData);
-	}
 }
 
 void SetEditingPlayer(ABuildingSMActor* _this, AFortPlayerStateAthena* NewEditingPlayer)
@@ -2051,27 +2058,18 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 		if ((FConfiguration::bSiphon && FConfiguration::SiphonAmount > 0) && PlayerController->Pawn && KillerPlayerState && KillerPlayerState->AbilitySystemComponent && KillerPawn && KillerPawn->Controller != PlayerController)
 		{
-			auto Handle = KillerPlayerState->AbilitySystemComponent->MakeEffectContext();
-			FGameplayTag Tag;
-			static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
-			Tag.TagName = Cue;
-			auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-			memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-			KillerPlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-			KillerPlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-			free(PredictionKey);
-
 			auto Health = KillerPawn->GetHealth();
 			auto Shield = KillerPawn->GetShield();
 
 			if (Health == 100)
 			{
-				Shield += Shield + FConfiguration::SiphonAmount;
+				Shield += FConfiguration::SiphonAmount;
 			}
 			else if (Health + FConfiguration::SiphonAmount > 100)
 			{
+				float Overflow = (Health + FConfiguration::SiphonAmount) - 100;
 				Health = 100;
-				Shield += (Health + FConfiguration::SiphonAmount) - 100;
+				Shield += Overflow;
 			}
 			else if (Health + FConfiguration::SiphonAmount <= 100)
 			{
@@ -2088,6 +2086,163 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			KillerPlayerController->WorldInventory->GiveItem(WoodItemData, FConfiguration::SiphonAmount);
 			KillerPlayerController->WorldInventory->GiveItem(StoneItemData, FConfiguration::SiphonAmount);
 			KillerPlayerController->WorldInventory->GiveItem(MetalItemData, FConfiguration::SiphonAmount);
+
+			switch (FConfiguration::SiphonAnimType)
+			{
+			case 0: // Default
+			{
+				auto Handle = KillerPlayerState->AbilitySystemComponent->MakeEffectContext();
+				FGameplayTag Tag;
+				static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+				Tag.TagName = Cue;
+				auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+				memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+				KillerPlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+				KillerPlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+				free(PredictionKey);
+				break;
+			}
+			case 1: // Slurp
+			{
+				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
+				{
+					static auto GameplayEffect = FindObject<UClass>(L"/Game/Athena/Items/Gameplay/SilkyBingo/GE_Athena_EnvSlurp_Grant_SilkyBingo.GE_Athena_EnvSlurp_Grant_SilkyBingo_C");
+					if (GameplayEffect)
+					{
+						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+						Context.Instigator = KillerPlayerController;
+						Context.Causer = KillerPawn;
+						Context.AddSourceObject(KillerPawn);
+
+						float HealthBeforeEffect = KillerPawn->GetHealth();
+						float ShieldBeforeEffect = KillerPawn->GetShield();
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GameplayEffect, 1.0f, Context);
+						KillerPawn->SetHealth(HealthBeforeEffect);
+						KillerPawn->SetShield(ShieldBeforeEffect);
+
+						float AddedBonus = 5.f;
+						float NewHealth = KillerPawn->GetHealth() - AddedBonus;
+						float NewShield = KillerPawn->GetShield() - AddedBonus;
+						KillerPawn->SetHealth(NewHealth);
+						KillerPawn->SetShield(NewShield);
+					}
+				}
+				break;
+			}
+			case 2: // Bandage Bazooka
+			{
+				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
+				{
+					static auto GameplayEffect = FindObject<UClass>(L"/Game/Athena/Items/Gameplay/Lotus/Mustache/GE_Lotus_Mustache_Heal_Burst.GE_Lotus_Mustache_Heal_Burst_C");
+
+					if (GameplayEffect)
+					{
+						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+						Context.Instigator = KillerPlayerController;
+						Context.Causer = KillerPawn;
+						Context.AddSourceObject(KillerPawn);
+
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GameplayEffect, 1.0f, Context);
+					}
+				}
+
+				break;
+			}
+			case 3: // Orange Paint
+			{
+				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
+				{
+					static auto GameplayEffect = FindObject<UClass>(L"/Game/Athena/Items/Weapons/Prototype/Papaya/GE_Player_PaintDecal_Red.GE_Player_PaintDecal_Red_C");
+
+					if (GameplayEffect)
+					{
+						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+						Context.Instigator = KillerPlayerController;
+						Context.Causer = KillerPawn;
+						Context.AddSourceObject(KillerPawn);
+
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GameplayEffect, 1.0f, Context);
+					}
+				}
+
+				break;
+			}
+			case 4: // Purple Paint
+			{
+				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
+				{
+					static auto GameplayEffect = FindObject<UClass>(L"/Game/Athena/Items/Weapons/Prototype/Papaya/GE_Player_PaintDecal_Blue.GE_Player_PaintDecal_Blue_C");
+
+					if (GameplayEffect)
+					{
+						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+						Context.Instigator = KillerPlayerController;
+						Context.Causer = KillerPawn;
+						Context.AddSourceObject(KillerPawn);
+
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GameplayEffect, 1.0f, Context);
+					}
+				}
+
+				break;
+			}
+			case 5:
+			{
+				auto Handle = KillerPlayerState->AbilitySystemComponent->MakeEffectContext();
+				FGameplayTag Tag;
+				static auto Cue = FName(L"GameplayCue.Athena.Health.HealUsed");
+				Tag.TagName = Cue;
+				auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+				memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+				KillerPlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+				KillerPlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+				free(PredictionKey);
+				break;
+			}
+			case 6:
+			{
+				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
+				{
+					static auto GameplayEffect = FindObject<UClass>(L"/FlipperGameplay/Items/HealSpray/GE_Athena_HealSpray_Heal.GE_Athena_HealSpray_Heal_C");
+
+					if (GameplayEffect)
+					{
+						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+						Context.Instigator = KillerPlayerController;
+						Context.Causer = KillerPawn;
+						Context.AddSourceObject(KillerPawn);
+
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GameplayEffect, 1.0f, Context);
+					}
+				}
+
+				break;
+			}
+			case 7:
+			{
+				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
+				{
+					static auto GameplayEffect = FindObject<UClass>(L"/Game/Athena/Items/Gameplay/Wumba/GE_WumbaUsed.GE_WumbaUsed_C");
+
+					if (GameplayEffect)
+					{
+						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+						Context.Instigator = KillerPlayerController;
+						Context.Causer = KillerPawn;
+						Context.AddSourceObject(KillerPawn);
+
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GameplayEffect, 1.0f, Context);
+					}
+				}
+
+				break;
+			}
+			}
 		}
 
 		if (GUI::IsArenaPlaylist())
@@ -3290,7 +3445,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				free(PredictionKey);
 			}
-			else if (command == "applyge")
+			else if (command == "applyge" || command == "givege")
 			{
 				if (args.size() < 2)
 				{
@@ -3329,12 +3484,6 @@ cheat spawn <class/path> - Spawns an actor at your location
 			}
 			else if (command == "removege")
 			{
-				if (args.size() < 2)
-				{
-					PlayerController->ClientMessage(FString(L"Please provide a custom Gameplay Effect."), FName(), 1.f);
-					return;
-				}
-
 				auto PlayerState = PlayerController->PlayerState;
 
 				auto ASC = PlayerState->AbilitySystemComponent;
@@ -3913,8 +4062,10 @@ cheat spawn <class/path> - Spawns an actor at your location
 						{
 							if (BotPS->bIsABot)
 							{
-								BotPawn->K2_TeleportTo(PlayerPawn->K2_GetActorLocation(), BotPawn->K2_GetActorRotation(), false, true);
-								BotPawn->K2_SetActorRotation(PlayerPawn->K2_GetActorRotation());
+								auto ActorLocation = PlayerPawn->K2_GetActorLocation();
+								ActorLocation.Z += 200.f;
+
+								BotPawn->K2_TeleportTo(ActorLocation, PlayerPawn->K2_GetActorRotation(), false, true);
 							}
 						}
 					}

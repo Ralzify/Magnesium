@@ -1,11 +1,15 @@
 #pragma once
 
+#include "../../../SDK/Engine.h"
+
 struct FConfiguration
 {
     static inline bool IsS27()
     {
         return std::floor(VersionInfo.FortniteVersion) == 27;
     }
+
+    static inline auto bSnowMap = false;
 
     static inline auto bReadyToStart = false;
     static inline auto MaxTickRate = 30.f;
@@ -31,6 +35,11 @@ struct FConfiguration
     static inline auto AutoEndGame = false;
     static inline auto CustomMap = L"";
 
+    static inline auto bAutoStartEvent = false;
+    static inline auto EventStartTime = 120.f;
+    static inline auto EventStartBaseTime = 0.f;
+    static inline auto bEventStarted = false;
+
     static inline auto bAutoDump = true;
 
     static inline std::string BotName = "Magnesium Bot ";
@@ -52,12 +61,14 @@ struct FConfiguration
     static inline auto bRideableProjectiles = false;
 
     static inline auto bSiphon = false;
+    static inline auto SiphonAnimType = 0;
     static inline auto SiphonAmount = 50;
 
     static inline auto bEnableTrickshotTab = false;
     static inline auto bUseWinLines = true;
     static inline auto RandomizeArenaPoints = false;
     static inline auto RandomizeKills = false;
+    static inline auto RandomizeLevels = false;
     static inline auto bEnableDBNO = true;
     static inline auto bInfiniteRender = false;
     static inline auto bFModCannon = false;
@@ -65,7 +76,6 @@ struct FConfiguration
     static inline auto bCrownSlomo = true;
     static inline auto bDisableJumpFatigue = false;
     static inline auto bCancelVelocityOnWin = false;
-    static inline auto bDisableSupplyDrops = false;
     static inline auto bAutoPauseTODM = false;
     static inline auto TODMTime = 7;
 
@@ -97,7 +107,7 @@ struct FConfiguration
 
     static inline auto bAutoRestart = false;
 
-    static inline constexpr auto bEnableIris = true; 
+    static inline auto bEnableIris = true;
 
     static inline constexpr auto WebhookURL = "";
 };

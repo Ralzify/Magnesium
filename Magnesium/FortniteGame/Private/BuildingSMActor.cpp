@@ -170,6 +170,10 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 	if (!PlayerController)
 		return;
 
+	auto PlayerState = (AFortPlayerStateAthena*)Pawn->PlayerState;
+	if (!PlayerState)
+		return;
+
 	if (VersionInfo.FortniteVersion >= 18) // idk when they stripped it, guessing s18
 	{
 		auto ItemDefinition = (UFortDecoItemDefinition*)DecoTool->ItemDefinition;
@@ -208,7 +212,7 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 
 			TSubclassOf<ABuildingSMActor> SubclassOf;
 			SubclassOf.ClassPtr = ItemDefinition->BlueprintClass.Get();
-			NewTrap = SpawnDecoVft ? SpawnDeco(DecoTool, SubclassOf, Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
+			NewTrap = SpawnDecoVft && SpawnDeco ? SpawnDeco(DecoTool, SubclassOf, Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
 		}
 		else
 		{
@@ -242,6 +246,11 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 			NewTrap->TeamIndex = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->TeamIndex;
 			NewTrap->Team = NewTrap->TeamIndex;
 		}*/
+
+		if (NewTrap)
+		{
+			NewTrap->SetTeam(PlayerState->TeamIndex);
+		}
 	}
 
 	if (VersionInfo.FortniteVersion < 18)
@@ -278,6 +287,10 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 	if (!PlayerController)
 		return;
 
+	auto PlayerState = (AFortPlayerStateAthena*)Pawn->PlayerState;
+	if (!PlayerState)
+		return;
+
 	if (VersionInfo.FortniteVersion >= 18) // idk when they stripped it, guessing s18
 	{
 		auto ItemDefinition = (UFortDecoItemDefinition*)DecoTool->ItemDefinition;
@@ -316,7 +329,7 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 
 			TSubclassOf<ABuildingSMActor> SubclassOf;
 			SubclassOf.ClassPtr = ItemDefinition->BlueprintClass.Get();
-			NewTrap = SpawnDecoVft ? SpawnDeco(DecoTool, SubclassOf, Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
+			NewTrap = SpawnDecoVft && SpawnDeco ? SpawnDeco(DecoTool, SubclassOf, Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
 		}
 		else
 		{
@@ -350,6 +363,11 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 			NewTrap->TeamIndex = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->TeamIndex;
 			NewTrap->Team = NewTrap->TeamIndex;
 		}*/
+
+		if (NewTrap)
+		{
+			NewTrap->SetTeam(PlayerState->TeamIndex);
+		}
 	}
 
 	if (VersionInfo.FortniteVersion < 18)
@@ -405,6 +423,7 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 	Stack.StepCompiledIn(&bSpawnDecoOnExtraPiece);
 	Stack.StepCompiledIn(&BuildingExtraPieceLocation);
 	Stack.IncrementCode();
+
 	auto Tool = (AFortDecoTool*)Context;
 
 	auto Pawn = (AFortPlayerPawnAthena*)Tool->Owner;
@@ -413,6 +432,10 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Pawn->Controller;
 	if (!PlayerController)
+		return;
+
+	auto PlayerState = (AFortPlayerStateAthena*)Pawn->PlayerState;
+	if (!PlayerState)
 		return;
 
 	auto ItemDefinition = (UFortDecoItemDefinition*)Tool->ItemDefinition;
@@ -500,7 +523,7 @@ _out:
 			if (!CanAffordToPlaceBuildableClass(PlayerController, BuildingClassData))
 				return;
 		}
-		else if (!PlayerController->bBuildFree)
+		else if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
 		{
 			auto Resource = UFortKismetLibrary::K2_GetResourceItemDefinition(((ABuildingSMActor*)BuildingClass->GetDefaultObj())->ResourceType);
 
@@ -586,6 +609,7 @@ _out:
 	/*Building->Team = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->TeamIndex;
 	if (Building->HasTeamIndex())
 		Building->TeamIndex = Building->Team;*/
+
 	Tool->ServerSpawnDeco(Location, Rotation, Building, InBuildingAttachmentType);
 }
 

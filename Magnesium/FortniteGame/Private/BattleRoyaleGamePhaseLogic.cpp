@@ -712,6 +712,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 		{
 			finishedFlight = true;
 
+			SetGamePhase(EAthenaGamePhase::SafeZones);
 			SetGamePhaseStep(EAthenaGamePhaseStep::StormForming);
 		}
 	}

@@ -5,6 +5,7 @@
 #include "../../ImGui/imgui_stdlib.h"
 #include "../../ImGui/imgui_impl_win32.h"
 #include "../../ImGui/imgui_impl_dx11.h"
+#include "../Public/Calendar.h"
 #include "../Public/Configuration.h"
 #include "../Public/Events.h"
 #include "../Public/Misc.h"
@@ -297,6 +298,17 @@ void GUI::Init()
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+
+        if (FConfiguration::bAutoStartEvent && !FConfiguration::bEventStarted && FConfiguration::EventStartBaseTime > 0.f)
+        {
+            float CurrentTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+            if (CurrentTime >= FConfiguration::EventStartBaseTime + FConfiguration::EventStartTime)
+            {
+                FConfiguration::bEventStarted = true;
+                printf("[Events] Auto-starting event at T=%.1f\n", CurrentTime);
+                Events::StartEvent();
+            }
+        }
 
         main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
@@ -610,7 +622,10 @@ void GUI::Init()
                                 {
                                     if (!bInitializedConfig)
                                     {
-                                        FConfiguration::RandomizeKills = true;
+                                        if (FConfiguration::bLateGame)
+                                            FConfiguration::RandomizeKills = true;
+
+                                        FConfiguration::RandomizeLevels = true;
                                         FConfiguration::bDisableJumpFatigue = true;
                                         FConfiguration::bAutoPauseTODM = true;
 
@@ -658,18 +673,6 @@ void GUI::Init()
 
                             if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                             {
-                                /*if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
-                                {
-                                    UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bStartAircraft = true;
-                                    //auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get();
-
-                                    //GamePhaseLogic->StartAircraftPhase();
-                                }
-                                else
-                                {
-                                    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
-                                }*/
-
                                 auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
                                 auto WarmupDuration = 10.f;
 
@@ -682,6 +685,19 @@ void GUI::Init()
                                     GameState->WarmupCountdownEndTime = Time + WarmupDuration;
                                     GameMode->WarmupCountdownDuration = WarmupDuration;
                                     GameMode->WarmupEarlyCountdownDuration = WarmupDuration;
+                                }
+
+                                if (VersionInfo.FortniteVersion > 25.20)
+                                {
+                                    auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+
+                                    if (GamePhaseLogic->HasWarmupCountdownEndTime())
+                                    {
+                                        GamePhaseLogic->WarmupCountdownStartTime = Time;
+                                        GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
+                                        GamePhaseLogic->WarmupCountdownDuration = WarmupDuration;
+                                        GamePhaseLogic->WarmupEarlyCountdownDuration = WarmupDuration;
+                                    }
                                 }
 
                                 bStartedBus = true;
@@ -709,6 +725,38 @@ void GUI::Init()
                 {
                     ImGui::SetNextItemWidth(260.0f);
                     ImGui::InputInt("Siphon Amount", &FConfiguration::SiphonAmount);
+
+                    std::vector<const char*> SiphonAnimations = { "Default" };
+
+                    if (VersionInfo.FortniteVersion >= 11.00)
+                    {
+                        SiphonAnimations.push_back("Slurp");
+                        SiphonAnimations.push_back("Bandage Bazooka");
+                    }
+
+                    if (VersionInfo.FortniteVersion >= 12.50)
+                    {
+                        SiphonAnimations.push_back("Orange Paint");
+                        SiphonAnimations.push_back("Purple Paint");
+                    }
+
+                    SiphonAnimations.push_back("Health Siphon");
+
+                    if (VersionInfo.FortniteVersion >= 19.00)
+                    {
+                        SiphonAnimations.push_back("Med Mist");
+                    }
+
+                    if (VersionInfo.FortniteVersion >= 11.40)
+                    {
+                        SiphonAnimations.push_back("Upgrade Weapon");
+                    }
+
+                    if (FConfiguration::SiphonAnimType >= (int)SiphonAnimations.size())
+                        FConfiguration::SiphonAnimType = 0;
+
+                    ImGui::SetNextItemWidth(260.0f);
+                    ImGui::Combo("Siphon Animation", &FConfiguration::SiphonAnimType, SiphonAnimations.data(), (int)SiphonAnimations.size());
                 }
 
                 if (ImGui::Button("Reset Player Builds", ImVec2(Width, Height)))
@@ -818,26 +866,24 @@ void GUI::Init()
                 }
             }
 
-            if (gsStatus == StartedMatch)
+            if (gsStatus > Joinable)
             {
                 if (hasEvent == 2)
                 {
-                    if (SelectedPlaylist == static_cast<int>(Playlist::Event))
+                    for (auto& Event : Events::EventsArray)
                     {
-                        static bool bInitialized = false;
-
-                        if (!bInitialized)
+                        if (Event.EventVersion == VersionInfo.FortniteVersion && Event.PlaylistPath && wcscmp(FConfiguration::Playlist, Event.PlaylistPath) == 0)
                         {
-                            ImGui::Spacing();
-                            ImGui::Spacing();
-
-                            ImGui::Text("Event:");
-                            SmallSeparator(Width);
-
-                            if (ImGui::Button("Start Event", ImVec2(Width, Height)))
+                            if (!FConfiguration::bEventStarted)
                             {
-                                Events::StartEvent();
-                                bInitialized = true;
+                                ImGui::Spacing();
+                                ImGui::Spacing();
+
+                                ImGui::Text("Event:");
+                                SmallSeparator(Width);
+
+                                if (ImGui::Button("Manually Start Event", ImVec2(Width, Height)))
+                                    Events::StartEvent();
                             }
                         }
                     }
@@ -1272,6 +1318,7 @@ void GUI::Init()
                             FConfiguration::Playlist = Event.PlaylistPath;
 
                         FConfiguration::bLateGame = false;
+                        FConfiguration::bAutoStartEvent = true;
                         break;
                     }
                 }
@@ -1299,6 +1346,21 @@ void GUI::Init()
                     persistentWstr = std::wstring(str.begin(), str.end());
 
                     FConfiguration::Playlist = persistentWstr.c_str();
+                }
+            }
+
+            if (SelectedPlaylist == (int)Playlist::Event)
+            {
+                ImGui::Spacing();
+                ImGui::Spacing();
+
+                ImGui::Checkbox("Auto Start Event", &FConfiguration::bAutoStartEvent);
+
+                if (FConfiguration::bAutoStartEvent)
+                {
+                    ImGui::PushItemWidth(Width);
+                    ImGui::SliderFloat("Event Start Time", &FConfiguration::EventStartTime, 30.0f, 300.0f, "%.1f seconds");
+                    ImGui::PopItemWidth();
                 }
             }
 
@@ -1466,11 +1528,15 @@ void GUI::Init()
                 if (ImGui::Button("Rift Player", ImVec2(Width, Height)))
                 {
 					auto Loc = TargetPawn->K2_GetActorLocation();
-                    FRotator Rot = FRotator(0.0f, 0.0f, 0.0f);
 
-                    auto RiftClass = FindObject<UClass>(L"/Game/Athena/Items/Consumables/RiftItem/BGA_RiftPortal_Item_Athena.BGA_RiftPortal_Item_Athena_C");
+                    static auto RiftClass = FindObject<UClass>(L"/Game/Athena/Items/Consumables/RiftItem/BGA_RiftPortal_Item_Athena.BGA_RiftPortal_Item_Athena_C");
 
-                    UWorld::SpawnActor(RiftClass, Loc, Rot);
+                    auto Rift = UWorld::SpawnActor<UClass>(RiftClass, Loc, {});
+
+                    auto Actor = (AActor*)Rift;
+                    Actor->ForceNetUpdate();
+
+                    Actor->K2_DestroyActor();
 				}
 
                 auto& Health = TargetPC->MyFortPawn->HealthSet->Health;
@@ -2156,6 +2222,8 @@ void GUI::Init()
                 if (FConfiguration::bLateGame)
                     ImGui::Checkbox("Randomize Kills", &FConfiguration::RandomizeKills);
 
+                ImGui::Checkbox("Randomize Levels", &FConfiguration::RandomizeLevels);
+
                 ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
             }
 
@@ -2168,8 +2236,6 @@ void GUI::Init()
                 ImGui::Checkbox("Negate Velocity on Win", &FConfiguration::bCancelVelocityOnWin);
 
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
-
-            //ImGui::Checkbox("Disable Supply Drops", &FConfiguration::bDisableSupplyDrops);
 
             ImGui::Checkbox("Auto Pause TODM", &FConfiguration::bAutoPauseTODM);
             

@@ -61,6 +61,18 @@ void Main()
         }
     }
 
+    if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
+        FConfiguration::bEnableIris = false;
+
+    if (VersionInfo.EngineVersion >= 5.0)
+    {
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogFortUIDirector None"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogFortUIManager None"), nullptr);
+    }
+    if (VersionInfo.FortniteVersion == 20.40)
+    {
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogSpecialRelevancyHealthComponent None"), nullptr);
+    }
     if (VersionInfo.EngineVersion >= 5.1)
     {
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"net.AllowEncryption 0"), nullptr);
@@ -133,9 +145,9 @@ void Main()
         if (MantleCVar)
             *MantleCVar = false;
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.TacticalSprint 0"), nullptr);
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Hurdle 0"), nullptr);
+        //UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Hurdle 0"), nullptr);
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Sliding 0"), nullptr);
-        //UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Clambering 0"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Clambering 0"), nullptr);
     }
 
 #ifdef CLIENT
@@ -190,7 +202,11 @@ void Main()
 
     srand((uint32_t)time(0));
 
-    UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Remove(0);
+    if (UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Num() > 0)
+    {
+        UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Remove(0);
+    }
+
     const wchar_t* terrainOpen = L"open Athena_Terrain";
 
     if (wcsstr(FConfiguration::Playlist, L"/MoleGame/Playlists/Playlist_MoleGame"))

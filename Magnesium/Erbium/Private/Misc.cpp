@@ -854,8 +854,10 @@ void InitializeCosmeticLoadout(UFortAthenaAIBotCustomizationData* BotData, AFort
 		FName& CosmeticTag = PredefinedCosmeticSetTag->TagName;
 
 		for (auto& [Key, Val] : (TMap<FName, FFortBotCosmeticItemSetDataTableRow*>&)BotData->CosmeticCustomizationLibrary->PredefineSetsDataTable->RowMap)
+		{
 			if (Val->SetTag.TagName == CosmeticTag)
 				LibraryRowMap[Key] = Val;
+		}
 
 		auto LibraryRowPair = PickWeighted(LibraryRowMap, [](float Total)
 			{ return ((float)rand() / 32767) * Total; });
