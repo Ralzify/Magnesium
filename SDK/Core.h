@@ -801,8 +801,12 @@ namespace SDK
 
 			for (int i = 0; i < Num(); i++)
 			{
-				const UObject* Obj = GetObjectByIndex(i);
-				if (Obj && Obj->Class && (TypeFlags == 0 || Obj->Class->GetCastFlags() & TypeFlags) && Obj->Name == ObjName && (!TargetClass || Obj->IsA(TargetClass)))
+				const FUObjectItem* Item = GetItemByIndex(i);
+				if (!Item || !Item->Object || (Item->Flags & 0x20))
+					continue;
+
+				const UObject* Obj = Item->Object;
+				if (Obj->Class && (TypeFlags == 0 || Obj->Class->GetCastFlags() & TypeFlags) && Obj->Name == ObjName && (!TargetClass || Obj->IsA(TargetClass)))
 					return Obj;
 			}
 			return nullptr;
