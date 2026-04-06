@@ -2680,8 +2680,8 @@ cheat startshrinksafezone - Starts shrinking the safe zone
 cheat infiniteammo - Toggles infinite ammo
 cheat infinitemats - Toggles infinite materials
 cheat serversendmessage - Broadcasts a message to all clients in the game
-cheat fly - Toggles fly mode
-cheat ghost - Toggles no-clip flying
+cheat fly <Speed> - Toggles fly mode (with optional speed value)
+cheat ghost <Speed> - Toggles no-clip flying (with optional speed value)
 cheat gravity <Scale> - Sets the gravity scale
 cheat changename <Name> - Changes your player name
 cheat keepinventory - Toggles keeping inventory on death
@@ -2711,6 +2711,10 @@ cheat savewaypoint - Saves your current location as a waypoint
 cheat waypoint <Name> - Loads a saved waypoint
 cheat skydive - Toggles skydiving
 cheat giveitem <WID/path> <Count = 1> - Gives you an item
+cheat giveall - Gives you all ammo, mats, and traps
+cheat givetraps - Gives you all available traps
+cheat giveammo - Gives you 999 of every ammo type
+cheat givemats - Gives you 500 of each material
 cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
 cheat clearinventory - Clears your inventory of all items that are droppable
 cheat spawn <class/path> - Spawns an actor at your location
@@ -3693,10 +3697,30 @@ cheat spawn <class/path> - Spawns an actor at your location
 					{
 						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
 						PlayerController->ClientMessage(FString(L"Enabled flying!"), FName(), 1.f);
+
+						if (args.size() == 2)
+						{
+							try {
+								float Speed = std::stof(std::string(args[1]));
+								static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
+								if (!SetMovementSpeedFn)
+									SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
+								if (SetMovementSpeedFn)
+									Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
+							} catch (...) {}
+						}
 					}
 					else
 					{
 						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+
+						float ResetSpeed = 1.0f;
+						static auto SetMovementSpeedFn2 = Pawn->GetFunction("SetMovementSpeed");
+						if (!SetMovementSpeedFn2)
+							SetMovementSpeedFn2 = Pawn->GetFunction("SetMovementSpeedMultiplier");
+						if (SetMovementSpeedFn2)
+							Pawn->ProcessEvent(SetMovementSpeedFn2, &ResetSpeed);
+
 						PlayerController->ClientMessage(FString(L"Disabled flying"), FName(), 1.f);
 					}
 				}
@@ -3718,9 +3742,32 @@ cheat spawn <class/path> - Spawns an actor at your location
 					Pawn->CharacterMovement->bCheatFlying = !Pawn->CharacterMovement->bCheatFlying;
 
 					if (Pawn->CharacterMovement->bCheatFlying)
+					{
 						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Flying, 0);
+
+						if (args.size() == 2)
+						{
+							try {
+								float Speed = std::stof(std::string(args[1]));
+								static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
+								if (!SetMovementSpeedFn)
+									SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
+								if (SetMovementSpeedFn)
+									Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
+							} catch (...) {}
+						}
+					}
 					else
+					{
 						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+
+						float ResetSpeed = 1.0f;
+						static auto SetMovementSpeedFn3 = Pawn->GetFunction("SetMovementSpeed");
+						if (!SetMovementSpeedFn3)
+							SetMovementSpeedFn3 = Pawn->GetFunction("SetMovementSpeedMultiplier");
+						if (SetMovementSpeedFn3)
+							Pawn->ProcessEvent(SetMovementSpeedFn3, &ResetSpeed);
+					}
 				}
 			}
 			else if (command == "flyspeed")
@@ -4417,6 +4464,196 @@ cheat spawn <class/path> - Spawns an actor at your location
 						PlayerController->ClientMessage(FString(L"Couldn't find a pawn to teleport!"), FName(), 1.f);
 					}
 				}
+			}
+			else if (command == "giveall" || (command == "give" && args.size() == 2 && args[1] == "all"))
+			{
+				auto Pawn = PlayerController->Pawn;
+				if (!Pawn)
+					return;
+
+				auto GiveItems = [&](const char* Name, int Count) {
+					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(Name);
+					if (!ItemDef)
+						return;
+
+					FVector FinalLoc = Pawn->K2_GetActorLocation();
+					FVector ForwardVector = Pawn->GetActorForwardVector();
+					ForwardVector.Z = 0.0f;
+					ForwardVector.Normalize();
+					FinalLoc = FinalLoc + ForwardVector * 450.f;
+					FinalLoc.Z += 50.f;
+
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					if (Pickup)
+						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+				};
+
+				const char* AmmoNames[] = {
+					"AmmoDataRockets", "AthenaAmmoDataBulletsHeavy", "AthenaAmmoDataBulletsLight",
+					"AthenaAmmoDataBulletsMedium", "AthenaAmmoDataEnergyCell", "AthenaAmmoDataHooks",
+					"AthenaAmmoDataShells", "AthenaOakCash", "AmmoDataBulletsHeavy", "AmmoDataBulletsLight",
+					"AmmoDataBulletsMedium", "AmmoDataEnergyCell", "AmmoDataExplosive", "AmmoDataShells",
+					"AmmoDataBotTurret", "AmmoDataBottleRockets", "AmmoDataFragGrenades", "AmmoDataFragments",
+					"AmmoDataGlowTorch", "AmmoDataM80", "AmmoDataProximityMines", "AmmoDataProximityMine",
+					"AmmoDataSmokeBomb", "AmmoDataThrowingStar", "AmmoInfiniteEnergy", "AmmoInfinitePossessor",
+					"AmmoTrollData",
+				};
+				for (auto& Name : AmmoNames) GiveItems(Name, 999);
+
+				const char* MatNames[] = { "WoodItemData", "StoneItemData", "MetalItemData" };
+				for (auto& Name : MatNames) GiveItems(Name, 500);
+
+				const char* TrapNames[] = {
+					"TID_Context_BouncePad_Athena", "TID_Ceiling_BouncePad_Athena_R_T01",
+					"TID_Floor_Player_Launch_Pad_Athena", "TID_Context_Freeze_Athena",
+					"TID_Floor_Player_Campfire_Athena", "TID_Floor_MountedTurret_Athena",
+					"TID_ContextTrap_Athena", "TID_PoisonDartTrap_Context",
+					"TID_Floor_Player_Jump_Pad_Free_Direction_Athena", "TID_Floor_Player_Jump_Pad_Athena",
+					"TID_Context_SpeedBoost", "TID_ZippyTroutTrap_Context",
+					"TID_Ceiling_Goop_VR_T01", "TID_Context_Reinforced_Athena",
+				};
+				for (auto& Name : TrapNames) GiveItems(Name, 6);
+
+				PlayerController->ClientMessage(FString(L"Gave all ammo, mats, and traps!"), FName(), 1.f);
+			}
+			else if (command == "giveammo" || (command == "give" && args.size() == 2 && args[1] == "ammo"))
+			{
+				auto Pawn = PlayerController->Pawn;
+				if (!Pawn)
+					return;
+
+				const char* AmmoNames[] = {
+					"AmmoDataRockets",
+					"AthenaAmmoDataBulletsHeavy",
+					"AthenaAmmoDataBulletsLight",
+					"AthenaAmmoDataBulletsMedium",
+					"AthenaAmmoDataEnergyCell",
+					"AthenaAmmoDataHooks",
+					"AthenaAmmoDataShells",
+					"AthenaOakCash",
+					"AmmoDataBulletsHeavy",
+					"AmmoDataBulletsLight",
+					"AmmoDataBulletsMedium",
+					"AmmoDataEnergyCell",
+					"AmmoDataExplosive",
+					"AmmoDataShells",
+					"AmmoDataBotTurret",
+					"AmmoDataBottleRockets",
+					"AmmoDataFragGrenades",
+					"AmmoDataFragments",
+					"AmmoDataGlowTorch",
+					"AmmoDataM80",
+					"AmmoDataProximityMines",
+					"AmmoDataProximityMine",
+					"AmmoDataSmokeBomb",
+					"AmmoDataThrowingStar",
+					"AmmoInfiniteEnergy",
+					"AmmoInfinitePossessor",
+					"AmmoTrollData",
+				};
+
+				int GivenCount = 0;
+				for (auto& AmmoName : AmmoNames)
+				{
+					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(AmmoName);
+					if (!ItemDef)
+						continue;
+
+					FVector FinalLoc = Pawn->K2_GetActorLocation();
+					FVector ForwardVector = Pawn->GetActorForwardVector();
+					ForwardVector.Z = 0.0f;
+					ForwardVector.Normalize();
+					FinalLoc = FinalLoc + ForwardVector * 450.f;
+					FinalLoc.Z += 50.f;
+
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 999, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					if (Pickup)
+					{
+						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+						GivenCount++;
+					}
+				}
+
+				wchar_t wmsg[64];
+				swprintf_s(wmsg, 64, L"Gave %d ammo types!", GivenCount);
+				PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
+			}
+			else if (command == "givemats" || (command == "give" && args.size() == 2 && args[1] == "mats"))
+			{
+				auto Pawn = PlayerController->Pawn;
+				if (!Pawn)
+					return;
+
+				const char* MatNames[] = { "WoodItemData", "StoneItemData", "MetalItemData" };
+
+				for (auto& MatName : MatNames)
+				{
+					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(MatName);
+					if (!ItemDef)
+						continue;
+
+					FVector FinalLoc = Pawn->K2_GetActorLocation();
+					FVector ForwardVector = Pawn->GetActorForwardVector();
+					ForwardVector.Z = 0.0f;
+					ForwardVector.Normalize();
+					FinalLoc = FinalLoc + ForwardVector * 450.f;
+					FinalLoc.Z += 50.f;
+
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 500, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					if (Pickup)
+						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+				}
+
+				PlayerController->ClientMessage(FString(L"Gave 500 of each material!"), FName(), 1.f);
+			}
+			else if (command == "givetraps" || (command == "give" && args.size() == 2 && args[1] == "traps"))
+			{
+				auto Pawn = PlayerController->Pawn;
+				if (!Pawn)
+					return;
+
+				const char* TrapNames[] = {
+					"TID_Context_BouncePad_Athena",
+					"TID_Ceiling_BouncePad_Athena_R_T01",
+					"TID_Floor_Player_Launch_Pad_Athena",
+					"TID_Context_Freeze_Athena",
+					"TID_Floor_Player_Campfire_Athena",
+					"TID_Floor_MountedTurret_Athena",
+					"TID_ContextTrap_Athena",
+					"TID_PoisonDartTrap_Context",
+					"TID_Floor_Player_Jump_Pad_Free_Direction_Athena",
+					"TID_Floor_Player_Jump_Pad_Athena",
+					"TID_Context_SpeedBoost",
+					"TID_ZippyTroutTrap_Context",
+					"TID_Ceiling_Goop_VR_T01",
+					"TID_Context_Reinforced_Athena",
+				};
+
+				int GivenCount = 0;
+				for (auto& TrapName : TrapNames)
+				{
+					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(TrapName);
+					if (!ItemDef)
+						continue;
+
+					FVector FinalLoc = Pawn->K2_GetActorLocation();
+					FVector ForwardVector = Pawn->GetActorForwardVector();
+					ForwardVector.Z = 0.0f;
+					ForwardVector.Normalize();
+					FinalLoc = FinalLoc + ForwardVector * 450.f;
+					FinalLoc.Z += 50.f;
+
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 6, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					if (Pickup)
+					{
+						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+						GivenCount++;
+					}
+				}
+
+				wchar_t wmsg[64];
+				swprintf_s(wmsg, 64, L"Gave %d traps!", GivenCount);
+				PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
 			}
 			else if (command == "giveitem" || command == "give")
 			{
