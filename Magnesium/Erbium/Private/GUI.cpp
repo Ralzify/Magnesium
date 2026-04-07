@@ -240,9 +240,9 @@ void GUI::Init()
     style.Colors[ImGuiCol_Button] = ImVec4(0.25f, 0.25f, 0.25f, 0.75f);
     style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.43f, 0.43f, 0.43f, 0.85f);
     style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.46f, 0.46f, 0.46f, 1.00f);
-    style.Colors[ImGuiCol_Header] = ImVec4(0.30f, 0.30f, 0.30f, 0.80f);
-    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.40f, 0.40f, 0.40f, 0.90f);
-    style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+    style.Colors[ImGuiCol_Header] = ImVec4(0.92f, 0.18f, 0.29f, 0.76f);
+    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.92f, 0.18f, 0.29f, 0.86f);
+    style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.92f, 0.18f, 0.29f, 1.00f);
     style.Colors[ImGuiCol_TextSelectedBg] = ImVec4(0.92f, 0.18f, 0.29f, 0.43f);
     style.Colors[ImGuiCol_PopupBg] = ImVec4(0.20f, 0.22f, 0.27f, 0.9f);
     style.Colors[ImGuiCol_Tab] = ImVec4(0.25f, 0.25f, 0.25f, 1.0f);
@@ -655,108 +655,6 @@ void GUI::Init()
                                     }
                                 }
 
-                                auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-
-                                if (VersionInfo.FortniteVersion < 8.00)
-                                {
-                                    if (ImGui::Checkbox("Infinite Respawns", &FConfiguration::bForceRespawns))
-                                    {
-                                        if (gsStatus >= Joinable)
-                                        {
-                                            if (!Playlist)
-                                                Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                                            if (Playlist)
-                                            {
-                                                if (FConfiguration::bForceRespawns)
-                                                {
-                                                    if (Playlist->HasbRespawnInAir())
-                                                        Playlist->bRespawnInAir = true;
-
-                                                    if (Playlist->HasRespawnHeight())
-                                                    {
-                                                        Playlist->RespawnHeight.Curve.CurveTable = nullptr;
-                                                        Playlist->RespawnHeight.Curve.RowName = FName();
-                                                        Playlist->RespawnHeight.Value = 20000;
-                                                    }
-                                                    if (Playlist->HasRespawnTime())
-                                                    {
-                                                        Playlist->RespawnTime.Curve.CurveTable = nullptr;
-                                                        Playlist->RespawnTime.Curve.RowName = FName();
-                                                        Playlist->RespawnTime.Value = FConfiguration::RespawnTime;
-                                                    }
-
-                                                    if (Playlist->HasRespawnType())
-                                                    {
-                                                        if (FConfiguration::PermanentRespawn)
-                                                            Playlist->RespawnType = 1;
-                                                        else
-                                                            Playlist->RespawnType = 2;
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                    if (Playlist->HasRespawnType())
-                                                        Playlist->RespawnType = 0;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if (FConfiguration::bForceRespawns)
-                                    {
-                                        if (ImGui::Checkbox("Storm Respawns", &FConfiguration::PermanentRespawn))
-                                        {
-                                            if (gsStatus >= Joinable)
-                                            {
-                                                if (!Playlist)
-                                                    Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                                                if (Playlist && Playlist->HasRespawnType())
-                                                    Playlist->RespawnType = FConfiguration::PermanentRespawn ? 1 : 2;
-                                            }
-                                        }
-
-                                        ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
-
-                                        ImGui::PushItemWidth(Width);
-                                        if (ImGui::SliderInt("Respawn Time", &FConfiguration::RespawnTime, 1, 10))
-                                        {
-                                            if (gsStatus >= Joinable)
-                                            {
-                                                if (!Playlist)
-                                                    Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                                                if (Playlist && Playlist->HasRespawnTime())
-                                                {
-                                                    Playlist->RespawnTime.Curve.CurveTable = nullptr;
-                                                    Playlist->RespawnTime.Curve.RowName = FName();
-                                                    Playlist->RespawnTime.Value = FConfiguration::RespawnTime;
-                                                }
-                                            }
-                                        }
-                                        ImGui::PopItemWidth();
-
-                                        ImGui::PushItemWidth(Width);
-                                        if (ImGui::SliderInt("Respawn Height", &FConfiguration::RespawnHeight, 1000, 50000))
-                                        {
-                                            if (gsStatus >= Joinable)
-                                            {
-                                                if (!Playlist)
-                                                    Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                                                if (Playlist && Playlist->HasRespawnHeight())
-                                                {
-                                                    Playlist->RespawnHeight.Curve.CurveTable = nullptr;
-                                                    Playlist->RespawnHeight.Curve.RowName = FName();
-                                                    Playlist->RespawnHeight.Value = FConfiguration::RespawnHeight;
-                                                }
-                                            }
-                                        }
-                                        ImGui::PopItemWidth();
-                                    }
-                                }
-
                                 if (FConfiguration::bAutoBusStart)
                                 {
                                     ImGui::PushItemWidth(Width);
@@ -807,175 +705,173 @@ void GUI::Init()
                 }
             }
 
+            if (!bIsGavMap && !bIsDesertZW && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsBoxfight && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine)
+            {
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            ImGui::Text("Match Settings:");
+            SmallSeparator(Width);
+
+            if (ImGui::Checkbox("Glider Redeploy (S16 & Below)", &FConfiguration::bGliderRedeploy))
+            {
+                if (gsStatus >= Joinable)
+                {
+                    auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                    auto GliderGameState = GliderGameMode->GameState;
+                    if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
+                        GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
+                }
+            }
+
+            if (VersionInfo.FortniteVersion >= 8.00 || gsStatus < Joinable)
+            {
+                if (ImGui::Checkbox("Infinite Respawns", &FConfiguration::bForceRespawns))
+                {
+                    if (gsStatus >= Joinable)
+                    {
+                        auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                        if (!RespawnPlaylist)
+                            RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                        if (RespawnPlaylist)
+                        {
+                            if (FConfiguration::bForceRespawns)
+                            {
+                                if (RespawnPlaylist->HasbRespawnInAir())
+                                    RespawnPlaylist->bRespawnInAir = true;
+                                if (RespawnPlaylist->HasRespawnHeight())
+                                {
+                                    RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
+                                    RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
+                                    RespawnPlaylist->RespawnHeight.Value = 20000;
+                                }
+                                if (RespawnPlaylist->HasRespawnTime())
+                                {
+                                    RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
+                                    RespawnPlaylist->RespawnTime.Curve.RowName = FName();
+                                    RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
+                                }
+
+                                if (RespawnPlaylist->HasRespawnType())
+                                {
+                                    if (FConfiguration::PermanentRespawn)
+                                        RespawnPlaylist->RespawnType = 1;
+                                    else
+                                        RespawnPlaylist->RespawnType = 2;
+                                }
+                            }
+                            else
+                            {
+                                if (RespawnPlaylist->HasRespawnType())
+                                    RespawnPlaylist->RespawnType = 0;
+                            }
+                        }
+                    }
+                }
+
+                if (FConfiguration::bForceRespawns)
+                {
+                    if (ImGui::Checkbox("Storm Respawns", &FConfiguration::PermanentRespawn))
+                    {
+                        if (gsStatus >= Joinable)
+                        {
+                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                            if (!RespawnPlaylist)
+                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnType())
+                                RespawnPlaylist->RespawnType = FConfiguration::PermanentRespawn ? 1 : 2;
+                        }
+                    }
+
+                    ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
+
+                    ImGui::PushItemWidth(Width);
+                    if (ImGui::SliderInt("Respawn Time", &FConfiguration::RespawnTime, 1, 10))
+                    {
+                        if (gsStatus >= Joinable)
+                        {
+                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                            if (!RespawnPlaylist)
+                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnTime())
+                            {
+                                RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
+                                RespawnPlaylist->RespawnTime.Curve.RowName = FName();
+                                RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
+                            }
+                        }
+                    }
+                    ImGui::PopItemWidth();
+
+                    ImGui::PushItemWidth(Width);
+                    if (ImGui::SliderInt("Respawn Height", &FConfiguration::RespawnHeight, 1000, 50000))
+                    {
+                        if (gsStatus >= Joinable)
+                        {
+                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                            if (!RespawnPlaylist)
+                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnHeight())
+                            {
+                                RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
+                                RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
+                                RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
+                            }
+                        }
+                    }
+                    ImGui::PopItemWidth();
+                }
+            }
+            }
+
             if (gsStatus >= Joinable)
             {
-                ImGui::Text("Match Settings:");
-                SmallSeparator(Width);
-
                 ImGui::Checkbox("Infinite Materials", &FConfiguration::bInfiniteMats);
                 ImGui::Checkbox("Infinite Ammo", &FConfiguration::bInfiniteAmmo);
                 ImGui::Checkbox("Toggle Cheat Commands", &FConfiguration::bEnableCheats);
                 ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
                 ImGui::Checkbox("Siphon", &FConfiguration::bSiphon);
 
-                if (VersionInfo.FortniteVersion < 16.00) // pretty sure it doesnt work on 16 either
-                {
-                    if (ImGui::Checkbox("Glider Redeploy", &FConfiguration::bGliderRedeploy))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                            auto GameState = GameMode->GameState;
-
-                            if (GameState->HasDefaultGliderRedeployCanRedeploy())
-                                GameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
-                        }
-                    }
-                }
-
-                auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-
-                if (VersionInfo.FortniteVersion >= 8.00)
-                {
-                    if (ImGui::Checkbox("Infinite Respawns", &FConfiguration::bForceRespawns))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            if (!Playlist)
-                                Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                            if (Playlist)
-                            {
-                                if (FConfiguration::bForceRespawns)
-                                {
-                                    if (Playlist->HasbRespawnInAir())
-                                        Playlist->bRespawnInAir = true;
-
-                                    if (Playlist->HasRespawnHeight())
-                                    {
-                                        Playlist->RespawnHeight.Curve.CurveTable = nullptr;
-                                        Playlist->RespawnHeight.Curve.RowName = FName();
-                                        Playlist->RespawnHeight.Value = 20000;
-                                    }
-                                    if (Playlist->HasRespawnTime())
-                                    {
-                                        Playlist->RespawnTime.Curve.CurveTable = nullptr;
-                                        Playlist->RespawnTime.Curve.RowName = FName();
-                                        Playlist->RespawnTime.Value = FConfiguration::RespawnTime;
-                                    }
-
-                                    if (Playlist->HasRespawnType())
-                                    {
-                                        if (FConfiguration::PermanentRespawn)
-                                            Playlist->RespawnType = 1;
-                                        else
-                                            Playlist->RespawnType = 2;
-                                    }
-                                }
-                                else
-                                {
-                                    if (Playlist->HasRespawnType())
-                                        Playlist->RespawnType = 0;
-                                }
-                            }
-                        }
-                    }
-
-                    if (FConfiguration::bForceRespawns)
-                    {
-                        if (ImGui::Checkbox("Storm Respawns", &FConfiguration::PermanentRespawn))
-                        {
-                            if (gsStatus >= Joinable)
-                            {
-                                if (!Playlist)
-                                    Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                                if (Playlist && Playlist->HasRespawnType())
-                                    Playlist->RespawnType = FConfiguration::PermanentRespawn ? 1 : 2;
-                            }
-                        }
-
-                        ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
-
-                        ImGui::PushItemWidth(Width);
-                        if (ImGui::SliderInt("Respawn Time", &FConfiguration::RespawnTime, 1, 10))
-                        {
-                            if (gsStatus >= Joinable)
-                            {
-                                if (!Playlist)
-                                    Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                                if (Playlist && Playlist->HasRespawnTime())
-                                {
-                                    Playlist->RespawnTime.Curve.CurveTable = nullptr;
-                                    Playlist->RespawnTime.Curve.RowName = FName();
-                                    Playlist->RespawnTime.Value = FConfiguration::RespawnTime;
-                                }
-                            }
-                        }
-                        ImGui::PopItemWidth();
-
-                        ImGui::PushItemWidth(Width);
-                        if (ImGui::SliderInt("Respawn Height", &FConfiguration::RespawnHeight, 1000, 50000))
-                        {
-                            if (gsStatus >= Joinable)
-                            {
-                                if (!Playlist)
-                                    Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                                if (Playlist && Playlist->HasRespawnHeight())
-                                {
-                                    Playlist->RespawnHeight.Curve.CurveTable = nullptr;
-                                    Playlist->RespawnHeight.Curve.RowName = FName();
-                                    Playlist->RespawnHeight.Value = FConfiguration::RespawnHeight;
-                                }
-                            }
-                        }
-                        ImGui::PopItemWidth();
-                    }
-                }
-
                 if (FConfiguration::bSiphon)
                 {
                     ImGui::SetNextItemWidth(260.0f);
                     ImGui::InputInt("Siphon Amount", &FConfiguration::SiphonAmount);
 
-                    std::vector<SiphonAnimEntry> SiphonAnimations;
-
-                    SiphonAnimations.push_back({ "Default", Siphon_Default });
+                    std::vector<const char*> SiphonAnimations = { "Default" };
 
                     if (VersionInfo.FortniteVersion >= 11.00)
                     {
-                        SiphonAnimations.push_back({ "Slurp", Siphon_Slurp });
-                        SiphonAnimations.push_back({ "Bandage Bazooka", Siphon_BandageBazooka });
+                        SiphonAnimations.push_back("Slurp");
+                        SiphonAnimations.push_back("Bandage Bazooka");
                     }
 
                     if (VersionInfo.FortniteVersion >= 12.50)
                     {
-                        SiphonAnimations.push_back({ "Orange Paint", Siphon_OrangePaint });
-                        SiphonAnimations.push_back({ "Purple Paint", Siphon_PurplePaint });
+                        SiphonAnimations.push_back("Orange Paint");
+                        SiphonAnimations.push_back("Purple Paint");
                     }
 
-                    SiphonAnimations.push_back({ "Health Siphon", Siphon_Health });
+                    SiphonAnimations.push_back("Health Siphon");
 
                     if (VersionInfo.FortniteVersion >= 19.00)
                     {
-                        SiphonAnimations.push_back({ "Med Mist", Siphon_MedMist });
+                        SiphonAnimations.push_back("Med Mist");
                     }
 
-                    static int SelectedIdx = 0;
+                    if (VersionInfo.FortniteVersion >= 11.40)
+                    {
+                        SiphonAnimations.push_back("Upgrade Weapon");
+                    }
 
-                    if (SelectedIdx >= SiphonAnimations.size())
-                        SelectedIdx = 0;
-
-                    std::vector<const char*> Names;
-                    for (auto& Entry : SiphonAnimations)
-                        Names.push_back(Entry.Name);
+                    if (FConfiguration::SiphonAnimType >= (int)SiphonAnimations.size())
+                        FConfiguration::SiphonAnimType = 0;
 
                     ImGui::SetNextItemWidth(260.0f);
-                    ImGui::Combo("Siphon Animation", &SelectedIdx, Names.data(), Names.size());
-
-                    FConfiguration::SiphonAnimType = SiphonAnimations[SelectedIdx].Type;
+                    ImGui::Combo("Siphon Animation", &FConfiguration::SiphonAnimType, SiphonAnimations.data(), (int)SiphonAnimations.size());
                 }
 
                 if (ImGui::Button("Reset Player Builds", ImVec2(Width, Height)))
@@ -1970,161 +1866,161 @@ void GUI::Init()
 
             if (gsStatus < StartedMatch)
             {
-                static char PrimaryWeaponBuffer[256] = { 0 };
-                static char SecondaryWeaponBuffer[256] = { 0 };
-                static char TertiaryWeaponBuffer[256] = { 0 };
-                static char QuaternaryWeaponBuffer[256] = { 0 };
-                static char QuinaryWeaponBuffer[256] = { 0 };
-                static char TrapsBuffer[256] = { 0 };
+            static char PrimaryWeaponBuffer[256] = { 0 };
+            static char SecondaryWeaponBuffer[256] = { 0 };
+            static char TertiaryWeaponBuffer[256] = { 0 };
+            static char QuaternaryWeaponBuffer[256] = { 0 };
+            static char QuinaryWeaponBuffer[256] = { 0 };
+            static char TrapsBuffer[256] = { 0 };
 
-                static int PrimaryAmountBuffer = 1;
-                static int SecondaryAmountBuffer = 1;
-                static int TertiaryAmountBuffer = 1;
-                static int QuaternaryAmountBuffer = 1;
-                static int QuinaryAmountBuffer = 1;
-                static int TrapsAmountBuffer = 6;
+            static int PrimaryAmountBuffer = 1;
+            static int SecondaryAmountBuffer = 1;
+            static int TertiaryAmountBuffer = 1;
+            static int QuaternaryAmountBuffer = 1;
+            static int QuinaryAmountBuffer = 1;
+            static int TrapsAmountBuffer = 6;
 
-                static bool bBuffersInitialized = false;
-                static std::string LoadoutStatusMessage;
-                static std::chrono::high_resolution_clock::time_point StatusMessageTime;
-                static std::string ApplyLoadoutStatusMessage;
-                static std::chrono::high_resolution_clock::time_point ApplyStatusMessageTime;
+            static bool bBuffersInitialized = false;
+            static std::string LoadoutStatusMessage;
+            static std::chrono::high_resolution_clock::time_point StatusMessageTime;
+            static std::string ApplyLoadoutStatusMessage;
+            static std::chrono::high_resolution_clock::time_point ApplyStatusMessageTime;
 
-                if (FConfiguration::bUseCustomLoadout)
+            if (FConfiguration::bUseCustomLoadout)
+            {
+                if (!bBuffersInitialized)
                 {
-                    if (!bBuffersInitialized)
-                    {
-                        strcpy_s(PrimaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Primary));
-                        strcpy_s(SecondaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Secondary));
-                        strcpy_s(TertiaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Tertiary));
-                        strcpy_s(QuaternaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Quaternary));
-                        strcpy_s(QuinaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Quinary));
-                        strcpy_s(TrapsBuffer, TCHAR_TO_UTF8(*FConfiguration::Traps));
+                    strcpy_s(PrimaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Primary));
+                    strcpy_s(SecondaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Secondary));
+                    strcpy_s(TertiaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Tertiary));
+                    strcpy_s(QuaternaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Quaternary));
+                    strcpy_s(QuinaryWeaponBuffer, TCHAR_TO_UTF8(*FConfiguration::Quinary));
+                    strcpy_s(TrapsBuffer, TCHAR_TO_UTF8(*FConfiguration::Traps));
 
-                        PrimaryAmountBuffer = FConfiguration::PrimaryAmount;
-                        SecondaryAmountBuffer = FConfiguration::SecondaryAmount;
-                        TertiaryAmountBuffer = FConfiguration::TertiaryAmount;
-                        QuaternaryAmountBuffer = FConfiguration::QuaternaryAmount;
-                        QuinaryAmountBuffer = FConfiguration::QuinaryAmount;
-                        TrapsAmountBuffer = FConfiguration::TrapsAmount;
+                    PrimaryAmountBuffer = FConfiguration::PrimaryAmount;
+                    SecondaryAmountBuffer = FConfiguration::SecondaryAmount;
+                    TertiaryAmountBuffer = FConfiguration::TertiaryAmount;
+                    QuaternaryAmountBuffer = FConfiguration::QuaternaryAmount;
+                    QuinaryAmountBuffer = FConfiguration::QuinaryAmount;
+                    TrapsAmountBuffer = FConfiguration::TrapsAmount;
 
-                        bBuffersInitialized = true;
-                    }
+                    bBuffersInitialized = true;
+                }
 
-                    ImGui::NewLine();
+                ImGui::NewLine();
 
-                    ImGui::Text("Custom Loadout Slots:");
-                    SmallSeparator(Width);
+                ImGui::Text("Custom Loadout Slots:");
+                SmallSeparator(Width);
 
-                    ImGui::PushItemWidth(Width);
-                    ImGui::InputText("Slot 1", PrimaryWeaponBuffer, sizeof(PrimaryWeaponBuffer));
-                    ImGui::InputInt("Slot 1 Amount", &PrimaryAmountBuffer);
+                ImGui::PushItemWidth(Width);
+                ImGui::InputText("Slot 1", PrimaryWeaponBuffer, sizeof(PrimaryWeaponBuffer));
+                ImGui::InputInt("Slot 1 Amount", &PrimaryAmountBuffer);
 
-                    ImGui::InputText("Slot 2", SecondaryWeaponBuffer, sizeof(SecondaryWeaponBuffer));
-                    ImGui::InputInt("Slot 2 Amount", &SecondaryAmountBuffer);
+                ImGui::InputText("Slot 2", SecondaryWeaponBuffer, sizeof(SecondaryWeaponBuffer));
+                ImGui::InputInt("Slot 2 Amount", &SecondaryAmountBuffer);
 
-                    ImGui::InputText("Slot 3", TertiaryWeaponBuffer, sizeof(TertiaryWeaponBuffer));
-                    ImGui::InputInt("Slot 3 Amount", &TertiaryAmountBuffer);
+                ImGui::InputText("Slot 3", TertiaryWeaponBuffer, sizeof(TertiaryWeaponBuffer));
+                ImGui::InputInt("Slot 3 Amount", &TertiaryAmountBuffer);
 
-                    ImGui::InputText("Slot 4", QuaternaryWeaponBuffer, sizeof(QuaternaryWeaponBuffer));
-                    ImGui::InputInt("Slot 4 Amount", &QuaternaryAmountBuffer);
+                ImGui::InputText("Slot 4", QuaternaryWeaponBuffer, sizeof(QuaternaryWeaponBuffer));
+                ImGui::InputInt("Slot 4 Amount", &QuaternaryAmountBuffer);
 
-                    ImGui::InputText("Slot 5", QuinaryWeaponBuffer, sizeof(QuinaryWeaponBuffer));
-                    ImGui::InputInt("Slot 5 Amount", &QuinaryAmountBuffer);
+                ImGui::InputText("Slot 5", QuinaryWeaponBuffer, sizeof(QuinaryWeaponBuffer));
+                ImGui::InputInt("Slot 5 Amount", &QuinaryAmountBuffer);
 
-                    ImGui::InputText("Trap", TrapsBuffer, sizeof(TrapsBuffer));
-                    ImGui::InputInt("Trap Amount", &TrapsAmountBuffer);
-                    ImGui::PopItemWidth();
+                ImGui::InputText("Trap", TrapsBuffer, sizeof(TrapsBuffer));
+                ImGui::InputInt("Trap Amount", &TrapsAmountBuffer);
+                ImGui::PopItemWidth();
 
-                    if (ImGui::Button("Apply Loadout", ImVec2(Width, Height)))
-                    {
-                        FConfiguration::Primary = FString(PrimaryWeaponBuffer);
-                        FConfiguration::Secondary = FString(SecondaryWeaponBuffer);
-                        FConfiguration::Tertiary = FString(TertiaryWeaponBuffer);
-                        FConfiguration::Quaternary = FString(QuaternaryWeaponBuffer);
-                        FConfiguration::Quinary = FString(QuinaryWeaponBuffer);
-                        FConfiguration::Traps = FString(TrapsBuffer);
+                if (ImGui::Button("Apply Loadout", ImVec2(Width, Height)))
+                {
+                    FConfiguration::Primary = FString(PrimaryWeaponBuffer);
+                    FConfiguration::Secondary = FString(SecondaryWeaponBuffer);
+                    FConfiguration::Tertiary = FString(TertiaryWeaponBuffer);
+                    FConfiguration::Quaternary = FString(QuaternaryWeaponBuffer);
+                    FConfiguration::Quinary = FString(QuinaryWeaponBuffer);
+                    FConfiguration::Traps = FString(TrapsBuffer);
 
-                        FConfiguration::PrimaryAmount = PrimaryAmountBuffer;
-                        FConfiguration::SecondaryAmount = SecondaryAmountBuffer;
-                        FConfiguration::TertiaryAmount = TertiaryAmountBuffer;
-                        FConfiguration::QuaternaryAmount = QuaternaryAmountBuffer;
-                        FConfiguration::QuinaryAmount = QuinaryAmountBuffer;
-                        FConfiguration::TrapsAmount = TrapsAmountBuffer;
+                    FConfiguration::PrimaryAmount = PrimaryAmountBuffer;
+                    FConfiguration::SecondaryAmount = SecondaryAmountBuffer;
+                    FConfiguration::TertiaryAmount = TertiaryAmountBuffer;
+                    FConfiguration::QuaternaryAmount = QuaternaryAmountBuffer;
+                    FConfiguration::QuinaryAmount = QuinaryAmountBuffer;
+                    FConfiguration::TrapsAmount = TrapsAmountBuffer;
 
-                        printf("Saved current loadout.\n");
-                        ApplyLoadoutStatusMessage = "Loadout saved successfully!";
-                        ApplyStatusMessageTime = std::chrono::high_resolution_clock::now();
+                    printf("Saved current loadout.\n");
+                    ApplyLoadoutStatusMessage = "Loadout saved successfully!";
+                    ApplyStatusMessageTime = std::chrono::high_resolution_clock::now();
 
-                        if (!ApplyLoadoutStatusMessage.empty())
-                        {
-                            auto Elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - StatusMessageTime).count();
-
-                            if (Elapsed < 5)
-                            {
-                                ImVec4 StatusColor = (ApplyLoadoutStatusMessage.find("Failed.") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
-
-                                ImGui::TextColored(StatusColor, "%s", LoadoutStatusMessage.c_str());
-                            }
-                            else
-                            {
-                                ApplyLoadoutStatusMessage.clear();
-                            }
-                        }
-                    }
-
-                    ImGui::Spacing();
-
-                    ImGui::Text("Save/Load Loadout:");
-                    SmallSeparator(Width);
-
-                    if (ImGui::Button("Save Loadout to File", ImVec2(Width, Height)))
-                    {
-                        if (LoadoutManager::SaveLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
-                        {
-                            LoadoutStatusMessage = "Loadout saved successfully!";
-                            printf("Loadout saved to: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
-                        }
-                        else
-                        {
-                            LoadoutStatusMessage = "Failed to save loadout!";
-                        }
-
-                        StatusMessageTime = std::chrono::high_resolution_clock::now();
-                    }
-
-                    if (ImGui::Button("Load Loadout from File", ImVec2(Width, Height)))
-                    {
-                        if (LoadoutManager::LoadLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
-                        {
-                            LoadoutStatusMessage = "Loadout loaded successfully!";
-                            printf("Loadout loaded from: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
-                        }
-                        else
-                        {
-                            LoadoutStatusMessage = "Failed to load loadout! File may not exist.";
-                        }
-
-                        StatusMessageTime = std::chrono::high_resolution_clock::now();
-                    }
-
-                    if (!LoadoutStatusMessage.empty())
+                    if (!ApplyLoadoutStatusMessage.empty())
                     {
                         auto Elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - StatusMessageTime).count();
 
                         if (Elapsed < 5)
                         {
-                            ImVec4 StatusColor = (LoadoutStatusMessage.find("Failed") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+                            ImVec4 StatusColor = (ApplyLoadoutStatusMessage.find("Failed.") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
 
                             ImGui::TextColored(StatusColor, "%s", LoadoutStatusMessage.c_str());
                         }
                         else
                         {
-                            LoadoutStatusMessage.clear();
+                            ApplyLoadoutStatusMessage.clear();
                         }
                     }
                 }
+
+                ImGui::Spacing();
+
+                ImGui::Text("Save/Load Loadout:");
+                SmallSeparator(Width);
+
+                if (ImGui::Button("Save Loadout to File", ImVec2(Width, Height)))
+                {
+                    if (LoadoutManager::SaveLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
+                    {
+                        LoadoutStatusMessage = "Loadout saved successfully!";
+                        printf("Loadout saved to: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
+                    }
+                    else
+                    {
+                        LoadoutStatusMessage = "Failed to save loadout!";
+                    }
+
+                    StatusMessageTime = std::chrono::high_resolution_clock::now();
+                }
+
+                if (ImGui::Button("Load Loadout from File", ImVec2(Width, Height)))
+                {
+                    if (LoadoutManager::LoadLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
+                    {
+                        LoadoutStatusMessage = "Loadout loaded successfully!";
+                        printf("Loadout loaded from: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
+                    }
+                    else
+                    {
+                        LoadoutStatusMessage = "Failed to load loadout! File may not exist.";
+                    }
+
+                    StatusMessageTime = std::chrono::high_resolution_clock::now();
+                }
+
+                if (!LoadoutStatusMessage.empty())
+                {
+                    auto Elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - StatusMessageTime).count();
+
+                    if (Elapsed < 5)
+                    {
+                        ImVec4 StatusColor = (LoadoutStatusMessage.find("Failed") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+
+                        ImGui::TextColored(StatusColor, "%s", LoadoutStatusMessage.c_str());
+                    }
+                    else
+                    {
+                        LoadoutStatusMessage.clear();
+                    }
+                }
             }
+            } // gsStatus < StartedMatch
 
             break;
         }
