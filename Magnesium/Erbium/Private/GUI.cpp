@@ -713,14 +713,17 @@ void GUI::Init()
             ImGui::Text("Match Settings:");
             SmallSeparator(Width);
 
-            if (ImGui::Checkbox("Glider Redeploy (S16 & Below)", &FConfiguration::bGliderRedeploy))
+            if (VersionInfo.FortniteVersion <= 16.00)
             {
-                if (gsStatus >= Joinable)
+                if (ImGui::Checkbox("Glider Redeploy", &FConfiguration::bGliderRedeploy))
                 {
-                    auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                    auto GliderGameState = GliderGameMode->GameState;
-                    if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
-                        GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
+                    if (gsStatus >= Joinable)
+                    {
+                        auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                        auto GliderGameState = GliderGameMode->GameState;
+                        if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
+                            GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
+                    }
                 }
             }
 
