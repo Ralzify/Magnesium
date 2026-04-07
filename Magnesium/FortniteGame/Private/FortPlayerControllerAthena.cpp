@@ -566,6 +566,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		for (auto& AbilitySet : AFortGameMode::AbilitySets)
 			PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
+	if (FConfiguration::bForceRespawns && PlayersInitialized.contains(PlayerController))
+	{
+		FortPawn->SetHealth(100.f);
+		FortPawn->SetShield(100.f);
+	}
+
 	if (Num == 0)
 	{
 		static auto SmartItemDefClass = FindClass("FortSmartBuildingItemDefinition");
