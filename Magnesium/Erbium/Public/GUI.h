@@ -110,6 +110,23 @@ enum class Map : int
     PropHunt,
 };
 
+enum ESiphonAnimation
+{
+    Siphon_Default = 0,
+    Siphon_Slurp,
+    Siphon_BandageBazooka,
+    Siphon_OrangePaint,
+    Siphon_PurplePaint,
+    Siphon_Health,
+    Siphon_MedMist
+};
+
+struct SiphonAnimEntry
+{
+    const char* Name;
+    ESiphonAnimation Type;
+};
+
 class GUI
 {
 public:

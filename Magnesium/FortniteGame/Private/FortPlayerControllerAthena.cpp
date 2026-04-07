@@ -647,8 +647,6 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		{
 			PlayersInitialized.insert(PlayerController);
 
-			FortPawn->SetShield(100.f);
-
 			LateGame::EquipLoadout(PlayerController);
 
 			if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
@@ -2093,9 +2091,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			KillerPlayerController->WorldInventory->GiveItem(StoneItemData, FConfiguration::SiphonAmount);
 			KillerPlayerController->WorldInventory->GiveItem(MetalItemData, FConfiguration::SiphonAmount);
 
-			switch (FConfiguration::SiphonAnimType)
+			switch ((ESiphonAnimation)FConfiguration::SiphonAnimType)
 			{
-			case 0: // Default
+			case Siphon_Default:
 			{
 				auto Handle = KillerPlayerState->AbilitySystemComponent->MakeEffectContext();
 				FGameplayTag Tag;
@@ -2108,7 +2106,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				free(PredictionKey);
 				break;
 			}
-			case 1: // Slurp
+			case Siphon_Slurp:
 			{
 				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
 				{
@@ -2135,7 +2133,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				}
 				break;
 			}
-			case 2: // Bandage Bazooka
+			case Siphon_BandageBazooka:
 			{
 				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
 				{
@@ -2155,7 +2153,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 				break;
 			}
-			case 3: // Orange Paint
+			case Siphon_OrangePaint:
 			{
 				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
 				{
@@ -2175,7 +2173,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 				break;
 			}
-			case 4: // Purple Paint
+			case Siphon_PurplePaint:
 			{
 				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
 				{
@@ -2195,7 +2193,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 				break;
 			}
-			case 5:
+			case Siphon_Health:
 			{
 				auto Handle = KillerPlayerState->AbilitySystemComponent->MakeEffectContext();
 				FGameplayTag Tag;
@@ -2208,31 +2206,11 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				free(PredictionKey);
 				break;
 			}
-			case 6:
+			case Siphon_MedMist:
 			{
 				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
 				{
 					static auto GameplayEffect = FindObject<UClass>(L"/FlipperGameplay/Items/HealSpray/GE_Athena_HealSpray_Heal.GE_Athena_HealSpray_Heal_C");
-
-					if (GameplayEffect)
-					{
-						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
-
-						Context.Instigator = KillerPlayerController;
-						Context.Causer = KillerPawn;
-						Context.AddSourceObject(KillerPawn);
-
-						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GameplayEffect, 1.0f, Context);
-					}
-				}
-
-				break;
-			}
-			case 7:
-			{
-				if (UAbilitySystemComponent* AbilitySystemComponent = KillerPlayerState->AbilitySystemComponent)
-				{
-					static auto GameplayEffect = FindObject<UClass>(L"/Game/Athena/Items/Gameplay/Wumba/GE_WumbaUsed.GE_WumbaUsed_C");
 
 					if (GameplayEffect)
 					{
@@ -3706,13 +3684,20 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 						if (args.size() == 2)
 						{
-							try {
+							try 
+							{
 								float Speed = std::stof(std::string(args[1]));
+
 								static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
+
 								if (!SetMovementSpeedFn)
 									SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
-								if (SetMovementSpeedFn)
-									Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
+
+								if (!SetMovementSpeedFn)
+									return;
+
+								Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
+
 							} catch (...) {}
 						}
 					}
@@ -3721,11 +3706,16 @@ cheat spawn <class/path> - Spawns an actor at your location
 						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
 
 						float ResetSpeed = 1.0f;
-						static auto SetMovementSpeedFn2 = Pawn->GetFunction("SetMovementSpeed");
-						if (!SetMovementSpeedFn2)
-							SetMovementSpeedFn2 = Pawn->GetFunction("SetMovementSpeedMultiplier");
-						if (SetMovementSpeedFn2)
-							Pawn->ProcessEvent(SetMovementSpeedFn2, &ResetSpeed);
+
+						static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
+
+						if (!SetMovementSpeedFn)
+							SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
+
+						if (!SetMovementSpeedFn)
+							return;
+
+						Pawn->ProcessEvent(SetMovementSpeedFn, &ResetSpeed);
 
 						PlayerController->ClientMessage(FString(L"Disabled flying"), FName(), 1.f);
 					}
@@ -3753,13 +3743,20 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 						if (args.size() == 2)
 						{
-							try {
+							try 
+							{
 								float Speed = std::stof(std::string(args[1]));
+
 								static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
+
 								if (!SetMovementSpeedFn)
 									SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
-								if (SetMovementSpeedFn)
-									Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
+
+								if (!SetMovementSpeedFn)
+									return;
+
+								Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
+
 							} catch (...) {}
 						}
 					}
@@ -3768,11 +3765,16 @@ cheat spawn <class/path> - Spawns an actor at your location
 						Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
 
 						float ResetSpeed = 1.0f;
-						static auto SetMovementSpeedFn3 = Pawn->GetFunction("SetMovementSpeed");
-						if (!SetMovementSpeedFn3)
-							SetMovementSpeedFn3 = Pawn->GetFunction("SetMovementSpeedMultiplier");
-						if (SetMovementSpeedFn3)
-							Pawn->ProcessEvent(SetMovementSpeedFn3, &ResetSpeed);
+
+						static auto SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeed");
+
+						if (!SetMovementSpeedFn)
+							SetMovementSpeedFn = Pawn->GetFunction("SetMovementSpeedMultiplier");
+
+						if (!SetMovementSpeedFn)
+							return;
+
+						Pawn->ProcessEvent(SetMovementSpeedFn, &ResetSpeed);
 					}
 				}
 			}
@@ -4474,11 +4476,14 @@ cheat spawn <class/path> - Spawns an actor at your location
 			else if (command == "giveall" || (command == "give" && args.size() == 2 && args[1] == "all"))
 			{
 				auto Pawn = PlayerController->Pawn;
+
 				if (!Pawn)
 					return;
 
-				auto GiveItems = [&](const char* Name, int Count) {
+				auto GiveItems = [&](const char* Name, int Count) 
+				{
 					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(Name);
+
 					if (!ItemDef)
 						return;
 
@@ -4490,11 +4495,13 @@ cheat spawn <class/path> - Spawns an actor at your location
 					FinalLoc.Z += 50.f;
 
 					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					
 					if (Pickup)
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
 				};
 
-				const char* AmmoNames[] = {
+				const char* AmmoNames[] = 
+				{
 					"AmmoDataRockets", "AthenaAmmoDataBulletsHeavy", "AthenaAmmoDataBulletsLight",
 					"AthenaAmmoDataBulletsMedium", "AthenaAmmoDataEnergyCell", "AthenaAmmoDataHooks",
 					"AthenaAmmoDataShells", "AthenaOakCash", "AmmoDataBulletsHeavy", "AmmoDataBulletsLight",
@@ -4504,12 +4511,17 @@ cheat spawn <class/path> - Spawns an actor at your location
 					"AmmoDataSmokeBomb", "AmmoDataThrowingStar", "AmmoInfiniteEnergy", "AmmoInfinitePossessor",
 					"AmmoTrollData",
 				};
-				for (auto& Name : AmmoNames) GiveItems(Name, 999);
+
+				for (auto& Name : AmmoNames) 
+					GiveItems(Name, 999);
 
 				const char* MatNames[] = { "WoodItemData", "StoneItemData", "MetalItemData" };
-				for (auto& Name : MatNames) GiveItems(Name, 500);
 
-				const char* TrapNames[] = {
+				for (auto& Name : MatNames) 
+					GiveItems(Name, 500);
+
+				const char* TrapNames[] = 
+				{
 					"TID_Context_BouncePad_Athena", "TID_Ceiling_BouncePad_Athena_R_T01",
 					"TID_Floor_Player_Launch_Pad_Athena", "TID_Context_Freeze_Athena",
 					"TID_Floor_Player_Campfire_Athena", "TID_Floor_MountedTurret_Athena",
@@ -4518,17 +4530,21 @@ cheat spawn <class/path> - Spawns an actor at your location
 					"TID_Context_SpeedBoost", "TID_ZippyTroutTrap_Context",
 					"TID_Ceiling_Goop_VR_T01", "TID_Context_Reinforced_Athena",
 				};
-				for (auto& Name : TrapNames) GiveItems(Name, 6);
+
+				for (auto& Name : TrapNames) 
+					GiveItems(Name, 6);
 
 				PlayerController->ClientMessage(FString(L"Gave all ammo, mats, and traps!"), FName(), 1.f);
 			}
 			else if (command == "giveammo" || (command == "give" && args.size() == 2 && args[1] == "ammo"))
 			{
 				auto Pawn = PlayerController->Pawn;
+
 				if (!Pawn)
 					return;
 
-				const char* AmmoNames[] = {
+				const char* AmmoNames[] = 
+				{
 					"AmmoDataRockets",
 					"AthenaAmmoDataBulletsHeavy",
 					"AthenaAmmoDataBulletsLight",
@@ -4559,9 +4575,11 @@ cheat spawn <class/path> - Spawns an actor at your location
 				};
 
 				int GivenCount = 0;
+
 				for (auto& AmmoName : AmmoNames)
 				{
 					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(AmmoName);
+
 					if (!ItemDef)
 						continue;
 
@@ -4573,6 +4591,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					FinalLoc.Z += 50.f;
 
 					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 999, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					
 					if (Pickup)
 					{
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
@@ -4595,6 +4614,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 				for (auto& MatName : MatNames)
 				{
 					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(MatName);
+
 					if (!ItemDef)
 						continue;
 
@@ -4606,6 +4626,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					FinalLoc.Z += 50.f;
 
 					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 500, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					
 					if (Pickup)
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
 				}
@@ -4615,10 +4636,12 @@ cheat spawn <class/path> - Spawns an actor at your location
 			else if (command == "givetraps" || (command == "give" && args.size() == 2 && args[1] == "traps"))
 			{
 				auto Pawn = PlayerController->Pawn;
+
 				if (!Pawn)
 					return;
 
-				const char* TrapNames[] = {
+				const char* TrapNames[] = 
+				{
 					"TID_Context_BouncePad_Athena",
 					"TID_Ceiling_BouncePad_Athena_R_T01",
 					"TID_Floor_Player_Launch_Pad_Athena",
@@ -4636,9 +4659,11 @@ cheat spawn <class/path> - Spawns an actor at your location
 				};
 
 				int GivenCount = 0;
+
 				for (auto& TrapName : TrapNames)
 				{
 					auto ItemDef = TUObjectArray::FindObject<UFortItemDefinition>(TrapName);
+
 					if (!ItemDef)
 						continue;
 
@@ -4650,6 +4675,7 @@ cheat spawn <class/path> - Spawns an actor at your location
 					FinalLoc.Z += 50.f;
 
 					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 6, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					
 					if (Pickup)
 					{
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
