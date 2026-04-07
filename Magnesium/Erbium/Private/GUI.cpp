@@ -655,9 +655,7 @@ void GUI::Init()
                                     }
                                 }
 
-								auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-
-                                auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+                                auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
 
                                 if (VersionInfo.FortniteVersion < 8.00)
                                 {
@@ -835,9 +833,7 @@ void GUI::Init()
                     }
                 }
 
-				auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-
-                auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+                auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
 
                 if (VersionInfo.FortniteVersion >= 8.00)
                 {
