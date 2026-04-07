@@ -1833,7 +1833,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
 
 			// respawn except storm needs to be fixed
-			bRespawnAllowed = Playlist ? Playlist->RespawnType > 0 : false;
+			bRespawnAllowed = Playlist ? (Playlist->HasRespawnType() ? Playlist->RespawnType > 0 : FConfiguration::bForceRespawns) : FConfiguration::bForceRespawns;
 		}
 		else
 			bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerState);

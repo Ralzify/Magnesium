@@ -51,6 +51,7 @@ struct FConfiguration
     static inline auto bLateGame = true;
     static inline auto LateGameZone = 4; // starting zone
     static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
+    static inline auto bGliderRedeploy = false;
     static inline auto bEnableCheats = true;
 	static inline auto bMovingBus = true;
 	static inline auto BusStartDelay = 90.f;
@@ -102,6 +103,7 @@ struct FConfiguration
     static inline auto bJoinInProgress = false;
 	static inline auto PermanentRespawn = false;
     static inline auto RespawnTime = 3;
+    static inline auto RespawnHeight = 20000;
 
     static inline auto bAutoBusStart = true;
 

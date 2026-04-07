@@ -71,7 +71,7 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             {
                 Playlist->RespawnHeight.Curve.CurveTable = nullptr;
                 Playlist->RespawnHeight.Curve.RowName = FName();
-                Playlist->RespawnHeight.Value = 20000;
+                Playlist->RespawnHeight.Value = FConfiguration::RespawnHeight;
             }
             if (Playlist->HasRespawnTime())
             {
@@ -80,10 +80,13 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
                 Playlist->RespawnTime.Value = FConfiguration::RespawnTime;
             }
 
-            if (FConfiguration::PermanentRespawn)
-                Playlist->RespawnType = 1; // InfiniteRespawn
-            else
-                Playlist->RespawnType = 2; // InfiniteRespawnExceptStorm
+            if (Playlist->HasRespawnType())
+            {
+                if (FConfiguration::PermanentRespawn)
+                    Playlist->RespawnType = 1; // InfiniteRespawn
+                else
+                    Playlist->RespawnType = 2; // InfiniteRespawnExceptStorm
+            }
 
             //if (Playlist->HasbForceRespawnLocationInsideOfVolume())
             //    Playlist->bForceRespawnLocationInsideOfVolume = true;
@@ -777,6 +780,9 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         {
             if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
                 GameState->DefaultParachuteDeployTraceForGroundDistance = 10000;
+
+            if (GameState->HasDefaultGliderRedeployCanRedeploy())
+                GameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
         }
 
         if (VersionInfo.FortniteVersion >= 27)
