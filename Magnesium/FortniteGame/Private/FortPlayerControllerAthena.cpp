@@ -2643,6 +2643,59 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 }
 
 std::unordered_map<std::string, std::vector<FVector>> Waypoints;
+std::unordered_set<AFortPlayerControllerAthena*> MarkToTeleportPlayers;
+
+static void (*ServerAddMapMarkerOG)(UObject*, FFrame&) = nullptr;
+static int32 MarkerWorldPositionOffset = -2;
+
+static void ServerAddMapMarker(UObject* Context, FFrame& Stack)
+{
+	auto MarkerComponent = Context;
+	auto Owner = MarkerComponent->Outer;
+	auto PlayerController = Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+
+	if (PlayerController && MarkToTeleportPlayers.count(PlayerController) && Stack.Locals)
+	{
+		if (MarkerWorldPositionOffset == -2)
+		{
+			auto MarkerRequestStruct = FindObject<UStruct>(L"/Script/FortniteGame.FortClientMarkerRequest");
+			if (MarkerRequestStruct)
+			{
+				auto Prop = MarkerRequestStruct->GetProperty("WorldPosition");
+				if (!Prop)
+					Prop = MarkerRequestStruct->GetProperty("BasePosition");
+				if (Prop)
+					MarkerWorldPositionOffset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+				else
+					MarkerWorldPositionOffset = -1;
+			}
+			else
+				MarkerWorldPositionOffset = -1;
+		}
+
+		if (MarkerWorldPositionOffset >= 0)
+		{
+			FVector MarkerWorldPos = *(FVector*)(Stack.Locals + MarkerWorldPositionOffset);
+
+			auto Pawn = PlayerController->Pawn;
+			if (Pawn && (MarkerWorldPos.X != 0.f || MarkerWorldPos.Y != 0.f))
+			{
+				FVector TeleportLoc = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, MarkerWorldPos, 10000.f, -10000.f, FName());
+				if (TeleportLoc.X == 0.f && TeleportLoc.Y == 0.f && TeleportLoc.Z == 0.f)
+					TeleportLoc = FVector(MarkerWorldPos.X, MarkerWorldPos.Y, MarkerWorldPos.Z + 500.f);
+				else
+					TeleportLoc.Z += 200.f;
+
+				Pawn->K2_TeleportTo(TeleportLoc, Pawn->K2_GetActorRotation(), false, true);
+				Pawn->CharacterMovement->Velocity = FVector{};
+				PlayerController->ClientMessage(FString(L"Teleported to marker!"), FName(), 1.f);
+			}
+		}
+	}
+
+	if (ServerAddMapMarkerOG)
+		return ServerAddMapMarkerOG(Context, Stack);
+}
 
 extern uint64_t ApplyCharacterCustomization;
 extern uint64_t NotifyGameMemberAdded_;
@@ -2711,11 +2764,13 @@ cheat botemote - Plays the 'Accolades' emote to the player bot
 cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
+cheat tp - Teleports to where your crosshair is aiming
 cheat tp <X> <Y> <Z> - Teleports to a location
 cheat launch <X> <Y> <Z> - Launches the player
 cheat savewaypoint - Saves your current location as a waypoint
 cheat waypoint <Name> - Loads a saved waypoint
 cheat skydive - Toggles skydiving
+cheat mark - Toggles teleporting to placed map markers
 cheat giveitem <WID/path> <Count = 1> - Gives you an item
 cheat giveall - Gives you all ammo, mats, and traps
 cheat givetraps - Gives you all available traps
@@ -2724,6 +2779,7 @@ cheat givemats - Gives you 500 of each material
 cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
 cheat clearinventory - Clears your inventory of all items that are droppable
 cheat spawn <class/path> - Spawns an actor at your location
+cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 )"), FName(), 1);
 	}
 	else
@@ -4246,23 +4302,123 @@ cheat spawn <class/path> - Spawns an actor at your location
 			}
 			else if (command == "bugitgo" || command == "tp")
 			{
-				if (args.size() != 4)
+				if (args.size() == 1)
 				{
-					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
-					return;
+					auto Pawn = PlayerController->Pawn;
+					if (!Pawn)
+					{
+						PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
+						return;
+					}
+
+					static auto TeleportFn = const_cast<UFunction*>(FindObject<UFunction>(L"/Script/Engine.CheatManager.Teleport"));
+					static auto CheatManagerClass = FindClass("CheatManager");
+
+					if (!TeleportFn)
+					{
+						PlayerController->ClientMessage(FString(L"Teleport function not found on this version."), FName(), 1.f);
+						return;
+					}
+
+					auto CheatManagerOffset = PlayerController->GetOffset("CheatManager");
+					UObject* CheatManager = CheatManagerOffset != -1 ? *(UObject**)(__int64(PlayerController) + CheatManagerOffset) : nullptr;
+
+					if (!CheatManager && CheatManagerClass)
+					{
+						CheatManager = UGameplayStatics::SpawnObject(CheatManagerClass, PlayerController);
+						if (CheatManager && CheatManagerOffset != -1)
+							*(UObject**)(__int64(PlayerController) + CheatManagerOffset) = CheatManager;
+					}
+
+					if (!CheatManager)
+					{
+						PlayerController->ClientMessage(FString(L"Failed to create cheat manager!"), FName(), 1.f);
+						return;
+					}
+
+					auto LocBefore = Pawn->K2_GetActorLocation();
+					CheatManager->ProcessEvent(TeleportFn, nullptr);
+					auto LocAfter = Pawn->K2_GetActorLocation();
+
+					bool bMoved = (LocBefore.X != LocAfter.X || LocBefore.Y != LocAfter.Y || LocBefore.Z != LocAfter.Z);
+					bool bInvalid = (LocAfter.X == 0.f && LocAfter.Y == 0.f && LocAfter.Z == 0.f);
+
+					if (!bMoved || bInvalid)
+					{
+						FVector ViewLoc;
+						FRotator ViewRot;
+						GetPlayerViewPointOG
+							? GetPlayerViewPointOG(PlayerController, ViewLoc, ViewRot)
+							: AFortPlayerControllerAthena::GetPlayerViewPoint(PlayerController, ViewLoc, ViewRot);
+
+						FVector ViewDir = (FVector)ViewRot;
+
+						// March along the view ray in steps, checking for ground at each one.
+						// Stops at the first point where terrain is found near or above the ray,
+						// so mountains and cliffs block the ray instead of being skipped over.
+						constexpr float StepSize = 500.f;
+						constexpr float MaxDist = 50000.f;
+						FVector TeleportLoc{};
+						bool bFoundGround = false;
+
+						for (float Dist = StepSize; Dist <= MaxDist; Dist += StepSize)
+						{
+							FVector SamplePoint = FVector(
+								ViewLoc.X + ViewDir.X * Dist,
+								ViewLoc.Y + ViewDir.Y * Dist,
+								ViewLoc.Z + ViewDir.Z * Dist
+							);
+
+							FVector GroundLoc = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, SamplePoint, 10000.f, -10000.f, FName());
+
+							if (GroundLoc.X == 0.f && GroundLoc.Y == 0.f && GroundLoc.Z == 0.f)
+								continue;
+
+							if (GroundLoc.Z >= SamplePoint.Z - 500.f)
+							{
+								TeleportLoc = GroundLoc;
+								bFoundGround = true;
+								break;
+							}
+						}
+
+						if (!bFoundGround)
+						{
+							FVector EndPoint = FVector(
+								ViewLoc.X + ViewDir.X * MaxDist,
+								ViewLoc.Y + ViewDir.Y * MaxDist,
+								ViewLoc.Z + ViewDir.Z * MaxDist
+							);
+							TeleportLoc = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, EndPoint, 10000.f, -10000.f, FName());
+							if (TeleportLoc.X == 0.f && TeleportLoc.Y == 0.f && TeleportLoc.Z == 0.f)
+								TeleportLoc = FVector(EndPoint.X, EndPoint.Y, ViewLoc.Z);
+						}
+
+						TeleportLoc.Z += 200.f;
+						Pawn->K2_TeleportTo(TeleportLoc, Pawn->K2_GetActorRotation(), false, true);
+						Pawn->CharacterMovement->Velocity = FVector{};
+						PlayerController->ClientMessage(FString(L"Teleported to crosshair! (fallback)"), FName(), 1.f);
+					}
+					else
+					{
+						Pawn->CharacterMovement->Velocity = FVector{};
+						PlayerController->ClientMessage(FString(L"Teleported to crosshair!"), FName(), 1.f);
+					}
 				}
-
-				double X = 0., Y = 0., Z = 0.;
-
-				X = strtod(args[1].c_str(), nullptr);
-				Y = strtod(args[2].c_str(), nullptr);
-				Z = strtod(args[3].c_str(), nullptr);
-
-				if (PlayerController->Pawn)
+				else if (args.size() == 4)
 				{
-					PlayerController->Pawn->K2_SetActorLocation(FVector(X, Y, Z), false, nullptr, true);
-					PlayerController->ClientMessage(FString(L"Teleported to location!"), FName(), 1.f);
+					double X = strtod(args[1].c_str(), nullptr);
+					double Y = strtod(args[2].c_str(), nullptr);
+					double Z = strtod(args[3].c_str(), nullptr);
+
+					if (PlayerController->Pawn)
+					{
+						PlayerController->Pawn->K2_SetActorLocation(FVector(X, Y, Z), false, nullptr, true);
+						PlayerController->ClientMessage(FString(L"Teleported to location!"), FName(), 1.f);
+					}
 				}
+				else
+					PlayerController->ClientMessage(FString(L"Usage: cheat tp OR cheat tp <X> <Y> <Z>"), FName(), 1.f);
 			}
 			else if (command == "launch" || command == "launchpawn" || command == "l")
 			{
@@ -4922,6 +5078,23 @@ cheat spawn <class/path> - Spawns an actor at your location
 				Pawn->SetInVortex(bInVortex);
 				PlayerController->ClientMessage(FString(L"Toggled skydiving!"), FName(), 1.f);
 			}
+			else if (command == "mark" || command == "marker" || command == "marktp" || command == "marktoteleport")
+			{
+				if (!ServerAddMapMarkerOG)
+				{
+					PlayerController->ClientMessage(FString(L"Marker teleport is not available on this version."), FName(), 1.f);
+				}
+				else if (MarkToTeleportPlayers.count(PlayerController))
+				{
+					MarkToTeleportPlayers.erase(PlayerController);
+					PlayerController->ClientMessage(FString(L"Marker teleporting is now off."), FName(), 1.f);
+				}
+				else
+				{
+					MarkToTeleportPlayers.insert(PlayerController);
+					PlayerController->ClientMessage(FString(L"Marker teleporting is now on. Place a map marker to teleport."), FName(), 1.f);
+				}
+			}
 			else if (command == "crazy" || command == "serversendmessage" || command == "clientsendconfirmationscreen")
 			{
 				bool bClientQuitAfterMessage = false;
@@ -5067,6 +5240,43 @@ cheat spawn <class/path> - Spawns an actor at your location
 
 				Builds.Free();
 				PlayerController->ClientMessage(FString(L"Resetting builds!"), FName(), 1.f);
+			}
+			else if (command == "shortcmds" || command == "shortcommands")
+			{
+				std::string category = args.size() >= 2 ? std::string(args[1].c_str()) : "";
+				std::transform(category.begin(), category.end(), category.begin(), tolower);
+
+				if (category.empty() || category == "items")
+				{
+					std::vector<std::string> names;
+					names.reserve(Misc::ItemNames.size());
+					for (auto& pair : Misc::ItemNames)
+						names.push_back(pair.first);
+					std::sort(names.begin(), names.end());
+
+					PlayerController->ClientMessage(FString(L"Short commands for 'cheat give <name>':"), FName(), 1.f);
+					for (auto& name : names)
+						PlayerController->ClientMessage(FString(std::wstring(name.begin(), name.end()).c_str()), FName(), 1.f);
+				}
+
+				if (category.empty())
+					PlayerController->ClientMessage(FString(L" "), FName(), 1.f);
+
+				if (category.empty() || category == "objects")
+				{
+					std::vector<std::string> names;
+					names.reserve(Misc::ObjectNames.size());
+					for (auto& pair : Misc::ObjectNames)
+						names.push_back(pair.first);
+					std::sort(names.begin(), names.end());
+
+					PlayerController->ClientMessage(FString(L"Short commands for 'cheat spawn <name>':"), FName(), 1.f);
+					for (auto& name : names)
+						PlayerController->ClientMessage(FString(std::wstring(name.begin(), name.end()).c_str()), FName(), 1.f);
+				}
+
+				if (!category.empty() && category != "items" && category != "objects")
+					PlayerController->ClientMessage(FString(L"Usage: cheat shortcmds <items/objects>"), FName(), 1.f);
 			}
 			else
 				goto _help;
@@ -6474,4 +6684,8 @@ void AFortPlayerControllerAthena::PostLoadHook()
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerOnMaterialSelection"), ServerOnMaterialSelection);
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerPlaySquadQuickChatMessage"), ServerPlaySquadQuickChatMessage);
+
+	auto DefaultMarkerComp = DefaultObjImpl("AthenaMarkerComponent");
+	if (DefaultMarkerComp)
+		Utils::ExecHook(DefaultMarkerComp->GetFunction("ServerAddMapMarker"), ServerAddMapMarker, ServerAddMapMarkerOG);
 }

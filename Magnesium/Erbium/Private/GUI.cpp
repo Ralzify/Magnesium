@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "../Public/GUI.h"
 #include <d3d11.h>
 #include "../../ImGui/imgui.h"
@@ -713,7 +713,7 @@ void GUI::Init()
             ImGui::Text("Match Settings:");
             SmallSeparator(Width);
 
-            if (VersionInfo.FortniteVersion <= 16.00)
+            if (VersionInfo.FortniteVersion > 5.41 && VersionInfo.FortniteVersion <= 16.00)
             {
                 if (ImGui::Checkbox("Glider Redeploy", &FConfiguration::bGliderRedeploy))
                 {
@@ -727,7 +727,7 @@ void GUI::Init()
                 }
             }
 
-            if (VersionInfo.FortniteVersion >= 8.00 || gsStatus < Joinable)
+            if ((VersionInfo.FortniteVersion >= 8.00 || gsStatus < Joinable) && VersionInfo.FortniteVersion > 2.50)
             {
                 if (ImGui::Checkbox("Infinite Respawns", &FConfiguration::bForceRespawns))
                 {
@@ -1857,7 +1857,8 @@ void GUI::Init()
             if (gsStatus < StartedMatch)
             {
                 ImGui::Checkbox("Late Game", &FConfiguration::bLateGame);
-                ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
+                if (VersionInfo.FortniteVersion > 2.50)
+                    ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
                 ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
                 ImGui::Checkbox("Use Versionized Lategame Loadouts", &FConfiguration::bUseVersionizedLoadout);
                 ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);

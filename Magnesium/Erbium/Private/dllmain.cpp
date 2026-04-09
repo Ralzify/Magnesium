@@ -64,6 +64,12 @@ void Main()
     if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
         FConfiguration::bEnableIris = false;
 
+    if (VersionInfo.FortniteVersion <= 2.50)
+        FConfiguration::bMovingBus = false;
+
+    if (VersionInfo.FortniteVersion <= 5.41)
+        FConfiguration::bGliderRedeploy = false;
+
     if (VersionInfo.EngineVersion >= 5.0)
     {
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogFortUIDirector None"), nullptr);
