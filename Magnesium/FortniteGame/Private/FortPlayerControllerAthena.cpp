@@ -2751,10 +2751,12 @@ cheat setshield <amount> - Sets your pawn's shield (0-100)
 cheat setmaxhealth <amount> - Sets your pawn's maximum health
 cheat setmaxshield <amount> - Sets your pawn's maximum shield
 cheat regen - Regenerates health and shield to the maximum value
+cheat regenall - Regenerates health and shield for all players
 cheat setkills - Sets your kill count
 cheat setarenapoints - Sets your arena points : Use a negative number to take away points
 cheat demospeed <Speed> - Sets the speed of the server
 cheat god - Toggles god mode
+cheat godall - Toggles god mode for all players
 cheat speed <Speed> - Sets the player's movement speed
 cheat timeofday <Hour> - Sets the time of day (0-23)
 cheat pausetimeofday - Pauses/Unpauses the time of day
@@ -3065,6 +3067,107 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					PlayerController->ClientMessage(FString(L"God mode disabled!"), FName(), 1);
 				}
 			}
+			else if (command == "godall")
+			{
+				UObject* NetDriver = UWorld::GetWorld()->NetDriver;
+
+				if (!NetDriver)
+				{
+					PlayerController->ClientMessage(FString(L"NetDriver not found!"), FName(), 1.f);
+					return;
+				}
+
+				UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
+				auto& ClientConnections = Driver->ClientConnections;
+
+				if (ClientConnections.Num() <= 0)
+				{
+					PlayerController->ClientMessage(FString(L"No players found!"), FName(), 1.f);
+					return;
+				}
+
+				int GodCount = 0;
+
+				for (int i = 0; i < ClientConnections.Num(); i++)
+				{
+					UNetConnection* Connection = ClientConnections[i];
+
+					if (!Connection)
+						continue;
+
+					auto PC = (AFortPlayerControllerAthena*)Connection->PlayerController;
+
+					if (!PC || !PC->Pawn || !PC->MyFortPawn)
+						continue;
+
+					auto Pawn = PC->Pawn;
+					auto PS = PC->PlayerState;
+
+					float MaxHealth = Pawn->GetMaxHealth();
+					float MaxShield = Pawn->GetMaxShield();
+
+					if (VersionInfo.FortniteVersion >= 21)
+					{
+						Pawn->bCanBeDamaged ^= 1;
+
+						if (Pawn->bCanBeDamaged == 0)
+						{
+							Pawn->SetHealth(MaxHealth);
+							Pawn->SetShield(MaxShield);
+
+							if (PS && PS->AbilitySystemComponent)
+							{
+								auto Handle = PS->AbilitySystemComponent->MakeEffectContext();
+								FGameplayTag Tag;
+								static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+								Tag.TagName = Cue;
+								auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+								memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+								free(PredictionKey);
+							}
+						}
+					}
+					else
+					{
+						auto& Health = PC->MyFortPawn->HealthSet->Health;
+						float MinValue = Pawn->GetMaxHealth();
+
+						if (Health.Minimum != MinValue)
+						{
+							Health.Minimum = MinValue;
+							PC->MyFortPawn->HealthSet->OnRep_Health(Health);
+
+							Pawn->SetHealth(MaxHealth);
+							Pawn->SetShield(MaxShield);
+
+							if (PS && PS->AbilitySystemComponent)
+							{
+								auto Handle = PS->AbilitySystemComponent->MakeEffectContext();
+								FGameplayTag Tag;
+								static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+								Tag.TagName = Cue;
+								auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+								memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+								free(PredictionKey);
+							}
+						}
+						else
+						{
+							Health.Minimum = 0.f;
+							PC->MyFortPawn->HealthSet->OnRep_Health(Health);
+						}
+					}
+
+					GodCount++;
+				}
+
+				auto msg = L"Toggled god mode for " + std::to_wstring(GodCount) + L" player(s)!";
+				PlayerController->ClientMessage(FString(msg.c_str()), FName(), 1.f);
+			}
 			else if (command == "speed")
 			{
 				float Speed = 1.0f;
@@ -3339,6 +3442,67 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					PlayerController->ClientMessage(FString(L"Regenerated the player's health!"), FName(), 1.f);
 				}
+			}
+			else if (command == "regenall")
+			{
+				UObject* NetDriver = UWorld::GetWorld()->NetDriver;
+
+				if (!NetDriver)
+				{
+					PlayerController->ClientMessage(FString(L"NetDriver not found!"), FName(), 1.f);
+					return;
+				}
+
+				UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
+				auto& ClientConnections = Driver->ClientConnections;
+
+				if (ClientConnections.Num() <= 0)
+				{
+					PlayerController->ClientMessage(FString(L"No players found!"), FName(), 1.f);
+					return;
+				}
+
+				int RegenCount = 0;
+
+				for (int i = 0; i < ClientConnections.Num(); i++)
+				{
+					UNetConnection* Connection = ClientConnections[i];
+
+					if (!Connection)
+						continue;
+
+					auto PC = (AFortPlayerControllerAthena*)Connection->PlayerController;
+
+					if (!PC || !PC->Pawn)
+						continue;
+
+					auto Pawn = PC->Pawn;
+					auto PS = PC->PlayerState;
+
+					float MaxHealth = Pawn->GetMaxHealth();
+					float MaxShield = Pawn->GetMaxShield();
+
+					Pawn->SetHealth(MaxHealth);
+					Pawn->SetShield(MaxShield);
+
+					if (PS && PS->AbilitySystemComponent)
+					{
+						auto Handle = PS->AbilitySystemComponent->MakeEffectContext();
+						FGameplayTag Tag;
+						static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+						Tag.TagName = Cue;
+						auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+						memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+						PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
+						PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+						free(PredictionKey);
+					}
+
+					RegenCount++;
+				}
+
+				auto msg = L"Regenerated health and shield for " + std::to_wstring(RegenCount) + L" player(s)!";
+				PlayerController->ClientMessage(FString(msg.c_str()), FName(), 1.f);
 			}
 			else if (command == "changename" || command == "name")
 			{
