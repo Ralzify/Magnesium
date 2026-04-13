@@ -1864,6 +1864,57 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			}
 			else if (auto Weapon = DeathReport.DamageCauser ? DeathReport.DamageCauser->Cast<AFortWeapon>() : nullptr)
 				DamageCauser = Weapon;
+
+			auto DeadPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
+			auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+
+			UNetDriver* Driver = static_cast<UNetDriver*>(UWorld::GetWorld()->NetDriver);
+
+			auto FindConnectionByPlayerState = [&](AFortPlayerStateAthena* PS) -> UNetConnection*
+				{
+					if (!PS || !Driver)
+						return nullptr;
+
+					for (int i = 0; i < Driver->ClientConnections.Num(); i++)
+					{
+						auto Conn = Driver->ClientConnections[i];
+						if (!Conn || !Conn->PlayerController)
+							continue;
+
+						if (Conn->PlayerController->PlayerState == PS)
+							return Conn;
+					}
+
+					return nullptr;
+				};
+
+			float KillDistanceCm = KillerPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
+			int KillDistanceMeters = static_cast<int>(KillDistanceCm / 100.f);
+
+			auto KillerConn = FindConnectionByPlayerState(KillerPlayerState);
+			auto DeadConn = FindConnectionByPlayerState(DeadPlayerState);
+
+			std::string KillerName = GUI::GetPlayerName(KillerPlayerState, KillerConn);
+			std::string DeadName = GUI::GetPlayerName(DeadPlayerState, DeadConn);
+
+			std::string Distance = std::to_string(KillDistanceMeters);
+
+			FConfiguration::ElimKillerName = KillerName;
+			FConfiguration::ElimEliminatedName = DeadName;
+			FConfiguration::ElimDistance = Distance;
+			FConfiguration::ElimStatusMessage = ":3";
+
+			auto KillerWeapon = DamageCauser ? DamageCauser->WeaponData : nullptr;
+
+			FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
+			FConfiguration::ElimWeaponName = Name.ToString();
+
+			if (VersionInfo.FortniteVersion < 16.00 && !FConfiguration::bUseWinLines)
+			{
+				DamageCauser = nullptr;
+				KillerWeapon = nullptr;
+			}
+
 			if (RemoveFromAlivePlayers_)
 			{
 				((void (*)(AFortGameMode*, AFortPlayerControllerAthena*, AFortPlayerStateAthena*, AFortPlayerPawnAthena*, UFortItemDefinition*, uint8, char))RemoveFromAlivePlayers_)(GameMode, PlayerController, KillerPlayerState == PlayerState ? nullptr : KillerPlayerState, KillerPawn, DamageCauser->IsA<AFortWeapon>() ? DamageCauser->WeaponData : nullptr, PlayerState->HasDeathInfo() ? PlayerState->DeathInfo.DeathCause : 0, 0);
@@ -1880,8 +1931,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (FConfiguration::bIsCustomMap && FConfiguration::AutoEndGame)
 			{
 				GUI::gsStatus = Ended;
-
-				auto KillerWeapon = DamageCauser ? DamageCauser->WeaponData : nullptr;
 
 				KillerPlayerController->PlayWinEffects(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause, false);
 				KillerPlayerController->ClientNotifyWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
@@ -1915,48 +1964,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					GameState->WinningPlayerState = KillerPlayerState;
 					GameState->OnRep_WinningPlayerState();
 				}
-
-				auto DeadPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
-				auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
-
-				UNetDriver* Driver = static_cast<UNetDriver*>(UWorld::GetWorld()->NetDriver);
-
-				auto FindConnectionByPlayerState = [&](AFortPlayerStateAthena* PS) -> UNetConnection*
-					{
-						if (!PS || !Driver)
-							return nullptr;
-
-						for (int i = 0; i < Driver->ClientConnections.Num(); i++)
-						{
-							auto Conn = Driver->ClientConnections[i];
-							if (!Conn || !Conn->PlayerController)
-								continue;
-
-							if (Conn->PlayerController->PlayerState == PS)
-								return Conn;
-						}
-
-						return nullptr;
-					};
-
-				float KillDistanceCm = KillerPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
-				int KillDistanceMeters = static_cast<int>(KillDistanceCm / 100.f);
-
-				auto KillerConn = FindConnectionByPlayerState(KillerPlayerState);
-				auto DeadConn = FindConnectionByPlayerState(DeadPlayerState);
-
-				std::string KillerName = GUI::GetPlayerName(KillerPlayerState, KillerConn);
-				std::string DeadName = GUI::GetPlayerName(DeadPlayerState, DeadConn);
-
-				std::string Distance = std::to_string(KillDistanceMeters);
-
-				FConfiguration::ElimKillerName = KillerName;
-				FConfiguration::ElimEliminatedName = DeadName;
-				FConfiguration::ElimDistance = Distance;
-				FConfiguration::ElimStatusMessage = ":3";
-
-				FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
-				FConfiguration::ElimWeaponName = Name.ToString();
 			}
 
 			if (PlayerController->Pawn && KillerPlayerState && KillerPlayerState != PlayerState && KillerPlayerState->Place == 1)
@@ -1968,8 +1975,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				}*/
 
 				GUI::gsStatus = Ended;
-
-				auto KillerWeapon = DamageCauser ? DamageCauser->WeaponData : nullptr;
 
 				if (FConfiguration::bUseWinLines)
 				{
@@ -2017,48 +2022,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					GameState->WinningPlayerState = KillerPlayerState;
 					GameState->OnRep_WinningPlayerState();
 				}
-
-				auto DeadPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
-				auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
-
-				UNetDriver* Driver = static_cast<UNetDriver*>(UWorld::GetWorld()->NetDriver);
-
-				auto FindConnectionByPlayerState = [&](AFortPlayerStateAthena* PS) -> UNetConnection*
-					{
-						if (!PS || !Driver)
-							return nullptr;
-
-						for (int i = 0; i < Driver->ClientConnections.Num(); i++)
-						{
-							auto Conn = Driver->ClientConnections[i];
-							if (!Conn || !Conn->PlayerController)
-								continue;
-
-							if (Conn->PlayerController->PlayerState == PS)
-								return Conn;
-						}
-
-						return nullptr;
-					};
-
-				float KillDistanceCm = KillerPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
-				int KillDistanceMeters = static_cast<int>(KillDistanceCm / 100.f);
-
-				auto KillerConn = FindConnectionByPlayerState(KillerPlayerState);
-				auto DeadConn = FindConnectionByPlayerState(DeadPlayerState);
-
-				std::string KillerName = GUI::GetPlayerName(KillerPlayerState, KillerConn);
-				std::string DeadName = GUI::GetPlayerName(DeadPlayerState, DeadConn);
-
-				std::string Distance = std::to_string(KillDistanceMeters);
-
-				FConfiguration::ElimKillerName = KillerName;
-				FConfiguration::ElimEliminatedName = DeadName;
-				FConfiguration::ElimDistance = Distance;
-				FConfiguration::ElimStatusMessage = ":3";
-
-				FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
-				FConfiguration::ElimWeaponName = Name.ToString();
 			}
 		}
 

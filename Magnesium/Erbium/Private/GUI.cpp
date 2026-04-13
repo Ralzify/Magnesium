@@ -2313,8 +2313,7 @@ void GUI::Init()
 
             if (gsStatus < Joinable)
             {
-                if (VersionInfo.FortniteVersion >= 16.00)
-                    ImGui::Checkbox("Toggle Swag Lines", &FConfiguration::bUseWinLines);
+                ImGui::Checkbox("Toggle Swag Lines", &FConfiguration::bUseWinLines);
 
                 if (VersionInfo.FortniteVersion <= 23.50)
                     ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
