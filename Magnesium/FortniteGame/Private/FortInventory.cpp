@@ -54,7 +54,7 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
         ((AFortPlayerControllerAthena*)Owner)->ClientEquipItem(Item->ItemEntry.ItemGuid, true);
     }*/
 
-    if (VersionInfo.FortniteVersion < 3)
+    if (VersionInfo.FortniteVersion <= 3.60)
     {
         auto PlayerController = (AFortPlayerControllerAthena*)Owner;
         auto PlayerState = PlayerController ? (AFortPlayerStateAthena*)PlayerController->PlayerState : nullptr;
