@@ -57,39 +57,12 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
     if (VersionInfo.FortniteVersion < 3)
     {
         auto PlayerController = (AFortPlayerControllerAthena*)Owner;
-        if (IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetBuildingPiece() || Def->ItemType == EFortItemType::GetTrap() || Def->ItemType == EFortItemType::GetWeaponHarvest())
+        auto PlayerState = PlayerController ? (AFortPlayerStateAthena*)PlayerController->PlayerState : nullptr;
+        bool bIsBotInventory = PlayerState && PlayerState->HasbIsABot() && PlayerState->bIsABot;
+
+        if (!bIsBotInventory && PlayerController && PlayerController->QuickBars && (IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetBuildingPiece() || Def->ItemType == EFortItemType::GetTrap() || Def->ItemType == EFortItemType::GetWeaponHarvest()))
         {
-            //auto& QuickBar = (IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetWeaponHarvest()) ? PlayerController->QuickBars->PrimaryQuickBar : PlayerController->QuickBars->SecondaryQuickBar;
-
-            //auto QuickbarSlot = (FQuickBarSlot*)malloc(FQuickBarSlot::Size());
-            //memset(QuickbarSlot, 0, FQuickBarSlot::Size());
-
-            //QuickbarSlot->bEnabled = true;
-
-            /*for (int i = 0; i < QuickBar.Slots.Num(); i++)
-            {
-                auto& Slot = QuickBar.Slots.Get(i, FQuickBarSlot::Size());
-
-                if (Slot.Items.Num() > 0)
-                    continue;
-
-                Slot.Items.Add(Item->ItemEntry.ItemGuid);
-                break;
-            }*/
-            //QuickBar.Slots.Add(*QuickbarSlot, FQuickBarSlot::Size());
-            //free(QuickbarSlot);
-
-            /*if (IsPrimaryQuickbar(Def))
-                PlayerController->QuickBars->OnRep_PrimaryQuickBar();
-            else
-                PlayerController->QuickBars->OnRep_SecondaryQuickBar();*/
-            ((AFortPlayerControllerAthena*)Owner)->QuickBars->ServerAddItemInternal(Item->ItemEntry.ItemGuid, !(IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetWeaponHarvest()), -3);
-        }
-
-        if (Def->ItemType == EFortItemType::GetWeaponHarvest())
-        {
-            //PlayerController->ServerExecuteInventoryItem(Item->ItemEntry.ItemGuid);
-            //PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
+            PlayerController->QuickBars->ServerAddItemInternal(Item->ItemEntry.ItemGuid, !(IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetWeaponHarvest()), -3);
         }
     }
 
