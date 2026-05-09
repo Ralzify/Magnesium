@@ -713,17 +713,14 @@ void GUI::Init()
             ImGui::Text("Match Settings:");
             SmallSeparator(Width);
 
-            if (VersionInfo.FortniteVersion > 5.41 && VersionInfo.FortniteVersion <= 16.00)
+            if (gsStatus >= Joinable && gsStatus < Ended && VersionInfo.FortniteVersion > 5.41 && VersionInfo.FortniteVersion <= 16.00)
             {
                 if (ImGui::Checkbox("Glider Redeploy", &FConfiguration::bGliderRedeploy))
                 {
-                    if (gsStatus >= Joinable)
-                    {
-                        auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                        auto GliderGameState = GliderGameMode->GameState;
-                        if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
-                            GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
-                    }
+                    auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                    auto GliderGameState = GliderGameMode->GameState;
+                    if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
+                        GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
                 }
             }
 
@@ -1626,6 +1623,9 @@ void GUI::Init()
 
                     Memcury::Util::CopyToClipboard(std::to_string(Location.X) + " " + std::to_string(Location.Y) + " " + std::to_string(Location.Z));
 				}
+
+                if (ImGui::Button("Teleport All Players", ImVec2(Width, Height)))
+                    AFortPlayerControllerAthena::TeleportAllPlayersTo(TargetPC);
 
                 if (ImGui::Button("Regenerate Health & Shield", ImVec2(Width, Height)))
                 {

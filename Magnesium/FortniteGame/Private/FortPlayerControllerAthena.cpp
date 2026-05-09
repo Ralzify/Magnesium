@@ -2408,7 +2408,7 @@ public:
 
 void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 {
-	if (!PickupEntry || !PickupEntry->ItemDefinition)
+	if (!PickupEntry || !PickupEntry->ItemDefinition || !WorldInventory)
 		return;
 
 	auto MaxStack = (int32)PickupEntry->ItemDefinition->GetMaxStackSize();
@@ -2664,6 +2664,233 @@ extern uint64_t ApplyCharacterCustomization;
 extern uint64_t NotifyGameMemberAdded_;
 
 int32 PlayerBotID = 0;
+
+static std::string TrimPlayerCommandString(std::string Str)
+{
+	auto Start = Str.find_first_not_of(" \t");
+
+	if (Start == std::string::npos)
+		return "";
+
+	auto End = Str.find_last_not_of(" \t");
+	return Str.substr(Start, End - Start + 1);
+}
+
+static std::string NormalizePlayerCommandString(std::string Str)
+{
+	Str = TrimPlayerCommandString(Str);
+	std::transform(Str.begin(), Str.end(), Str.begin(), [](unsigned char c) { return std::tolower(c); });
+	return Str;
+}
+
+static std::string GetResolvedPlayerNameForCommand(AFortPlayerControllerAthena* PlayerController, UNetConnection* Connection, int Index)
+{
+	auto PlayerState = PlayerController ? PlayerController->PlayerState : nullptr;
+	std::string PlayerName = GUI::GetPlayerName(PlayerState, Connection);
+	auto RequestURL = GUI::GetRequestURL(Connection);
+
+	if (RequestURL && RequestURL->Data && RequestURL->NumElements)
+	{
+		auto RequestURLStr = RequestURL->ToString();
+		std::size_t pos = RequestURLStr.find("Name=");
+
+		if (pos != std::string::npos)
+		{
+			std::size_t end_pos = RequestURLStr.find('?', pos);
+			if (end_pos != std::string::npos)
+				PlayerName = RequestURLStr.substr(pos + 5, end_pos - pos - 5);
+			else
+				PlayerName = RequestURLStr.substr(pos + 5);
+		}
+	}
+
+	if (PlayerName.empty())
+		PlayerName = GUI::GetPlayerNameFromConnection(Connection);
+
+	if (PlayerName.empty())
+		PlayerName = std::string("Player ") + std::to_string(Index + 1);
+
+	return PlayerName;
+}
+
+static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::string& Name, AFortPlayerControllerAthena* RequestingPlayer, std::string& MatchedName, bool& bAmbiguous)
+{
+	bAmbiguous = false;
+	MatchedName.clear();
+
+	auto World = UWorld::GetWorld();
+
+	if (!World || !World->NetDriver)
+		return nullptr;
+
+	auto Driver = (UNetDriver*)World->NetDriver;
+	auto& ClientConnections = Driver->ClientConnections;
+	auto NormalizedName = NormalizePlayerCommandString(Name);
+
+	if (NormalizedName.empty())
+		return nullptr;
+
+	AFortPlayerControllerAthena* ExactMatch = nullptr;
+	AFortPlayerControllerAthena* PartialMatch = nullptr;
+	std::string ExactName;
+	std::string PartialName;
+	int ExactMatches = 0;
+	int PartialMatches = 0;
+
+	for (int i = 0; i < ClientConnections.Num(); i++)
+	{
+		auto Connection = ClientConnections[i];
+
+		if (!Connection || !Connection->PlayerController)
+			continue;
+
+		auto PC = (AFortPlayerControllerAthena*)Connection->PlayerController;
+
+		if (!PC || PC == RequestingPlayer || !PC->Pawn)
+			continue;
+
+		auto PS = PC->PlayerState;
+
+		if (PS && PS->HasbIsABot() && PS->bIsABot)
+			continue;
+
+		auto PlayerName = GetResolvedPlayerNameForCommand(PC, Connection, i);
+		auto NormalizedPlayerName = NormalizePlayerCommandString(PlayerName);
+
+		if (NormalizedPlayerName == NormalizedName)
+		{
+			ExactMatch = PC;
+			ExactName = PlayerName;
+			ExactMatches++;
+			continue;
+		}
+
+		if (NormalizedPlayerName.find(NormalizedName) != std::string::npos)
+		{
+			PartialMatch = PC;
+			PartialName = PlayerName;
+			PartialMatches++;
+		}
+	}
+
+	if (ExactMatches > 1 || (ExactMatches == 0 && PartialMatches > 1))
+	{
+		bAmbiguous = true;
+		return nullptr;
+	}
+
+	if (ExactMatches == 1)
+	{
+		MatchedName = ExactName;
+		return ExactMatch;
+	}
+
+	if (PartialMatches == 1)
+	{
+		MatchedName = PartialName;
+		return PartialMatch;
+	}
+
+	return nullptr;
+}
+
+int AFortPlayerControllerAthena::TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage)
+{
+	if (!TargetPlayer || !TargetPlayer->Pawn)
+		return 0;
+
+	UObject* NetDriver = UWorld::GetWorld()->NetDriver;
+
+	if (!NetDriver)
+	{
+		if (bSendMessage)
+			TargetPlayer->ClientMessage(FString(L"NetDriver not found!"), FName(), 1.f);
+		return 0;
+	}
+
+	UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
+	auto& ClientConnections = Driver->ClientConnections;
+
+	if (ClientConnections.Num() <= 0)
+	{
+		if (bSendMessage)
+			TargetPlayer->ClientMessage(FString(L"No players found!"), FName(), 1.f);
+		return 0;
+	}
+
+	std::vector<AFortPlayerControllerAthena*> TargetPlayers;
+	TargetPlayers.reserve(ClientConnections.Num());
+
+	for (int i = 0; i < ClientConnections.Num(); i++)
+	{
+		UNetConnection* Connection = ClientConnections[i];
+
+		if (!Connection)
+			continue;
+
+		auto PC = (AFortPlayerControllerAthena*)Connection->PlayerController;
+
+		if (!PC || PC == TargetPlayer || !PC->Pawn)
+			continue;
+
+		auto PS = PC->PlayerState;
+
+		if (PS && PS->HasbIsABot() && PS->bIsABot)
+			continue;
+
+		TargetPlayers.push_back(PC);
+	}
+
+	int TargetCount = (int)TargetPlayers.size();
+
+	if (TargetCount <= 0)
+	{
+		if (bSendMessage)
+			TargetPlayer->ClientMessage(FString(L"No real players found!"), FName(), 1.f);
+		return 0;
+	}
+
+	auto TargetPawn = TargetPlayer->Pawn;
+	auto TargetLocation = TargetPawn->K2_GetActorLocation();
+	auto TargetRotation = TargetPawn->K2_GetActorRotation();
+	int TeleportCount = 0;
+
+	for (int i = 0; i < TargetCount; i++)
+	{
+		auto PC = TargetPlayers[i];
+		auto Pawn = PC->Pawn;
+
+		if (!Pawn)
+			continue;
+
+		int Ring = i / 8;
+		int Slot = i % 8;
+		int RemainingPlayers = TargetCount - (Ring * 8);
+		int PlayersOnRing = RemainingPlayers < 8 ? RemainingPlayers : 8;
+		float Radius = 350.f + (Ring * 250.f);
+		float AngleStep = 6.2831853071795864769f / PlayersOnRing;
+		float Angle = ((float)TargetRotation.Yaw * 0.017453292519943295f) + (Slot * AngleStep);
+
+		FVector TeleportLoc = TargetLocation;
+		TeleportLoc.X += cos(Angle) * Radius;
+		TeleportLoc.Y += sin(Angle) * Radius;
+		TeleportLoc.Z += 200.f;
+
+		Pawn->K2_TeleportTo(TeleportLoc, TargetRotation, false, true);
+		if (Pawn->CharacterMovement)
+			Pawn->CharacterMovement->Velocity = FVector{};
+		TeleportCount++;
+	}
+
+	if (bSendMessage)
+	{
+		auto msg = L"Teleported " + std::to_wstring(TeleportCount) + L" player(s) around you!";
+		TargetPlayer->ClientMessage(FString(msg.c_str()), FName(), 1.f);
+	}
+
+	return TeleportCount;
+}
+
 void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 {
 	FString Msg;
@@ -2725,10 +2952,12 @@ cheat timeofday <Hour> - Sets the time of day (0-23)
 cheat pausetimeofday - Pauses/Unpauses the time of day
 cheat spawnbot - Spawns a player bot at your location (WIP)
 cheat tpbot - Teleports the player bot to your location
+cheat tpall - Teleports all real players around your location
 cheat botemote - Plays the 'Accolades' emote to the player bot
 cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
+cheat tpto <player name> - Teleports you next to a real player
 cheat tp - Teleports to where your crosshair is aiming
 cheat tp <X> <Y> <Z> - Teleports to a location
 cheat launch <X> <Y> <Z> - Launches the player
@@ -4307,6 +4536,71 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					}
 				}
 			}
+			else if (command == "tpall")
+			{
+				TeleportAllPlayersTo(PlayerController);
+			}
+			else if (command == "tpto")
+			{
+				auto PlayerPawn = PlayerController->Pawn;
+
+				if (!PlayerPawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
+					return;
+				}
+
+				auto PlayerNameStart = fullCommand.find(' ');
+
+				if (PlayerNameStart == std::string::npos)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat tpto <player name>"), FName(), 1.f);
+					return;
+				}
+
+				std::string PlayerNameInput = fullCommand.substr(PlayerNameStart + 1).c_str();
+				auto PlayerName = TrimPlayerCommandString(PlayerNameInput);
+
+				if (PlayerName.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat tpto <player name>"), FName(), 1.f);
+					return;
+				}
+
+				std::string MatchedName;
+				bool bAmbiguous = false;
+				auto TargetPC = FindRealPlayerByNameForCommand(PlayerName, PlayerController, MatchedName, bAmbiguous);
+
+				if (bAmbiguous)
+				{
+					PlayerController->ClientMessage(FString(L"Multiple real players matched that name. Please be more specific."), FName(), 1.f);
+					return;
+				}
+
+				if (!TargetPC || !TargetPC->Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find a real player with that name."), FName(), 1.f);
+					return;
+				}
+
+				auto TargetPawn = TargetPC->Pawn;
+				auto SideVector = TargetPawn->GetActorRightVector();
+				SideVector.Z = 0.0f;
+
+				if (SideVector.IsZero())
+					SideVector = FVector(1.f, 0.f, 0.f);
+				else
+					SideVector.Normalize();
+
+				auto TeleportLoc = TargetPawn->K2_GetActorLocation() + (SideVector * 250.f);
+				TeleportLoc.Z += 50.f;
+
+				PlayerPawn->K2_TeleportTo(TeleportLoc, TargetPawn->K2_GetActorRotation(), false, true);
+				if (PlayerPawn->CharacterMovement)
+					PlayerPawn->CharacterMovement->Velocity = FVector{};
+
+				PlayerController->ClientMessage(FString(L"Teleported next to player!"), FName(), 1.f);
+			}
 			else if (command == "botemote")
 			{
 				const UAthenaDanceItemDefinition* Emote = nullptr;
@@ -5178,6 +5472,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						FQuat SpawnQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
 						FTransform SpawnTransform(Loc, SpawnQuat, FVector(1.f, 1.f, 1.f));
 						auto Actor = UWorld::SpawnActor(Class, SpawnTransform);
+						if (!Actor)
+							continue;
 
 						if (auto Car = Actor->Cast<AFortDagwoodVehicle>())
 							Car->SetFuel(100.f);

@@ -89,8 +89,17 @@ void UFortKismetLibrary::GiveItemToInventoryOwner(UObject* Object, FFrame& Stack
 		Stack.StepCompiledIn(&WeaponAmmoOverride);
 	Stack.IncrementCode();
 
-	auto PlayerController = (AFortPlayerControllerAthena*)InventoryOwner.ObjectPointer;
+	if (!InventoryOwner.ObjectPointer || !ItemDefinition || NumberToGive <= 0)
+		return;
+
+	auto PlayerController = InventoryOwner.ObjectPointer->Cast<AFortPlayerControllerAthena>();
+	if (!PlayerController || !PlayerController->WorldInventory)
+		return;
+
 	auto ItemEntry = AFortInventory::MakeItemEntry(ItemDefinition, NumberToGive, ItemLevel);
+	if (!ItemEntry)
+		return;
+
 	if (WeaponAmmoOverride != -1)
 		ItemEntry->LoadedAmmo = WeaponAmmoOverride;
 	PlayerController->InternalPickup(ItemEntry);
