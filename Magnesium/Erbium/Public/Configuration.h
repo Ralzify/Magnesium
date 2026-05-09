@@ -29,6 +29,16 @@ struct FConfiguration
 
     static inline auto Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
 
+    static inline bool IsKnownS27CustomMapPlaylist()
+    {
+        if (VersionInfo.FortniteVersion != 27.11)
+            return false;
+
+        return wcsstr(Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn")
+            || wcsstr(Playlist, L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett")
+            || wcsstr(Playlist, L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett");
+    }
+
     static inline auto CreativePlot = L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium";
 
     static inline auto bIsCustomMap = false;

@@ -339,15 +339,61 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         if (Playlist)
         {
             auto AdditionalPlaylistLevelsStreamed__Off = GameState->GetOffset("AdditionalPlaylistLevelsStreamed");
+            auto AdditionalLevelStruct = FAdditionalLevelStreamed::StaticStruct();
 
-            if (AdditionalPlaylistLevelsStreamed__Off != -1)
+            if (FConfiguration::IsKnownS27CustomMapPlaylist())
+            {
+                if (Playlist->HasAdditionalLevels())
+                {
+                    for (auto& Level : Playlist->AdditionalLevels)
+                    {
+                        bool Success = false;
+                        ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
+                        if (AdditionalLevelStruct)
+                        {
+                            auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
+                            memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
+                            level->bIsServerOnly = false;
+                            level->LevelName = Level.ObjectID.AssetPathName;
+                            if (Success)
+                                GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
+                            free(level);
+                        }
+                        else
+                            GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
+                    }
+                }
+
+                if (Playlist->HasAdditionalLevelsServerOnly())
+                {
+                    for (auto& Level : Playlist->AdditionalLevelsServerOnly)
+                    {
+                        bool Success = false;
+                        ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
+
+                        if (AdditionalLevelStruct)
+                        {
+
+                            auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
+                            memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
+                            level->bIsServerOnly = true;
+                            level->LevelName = Level.ObjectID.AssetPathName;
+                            if (Success)
+                                GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
+                            free(level);
+                        }
+                        else
+                            GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
+                    }
+                }
+            }
+            else if (AdditionalPlaylistLevelsStreamed__Off != -1)
             {
                 TArray<FPlaylistStreamedLevelData>& AdditionalPlaylistLevels
                     = *(TArray<FPlaylistStreamedLevelData>*)(__int64(GameState) + AdditionalPlaylistLevelsStreamed__Off - 0x10);
 
                 AdditionalPlaylistLevels.Free();
 
-                auto AdditionalLevelStruct = FAdditionalLevelStreamed::StaticStruct();
                 if (Playlist->HasAdditionalLevels())
                 {
                     for (auto& Level : Playlist->AdditionalLevels)
@@ -394,7 +440,8 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
         }
 
-        GameState->OnRep_AdditionalPlaylistLevelsStreamed();
+        if (!FConfiguration::IsKnownS27CustomMapPlaylist())
+            GameState->OnRep_AdditionalPlaylistLevelsStreamed();
 
         // misc C1 poi things
         if (VersionInfo.FortniteVersion >= 6 && VersionInfo.FortniteVersion < 7)
@@ -1221,7 +1268,7 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
 
     while (!Pawn)
     {
-        auto PlayerStart = GameMode->ChoosePlayerStart(NewPlayer);
+        auto PlayerStart = FConfiguration::IsKnownS27CustomMapPlaylist() ? GameMode->ChoosePlayerStart() : GameMode->ChoosePlayerStart(NewPlayer);
         if (PlayerStart)
             Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(GameMode->GetDefaultPawnClassForController(NewPlayer), PlayerStart->GetTransform(), NewPlayer, 3);
     }

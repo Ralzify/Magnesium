@@ -142,8 +142,8 @@ void Main()
         //if (SprintCVar)
         //    *SprintCVar = false;
 
-        //if (HurdleCVar)
-        //    *HurdleCVar = false;
+        if (FConfiguration::IsKnownS27CustomMapPlaylist() && HurdleCVar)
+            *HurdleCVar = false;
 
         if (SlideCVar)
             *SlideCVar = false;
@@ -151,7 +151,8 @@ void Main()
         if (MantleCVar)
             *MantleCVar = false;
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.TacticalSprint 0"), nullptr);
-        //UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Hurdle 0"), nullptr);
+        if (FConfiguration::IsKnownS27CustomMapPlaylist())
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Hurdle 0"), nullptr);
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Sliding 0"), nullptr);
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Clambering 0"), nullptr);
     }

@@ -492,7 +492,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 	if (bSkipAircraft)
 	{
 		printf("[GamePhaseLogic] Skipping aircraft\n");
-		SetGamePhase(EAthenaGamePhase::SafeZones);
+		SetGamePhase(FConfiguration::IsKnownS27CustomMapPlaylist() && bSkipWarmup ? EAthenaGamePhase::None : EAthenaGamePhase::SafeZones);
 		SetGamePhaseStep(EAthenaGamePhaseStep::StormForming);
 
 		return;
@@ -712,7 +712,8 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 		{
 			finishedFlight = true;
 
-			SetGamePhase(EAthenaGamePhase::SafeZones);
+			if (!FConfiguration::IsKnownS27CustomMapPlaylist())
+				SetGamePhase(EAthenaGamePhase::SafeZones);
 			SetGamePhaseStep(EAthenaGamePhaseStep::StormForming);
 		}
 	}

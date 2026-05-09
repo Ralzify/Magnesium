@@ -760,14 +760,22 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 		else
 			PlayerController = (AFortPlayerControllerAthena*)Context;
 
-		PlayerController->StateName = FName(L"Inactive");
+		if (FConfiguration::IsKnownS27CustomMapPlaylist())
+		{
+			GameMode->RestartPlayer(PlayerController);
+			PlayerController->ClientSetRotation(Rotation, true);
+		}
+		else
+		{
+			PlayerController->StateName = FName(L"Inactive");
 
-		if (PlayerController->Pawn)
-			PlayerController->UnPossess(PlayerController->Pawn);
+			if (PlayerController->Pawn)
+				PlayerController->UnPossess(PlayerController->Pawn);
 
-		GameMode->RestartPlayer(PlayerController);
-		//PlayerController->ServerRestartPlayer();
-		PlayerController->SetControlRotation(Rotation);
+			GameMode->RestartPlayer(PlayerController);
+			//PlayerController->ServerRestartPlayer();
+			PlayerController->SetControlRotation(Rotation);
+		}
 
 		if (PlayerController->MyFortPawn)
 		{
