@@ -3665,7 +3665,54 @@ static void TryCallNukeTargetFunctions(AActor* Rocket, AFortPlayerPawnAthena* Ta
 		TryCallNukeTargetFunction<AActor*>(Rocket, FunctionName, TargetPawn);
 }
 
-static void ConfigureNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& TargetLocation, const FVector& Velocity)
+static constexpr float NukeRocketPlayerDamage = 25.f;
+static constexpr float NukeRocketEnvironmentDamage = 1000.f;
+static constexpr float NukeRocketDamageRadius = 650.f;
+
+static bool TryCallFloatCommandFunction(UObject* Object, const char* FunctionName, float Value)
+{
+	if (!Object)
+		return false;
+
+	auto Function = Object->GetFunction(FunctionName);
+
+	if (!FunctionHasSingleCommandInputParam(Function, sizeof(float)))
+		return false;
+
+	Object->Call<void>(Function, Value);
+	return true;
+}
+
+static void ConfigureNukeRocketDamageProperties(AActor* Rocket, bool bDamageEnabled)
+{
+	if (!Rocket)
+		return;
+
+	auto PlayerDamage = bDamageEnabled ? NukeRocketPlayerDamage : 0.f;
+	auto EnvironmentDamage = bDamageEnabled ? NukeRocketEnvironmentDamage : 0.f;
+
+	SetReflectedProperty<float>(Rocket, "Damage", PlayerDamage);
+	SetReflectedProperty<float>(Rocket, "BaseDamage", PlayerDamage);
+	SetReflectedProperty<float>(Rocket, "MaxDamage", PlayerDamage);
+	SetReflectedProperty<float>(Rocket, "PlayerDamage", PlayerDamage);
+	SetReflectedProperty<float>(Rocket, "DamageRadius", NukeRocketDamageRadius);
+	SetReflectedProperty<float>(Rocket, "ExplosionRadius", NukeRocketDamageRadius);
+	SetReflectedProperty<float>(Rocket, "OuterExplosionRadius", NukeRocketDamageRadius);
+	SetReflectedProperty<float>(Rocket, "InnerExplosionRadius", NukeRocketDamageRadius * 0.5f);
+	SetReflectedProperty<float>(Rocket, "EnvDamage", EnvironmentDamage);
+	SetReflectedProperty<float>(Rocket, "EnvironmentalDamage", EnvironmentDamage);
+	SetReflectedProperty<float>(Rocket, "BuildingDamage", EnvironmentDamage);
+
+	SetReflectedBoolProperty(Rocket, "bCanDamage", bDamageEnabled);
+	SetReflectedBoolProperty(Rocket, "bCanDamagePlayers", bDamageEnabled);
+	SetReflectedBoolProperty(Rocket, "bDamagePlayers", bDamageEnabled);
+	SetReflectedBoolProperty(Rocket, "bCanDamageEnvironment", bDamageEnabled);
+	SetReflectedBoolProperty(Rocket, "bDamageEnvironment", bDamageEnabled);
+	SetReflectedBoolProperty(Rocket, "bDamageBuildings", bDamageEnabled);
+	SetReflectedBoolProperty(Rocket, "bExplodeOnImpact", false);
+}
+
+static void ConfigureNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& TargetLocation, const FVector& Velocity, bool bDamageEnabled)
 {
 	if (!Rocket)
 		return;
@@ -3676,6 +3723,8 @@ static void ConfigureNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPaw
 		Rocket->bAlwaysRelevant = true;
 	if (Rocket->HasNetUpdateFrequency())
 		Rocket->NetUpdateFrequency = 100.f;
+
+	ConfigureNukeRocketDamageProperties(Rocket, bDamageEnabled);
 
 	SetReflectedProperty<FVector>(Rocket, "Velocity", Velocity);
 	SetReflectedProperty<FVector>(Rocket, "InitialVelocity", Velocity);
@@ -3754,20 +3803,136 @@ static void ConfigureNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPaw
 struct FGuidedNukeRocket
 {
 	AActor* Rocket;
+	AActor* InstigatorPawn;
+	AFortPlayerControllerAthena* InstigatorController;
 	AFortPlayerPawnAthena* TargetPawn;
 	FVector TargetLocation;
 	float LifeSeconds;
 	float Speed;
+	bool bDamageEnabled;
+	int EnvironmentDamageContextId;
 };
 
 static std::vector<FGuidedNukeRocket> GuidedNukeRockets;
 
-static void RegisterGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& TargetLocation, float Speed)
+struct FNukeEnvironmentDamageContext
+{
+	int Id;
+	int RocketRefs;
+	std::vector<ABuildingSMActor*> Buildings;
+};
+
+static std::vector<FNukeEnvironmentDamageContext> NukeEnvironmentDamageContexts;
+static int NextNukeEnvironmentDamageContextId = 1;
+
+static FNukeEnvironmentDamageContext* FindNukeEnvironmentDamageContext(int ContextId)
+{
+	if (ContextId <= 0)
+		return nullptr;
+
+	for (auto& Context : NukeEnvironmentDamageContexts)
+	{
+		if (Context.Id == ContextId)
+			return &Context;
+	}
+
+	return nullptr;
+}
+
+static void AddNukeEnvironmentDamageContextRef(int ContextId)
+{
+	auto Context = FindNukeEnvironmentDamageContext(ContextId);
+
+	if (Context)
+		Context->RocketRefs++;
+}
+
+static void RemoveUnusedNukeEnvironmentDamageContext(int ContextId)
+{
+	if (ContextId <= 0)
+		return;
+
+	for (size_t i = 0; i < NukeEnvironmentDamageContexts.size(); i++)
+	{
+		if (NukeEnvironmentDamageContexts[i].Id == ContextId && NukeEnvironmentDamageContexts[i].RocketRefs <= 0)
+		{
+			NukeEnvironmentDamageContexts.erase(NukeEnvironmentDamageContexts.begin() + i);
+			return;
+		}
+	}
+}
+
+static void ReleaseNukeEnvironmentDamageContext(int ContextId)
+{
+	if (ContextId <= 0)
+		return;
+
+	for (size_t i = 0; i < NukeEnvironmentDamageContexts.size(); i++)
+	{
+		if (NukeEnvironmentDamageContexts[i].Id != ContextId)
+			continue;
+
+		NukeEnvironmentDamageContexts[i].RocketRefs--;
+
+		if (NukeEnvironmentDamageContexts[i].RocketRefs <= 0)
+			NukeEnvironmentDamageContexts.erase(NukeEnvironmentDamageContexts.begin() + i);
+
+		return;
+	}
+}
+
+static int CreateNukeEnvironmentDamageContext(const FVector& Center, double Radius)
+{
+	if (Radius <= 0.0)
+		return 0;
+
+	FNukeEnvironmentDamageContext Context{};
+	Context.Id = NextNukeEnvironmentDamageContextId++;
+	Context.RocketRefs = 0;
+
+	if (NextNukeEnvironmentDamageContextId <= 0)
+		NextNukeEnvironmentDamageContextId = 1;
+
+	auto RadiusSquared = Radius * Radius;
+	TArray<ABuildingSMActor*> Buildings;
+	Utils::GetAll<ABuildingSMActor>(Buildings);
+
+	Context.Buildings.reserve(Buildings.Num());
+
+	for (auto Building : Buildings)
+	{
+		if (!IsUsableDeathObject(Building) || (Building->HasbDestroyed() && Building->bDestroyed))
+			continue;
+
+		if ((Building->K2_GetActorLocation() - Center).SizeSquared() <= RadiusSquared)
+			Context.Buildings.push_back(Building);
+	}
+
+	Buildings.Free();
+
+	if (Context.Buildings.empty())
+		return 0;
+
+	NukeEnvironmentDamageContexts.push_back(std::move(Context));
+	return NukeEnvironmentDamageContexts.back().Id;
+}
+
+static void RegisterGuidedNukeRocket(AActor* Rocket, AFortPlayerControllerAthena* InstigatorController, AFortPlayerPawnAthena* TargetPawn, const FVector& TargetLocation, float Speed, bool bDamageEnabled, int EnvironmentDamageContextId)
 {
 	if (!Rocket)
 		return;
 
-	GuidedNukeRockets.push_back({ Rocket, TargetPawn, TargetLocation, 8.f, Speed });
+	AddNukeEnvironmentDamageContextRef(EnvironmentDamageContextId);
+	GuidedNukeRockets.push_back({ Rocket, InstigatorController ? InstigatorController->Pawn : nullptr, InstigatorController, TargetPawn, TargetLocation, 8.f, Speed, bDamageEnabled, EnvironmentDamageContextId });
+}
+
+static void RemoveGuidedNukeRocketAt(size_t Index)
+{
+	if (Index >= GuidedNukeRockets.size())
+		return;
+
+	ReleaseNukeEnvironmentDamageContext(GuidedNukeRockets[Index].EnvironmentDamageContextId);
+	GuidedNukeRockets.erase(GuidedNukeRockets.begin() + Index);
 }
 
 static bool IsGuidedNukeObjectValid(const UObject* Object)
@@ -3775,7 +3940,109 @@ static bool IsGuidedNukeObjectValid(const UObject* Object)
 	return IsUsableDeathObject(Object) && Object->Class;
 }
 
-static void ApplyGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& StaticTargetLocation, float Speed, float DeltaSeconds)
+static void TryForceKillPawnForNuke(AFortPlayerPawnAthena* Pawn, AFortPlayerControllerAthena* InstigatorController, AActor* DamageCauser)
+{
+	if (!Pawn)
+		return;
+
+	auto ForceKillFn = Pawn->GetFunction("ForceKill");
+
+	if (ForceKillFn)
+	{
+		FGameplayTag DeathTag{};
+		Pawn->Call<void>(ForceKillFn, DeathTag, InstigatorController, DamageCauser);
+		return;
+	}
+
+	Pawn->SetHealth(0.f);
+	Pawn->ForceNetUpdate();
+}
+
+static void ApplyNukePlayerDamageAtLocation(const FVector& ImpactLocation, AActor* InstigatorPawn, AFortPlayerControllerAthena* InstigatorController, AActor* DamageCauser)
+{
+	TArray<AFortPlayerPawnAthena*> Pawns;
+	Utils::GetAll<AFortPlayerPawnAthena>(Pawns);
+
+	for (auto Pawn : Pawns)
+	{
+		if (!Pawn)
+			continue;
+
+		if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
+			continue;
+
+		if (Pawn->K2_GetActorLocation().GetDistanceTo(ImpactLocation) > NukeRocketDamageRadius)
+			continue;
+
+		auto RemainingDamage = NukeRocketPlayerDamage;
+		auto Shield = Pawn->GetShield();
+
+		if (Shield > 0.f)
+		{
+			auto ShieldDamage = Shield < RemainingDamage ? Shield : RemainingDamage;
+			Pawn->SetShield(Shield - ShieldDamage);
+			RemainingDamage -= ShieldDamage;
+		}
+
+		if (RemainingDamage > 0.f)
+		{
+			auto Health = Pawn->GetHealth();
+
+			if (Health <= RemainingDamage)
+				TryForceKillPawnForNuke(Pawn, InstigatorController, DamageCauser);
+			else
+				Pawn->SetHealth(Health - RemainingDamage);
+		}
+
+		Pawn->ForceNetUpdate();
+	}
+
+	Pawns.Free();
+}
+
+static void ApplyNukeEnvironmentDamageToBuilding(ABuildingSMActor* Building, float Damage)
+{
+	if (!Building || Damage <= 0.f)
+		return;
+
+	auto RemainingHealth = Building->GetHealth() - Damage;
+
+	if (RemainingHealth <= 0.f)
+		Building->SilentDie(true);
+	else if (TryCallFloatCommandFunction(Building, "SetHealth", RemainingHealth))
+		Building->ForceNetUpdate();
+	else
+		Building->K2_DestroyActor();
+}
+
+static void ApplyNukeEnvironmentDamageAtLocation(const FVector& ImpactLocation, int EnvironmentDamageContextId)
+{
+	auto Context = FindNukeEnvironmentDamageContext(EnvironmentDamageContextId);
+
+	if (!Context)
+		return;
+
+	const auto RadiusSquared = static_cast<double>(NukeRocketDamageRadius) * static_cast<double>(NukeRocketDamageRadius);
+
+	for (auto Building : Context->Buildings)
+	{
+		if (!IsUsableDeathObject(Building) || (Building->HasbDestroyed() && Building->bDestroyed))
+			continue;
+
+		if ((Building->K2_GetActorLocation() - ImpactLocation).SizeSquared() > RadiusSquared)
+			continue;
+
+		ApplyNukeEnvironmentDamageToBuilding(Building, NukeRocketEnvironmentDamage);
+	}
+}
+
+static void ApplyNukeImpactDamage(const FVector& ImpactLocation, AActor* InstigatorPawn, AFortPlayerControllerAthena* InstigatorController, AActor* DamageCauser, int EnvironmentDamageContextId)
+{
+	ApplyNukePlayerDamageAtLocation(ImpactLocation, InstigatorPawn, InstigatorController, DamageCauser);
+	ApplyNukeEnvironmentDamageAtLocation(ImpactLocation, EnvironmentDamageContextId);
+}
+
+static bool ApplyGuidedNukeRocket(AActor* Rocket, AActor* InstigatorPawn, AFortPlayerControllerAthena* InstigatorController, AFortPlayerPawnAthena* TargetPawn, const FVector& StaticTargetLocation, float Speed, float DeltaSeconds, bool bDamageEnabled, int EnvironmentDamageContextId)
 {
 	auto TargetLocation = StaticTargetLocation;
 
@@ -3798,6 +4065,7 @@ static void ApplyGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetP
 
 	auto Step = (DeltaSeconds > 0.f ? DeltaSeconds : 0.f) * Speed;
 	auto Distance = RocketLocation.GetDistanceTo(TargetLocation);
+	bool bImpacted = Distance <= (Step > 0.f ? Step : 100.f);
 
 	if (Distance > 0.f && Step > 0.f)
 	{
@@ -3833,6 +4101,16 @@ static void ApplyGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetP
 	}
 
 	Rocket->ForceNetUpdate();
+
+	if (bImpacted)
+	{
+		if (bDamageEnabled)
+			ApplyNukeImpactDamage(TargetLocation, InstigatorPawn, InstigatorController, Rocket, EnvironmentDamageContextId);
+
+		return true;
+	}
+
+	return false;
 }
 
 void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
@@ -3846,7 +4124,7 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 
 		if (!IsGuidedNukeObjectValid(GuidedRocket.Rocket) || (GuidedRocket.TargetPawn && !IsGuidedNukeObjectValid(GuidedRocket.TargetPawn)))
 		{
-			GuidedNukeRockets.erase(GuidedNukeRockets.begin() + i);
+			RemoveGuidedNukeRocketAt(static_cast<size_t>(i));
 			continue;
 		}
 
@@ -3854,11 +4132,12 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 
 		if (GuidedRocket.LifeSeconds <= 0.f || (GuidedRocket.Rocket->HasbActorIsBeingDestroyed() && GuidedRocket.Rocket->bActorIsBeingDestroyed))
 		{
-			GuidedNukeRockets.erase(GuidedNukeRockets.begin() + i);
+			RemoveGuidedNukeRocketAt(static_cast<size_t>(i));
 			continue;
 		}
 
-		ApplyGuidedNukeRocket(GuidedRocket.Rocket, GuidedRocket.TargetPawn, GuidedRocket.TargetLocation, GuidedRocket.Speed, DeltaSeconds);
+		if (ApplyGuidedNukeRocket(GuidedRocket.Rocket, GuidedRocket.InstigatorPawn, GuidedRocket.InstigatorController, GuidedRocket.TargetPawn, GuidedRocket.TargetLocation, GuidedRocket.Speed, DeltaSeconds, GuidedRocket.bDamageEnabled, GuidedRocket.EnvironmentDamageContextId))
+			RemoveGuidedNukeRocketAt(static_cast<size_t>(i));
 	}
 }
 
@@ -3998,10 +4277,10 @@ cheat startshrinksafezone - Starts shrinking the safe zone
 cheat infiniteammo - Toggles infinite ammo
 cheat infinitemats - Toggles infinite materials
 cheat serversendmessage - Broadcasts a message to all clients in the game
-cheat fly <Speed> - Toggles fly mode (with optional speed value)
-cheat ghost <Speed> - Toggles no-clip flying (with optional speed value)
-cheat gravity <Scale> - Sets the gravity scale
-cheat changename <Name> - Changes your player name
+cheat fly <speed> - Toggles fly mode (with optional speed value)
+cheat ghost <speed> - Toggles no-clip flying (with optional speed value)
+cheat gravity <scale> - Sets the gravity scale
+cheat changename <name> - Changes your player name
 cheat keepinventory - Toggles keeping inventory on death
 cheat spawnactor/summon <class/path> [s<size>] [h<meters>] - Spawns an actor near your location
 cheat destroyall <class/path> - Destroys all actors of a class
@@ -4013,11 +4292,11 @@ cheat regen - Regenerates health and shield to the maximum value
 cheat regenall - Regenerates health and shield for all players
 cheat setkills - Sets your kill count
 cheat setarenapoints - Sets your arena points : Use a negative number to take away points
-cheat demospeed <Speed> - Sets the speed of the server
+cheat demospeed <speed> - Sets the speed of the server
 cheat god - Toggles god mode
 cheat godall - Toggles god mode for all players
-cheat speed <Speed> - Sets the player's movement speed
-cheat timeofday <Hour> - Sets the time of day (0-23)
+cheat speed <scale> - Sets the player's movement speed
+cheat timeofday <hour> - Sets the time of day (0-23)
 cheat pausetimeofday - Pauses/Unpauses the time of day
 cheat spawnbot <count> <weapon> <s[size]> - Spawns a player bot at your location (WIP)
 cheat tpbot - Teleports the player bot to your location
@@ -4027,12 +4306,12 @@ cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
 cheat tpto <exact player name> - Teleports you next to a real player
-cheat nuke [projectile/path] [s<size>] [h<meters>] [exact player name] - Spawns 100 projectiles and targets them to a player or crosshair
+cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 projectiles and targets them to a player or crosshair
 cheat tp - Teleports to where your crosshair is aiming
 cheat tp <X> <Y> <Z> - Teleports to a location
 cheat launch <X> <Y> <Z> - Launches the player
 cheat savewaypoint - Saves your current location as a waypoint
-cheat waypoint <Name> - Loads a saved waypoint
+cheat waypoint <name> - Loads a saved waypoint
 cheat skydive - Toggles skydiving
 cheat mark - Toggles teleporting to placed map markers
 cheat giveitem <WID/path> <Count = 1> - Gives you an item
@@ -5714,6 +5993,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				constexpr float MaxNukeHeightMeters = 5000.f;
 				auto NukeScale = DefaultNukeScale;
 				auto NukeHeightMeters = DefaultNukeHeightMeters;
+				bool bNukeDamageEnabled = true;
 				auto NukeTokens = SplitPlayerCommandArgs(NukeArgs);
 				size_t PlayerNameStartIndex = 0;
 
@@ -5743,7 +6023,22 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				while (PlayerNameStartIndex < NukeTokens.size())
 				{
 					auto ModifierArg = TrimPlayerCommandString(NukeTokens[PlayerNameStartIndex]);
+					auto NormalizedModifierArg = NormalizePlayerCommandString(ModifierArg);
 					float ModifierValue = 0.f;
+
+					if (NormalizedModifierArg == "nodmg" || NormalizedModifierArg == "nodamage" || NormalizedModifierArg == "no-damage")
+					{
+						bNukeDamageEnabled = false;
+						PlayerNameStartIndex++;
+						continue;
+					}
+
+					if (NormalizedModifierArg == "dmg" || NormalizedModifierArg == "damage")
+					{
+						bNukeDamageEnabled = true;
+						PlayerNameStartIndex++;
+						continue;
+					}
 
 					if (TryParsePrefixedCommandFloat(ModifierArg, 's', ModifierValue))
 					{
@@ -5761,7 +6056,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					if (LooksLikeSizeOrHeightModifierArg(ModifierArg))
 					{
-						PlayerController->ClientMessage(FString(L"Invalid nuke modifier. Use s2 for 2x size or h100 for 100 meters high."), FName(), 1.f);
+						PlayerController->ClientMessage(FString(L"Invalid nuke modifier. Use s2 for 2x size, h100 for 100 meters high, or nodmg to disable damage."), FName(), 1.f);
 						return;
 					}
 
@@ -5822,6 +6117,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				constexpr double RocketSpeed = 5500.0;
 				auto SpawnHeight = static_cast<double>(NukeHeightMeters) * 100.0;
 				auto EffectiveDiskRadius = DiskRadius * static_cast<double>(NukeScale > 1.f ? NukeScale : 1.f);
+				auto EnvironmentContextRadius = EffectiveDiskRadius + static_cast<double>(NukeRocketDamageRadius) + 1000.0;
+				auto EnvironmentDamageContextId = bNukeDamageEnabled ? CreateNukeEnvironmentDamageContext(TargetLocation, EnvironmentContextRadius) : 0;
 				int SpawnedRockets = 0;
 
 				for (int i = 0; i < RocketCount; i++)
@@ -5852,14 +6149,16 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					if (Rocket->HasInstigator() && PlayerController->Pawn)
 						Rocket->Instigator = PlayerController->Pawn;
 
-					ConfigureNukeRocket(Rocket, TargetPawn, AimLocation, Direction * RocketSpeed);
-					RegisterGuidedNukeRocket(Rocket, TargetPawn, AimLocation, static_cast<float>(RocketSpeed));
+					ConfigureNukeRocket(Rocket, TargetPawn, AimLocation, Direction * RocketSpeed, bNukeDamageEnabled);
+					RegisterGuidedNukeRocket(Rocket, PlayerController, TargetPawn, AimLocation, static_cast<float>(RocketSpeed), bNukeDamageEnabled, EnvironmentDamageContextId);
 					SpawnedRockets++;
 				}
 
+				RemoveUnusedNukeEnvironmentDamageContext(EnvironmentDamageContextId);
+
 				auto TargetText = bUsingCrosshairTarget ? std::wstring(L"your crosshair") : std::wstring(MatchedName.begin(), MatchedName.end());
 				auto Message = L"Spawned " + std::to_wstring(SpawnedRockets) + L" projectiles above " + TargetText +
-					L" (s" + FormatCommandFloatForMessage(NukeScale) + L" h" + FormatCommandFloatForMessage(NukeHeightMeters) + L"m)!";
+					L" (s" + FormatCommandFloatForMessage(NukeScale) + L" h" + FormatCommandFloatForMessage(NukeHeightMeters) + L"m dmg " + (bNukeDamageEnabled ? std::wstring(L"on") : std::wstring(L"off")) + L")!";
 				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
 			}
 			else if (command == "botemote")
