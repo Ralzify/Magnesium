@@ -29,6 +29,9 @@
 #include <iostream>
 #include <cstdlib>
 #include <ctime>
+#include <cmath>
+#include <cctype>
+#include <limits>
 
 void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena* PlayerController, FVector& Loc, FRotator& Rot)
 {
@@ -2785,37 +2788,127 @@ static std::string NormalizePlayerCommandString(std::string Str)
 	return Str;
 }
 
-static std::string GetResolvedPlayerNameForCommand(AFortPlayerControllerAthena* PlayerController, UNetConnection* Connection, int Index)
+static int HexDigitValueForCommand(char Char)
 {
-	auto PlayerState = PlayerController ? PlayerController->PlayerState : nullptr;
-	std::string PlayerName = GUI::GetPlayerName(PlayerState, Connection);
+	if (Char >= '0' && Char <= '9')
+		return Char - '0';
+
+	Char = static_cast<char>(std::tolower(static_cast<unsigned char>(Char)));
+
+	if (Char >= 'a' && Char <= 'f')
+		return 10 + (Char - 'a');
+
+	return -1;
+}
+
+static std::string DecodePlayerCommandURLName(const std::string& Value)
+{
+	std::string Result;
+	Result.reserve(Value.size());
+
+	for (size_t i = 0; i < Value.size(); i++)
+	{
+		if (Value[i] == '+' )
+		{
+			Result += ' ';
+			continue;
+		}
+
+		if (Value[i] == '%' && i + 2 < Value.size())
+		{
+			auto High = HexDigitValueForCommand(Value[i + 1]);
+			auto Low = HexDigitValueForCommand(Value[i + 2]);
+
+			if (High >= 0 && Low >= 0)
+			{
+				Result += static_cast<char>((High << 4) | Low);
+				i += 2;
+				continue;
+			}
+		}
+
+		Result += Value[i];
+	}
+
+	return Result;
+}
+
+static void AddPlayerCommandNameCandidate(std::vector<std::string>& Candidates, const std::string& Name)
+{
+	auto TrimmedName = TrimPlayerCommandString(Name);
+
+	if (TrimmedName.empty())
+		return;
+
+	auto NormalizedName = NormalizePlayerCommandString(TrimmedName);
+
+	for (auto& ExistingName : Candidates)
+	{
+		if (NormalizePlayerCommandString(ExistingName) == NormalizedName)
+			return;
+	}
+
+	Candidates.push_back(TrimmedName);
+}
+
+static std::string GetRequestURLPlayerNameForCommand(UNetConnection* Connection)
+{
 	auto RequestURL = GUI::GetRequestURL(Connection);
 
-	if (RequestURL && RequestURL->Data && RequestURL->NumElements)
-	{
-		auto RequestURLStr = RequestURL->ToString();
-		std::size_t pos = RequestURLStr.find("Name=");
+	if (!RequestURL || !RequestURL->Data || !RequestURL->NumElements)
+		return "";
 
-		if (pos != std::string::npos)
+	auto RequestURLAllocated = RequestURL->ToString();
+	std::string RequestURLStr(RequestURLAllocated.begin(), RequestURLAllocated.end());
+	std::size_t pos = RequestURLStr.find("Name=");
+
+	if (pos == std::string::npos)
+		return "";
+
+	std::size_t end_pos = RequestURLStr.find('?', pos);
+
+	if (end_pos != std::string::npos)
+		return RequestURLStr.substr(pos + 5, end_pos - pos - 5);
+
+	return RequestURLStr.substr(pos + 5);
+}
+
+static std::vector<std::string> GetPlayerNameCandidatesForCommand(AFortPlayerControllerAthena* PlayerController, UNetConnection* Connection, int Index)
+{
+	std::vector<std::string> Candidates;
+	auto PlayerState = PlayerController ? PlayerController->PlayerState : nullptr;
+
+	auto RequestURLName = GetRequestURLPlayerNameForCommand(Connection);
+	AddPlayerCommandNameCandidate(Candidates, RequestURLName);
+
+	if (!RequestURLName.empty())
+		AddPlayerCommandNameCandidate(Candidates, DecodePlayerCommandURLName(RequestURLName));
+
+	if (PlayerState)
+	{
+		FString PSName = PlayerState->GetPlayerName();
+
+		if (PSName.Data && PSName.NumElements)
 		{
-			std::size_t end_pos = RequestURLStr.find('?', pos);
-			if (end_pos != std::string::npos)
-				PlayerName = RequestURLStr.substr(pos + 5, end_pos - pos - 5);
-			else
-				PlayerName = RequestURLStr.substr(pos + 5);
+			auto PSNameString = PSName.ToString();
+			AddPlayerCommandNameCandidate(Candidates, std::string(PSNameString.begin(), PSNameString.end()));
 		}
 	}
 
-	if (PlayerName.empty())
-		PlayerName = GUI::GetPlayerNameFromConnection(Connection);
+	AddPlayerCommandNameCandidate(Candidates, GUI::GetPlayerName(PlayerState, Connection));
+	AddPlayerCommandNameCandidate(Candidates, GUI::GetPlayerNameFromConnection(Connection));
+	AddPlayerCommandNameCandidate(Candidates, std::string("Player ") + std::to_string(Index + 1));
 
-	if (PlayerName.empty())
-		PlayerName = std::string("Player ") + std::to_string(Index + 1);
-
-	return PlayerName;
+	return Candidates;
 }
 
-static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::string& Name, AFortPlayerControllerAthena* RequestingPlayer, std::string& MatchedName, bool& bAmbiguous, bool bAllowRequestingPlayer = false)
+static std::string GetResolvedPlayerNameForCommand(AFortPlayerControllerAthena* PlayerController, UNetConnection* Connection, int Index)
+{
+	auto Candidates = GetPlayerNameCandidatesForCommand(PlayerController, Connection, Index);
+	return Candidates.empty() ? std::string("Player ") + std::to_string(Index + 1) : Candidates[0];
+}
+
+static AFortPlayerControllerAthena* FindRealPlayerByExactNameForCommand(const std::string& Name, AFortPlayerControllerAthena* RequestingPlayer, std::string& MatchedName, bool& bAmbiguous, bool bAllowRequestingPlayer = false)
 {
 	bAmbiguous = false;
 	MatchedName.clear();
@@ -2833,11 +2926,8 @@ static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::st
 		return nullptr;
 
 	AFortPlayerControllerAthena* ExactMatch = nullptr;
-	AFortPlayerControllerAthena* PartialMatch = nullptr;
 	std::string ExactName;
-	std::string PartialName;
 	int ExactMatches = 0;
-	int PartialMatches = 0;
 
 	for (int i = 0; i < ClientConnections.Num(); i++)
 	{
@@ -2856,26 +2946,23 @@ static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::st
 		if (PS && PS->HasbIsABot() && PS->bIsABot)
 			continue;
 
-		auto PlayerName = GetResolvedPlayerNameForCommand(PC, Connection, i);
-		auto NormalizedPlayerName = NormalizePlayerCommandString(PlayerName);
+		auto NameCandidates = GetPlayerNameCandidatesForCommand(PC, Connection, i);
 
-		if (NormalizedPlayerName == NormalizedName)
+		for (auto& PlayerName : NameCandidates)
 		{
-			ExactMatch = PC;
-			ExactName = PlayerName;
-			ExactMatches++;
-			continue;
-		}
+			auto NormalizedPlayerName = NormalizePlayerCommandString(PlayerName);
 
-		if (NormalizedPlayerName.find(NormalizedName) != std::string::npos)
-		{
-			PartialMatch = PC;
-			PartialName = PlayerName;
-			PartialMatches++;
+			if (NormalizedPlayerName == NormalizedName)
+			{
+				ExactMatch = PC;
+				ExactName = GetResolvedPlayerNameForCommand(PC, Connection, i);
+				ExactMatches++;
+				break;
+			}
 		}
 	}
 
-	if (ExactMatches > 1 || (ExactMatches == 0 && PartialMatches > 1))
+	if (ExactMatches > 1)
 	{
 		bAmbiguous = true;
 		return nullptr;
@@ -2885,12 +2972,6 @@ static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::st
 	{
 		MatchedName = ExactName;
 		return ExactMatch;
-	}
-
-	if (PartialMatches == 1)
-	{
-		MatchedName = PartialName;
-		return PartialMatch;
 	}
 
 	return nullptr;
@@ -3010,12 +3091,14 @@ static bool LooksLikeNukeTargetProperty(std::string Name)
 	return false;
 }
 
-static const UClass* FindNukeProjectileClassByArg(const std::string& ClassArg)
+static const UClass* FindActorClassByCommandArg(const std::string& ClassArg)
 {
 	auto TrimmedArg = TrimPlayerCommandString(ClassArg);
 
 	if (TrimmedArg.empty())
 		return nullptr;
+
+	auto NormalizedArg = NormalizePlayerCommandString(TrimmedArg);
 
 	auto TryFindClass = [](const std::string& Value) -> const UClass*
 	{
@@ -3046,7 +3129,7 @@ static const UClass* FindNukeProjectileClassByArg(const std::string& ClassArg)
 			if (auto Class = TryFindClass(TrimmedArg + "." + AssetName + "_C"))
 				return Class;
 		}
-		else if (!TrimmedArg.ends_with("_c"))
+		else if (!NormalizedArg.ends_with("_c"))
 		{
 			if (auto Class = TryFindClass(TrimmedArg + "_C"))
 				return Class;
@@ -3059,7 +3142,7 @@ static const UClass* FindNukeProjectileClassByArg(const std::string& ClassArg)
 			return Class;
 	}
 
-	auto ShortName = Misc::ObjectNames.find(TrimmedArg);
+	auto ShortName = Misc::ObjectNames.find(NormalizedArg);
 
 	if (ShortName != Misc::ObjectNames.end())
 	{
@@ -3075,9 +3158,406 @@ static const UClass* GetDefaultNukeProjectileClass()
 	static const UClass* DefaultNukeProjectileClass = nullptr;
 
 	if (!DefaultNukeProjectileClass)
-		DefaultNukeProjectileClass = FindNukeProjectileClassByArg("/Game/Athena/DrivableVehicles/Mech/B_Prj_Ostrich_Rocket.B_Prj_Ostrich_Rocket_C");
+		DefaultNukeProjectileClass = FindActorClassByCommandArg("/Game/Athena/DrivableVehicles/Mech/B_Prj_Ostrich_Rocket.B_Prj_Ostrich_Rocket_C");
 
 	return DefaultNukeProjectileClass;
+}
+
+static std::vector<std::string> SplitPlayerCommandArgs(const std::string& Args)
+{
+	std::vector<std::string> Tokens;
+	std::stringstream Stream(Args);
+	std::string Token;
+
+	while (Stream >> Token)
+		Tokens.push_back(Token);
+
+	return Tokens;
+}
+
+static std::string JoinPlayerCommandArgs(const std::vector<std::string>& Tokens, size_t StartIndex)
+{
+	std::string Result;
+
+	for (size_t i = StartIndex; i < Tokens.size(); i++)
+	{
+		if (!Result.empty())
+			Result += " ";
+
+		Result += Tokens[i];
+	}
+
+	return TrimPlayerCommandString(Result);
+}
+
+static bool TryParsePrefixedCommandFloat(const std::string& Arg, char Prefix, float& OutValue)
+{
+	auto TrimmedArg = TrimPlayerCommandString(Arg);
+
+	if (TrimmedArg.size() < 2 || std::tolower(static_cast<unsigned char>(TrimmedArg[0])) != Prefix)
+		return false;
+
+	auto ValuePart = TrimmedArg.substr(1);
+	size_t ParsedCount = 0;
+
+	try
+	{
+		auto ParsedValue = std::stof(ValuePart, &ParsedCount);
+
+		if (ParsedCount != ValuePart.size() || !std::isfinite(ParsedValue))
+			return false;
+
+		OutValue = ParsedValue;
+		return true;
+	}
+	catch (...)
+	{
+		return false;
+	}
+}
+
+static bool TryParseCommandFloat(const std::string& Arg, float& OutValue)
+{
+	auto TrimmedArg = TrimPlayerCommandString(Arg);
+
+	if (TrimmedArg.empty())
+		return false;
+
+	size_t ParsedCount = 0;
+
+	try
+	{
+		auto ParsedValue = std::stof(TrimmedArg, &ParsedCount);
+
+		if (ParsedCount != TrimmedArg.size() || !std::isfinite(ParsedValue))
+			return false;
+
+		OutValue = ParsedValue;
+		return true;
+	}
+	catch (...)
+	{
+		return false;
+	}
+}
+
+static bool TryParseCommandInt(const std::string& Arg, int& OutValue)
+{
+	auto TrimmedArg = TrimPlayerCommandString(Arg);
+
+	if (TrimmedArg.empty())
+		return false;
+
+	size_t ParsedCount = 0;
+
+	try
+	{
+		auto ParsedValue = std::stoi(TrimmedArg, &ParsedCount);
+
+		if (ParsedCount != TrimmedArg.size())
+			return false;
+
+		OutValue = ParsedValue;
+		return true;
+	}
+	catch (...)
+	{
+		return false;
+	}
+}
+
+static bool LooksLikeSizeOrHeightModifierArg(const std::string& Arg)
+{
+	auto TrimmedArg = TrimPlayerCommandString(Arg);
+
+	if (TrimmedArg.size() < 2)
+		return false;
+
+	auto Prefix = static_cast<char>(std::tolower(static_cast<unsigned char>(TrimmedArg[0])));
+	if (Prefix != 's' && Prefix != 'h')
+		return false;
+
+	auto ValueStart = TrimmedArg[1];
+	return std::isdigit(static_cast<unsigned char>(ValueStart)) || ValueStart == '.' || ValueStart == '-' || ValueStart == '+';
+}
+
+static float ClampCommandFloat(float Value, float Min, float Max)
+{
+	if (Value < Min)
+		return Min;
+
+	if (Value > Max)
+		return Max;
+
+	return Value;
+}
+
+static std::wstring FormatCommandFloatForMessage(float Value)
+{
+	std::ostringstream Stream;
+	Stream << Value;
+
+	auto Text = Stream.str();
+	return std::wstring(Text.begin(), Text.end());
+}
+
+static constexpr float MinCommandScale = 0.05f;
+static constexpr float MaxCommandScale = 20.f;
+
+static bool FunctionHasSingleCommandInputParam(UFunction* Function, uint32 ExpectedElementSize)
+{
+	if (!Function)
+		return false;
+
+	auto Params = Function->GetParams();
+	int InputParamCount = 0;
+
+	for (auto& Param : Params.NameOffsetMap)
+	{
+		if (((Param.PropertyFlags & 0x100) != 0 && (Param.PropertyFlags & 0x8000000) == 0) || (Param.PropertyFlags & 0x400) != 0)
+			continue;
+
+		InputParamCount++;
+
+		if (Param.ElementSize != ExpectedElementSize)
+			return false;
+	}
+
+	return InputParamCount == 1;
+}
+
+static bool FunctionHasNoCommandInputParams(UFunction* Function)
+{
+	if (!Function)
+		return false;
+
+	auto Params = Function->GetParams();
+
+	for (auto& Param : Params.NameOffsetMap)
+	{
+		if (((Param.PropertyFlags & 0x100) != 0 && (Param.PropertyFlags & 0x8000000) == 0) || (Param.PropertyFlags & 0x400) != 0)
+			continue;
+
+		return false;
+	}
+
+	return true;
+}
+
+static bool TryCallNoParamCommandFunction(UObject* Object, const char* FunctionName)
+{
+	if (!Object)
+		return false;
+
+	auto Function = Object->GetFunction(FunctionName);
+
+	if (!FunctionHasNoCommandInputParams(Function))
+		return false;
+
+	Object->Call<void>(Function);
+	return true;
+}
+
+static bool TryCallVectorCommandFunction(UObject* Object, const char* FunctionName, const FVector& Value)
+{
+	if (!Object)
+		return false;
+
+	auto Function = Object->GetFunction(FunctionName);
+
+	if (!FunctionHasSingleCommandInputParam(Function, FVector::Size()))
+		return false;
+
+	auto ValueCopy = Value;
+	Object->Call<void>(Function, ValueCopy);
+	return true;
+}
+
+static bool SetReflectedTransformScaleProperty(UObject* Object, const char* PropertyName, const FVector& Scale)
+{
+	if (!Object)
+		return false;
+
+	auto Prop = Object->GetProperty(PropertyName);
+
+	if (!Prop)
+		return false;
+
+	auto Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+	auto ElementSize = GetFromOffset<uint32>(Prop, Offsets::ElementSize);
+
+	if (Offset == -1 || ElementSize != FTransform::Size())
+		return false;
+
+	auto Transform = GetFromOffset<FTransform>(Object, Offset);
+	auto ScaleCopy = Scale;
+	Transform.Scale3D = ScaleCopy;
+	GetFromOffset<FTransform>(Object, Offset) = Transform;
+	return true;
+}
+
+static void RefreshScaledComponentForCommand(UObject* Component)
+{
+	if (!Component)
+		return;
+
+	if (auto UpdateComponentToWorldFn = Component->GetFunction("UpdateComponentToWorld"))
+		Component->Call<void>(UpdateComponentToWorldFn);
+
+	if (auto UpdateBoundsFn = Component->GetFunction("UpdateBounds"))
+		Component->Call<void>(UpdateBoundsFn);
+
+	if (auto MarkRenderTransformDirtyFn = Component->GetFunction("MarkRenderTransformDirty"))
+		Component->Call<void>(MarkRenderTransformDirtyFn);
+
+	if (auto MarkRenderDynamicDataDirtyFn = Component->GetFunction("MarkRenderDynamicDataDirty"))
+		Component->Call<void>(MarkRenderDynamicDataDirtyFn);
+
+	if (auto MarkRenderStateDirtyFn = Component->GetFunction("MarkRenderStateDirty"))
+		Component->Call<void>(MarkRenderStateDirtyFn);
+
+	TryCallNoParamCommandFunction(Component, "RecreateRenderState_Concurrent");
+	TryCallNoParamCommandFunction(Component, "ReregisterComponent");
+}
+
+static bool SetComponentScaleForCommand(UObject* Component, const FVector& Scale)
+{
+	if (!Component)
+		return false;
+
+	bool bApplied = false;
+
+	bApplied = TryCallVectorCommandFunction(Component, "SetWorldScale3D", Scale) || bApplied;
+	bApplied = TryCallVectorCommandFunction(Component, "K2_SetWorldScale3D", Scale) || bApplied;
+	bApplied = TryCallVectorCommandFunction(Component, "SetRelativeScale3D", Scale) || bApplied;
+	bApplied = TryCallVectorCommandFunction(Component, "K2_SetRelativeScale3D", Scale) || bApplied;
+
+	bApplied = SetReflectedProperty<FVector>(Component, "RelativeScale3D", Scale) || bApplied;
+	bApplied = SetReflectedProperty<FVector>(Component, "WorldScale3D", Scale) || bApplied;
+	bApplied = SetReflectedTransformScaleProperty(Component, "ComponentToWorld", Scale) || bApplied;
+	bApplied = SetReflectedTransformScaleProperty(Component, "RelativeTransform", Scale) || bApplied;
+
+	if (bApplied)
+		RefreshScaledComponentForCommand(Component);
+
+	return bApplied;
+}
+
+static bool SetActorScaleForCommand(AActor* Actor, float ScaleValue)
+{
+	if (!Actor)
+		return false;
+
+	auto Scale = FVector(ScaleValue, ScaleValue, ScaleValue);
+	bool bApplied = false;
+
+	bApplied = TryCallVectorCommandFunction(Actor, "K2_SetActorScale3D", Scale) || bApplied;
+	bApplied = TryCallVectorCommandFunction(Actor, "SetActorScale3D", Scale) || bApplied;
+	bApplied = SetReflectedProperty<FVector>(Actor, "DrawScale3D", Scale) || bApplied;
+	bApplied = SetReflectedProperty<float>(Actor, "DrawScale", ScaleValue) || bApplied;
+
+	auto Transform = Actor->GetTransform();
+	Transform.Scale3D = Scale;
+
+	if (auto SetTransformFn = Actor->GetFunction("SetTransform"))
+	{
+		if (FunctionHasSingleCommandInputParam(SetTransformFn, FTransform::Size()))
+		{
+			Actor->Call<void>(SetTransformFn, Transform);
+			bApplied = true;
+		}
+	}
+
+	if (Actor->HasRootComponent() && Actor->RootComponent)
+		bApplied = SetComponentScaleForCommand(Actor->RootComponent, Scale) || bApplied;
+
+	if (auto Pawn = Actor->Cast<AFortPlayerPawnAthena>())
+	{
+		if (Pawn->HasMesh() && Pawn->Mesh)
+			bApplied = SetComponentScaleForCommand(Pawn->Mesh, Scale) || bApplied;
+
+		static auto CapsuleComponentClass = FindClass("CapsuleComponent");
+		auto CapsuleComponent = CapsuleComponentClass ? Pawn->GetComponentByClass(CapsuleComponentClass) : nullptr;
+
+		if (CapsuleComponent)
+			bApplied = SetComponentScaleForCommand(CapsuleComponent, Scale) || bApplied;
+	}
+
+	Actor->FlushNetDormancy();
+	Actor->ForceNetUpdate();
+	return bApplied;
+}
+
+static bool TryGetCrosshairGroundLocationForCommand(AFortPlayerControllerAthena* PlayerController, FVector& OutLocation)
+{
+	if (!PlayerController)
+		return false;
+
+	FVector ViewLoc;
+	FRotator ViewRot;
+
+	if (PlayerController->Pawn)
+	{
+		ViewLoc = PlayerController->Pawn->K2_GetActorLocation();
+		ViewLoc.Z += 80.f;
+		ViewRot = PlayerController->GetControlRotation();
+	}
+	else
+	{
+		AFortPlayerControllerAthena::GetPlayerViewPoint(PlayerController, ViewLoc, ViewRot);
+	}
+
+	FVector ViewDir = ViewRot.Vector().GetSafeNormal();
+
+	if (ViewDir.IsZero())
+		return false;
+
+	auto IsInvalidGroundLocation = [](const FVector& Location, const FVector& Reference)
+	{
+		return Location.X == 0.f && Location.Y == 0.f && (std::abs(Reference.X) > 100.f || std::abs(Reference.Y) > 100.f);
+	};
+
+	constexpr float StepSize = 500.f;
+	constexpr float MaxDist = 50000.f;
+	constexpr float GroundHitTolerance = 50.f;
+	float PreviousRayHeightOverGround = (std::numeric_limits<float>::max)();
+
+	for (float Dist = StepSize; Dist <= MaxDist; Dist += StepSize)
+	{
+		FVector SamplePoint = FVector(
+			ViewLoc.X + ViewDir.X * Dist,
+			ViewLoc.Y + ViewDir.Y * Dist,
+			ViewLoc.Z + ViewDir.Z * Dist
+		);
+
+		FVector GroundLoc = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, SamplePoint, 10000.f, -10000.f, FName());
+
+		if (IsInvalidGroundLocation(GroundLoc, SamplePoint))
+			continue;
+
+		auto RayHeightOverGround = SamplePoint.Z - GroundLoc.Z;
+
+		if (std::abs(RayHeightOverGround) <= GroundHitTolerance || RayHeightOverGround <= 0.f || (PreviousRayHeightOverGround > 0.f && RayHeightOverGround <= 0.f))
+		{
+			OutLocation = GroundLoc;
+			return true;
+		}
+
+		PreviousRayHeightOverGround = RayHeightOverGround;
+	}
+
+	FVector EndPoint = FVector(
+		ViewLoc.X + ViewDir.X * MaxDist,
+		ViewLoc.Y + ViewDir.Y * MaxDist,
+		ViewLoc.Z + ViewDir.Z * MaxDist
+	);
+
+	OutLocation = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, EndPoint, 10000.f, -10000.f, FName());
+
+	if (IsInvalidGroundLocation(OutLocation, EndPoint))
+		OutLocation = FVector(EndPoint.X, EndPoint.Y, ViewLoc.Z);
+
+	return true;
 }
 
 static void SetMatchingNukeTargetVectorProperties(UObject* Object, const FVector& TargetLocation)
@@ -3275,18 +3755,19 @@ struct FGuidedNukeRocket
 {
 	AActor* Rocket;
 	AFortPlayerPawnAthena* TargetPawn;
+	FVector TargetLocation;
 	float LifeSeconds;
 	float Speed;
 };
 
 static std::vector<FGuidedNukeRocket> GuidedNukeRockets;
 
-static void RegisterGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, float Speed)
+static void RegisterGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& TargetLocation, float Speed)
 {
-	if (!Rocket || !TargetPawn)
+	if (!Rocket)
 		return;
 
-	GuidedNukeRockets.push_back({ Rocket, TargetPawn, 8.f, Speed });
+	GuidedNukeRockets.push_back({ Rocket, TargetPawn, TargetLocation, 8.f, Speed });
 }
 
 static bool IsGuidedNukeObjectValid(const UObject* Object)
@@ -3294,10 +3775,15 @@ static bool IsGuidedNukeObjectValid(const UObject* Object)
 	return IsUsableDeathObject(Object) && Object->Class;
 }
 
-static void ApplyGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, float Speed, float DeltaSeconds)
+static void ApplyGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& StaticTargetLocation, float Speed, float DeltaSeconds)
 {
-	auto TargetLocation = TargetPawn->K2_GetActorLocation();
-	TargetLocation.Z += 80.f;
+	auto TargetLocation = StaticTargetLocation;
+
+	if (TargetPawn)
+	{
+		TargetLocation = TargetPawn->K2_GetActorLocation();
+		TargetLocation.Z += 80.f;
+	}
 
 	auto RocketLocation = Rocket->K2_GetActorLocation();
 	auto Direction = (TargetLocation - RocketLocation).GetSafeNormal();
@@ -3358,7 +3844,7 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 	{
 		auto& GuidedRocket = GuidedNukeRockets[i];
 
-		if (!IsGuidedNukeObjectValid(GuidedRocket.Rocket) || !IsGuidedNukeObjectValid(GuidedRocket.TargetPawn))
+		if (!IsGuidedNukeObjectValid(GuidedRocket.Rocket) || (GuidedRocket.TargetPawn && !IsGuidedNukeObjectValid(GuidedRocket.TargetPawn)))
 		{
 			GuidedNukeRockets.erase(GuidedNukeRockets.begin() + i);
 			continue;
@@ -3372,7 +3858,7 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 			continue;
 		}
 
-		ApplyGuidedNukeRocket(GuidedRocket.Rocket, GuidedRocket.TargetPawn, GuidedRocket.Speed, DeltaSeconds);
+		ApplyGuidedNukeRocket(GuidedRocket.Rocket, GuidedRocket.TargetPawn, GuidedRocket.TargetLocation, GuidedRocket.Speed, DeltaSeconds);
 	}
 }
 
@@ -3482,7 +3968,8 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-	auto fullCommand = Msg.ToString();
+	auto originalCommand = Msg.ToString();
+	auto fullCommand = originalCommand;
 
 	std::transform(fullCommand.begin(), fullCommand.end(), fullCommand.begin(),
 		[](unsigned char c) { return std::tolower(c); });
@@ -3516,7 +4003,7 @@ cheat ghost <Speed> - Toggles no-clip flying (with optional speed value)
 cheat gravity <Scale> - Sets the gravity scale
 cheat changename <Name> - Changes your player name
 cheat keepinventory - Toggles keeping inventory on death
-cheat spawnactor <class/path> - Spawns an actor near your location
+cheat spawnactor/summon <class/path> [s<size>] [h<meters>] - Spawns an actor near your location
 cheat destroyall <class/path> - Destroys all actors of a class
 cheat sethealth <amount> - Sets your pawn's health (0-100)
 cheat setshield <amount> - Sets your pawn's shield (0-100)
@@ -3532,15 +4019,15 @@ cheat godall - Toggles god mode for all players
 cheat speed <Speed> - Sets the player's movement speed
 cheat timeofday <Hour> - Sets the time of day (0-23)
 cheat pausetimeofday - Pauses/Unpauses the time of day
-cheat spawnbot - Spawns a player bot at your location (WIP)
+cheat spawnbot <count> <weapon> <s[size]> - Spawns a player bot at your location (WIP)
 cheat tpbot - Teleports the player bot to your location
 cheat tpall - Teleports all real players around your location
 cheat botemote - Plays the 'Accolades' emote to the player bot
 cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
-cheat tpto <player name> - Teleports you next to a real player
-cheat nuke [projectile/path] <player name> - Spawns projectiles above a real player
+cheat tpto <exact player name> - Teleports you next to a real player
+cheat nuke [projectile/path] [s<size>] [h<meters>] [exact player name] - Spawns 100 projectiles and targets them to a player or crosshair
 cheat tp - Teleports to where your crosshair is aiming
 cheat tp <X> <Y> <Z> - Teleports to a location
 cheat launch <X> <Y> <Z> - Launches the player
@@ -3555,7 +4042,7 @@ cheat giveammo - Gives you 999 of every ammo type
 cheat givemats - Gives you 500 of each material
 cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
 cheat clearinventory - Clears your inventory of all items that are droppable
-cheat spawn <class/path> - Spawns an actor at your location
+cheat spawn <class/path> <s[size]> <h[meters]> - Spawns an actor at your location
 cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 )"), FName(), 1);
 	}
@@ -4816,31 +5303,54 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				auto CallerController = PlayerController;
 				int Count = 1;
 				std::string WeaponArg = "";
+				float BotScale = 1.f;
 
-				if (args.size() >= 2)
+				for (size_t ArgIndex = 1; ArgIndex < args.size(); ArgIndex++)
 				{
-					auto ShortNames = Misc::ItemNames.find(args[1].c_str());
+					auto CurrentArg = std::string(args[ArgIndex].c_str());
+					float ParsedScale = 0.f;
 
-					if (ShortNames != Misc::ItemNames.end())
+					if (TryParsePrefixedCommandFloat(CurrentArg, 's', ParsedScale))
 					{
-						WeaponArg = args[1];
+						BotScale = ClampCommandFloat(ParsedScale, MinCommandScale, MaxCommandScale);
+						continue;
+					}
 
-						if (args.size() >= 3)
-						{
-							try { Count = std::stoi(args[2].c_str(), nullptr); }
-							catch (...) {}
-						}
-					}
-					else
+					if (LooksLikeSizeOrHeightModifierArg(CurrentArg))
 					{
-						try { Count = std::stoi(args[1].c_str(), nullptr); }
-						catch (...) {}
+						PlayerController->ClientMessage(FString(L"Invalid bot size. Use s0.5 for half size or s2 for 2x size."), FName(), 1.f);
+						return;
 					}
+
+					int ParsedCount = 0;
+
+					if (TryParseCommandInt(CurrentArg, ParsedCount))
+					{
+						Count = ParsedCount;
+						continue;
+					}
+
+					if (CurrentArg.find('.') != std::string::npos && TryParseCommandFloat(CurrentArg, ParsedScale))
+					{
+						BotScale = ClampCommandFloat(ParsedScale, MinCommandScale, MaxCommandScale);
+						continue;
+					}
+
+					if (WeaponArg.empty())
+					{
+						WeaponArg = CurrentArg;
+						continue;
+					}
+
+					PlayerController->ClientMessage(FString(L"Invalid spawnbot argument. Use count, weapon, or s0.5/s2 size."), FName(), 1.f);
+					return;
 				}
 
 				for (int i = 0; i < Count; i++)
 				{
 					auto Transform = PlayerController->Pawn->GetTransform();
+					auto BotScaleVector = FVector(BotScale, BotScale, BotScale);
+					Transform.Scale3D = BotScaleVector;
 
 					auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 					auto GameState = GameMode->GameState;
@@ -4964,6 +5474,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					if (ApplyCharacterCustomization)
 						((void (*)(AActor*, AFortPlayerPawnAthena*)) ApplyCharacterCustomization)(PlayerState, Pawn);
+
+					SetActorScaleForCommand(Pawn, BotScale);
 
 					PlayerBotID++;
 
@@ -5090,7 +5602,9 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						}
 					}
 
-					CallerController->ClientMessage(FString(L"Spawned a player bot!"), FName(), 1.f);
+					auto Message = L"Spawned a player bot! (s" + FormatCommandFloatForMessage(BotScale) +
+						L")";
+					CallerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
 				}
 			}
 			else if (command == "tpbot" || command == "tpbots")
@@ -5137,7 +5651,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 				if (PlayerNameStart == std::string::npos)
 				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat tpto <player name>"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat tpto <exact player name>"), FName(), 1.f);
 					return;
 				}
 
@@ -5146,23 +5660,23 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 				if (PlayerName.empty())
 				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat tpto <player name>"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat tpto <exact player name>"), FName(), 1.f);
 					return;
 				}
 
 				std::string MatchedName;
 				bool bAmbiguous = false;
-				auto TargetPC = FindRealPlayerByNameForCommand(PlayerName, PlayerController, MatchedName, bAmbiguous);
+				auto TargetPC = FindRealPlayerByExactNameForCommand(PlayerName, PlayerController, MatchedName, bAmbiguous);
 
 				if (bAmbiguous)
 				{
-					PlayerController->ClientMessage(FString(L"Multiple real players matched that name. Please be more specific."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Multiple real players have that exact name."), FName(), 1.f);
 					return;
 				}
 
 				if (!TargetPC || !TargetPC->Pawn)
 				{
-					PlayerController->ClientMessage(FString(L"Could not find a real player with that name."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Could not find a real player with that exact name."), FName(), 1.f);
 					return;
 				}
 
@@ -5187,41 +5701,74 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			else if (command == "nuke")
 			{
 				auto NukeArgsStart = fullCommand.find(' ');
-
-				if (NukeArgsStart == std::string::npos)
-				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat nuke [projectile/path] <player name>"), FName(), 1.f);
-					return;
-				}
-
-				auto NukeArgs = TrimPlayerCommandString(fullCommand.substr(NukeArgsStart + 1).c_str());
-
-				if (NukeArgs.empty())
-				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat nuke [projectile/path] <player name>"), FName(), 1.f);
-					return;
-				}
+				auto NukeArgs = NukeArgsStart == std::string::npos
+					? std::string()
+					: TrimPlayerCommandString(originalCommand.substr(NukeArgsStart + 1).c_str());
 
 				auto ProjectileClass = GetDefaultNukeProjectileClass();
-				auto PlayerName = NukeArgs;
-				auto ProjectileArgEnd = NukeArgs.find(' ');
+				constexpr float DefaultNukeScale = 1.f;
+				constexpr float MinNukeScale = 0.1f;
+				constexpr float MaxNukeScale = 20.f;
+				constexpr float DefaultNukeHeightMeters = 65.f;
+				constexpr float MinNukeHeightMeters = 0.f;
+				constexpr float MaxNukeHeightMeters = 5000.f;
+				auto NukeScale = DefaultNukeScale;
+				auto NukeHeightMeters = DefaultNukeHeightMeters;
+				auto NukeTokens = SplitPlayerCommandArgs(NukeArgs);
+				size_t PlayerNameStartIndex = 0;
 
-				if (ProjectileArgEnd != std::string::npos)
+				if (!NukeTokens.empty())
 				{
-					auto ProjectileArg = TrimPlayerCommandString(NukeArgs.substr(0, ProjectileArgEnd));
-					auto CandidateProjectileClass = FindNukeProjectileClassByArg(ProjectileArg);
+					auto ProjectileArg = TrimPlayerCommandString(NukeTokens[0]);
+					auto NormalizedProjectileArg = NormalizePlayerCommandString(ProjectileArg);
+					bool bExplicitProjectileArg = ProjectileArg.find('/') != std::string::npos || ProjectileArg.find('.') != std::string::npos || NormalizedProjectileArg.ends_with("_c");
 
-					if (CandidateProjectileClass)
+					if (NukeTokens.size() > 1 || bExplicitProjectileArg)
 					{
-						ProjectileClass = CandidateProjectileClass;
-						PlayerName = TrimPlayerCommandString(NukeArgs.substr(ProjectileArgEnd + 1));
-					}
-					else if (ProjectileArg.find('/') != std::string::npos || ProjectileArg.find('.') != std::string::npos || ProjectileArg.ends_with("_c"))
-					{
-						PlayerController->ClientMessage(FString(L"Failed to find projectile class. Try a class path, generated class path, or short object name."), FName(), 1.f);
-						return;
+						auto CandidateProjectileClass = FindActorClassByCommandArg(ProjectileArg);
+
+						if (CandidateProjectileClass)
+						{
+							ProjectileClass = CandidateProjectileClass;
+							PlayerNameStartIndex = 1;
+						}
+						else if (bExplicitProjectileArg)
+						{
+							PlayerController->ClientMessage(FString(L"Failed to find projectile class. Try a class path, generated class path, or short object name."), FName(), 1.f);
+							return;
+						}
 					}
 				}
+
+				while (PlayerNameStartIndex < NukeTokens.size())
+				{
+					auto ModifierArg = TrimPlayerCommandString(NukeTokens[PlayerNameStartIndex]);
+					float ModifierValue = 0.f;
+
+					if (TryParsePrefixedCommandFloat(ModifierArg, 's', ModifierValue))
+					{
+						NukeScale = ClampCommandFloat(ModifierValue, MinNukeScale, MaxNukeScale);
+						PlayerNameStartIndex++;
+						continue;
+					}
+
+					if (TryParsePrefixedCommandFloat(ModifierArg, 'h', ModifierValue))
+					{
+						NukeHeightMeters = ClampCommandFloat(ModifierValue, MinNukeHeightMeters, MaxNukeHeightMeters);
+						PlayerNameStartIndex++;
+						continue;
+					}
+
+					if (LooksLikeSizeOrHeightModifierArg(ModifierArg))
+					{
+						PlayerController->ClientMessage(FString(L"Invalid nuke modifier. Use s2 for 2x size or h100 for 100 meters high."), FName(), 1.f);
+						return;
+					}
+
+					break;
+				}
+
+				auto PlayerName = JoinPlayerCommandArgs(NukeTokens, PlayerNameStartIndex);
 
 				if (!ProjectileClass)
 				{
@@ -5229,44 +5776,58 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					return;
 				}
 
-				if (PlayerName.empty())
-				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat nuke [projectile/path] <player name>"), FName(), 1.f);
-					return;
-				}
-
 				std::string MatchedName;
 				bool bAmbiguous = false;
-				auto TargetPC = FindRealPlayerByNameForCommand(PlayerName, PlayerController, MatchedName, bAmbiguous, true);
+				AFortPlayerControllerAthena* TargetPC = nullptr;
+				AFortPlayerPawnAthena* TargetPawn = nullptr;
+				FVector TargetLocation{};
+				FVector AimLocation{};
+				bool bUsingCrosshairTarget = PlayerName.empty();
 
-				if (bAmbiguous)
+				if (bUsingCrosshairTarget)
 				{
-					PlayerController->ClientMessage(FString(L"Multiple real players matched that name. Please be more specific."), FName(), 1.f);
-					return;
-				}
+					if (!TryGetCrosshairGroundLocationForCommand(PlayerController, TargetLocation))
+					{
+						PlayerController->ClientMessage(FString(L"Could not find a crosshair target."), FName(), 1.f);
+						return;
+					}
 
-				if (!TargetPC || !TargetPC->Pawn)
+					AimLocation = TargetLocation;
+				}
+				else
 				{
-					PlayerController->ClientMessage(FString(L"Could not find a real player with that name."), FName(), 1.f);
-					return;
-				}
+					TargetPC = FindRealPlayerByExactNameForCommand(PlayerName, PlayerController, MatchedName, bAmbiguous, true);
 
-				auto TargetPawn = TargetPC->Pawn;
-				auto TargetLocation = TargetPawn->K2_GetActorLocation();
-				auto AimLocation = TargetLocation;
-				AimLocation.Z += 80.f;
+					if (bAmbiguous)
+					{
+						PlayerController->ClientMessage(FString(L"Multiple real players have that exact name."), FName(), 1.f);
+						return;
+					}
+
+					if (!TargetPC || !TargetPC->Pawn)
+					{
+						PlayerController->ClientMessage(FString(L"Could not find a real player with that exact name."), FName(), 1.f);
+						return;
+					}
+
+					TargetPawn = TargetPC->Pawn;
+					TargetLocation = TargetPawn->K2_GetActorLocation();
+					AimLocation = TargetLocation;
+					AimLocation.Z += 80.f;
+				}
 
 				constexpr int RocketCount = 100;
 				constexpr double GoldenAngle = 2.39996322972865332;
 				constexpr double DiskRadius = 1800.0;
-				constexpr double SpawnHeight = 6500.0;
 				constexpr double RocketSpeed = 5500.0;
+				auto SpawnHeight = static_cast<double>(NukeHeightMeters) * 100.0;
+				auto EffectiveDiskRadius = DiskRadius * static_cast<double>(NukeScale > 1.f ? NukeScale : 1.f);
 				int SpawnedRockets = 0;
 
 				for (int i = 0; i < RocketCount; i++)
 				{
 					double NormalizedIndex = RocketCount > 1 ? static_cast<double>(i) / static_cast<double>(RocketCount - 1) : 0.0;
-					double Radius = DiskRadius * sqrt(NormalizedIndex);
+					double Radius = EffectiveDiskRadius * sqrt(NormalizedIndex);
 					double Angle = GoldenAngle * i;
 
 					FVector SpawnLocation(
@@ -5281,7 +5842,9 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						Direction = FVector(0.f, 0.f, -1.f);
 
 					auto SpawnRotation = MakeRotationFromDirection(Direction);
-					auto Rocket = UWorld::SpawnActor(ProjectileClass, SpawnLocation, SpawnRotation, PlayerController);
+					auto SpawnScale = FVector(NukeScale, NukeScale, NukeScale);
+					auto SpawnTransform = FTransform(SpawnLocation, SpawnRotation.Quaternion(), SpawnScale);
+					auto Rocket = UWorld::SpawnActor(ProjectileClass, SpawnTransform, PlayerController);
 
 					if (!Rocket)
 						continue;
@@ -5290,11 +5853,13 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						Rocket->Instigator = PlayerController->Pawn;
 
 					ConfigureNukeRocket(Rocket, TargetPawn, AimLocation, Direction * RocketSpeed);
-					RegisterGuidedNukeRocket(Rocket, TargetPawn, static_cast<float>(RocketSpeed));
+					RegisterGuidedNukeRocket(Rocket, TargetPawn, AimLocation, static_cast<float>(RocketSpeed));
 					SpawnedRockets++;
 				}
 
-				auto Message = L"Spawned " + std::to_wstring(SpawnedRockets) + L" projectiles above " + std::wstring(MatchedName.begin(), MatchedName.end()) + L"!";
+				auto TargetText = bUsingCrosshairTarget ? std::wstring(L"your crosshair") : std::wstring(MatchedName.begin(), MatchedName.end());
+				auto Message = L"Spawned " + std::to_wstring(SpawnedRockets) + L" projectiles above " + TargetText +
+					L" (s" + FormatCommandFloatForMessage(NukeScale) + L" h" + FormatCommandFloatForMessage(NukeHeightMeters) + L"m)!";
 				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
 			}
 			else if (command == "botemote")
@@ -5462,53 +6027,12 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					if (!bMoved || bInvalid)
 					{
-						FVector ViewLoc;
-						FRotator ViewRot;
-						GetPlayerViewPointOG
-							? GetPlayerViewPointOG(PlayerController, ViewLoc, ViewRot)
-							: AFortPlayerControllerAthena::GetPlayerViewPoint(PlayerController, ViewLoc, ViewRot);
-
-						FVector ViewDir = (FVector)ViewRot;
-
-						// March along the view ray in steps, checking for ground at each one.
-						// Stops at the first point where terrain is found near or above the ray,
-						// so mountains and cliffs block the ray instead of being skipped over.
-						constexpr float StepSize = 500.f;
-						constexpr float MaxDist = 50000.f;
 						FVector TeleportLoc{};
-						bool bFoundGround = false;
 
-						for (float Dist = StepSize; Dist <= MaxDist; Dist += StepSize)
+						if (!TryGetCrosshairGroundLocationForCommand(PlayerController, TeleportLoc))
 						{
-							FVector SamplePoint = FVector(
-								ViewLoc.X + ViewDir.X * Dist,
-								ViewLoc.Y + ViewDir.Y * Dist,
-								ViewLoc.Z + ViewDir.Z * Dist
-							);
-
-							FVector GroundLoc = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, SamplePoint, 10000.f, -10000.f, FName());
-
-							if (GroundLoc.X == 0.f && GroundLoc.Y == 0.f && GroundLoc.Z == 0.f)
-								continue;
-
-							if (GroundLoc.Z >= SamplePoint.Z - 500.f)
-							{
-								TeleportLoc = GroundLoc;
-								bFoundGround = true;
-								break;
-							}
-						}
-
-						if (!bFoundGround)
-						{
-							FVector EndPoint = FVector(
-								ViewLoc.X + ViewDir.X * MaxDist,
-								ViewLoc.Y + ViewDir.Y * MaxDist,
-								ViewLoc.Z + ViewDir.Z * MaxDist
-							);
-							TeleportLoc = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, EndPoint, 10000.f, -10000.f, FName());
-							if (TeleportLoc.X == 0.f && TeleportLoc.Y == 0.f && TeleportLoc.Z == 0.f)
-								TeleportLoc = FVector(EndPoint.X, EndPoint.Y, ViewLoc.Z);
+							PlayerController->ClientMessage(FString(L"Could not find a crosshair target."), FName(), 1.f);
+							return;
 						}
 
 						TeleportLoc.Z += 200.f;
@@ -6069,89 +6593,138 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			}
 			else if (command == "spawnactor" || command == "summon" || command == "spawn")
 			{
-				bool HasLocation = false;
-				auto Loc = PlayerController->Pawn->K2_GetActorLocation();
-				Loc.Z += 200.f;
+				if (!PlayerController->Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
 
-				auto Rotation = PlayerController->Pawn->K2_GetActorRotation();
-				FQuat NewQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
+				auto SummonArgsStart = originalCommand.find(' ');
 
-				int Count = 1;
+				if (SummonArgsStart == std::string::npos)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [direction] [p<pitch>]"), FName(), 1.f);
+					return;
+				}
 
-				// auto Transform = PlayerController->Pawn->GetTransform(); // proper, but at what cost?
+				auto SummonArgs = TrimPlayerCommandString(originalCommand.substr(SummonArgsStart + 1).c_str());
+				auto SummonTokens = SplitPlayerCommandArgs(SummonArgs);
 
-				auto Class = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
+				if (SummonTokens.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [direction] [p<pitch>]"), FName(), 1.f);
+					return;
+				}
 
-				if (!Class)
-					Class = FindClass(args[1].c_str());
+				auto Class = FindActorClassByCommandArg(SummonTokens[0]);
 
 				if (!Class)
 				{
-					auto ShortNames = Misc::ObjectNames.find(args[1].c_str());
-
-					if (ShortNames != Misc::ObjectNames.end())
-						Class = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
+					return PlayerController->ClientMessage(FString(L"Failed to find class! Try passing it as a path or check your spelling & casing"), FName(), 1);
 				}
+
+				bool HasLocation = false;
+				bool HasExplicitHeight = false;
+				auto Loc = PlayerController->Pawn->K2_GetActorLocation();
+
+				auto Rotation = PlayerController->Pawn->K2_GetActorRotation();
+				int Count = 1;
+				constexpr float DefaultSummonScale = 1.f;
+				constexpr float MinSummonScale = 0.1f;
+				constexpr float MaxSummonScale = 20.f;
+				constexpr float DefaultSummonHeightMeters = 2.f;
+				constexpr float MinSummonHeightMeters = 0.f;
+				constexpr float MaxSummonHeightMeters = 5000.f;
+				auto SummonScale = DefaultSummonScale;
+				auto SummonHeightMeters = DefaultSummonHeightMeters;
 
 				std::map<std::wstring, float> DirectionToYaw = {
 					{L"N", 0.0f}, {L"E", 90.0f}, {L"S", 180.0f}, {L"W", 270.0f},
 					{L"NE", 45.0f}, {L"SE", 135.0f}, {L"SW", 225.0f}, {L"NW", 315.0f}
 				};
 
-				try
+				for (size_t i = 1; i < SummonTokens.size(); ++i)
 				{
-					if (args.size() >= 5)
+					auto CurrentArg = TrimPlayerCommandString(SummonTokens[i]);
+					float ModifierValue = 0.f;
+
+					if (TryParsePrefixedCommandFloat(CurrentArg, 's', ModifierValue))
 					{
-						Loc.X = std::stof(args[2].c_str());
-						Loc.Y = std::stof(args[3].c_str());
-						Loc.Z = std::stof(args[4].c_str() - 75);
-						HasLocation = true;
+						SummonScale = ClampCommandFloat(ModifierValue, MinSummonScale, MaxSummonScale);
+						continue;
 					}
 
-					for (size_t i = (HasLocation ? 5 : 2); i < args.size(); ++i)
+					if (TryParsePrefixedCommandFloat(CurrentArg, 'h', ModifierValue))
 					{
-						try
-						{
-							int PossibleCount = std::stoi(args[i].c_str());
-							Count = PossibleCount;
-							continue;
-						}
-						catch (...) {}
+						SummonHeightMeters = ClampCommandFloat(ModifierValue, MinSummonHeightMeters, MaxSummonHeightMeters);
+						HasExplicitHeight = true;
+						continue;
+					}
 
-						if (args[i].size() > 1 && (args[i][0] == 'p' || (args[i][0] == 'r')))
-						{
-							try
-							{
-								float PitchValue = std::stof(args[i].substr(1).c_str());
-								Rotation.Pitch = PitchValue;
-								continue;
-							}
-							catch (...) {}
-						}
+					if (LooksLikeSizeOrHeightModifierArg(CurrentArg))
+					{
+						PlayerController->ClientMessage(FString(L"Invalid summon modifier. Use s2 for 2x size or h100 for 100 meters high."), FName(), 1.f);
+						return;
+					}
 
-						std::wstring WideArg(args[i].begin(), args[i].end());
-						std::transform(WideArg.begin(), WideArg.end(), WideArg.begin(), ::towupper);
-						auto it = DirectionToYaw.find(WideArg);
+					if (!HasLocation && i + 2 < SummonTokens.size())
+					{
+						float X = 0.f;
+						float Y = 0.f;
+						float Z = 0.f;
 
-						if (it != DirectionToYaw.end())
+						if (TryParseCommandFloat(SummonTokens[i], X) && TryParseCommandFloat(SummonTokens[i + 1], Y) && TryParseCommandFloat(SummonTokens[i + 2], Z))
 						{
-							Rotation.Yaw = it->second;
+							Loc = FVector(X, Y, Z);
+							HasLocation = true;
+							i += 2;
 							continue;
 						}
 					}
-				}
-				catch (const std::invalid_argument&)
-				{
-					PlayerController->ClientMessage(FString(L"Invalid input for coordinates or count!"), FName(), 1.f);
+
+					int PossibleCount = 0;
+
+					if (TryParseCommandInt(CurrentArg, PossibleCount))
+					{
+						Count = PossibleCount;
+						continue;
+					}
+
+					if (CurrentArg.size() > 1 && (std::tolower(static_cast<unsigned char>(CurrentArg[0])) == 'p' || std::tolower(static_cast<unsigned char>(CurrentArg[0])) == 'r'))
+					{
+						float PitchValue = 0.f;
+
+						if (TryParseCommandFloat(CurrentArg.substr(1), PitchValue))
+						{
+							Rotation.Pitch = PitchValue;
+							continue;
+						}
+					}
+
+					std::wstring WideArg(CurrentArg.begin(), CurrentArg.end());
+					std::transform(WideArg.begin(), WideArg.end(), WideArg.begin(), ::towupper);
+					auto it = DirectionToYaw.find(WideArg);
+
+					if (it != DirectionToYaw.end())
+					{
+						Rotation.Yaw = it->second;
+						continue;
+					}
+
+					PlayerController->ClientMessage(FString(L"Invalid summon argument. Use count, X Y Z, s2, h100, p45/r45, or a compass direction."), FName(), 1.f);
 					return;
 				}
-				catch (const std::out_of_range&)
-				{
-					PlayerController->ClientMessage(FString(L"Input value out of range!"), FName(), 1.f);
-					return;
-				}
+
+				auto AppliedSummonHeightMeters = (!HasLocation || HasExplicitHeight) ? SummonHeightMeters : 0.f;
+				Loc.Z += AppliedSummonHeightMeters * 100.f;
 
 				int Max = 100;
+
+				if (Count < 1)
+				{
+					PlayerController->ClientMessage(FString(L"Summon count must be at least 1."), FName(), 1.f);
+					return;
+				}
 
 				if (Count > Max && IPStr != "127.0.0.1")
 				{
@@ -6159,31 +6732,28 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					Count = Max;
 				}
 
-				if (Class)
+				int AmountSpawned = 0;
+
+				for (int i = 0; i < Count; i++)
 				{
-					int AmountSpawned = 0;
+					FQuat SpawnQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
+					auto SpawnScale = FVector(SummonScale, SummonScale, SummonScale);
+					FTransform SpawnTransform(Loc, SpawnQuat, SpawnScale);
+					auto Actor = UWorld::SpawnActor(Class, SpawnTransform);
 
-					for (int i = 0; i < Count; i++)
-					{
-						FQuat SpawnQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
-						FTransform SpawnTransform(Loc, SpawnQuat, FVector(1.f, 1.f, 1.f));
-						auto Actor = UWorld::SpawnActor(Class, SpawnTransform);
-						if (!Actor)
-							continue;
+					if (!Actor)
+						continue;
 
-						if (auto Car = Actor->Cast<AFortDagwoodVehicle>())
-							Car->SetFuel(100.f);
+					if (auto Car = Actor->Cast<AFortDagwoodVehicle>())
+						Car->SetFuel(100.f);
 
-						Actor->ForceNetUpdate();
-						AmountSpawned++;
-					}
-
-					PlayerController->ClientMessage(FString(L"Spawned actor!"), FName(), 1.f);
+					Actor->ForceNetUpdate();
+					AmountSpawned++;
 				}
-				else
-				{
-					return PlayerController->ClientMessage(FString(L"Failed to find class! Try passing it as a path or check your spelling & casing"), FName(), 1);
-				}
+
+				auto Message = L"Spawned " + std::to_wstring(AmountSpawned) + L" actor(s)! (s" + FormatCommandFloatForMessage(SummonScale) +
+					L" h" + FormatCommandFloatForMessage(AppliedSummonHeightMeters) + L"m)";
+				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
 			}
 			else if (command == "skydive")
 			{

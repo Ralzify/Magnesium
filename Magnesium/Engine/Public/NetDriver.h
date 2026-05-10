@@ -175,7 +175,7 @@ public:
             AFortPlayerControllerAthena::GetPlayerViewPoint(ViewingController, NetViewer->ViewLocation, ViewRotation);
             constexpr auto radian = 0.017453292519943295;
             auto UnwindedPitch = FRotator::UnwindDegrees(ViewRotation.Pitch);
-            auto UnwindedYaw = FRotator::UnwindDegrees(ViewRotation.Pitch);
+            auto UnwindedYaw = FRotator::UnwindDegrees(ViewRotation.Yaw);
             double cosPitch = cos(UnwindedPitch * radian), sinPitch = sin(UnwindedPitch * radian), cosYaw = cos(UnwindedYaw * radian), sinYaw = sin(UnwindedYaw * radian);
             NetViewer->ViewDir = FVector(cosPitch * cosYaw, cosPitch * sinYaw, sinPitch);
         }
