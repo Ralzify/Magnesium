@@ -1866,12 +1866,15 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			{
 				auto Owner = DeathReport.DamageCauser->Owner;
 
-				if (Owner->Cast<AFortWeapon>())
-					DamageCauser = (AFortWeapon*)Owner;
-				else if (auto Controller = Owner->Cast<AFortPlayerControllerAthena>())
-					DamageCauser = (AFortWeapon*)Controller->Pawn->CurrentWeapon;
-				else if (auto Pawn = Owner->Cast<AFortPlayerPawnAthena>())
-					DamageCauser = (AFortWeapon*)Pawn->CurrentWeapon;
+				if (Owner)
+				{
+					if (Owner->Cast<AFortWeapon>())
+						DamageCauser = (AFortWeapon*)Owner;
+					else if (auto Controller = Owner->Cast<AFortPlayerControllerAthena>())
+						DamageCauser = Controller->Pawn ? (AFortWeapon*)Controller->Pawn->CurrentWeapon : nullptr;
+					else if (auto Pawn = Owner->Cast<AFortPlayerPawnAthena>())
+						DamageCauser = (AFortWeapon*)Pawn->CurrentWeapon;
+				}
 			}
 			else if (auto Weapon = DeathReport.DamageCauser ? DeathReport.DamageCauser->Cast<AFortWeapon>() : nullptr)
 				DamageCauser = Weapon;
@@ -1899,7 +1902,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					return nullptr;
 				};
 
-			float KillDistanceCm = KillerPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
+			float KillDistanceCm = KillerPawn && DeadPawn ? KillerPawn->GetDistanceTo(DeadPawn) : 0.f;
 			int KillDistanceMeters = static_cast<int>(KillDistanceCm / 100.f);
 
 			auto KillerConn = FindConnectionByPlayerState(KillerPlayerState);
@@ -1917,8 +1920,16 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 			auto KillerWeapon = DamageCauser ? DamageCauser->WeaponData : nullptr;
 
-			FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
-			FConfiguration::ElimWeaponName = Name.ToString();
+			FConfiguration::ElimWeaponName = "Unknown";
+
+			if (KillerWeapon)
+			{
+				if (KillerWeapon->HasDisplayName() || KillerWeapon->HasItemName())
+				{
+					FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
+					FConfiguration::ElimWeaponName = Name.ToString();
+				}
+			}
 
 			if (VersionInfo.FortniteVersion < 16.00 && !FConfiguration::bUseWinLines)
 			{
@@ -1928,7 +1939,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 			if (RemoveFromAlivePlayers_)
 			{
-				((void (*)(AFortGameMode*, AFortPlayerControllerAthena*, AFortPlayerStateAthena*, AFortPlayerPawnAthena*, UFortItemDefinition*, uint8, char))RemoveFromAlivePlayers_)(GameMode, PlayerController, KillerPlayerState == PlayerState ? nullptr : KillerPlayerState, KillerPawn, DamageCauser->IsA<AFortWeapon>() ? DamageCauser->WeaponData : nullptr, PlayerState->HasDeathInfo() ? PlayerState->DeathInfo.DeathCause : 0, 0);
+				auto DamageCauserWeaponData = DamageCauser && DamageCauser->IsA<AFortWeapon>() ? DamageCauser->WeaponData : nullptr;
+				((void (*)(AFortGameMode*, AFortPlayerControllerAthena*, AFortPlayerStateAthena*, AFortPlayerPawnAthena*, UFortItemDefinition*, uint8, char))RemoveFromAlivePlayers_)(GameMode, PlayerController, KillerPlayerState == PlayerState ? nullptr : KillerPlayerState, KillerPawn, DamageCauserWeaponData, PlayerState->HasDeathInfo() ? PlayerState->DeathInfo.DeathCause : 0, 0);
 			}
 
 			if (VersionInfo.FortniteVersion >= 15)
@@ -1936,7 +1948,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				//static auto SpectatingName = FName(L"Spectating");
 				//PlayerController->StateName = SpectatingName;
 				//PlayerController->ClientGotoState(SpectatingName);
-				PlayerController->Pawn->CharacterMovement->ProcessEvent(PlayerController->Pawn->CharacterMovement->GetFunction("DisableMovement"), nullptr);
+				if (PlayerController->Pawn && PlayerController->Pawn->CharacterMovement)
+					PlayerController->Pawn->CharacterMovement->ProcessEvent(PlayerController->Pawn->CharacterMovement->GetFunction("DisableMovement"), nullptr);
 			}
 
 			if (FConfiguration::bIsCustomMap && FConfiguration::AutoEndGame)
