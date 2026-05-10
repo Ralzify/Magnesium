@@ -198,6 +198,12 @@ static bool ApplyTrapTeam(ABuildingSMActor* Trap, AFortPlayerStateAthena* Player
 	if (Trap->HasTeamIndex())
 		Trap->TeamIndex = TeamIndex;
 
+	if (Trap->HasOwnerPersistentID() && PlayerState->HasWorldPlayerId())
+		Trap->OwnerPersistentID = PlayerState->WorldPlayerId;
+
+	if (Trap->HasbPlayerPlaced())
+		Trap->bPlayerPlaced = true;
+
 	Trap->SetTeam(TeamIndex);
 	Trap->ForceNetUpdate();
 	return true;
@@ -628,6 +634,9 @@ _out:
 
 	if (Building->HasTeamIndex())
 		Building->TeamIndex = Building->Team;
+
+	if (Building->HasOwnerPersistentID() && PlayerState->HasWorldPlayerId())
+		Building->OwnerPersistentID = PlayerState->WorldPlayerId;
 
 	//UWorld::FinishSpawnActor(Building, BuildLoc, BuildRot);
 

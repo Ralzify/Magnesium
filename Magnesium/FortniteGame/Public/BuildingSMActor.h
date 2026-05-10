@@ -104,6 +104,7 @@ public:
     DEFINE_PROP(ResourceType, EFortResourceType);
     DEFINE_PROP(Team, uint8);
     DEFINE_PROP(TeamIndex, uint8);
+    DEFINE_PROP(OwnerPersistentID, int16);
     DEFINE_PROP(EditingPlayer, AFortPlayerStateAthena*);
     DEFINE_BITFIELD_PROP(bDestroyed);
     DEFINE_PROP(CurrentBuildingLevel, int32);

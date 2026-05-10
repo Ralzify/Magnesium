@@ -1555,7 +1555,8 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
     if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2"))
         AFortAthenaCreativePortal::Create(NewPlayer);
 
-    PlayerState->WorldPlayerId = WorldPlayerId;
+    if (PlayerState->HasWorldPlayerId())
+        PlayerState->WorldPlayerId = WorldPlayerId++;
 
     if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2"))
         AFortAthenaCreativePortal::Create(NewPlayer);

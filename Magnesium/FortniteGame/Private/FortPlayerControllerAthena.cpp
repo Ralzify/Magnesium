@@ -1174,6 +1174,9 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 	
 	if (Building->HasTeamIndex())
 		Building->TeamIndex = Building->Team;
+
+	if (Building->HasOwnerPersistentID() && ((AFortPlayerStateAthena*)PlayerController->PlayerState)->HasWorldPlayerId())
+		Building->OwnerPersistentID = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->WorldPlayerId;
 }
 
 void SetEditingPlayer(ABuildingSMActor* _this, AFortPlayerStateAthena* NewEditingPlayer)
