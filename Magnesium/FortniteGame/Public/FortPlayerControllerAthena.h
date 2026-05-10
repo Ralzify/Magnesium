@@ -472,6 +472,7 @@ public:
     static void ServerClientIsReadyToRespawn(UObject*, FFrame&);
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
+    static void TickNukeRockets(float DeltaSeconds);
     DefHookOg(void, ClientOnPawnDied, AFortPlayerControllerAthena*, FFortPlayerDeathReport&);
     DefUHookOg(ServerAttemptInteract_);
     void InternalPickup(FFortItemEntry*);

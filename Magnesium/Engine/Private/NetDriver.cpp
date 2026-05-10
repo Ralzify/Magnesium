@@ -503,6 +503,8 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		GamePhaseLogic->Tick();
 	}
 
+	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
+
 	if (Driver->ClientConnections.Num() > 0)
 		ServerReplicateActors(Driver, DeltaSeconds);
 
@@ -585,6 +587,8 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
 	if (Driver->ReplicationDriver)
 	{
+		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
+
 		// this is our main netdriver
 		if (Driver->ClientConnections.Num() > 0)
 			((void (*)(UObject*, float)) ServerReplicateActors_)(Driver->ReplicationDriver, DeltaSeconds);
@@ -712,6 +716,8 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		if (GamePhaseLogic)
 			GamePhaseLogic->Tick();
 	}
+
+	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
 	if (Driver->ClientConnections.Num() > 0)
 	{

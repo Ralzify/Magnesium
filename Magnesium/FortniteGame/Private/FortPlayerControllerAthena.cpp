@@ -1721,14 +1721,105 @@ uint8 ToDeathCause(AFortPlayerPawnAthena* Pawn, FGameplayTagContainer& DeathTags
 	return 0;
 }
 
+static bool IsUsableDeathObject(const UObject* Object)
+{
+	if (!Object || IsBadReadPtr((void*)Object))
+		return false;
+
+	if (Object->Index < 0 || Object->Index >= TUObjectArray::Num())
+		return false;
+
+	auto Item = TUObjectArray::GetItemByIndex(Object->Index);
+	if (!Item || Item->Object != Object || (Item->Flags & 0x20))
+		return false;
+
+	return Object->Class && !IsBadReadPtr(Object->Class);
+}
+
+static AFortWeapon* GetPawnCurrentWeaponSafe(AFortPlayerPawnAthena* Pawn)
+{
+	if (!IsUsableDeathObject(Pawn) || !Pawn->HasCurrentWeapon())
+		return nullptr;
+
+	auto CurrentWeapon = Pawn->CurrentWeapon;
+	if (!IsUsableDeathObject(CurrentWeapon))
+		return nullptr;
+
+	return CurrentWeapon->Cast<AFortWeapon>();
+}
+
+static UFortWeaponItemDefinition* GetWeaponDataSafe(AFortWeapon* Weapon)
+{
+	if (!IsUsableDeathObject(Weapon) || !Weapon->HasWeaponData())
+		return nullptr;
+
+	auto WeaponData = Weapon->WeaponData;
+	return IsUsableDeathObject(WeaponData) ? WeaponData : nullptr;
+}
+
+static AFortWeapon* ResolveDeathReportWeapon(FFortPlayerDeathReport& DeathReport)
+{
+	auto DamageCauser = DeathReport.HasDamageCauser() ? DeathReport.DamageCauser : nullptr;
+	if (!IsUsableDeathObject(DamageCauser))
+		return nullptr;
+
+	static auto ProjectileBaseClass = FindClass("FortProjectileBase");
+	if (ProjectileBaseClass && DamageCauser->IsA(ProjectileBaseClass))
+	{
+		auto Owner = DamageCauser->HasOwner() ? DamageCauser->Owner : nullptr;
+		if (!IsUsableDeathObject(Owner))
+			return nullptr;
+
+		if (auto Weapon = Owner->Cast<AFortWeapon>())
+			return Weapon;
+
+		if (auto Controller = Owner->Cast<AFortPlayerControllerAthena>())
+			return Controller->HasPawn() ? GetPawnCurrentWeaponSafe(Controller->Pawn) : nullptr;
+
+		if (auto Pawn = Owner->Cast<AFortPlayerPawnAthena>())
+			return GetPawnCurrentWeaponSafe(Pawn);
+
+		return nullptr;
+	}
+
+	return DamageCauser->Cast<AFortWeapon>();
+}
+
+static bool TryGetItemDefinitionDisplayName(UFortItemDefinition* ItemDefinition, std::string& OutName)
+{
+	if (!IsUsableDeathObject(ItemDefinition))
+		return false;
+
+	FText* NameText = nullptr;
+	if (ItemDefinition->HasDisplayName())
+		NameText = &ItemDefinition->DisplayName;
+	else if (ItemDefinition->HasItemName())
+		NameText = &ItemDefinition->ItemName;
+
+	if (!NameText || IsBadReadPtr(NameText))
+		return false;
+
+	auto Name = UKismetTextLibrary::Conv_TextToString(*NameText);
+	auto ConvertedName = Name.ToString();
+	if (ConvertedName.empty())
+		return false;
+
+	OutName = ConvertedName;
+	return true;
+}
+
 uint64 RemoveFromAlivePlayers_ = 0;
 void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* PlayerController, FFortPlayerDeathReport& DeathReport)
 {
 	if (!PlayerController)
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
-	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-	auto PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+	auto World = UWorld::GetWorld();
+	auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
+	auto GameState = GameMode ? (AFortGameStateAthena*)GameMode->GameState : nullptr;
+	auto PlayerState = PlayerController->HasPlayerState() ? (AFortPlayerStateAthena*)PlayerController->PlayerState : nullptr;
+
+	if (!GameMode || !GameState || !PlayerState)
+		return ClientOnPawnDiedOG(PlayerController, DeathReport);
 
 	if (PlayerController->WorldInventory && PlayerController->Pawn && ((PlayerController->Pawn->HasbShouldDropItemsOnDeath() ? PlayerController->Pawn->bShouldDropItemsOnDeath : true) && !FConfiguration::bKeepInventory))
 	{
@@ -1742,9 +1833,16 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 	}
 
-	auto KillerPlayerState = (AFortPlayerStateAthena*)DeathReport.KillerPlayerState;
-	auto KillerPawn = (AFortPlayerPawnAthena*)DeathReport.KillerPawn;
-	auto KillerPlayerController = KillerPlayerState ? (AFortPlayerControllerAthena*)KillerPlayerState->Owner : nullptr;
+	auto KillerPlayerState = DeathReport.HasKillerPlayerState() ? (AFortPlayerStateAthena*)DeathReport.KillerPlayerState : nullptr;
+	auto KillerPawn = DeathReport.HasKillerPawn() ? (AFortPlayerPawnAthena*)DeathReport.KillerPawn : nullptr;
+	if (!IsUsableDeathObject(KillerPlayerState))
+		KillerPlayerState = nullptr;
+	if (!IsUsableDeathObject(KillerPawn))
+		KillerPawn = nullptr;
+
+	auto KillerPlayerController = (KillerPlayerState && KillerPlayerState->HasOwner() && IsUsableDeathObject(KillerPlayerState->Owner)) ? KillerPlayerState->Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+	FGameplayTagContainer EmptyDeathTags{};
+	auto& DeathTags = DeathReport.HasTags() ? DeathReport.Tags : EmptyDeathTags;
 
 	if (VersionInfo.FortniteVersion > 1.8 || VersionInfo.EngineVersion >= 4.19)
 	{
@@ -1763,7 +1861,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				PlayerState->DeathInfo.DeathTags = /*DeathReport.Tags*/ PlayerController->Pawn ? *(FGameplayTagContainer*)(__int64(&PlayerController->Pawn->MoveSoundStimulusBroadcastInterval) + (VersionInfo.FortniteVersion >= 11 && VersionInfo.FortniteVersion < 18 ? 0x18 : 0x10)) : FGameplayTagContainer();
 			if (FDeathInfo::HasDeathClassSlot())
 				PlayerState->DeathInfo.DeathClassSlot = -1;
-			PlayerState->DeathInfo.DeathCause = ToDeathCause(PlayerController->Pawn, DeathReport.Tags, PlayerState->DeathInfo.bDBNO);
+			PlayerState->DeathInfo.DeathCause = ToDeathCause(PlayerController->Pawn, DeathTags, PlayerState->DeathInfo.bDBNO);
 			//PlayerState->DeathInfo.Downer = KillerPlayerState;
 			if (FDeathInfo::HasFinisherOrDowner())
 				PlayerState->DeathInfo.FinisherOrDowner = KillerPlayerState ? KillerPlayerState : PlayerState;
@@ -1860,24 +1958,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			PlayerState->Place = GameState->PlayersLeft;
 			PlayerState->OnRep_Place();
 
-			AFortWeapon* DamageCauser = nullptr;
-			static auto ProjectileBaseClass = FindClass("FortProjectileBase");
-			if (DeathReport.DamageCauser ? DeathReport.DamageCauser->IsA(ProjectileBaseClass) : false)
-			{
-				auto Owner = DeathReport.DamageCauser->Owner;
-
-				if (Owner)
-				{
-					if (Owner->Cast<AFortWeapon>())
-						DamageCauser = (AFortWeapon*)Owner;
-					else if (auto Controller = Owner->Cast<AFortPlayerControllerAthena>())
-						DamageCauser = Controller->Pawn ? (AFortWeapon*)Controller->Pawn->CurrentWeapon : nullptr;
-					else if (auto Pawn = Owner->Cast<AFortPlayerPawnAthena>())
-						DamageCauser = (AFortWeapon*)Pawn->CurrentWeapon;
-				}
-			}
-			else if (auto Weapon = DeathReport.DamageCauser ? DeathReport.DamageCauser->Cast<AFortWeapon>() : nullptr)
-				DamageCauser = Weapon;
+			AFortWeapon* DamageCauser = ResolveDeathReportWeapon(DeathReport);
 
 			auto DeadPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
 			auto DeadPlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
@@ -1918,28 +1999,25 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			FConfiguration::ElimDistance = Distance;
 			FConfiguration::ElimStatusMessage = ":3";
 
-			auto KillerWeapon = DamageCauser ? DamageCauser->WeaponData : nullptr;
+			auto KillerWeapon = GetWeaponDataSafe(DamageCauser);
 
 			FConfiguration::ElimWeaponName = "Unknown";
-
-			if (KillerWeapon)
-			{
-				if (KillerWeapon->HasDisplayName() || KillerWeapon->HasItemName())
-				{
-					FString Name = UKismetTextLibrary::Conv_TextToString(KillerWeapon->HasDisplayName() ? KillerWeapon->DisplayName : KillerWeapon->ItemName);
-					FConfiguration::ElimWeaponName = Name.ToString();
-				}
-			}
 
 			if (VersionInfo.FortniteVersion < 16.00 && !FConfiguration::bUseWinLines)
 			{
 				DamageCauser = nullptr;
 				KillerWeapon = nullptr;
 			}
+			else
+			{
+				std::string WeaponName;
+				if (TryGetItemDefinitionDisplayName(KillerWeapon, WeaponName))
+					FConfiguration::ElimWeaponName = WeaponName;
+			}
 
 			if (RemoveFromAlivePlayers_)
 			{
-				auto DamageCauserWeaponData = DamageCauser && DamageCauser->IsA<AFortWeapon>() ? DamageCauser->WeaponData : nullptr;
+				auto DamageCauserWeaponData = GetWeaponDataSafe(DamageCauser);
 				((void (*)(AFortGameMode*, AFortPlayerControllerAthena*, AFortPlayerStateAthena*, AFortPlayerPawnAthena*, UFortItemDefinition*, uint8, char))RemoveFromAlivePlayers_)(GameMode, PlayerController, KillerPlayerState == PlayerState ? nullptr : KillerPlayerState, KillerPawn, DamageCauserWeaponData, PlayerState->HasDeathInfo() ? PlayerState->DeathInfo.DeathCause : 0, 0);
 			}
 
@@ -2737,7 +2815,7 @@ static std::string GetResolvedPlayerNameForCommand(AFortPlayerControllerAthena* 
 	return PlayerName;
 }
 
-static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::string& Name, AFortPlayerControllerAthena* RequestingPlayer, std::string& MatchedName, bool& bAmbiguous)
+static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::string& Name, AFortPlayerControllerAthena* RequestingPlayer, std::string& MatchedName, bool& bAmbiguous, bool bAllowRequestingPlayer = false)
 {
 	bAmbiguous = false;
 	MatchedName.clear();
@@ -2770,7 +2848,7 @@ static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::st
 
 		auto PC = (AFortPlayerControllerAthena*)Connection->PlayerController;
 
-		if (!PC || PC == RequestingPlayer || !PC->Pawn)
+		if (!PC || (!bAllowRequestingPlayer && PC == RequestingPlayer) || !PC->Pawn)
 			continue;
 
 		auto PS = PC->PlayerState;
@@ -2816,6 +2894,486 @@ static AFortPlayerControllerAthena* FindRealPlayerByNameForCommand(const std::st
 	}
 
 	return nullptr;
+}
+
+static FRotator MakeRotationFromDirection(FVector Direction)
+{
+	Direction = Direction.GetSafeNormal();
+
+	if (Direction.IsZero())
+		return FRotator(-90.f, 0.f, 0.f);
+
+	constexpr double RadToDeg = 57.29577951308232;
+	return FRotator(asin(Direction.Z) * RadToDeg, atan2(Direction.Y, Direction.X) * RadToDeg, 0.f);
+}
+
+template <typename T>
+static bool SetReflectedProperty(UObject* Object, const char* PropertyName, const T& Value)
+{
+	if (!Object)
+		return false;
+
+	auto Prop = Object->GetProperty(PropertyName, GUESS_PROP_FLAGS(T));
+
+	if (!Prop)
+		return false;
+
+	auto Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+	auto ElementSize = GetFromOffset<uint32>(Prop, Offsets::ElementSize);
+
+	if (Offset == -1)
+		return false;
+
+	if constexpr (std::is_same_v<T, FVector>)
+	{
+		if (ElementSize != FVector::Size())
+			return false;
+	}
+	else if (ElementSize != sizeof(T))
+	{
+		return false;
+	}
+
+	auto ValueCopy = Value;
+	GetFromOffset<T>(Object, Offset) = ValueCopy;
+	return true;
+}
+
+static bool SetReflectedBoolProperty(UObject* Object, const char* PropertyName, bool Value)
+{
+	if (!Object)
+		return false;
+
+	auto Prop = Object->GetProperty(PropertyName, 0x20000);
+
+	if (!Prop)
+		return false;
+
+	auto Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+	auto FieldMask = Prop->GetFieldMask();
+
+	if (Offset == -1 || FieldMask == 0)
+		return false;
+
+	if (Value)
+		GetFromOffset<uint8>(Object, Offset) |= FieldMask;
+	else
+		GetFromOffset<uint8>(Object, Offset) &= ~FieldMask;
+
+	return true;
+}
+
+static uint32 GetReflectedPropertyOffset(const UField* Prop)
+{
+	return Prop ? GetFromOffset<uint32>(Prop, Offsets::Offset_Internal) : -1;
+}
+
+static uint32 GetReflectedPropertyElementSize(const UField* Prop)
+{
+	return Prop ? GetFromOffset<uint32>(Prop, Offsets::ElementSize) : 0;
+}
+
+static std::string GetReflectedPropertyName(const UField* Prop)
+{
+	if (!Prop)
+		return "";
+
+	auto Name = VersionInfo.FortniteVersion >= 12.10 ? Prop->FField_GetName().ToSDKString() : Prop->GetName().ToSDKString();
+	return std::string(Name.c_str());
+}
+
+static bool LooksLikeNukeTargetProperty(std::string Name)
+{
+	std::transform(Name.begin(), Name.end(), Name.begin(), [](unsigned char c) { return std::tolower(c); });
+
+	static const char* Tokens[] =
+	{
+		"target",
+		"destination",
+		"impact",
+		"goal",
+		"homing",
+		"seek",
+		"lockon",
+		"aim",
+		"reticle",
+		"crosshair",
+		"final"
+	};
+
+	for (auto Token : Tokens)
+	{
+		if (Name.find(Token) != std::string::npos)
+			return true;
+	}
+
+	return false;
+}
+
+static const UClass* FindNukeProjectileClassByArg(const std::string& ClassArg)
+{
+	auto TrimmedArg = TrimPlayerCommandString(ClassArg);
+
+	if (TrimmedArg.empty())
+		return nullptr;
+
+	auto TryFindClass = [](const std::string& Value) -> const UClass*
+	{
+		if (Value.empty())
+			return nullptr;
+
+		UEAllocatedWString WideValue(Value.begin(), Value.end());
+		auto Class = FindObject<UClass>(WideValue.c_str());
+
+		if (!Class)
+			Class = FindClass(Value.c_str());
+
+		return Class;
+	};
+
+	if (auto Class = TryFindClass(TrimmedArg))
+		return Class;
+
+	if (TrimmedArg.find('/') != std::string::npos)
+	{
+		auto DotIndex = TrimmedArg.rfind('.');
+
+		if (DotIndex == std::string::npos)
+		{
+			auto LastSlashIndex = TrimmedArg.find_last_of('/');
+			auto AssetName = LastSlashIndex == std::string::npos ? TrimmedArg : TrimmedArg.substr(LastSlashIndex + 1);
+
+			if (auto Class = TryFindClass(TrimmedArg + "." + AssetName + "_C"))
+				return Class;
+		}
+		else if (!TrimmedArg.ends_with("_c"))
+		{
+			if (auto Class = TryFindClass(TrimmedArg + "_C"))
+				return Class;
+		}
+	}
+
+	if (TrimmedArg.find('.') == std::string::npos)
+	{
+		if (auto Class = TryFindClass(TrimmedArg + "." + TrimmedArg))
+			return Class;
+	}
+
+	auto ShortName = Misc::ObjectNames.find(TrimmedArg);
+
+	if (ShortName != Misc::ObjectNames.end())
+	{
+		if (auto Class = TryFindClass(ShortName->second))
+			return Class;
+	}
+
+	return nullptr;
+}
+
+static const UClass* GetDefaultNukeProjectileClass()
+{
+	static const UClass* DefaultNukeProjectileClass = nullptr;
+
+	if (!DefaultNukeProjectileClass)
+		DefaultNukeProjectileClass = FindNukeProjectileClassByArg("/Game/Athena/DrivableVehicles/Mech/B_Prj_Ostrich_Rocket.B_Prj_Ostrich_Rocket_C");
+
+	return DefaultNukeProjectileClass;
+}
+
+static void SetMatchingNukeTargetVectorProperties(UObject* Object, const FVector& TargetLocation)
+{
+	if (!Object || !Object->Class)
+		return;
+
+	for (const UStruct* Clss = Object->Class; Clss; Clss = Clss->GetSuper())
+	{
+		auto Prop = VersionInfo.FortniteVersion >= 12.10 ? Clss->GetChildProperties() : Clss->GetChildren();
+
+		for (; Prop; Prop = VersionInfo.FortniteVersion >= 12.10 ? Prop->FField_GetNext() : Prop->GetNext())
+		{
+			if (GetReflectedPropertyElementSize(Prop) != FVector::Size())
+				continue;
+
+			if (!LooksLikeNukeTargetProperty(GetReflectedPropertyName(Prop)))
+				continue;
+
+			auto Offset = GetReflectedPropertyOffset(Prop);
+
+			if (Offset == -1)
+				continue;
+
+			auto TargetLocationCopy = TargetLocation;
+			GetFromOffset<FVector>(Object, Offset) = TargetLocationCopy;
+		}
+	}
+}
+
+static bool FunctionHasSingleNukeInputParam(UFunction* Function, uint32 ExpectedElementSize)
+{
+	if (!Function)
+		return false;
+
+	auto Params = Function->GetParams();
+	int InputParamCount = 0;
+
+	for (auto& Param : Params.NameOffsetMap)
+	{
+		if (((Param.PropertyFlags & 0x100) != 0 && (Param.PropertyFlags & 0x8000000) == 0) || (Param.PropertyFlags & 0x400) != 0)
+			continue;
+
+		InputParamCount++;
+
+		if (Param.ElementSize != ExpectedElementSize)
+			return false;
+	}
+
+	return InputParamCount == 1;
+}
+
+template <typename T>
+static bool TryCallNukeTargetFunction(UObject* Object, const char* FunctionName, const T& Value)
+{
+	if (!Object)
+		return false;
+
+	auto Function = Object->GetFunction(FunctionName);
+	uint32 ExpectedElementSize = std::is_same_v<T, FVector> ? FVector::Size() : sizeof(T);
+
+	if (!FunctionHasSingleNukeInputParam(Function, ExpectedElementSize))
+		return false;
+
+	auto ValueCopy = Value;
+	Object->Call<void>(Function, ValueCopy);
+	return true;
+}
+
+static void TryCallNukeTargetFunctions(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& TargetLocation)
+{
+	if (!Rocket)
+		return;
+
+	static const char* VectorFunctions[] =
+	{
+		"SetTargetLocation",
+		"SetTargetPosition",
+		"SetDestination",
+		"SetDestinationLocation",
+		"SetImpactLocation",
+		"SetGoalLocation",
+		"SetAimLocation",
+		"SetHomingTargetLocation",
+		"SetTarget"
+	};
+
+	for (auto FunctionName : VectorFunctions)
+		TryCallNukeTargetFunction<FVector>(Rocket, FunctionName, TargetLocation);
+
+	if (!TargetPawn)
+		return;
+
+	static const char* ActorFunctions[] =
+	{
+		"SetTargetActor",
+		"SetTargetPawn",
+		"SetHomingTarget",
+		"SetLockOnTarget",
+		"SetSeekTarget",
+		"SetTarget"
+	};
+
+	for (auto FunctionName : ActorFunctions)
+		TryCallNukeTargetFunction<AActor*>(Rocket, FunctionName, TargetPawn);
+}
+
+static void ConfigureNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, const FVector& TargetLocation, const FVector& Velocity)
+{
+	if (!Rocket)
+		return;
+
+	if (Rocket->HasbReplicates())
+		Rocket->bReplicates = true;
+	if (Rocket->HasbAlwaysRelevant())
+		Rocket->bAlwaysRelevant = true;
+	if (Rocket->HasNetUpdateFrequency())
+		Rocket->NetUpdateFrequency = 100.f;
+
+	SetReflectedProperty<FVector>(Rocket, "Velocity", Velocity);
+	SetReflectedProperty<FVector>(Rocket, "InitialVelocity", Velocity);
+	SetReflectedProperty<FVector>(Rocket, "LaunchVelocity", Velocity);
+	SetReflectedProperty<FVector>(Rocket, "TargetLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "TargetPosition", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "Destination", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "InitialTargetLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "ImpactLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "GoalLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "AimLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "HomingTargetLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "LockOnLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "SeekLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "ReticleTargetLocation", TargetLocation);
+	SetReflectedProperty<FVector>(Rocket, "CrosshairTargetLocation", TargetLocation);
+	SetMatchingNukeTargetVectorProperties(Rocket, TargetLocation);
+
+	if (TargetPawn)
+	{
+		SetReflectedProperty<AActor*>(Rocket, "Target", TargetPawn);
+		SetReflectedProperty<AActor*>(Rocket, "CurrentTarget", TargetPawn);
+		SetReflectedProperty<AActor*>(Rocket, "CachedTarget", TargetPawn);
+		SetReflectedProperty<AFortPlayerPawnAthena*>(Rocket, "TargetPawn", TargetPawn);
+		SetReflectedProperty<AActor*>(Rocket, "TargetActor", TargetPawn);
+		SetReflectedProperty<AActor*>(Rocket, "HomingTarget", TargetPawn);
+		SetReflectedProperty<AActor*>(Rocket, "LockOnTarget", TargetPawn);
+		SetReflectedProperty<AActor*>(Rocket, "LockedOnTarget", TargetPawn);
+		SetReflectedProperty<AActor*>(Rocket, "SeekTarget", TargetPawn);
+
+		if (TargetPawn->HasRootComponent() && TargetPawn->RootComponent)
+			SetReflectedProperty<UActorComponent*>(Rocket, "HomingTargetComponent", TargetPawn->RootComponent);
+	}
+
+	TryCallNukeTargetFunctions(Rocket, TargetPawn, TargetLocation);
+
+	if (auto SetActorTickEnabledFn = Rocket->GetFunction("SetActorTickEnabled"))
+	{
+		bool bEnabled = false;
+
+		if (FunctionHasSingleNukeInputParam(SetActorTickEnabledFn, sizeof(bool)))
+			Rocket->Call<void>(SetActorTickEnabledFn, bEnabled);
+	}
+
+	static auto ProjectileMovementClass = FindClass("ProjectileMovementComponent");
+	auto ProjectileMovement = ProjectileMovementClass ? Rocket->GetComponentByClass(ProjectileMovementClass) : nullptr;
+
+	if (ProjectileMovement)
+	{
+		auto Speed = static_cast<float>(Velocity.Magnitude());
+
+		SetReflectedProperty<FVector>(ProjectileMovement, "Velocity", Velocity);
+		SetReflectedProperty<float>(ProjectileMovement, "InitialSpeed", Speed);
+		SetReflectedProperty<float>(ProjectileMovement, "MaxSpeed", Speed);
+		SetReflectedProperty<float>(ProjectileMovement, "ProjectileGravityScale", 0.f);
+		SetReflectedProperty<float>(ProjectileMovement, "HomingAccelerationMagnitude", 0.f);
+		SetReflectedBoolProperty(ProjectileMovement, "bRotationFollowsVelocity", true);
+		SetReflectedBoolProperty(ProjectileMovement, "bIsHomingProjectile", false);
+
+		SetReflectedProperty<UActorComponent*>(ProjectileMovement, "HomingTargetComponent", nullptr);
+
+		if (auto SetVelocityInLocalSpaceFn = ProjectileMovement->GetFunction("SetVelocityInLocalSpace"))
+			ProjectileMovement->Call<void>(SetVelocityInLocalSpaceFn, FVector(Speed, 0.f, 0.f));
+	}
+
+	if (Rocket->HasRootComponent() && Rocket->RootComponent)
+	{
+		if (auto SetPhysicsLinearVelocityFn = Rocket->RootComponent->GetFunction("SetPhysicsLinearVelocity"))
+			Rocket->RootComponent->Call<void>(SetPhysicsLinearVelocityFn, Velocity, false, FName(0));
+	}
+
+	Rocket->SetLifeSpan(20.f);
+	Rocket->ForceNetUpdate();
+}
+
+struct FGuidedNukeRocket
+{
+	AActor* Rocket;
+	AFortPlayerPawnAthena* TargetPawn;
+	float LifeSeconds;
+	float Speed;
+};
+
+static std::vector<FGuidedNukeRocket> GuidedNukeRockets;
+
+static void RegisterGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, float Speed)
+{
+	if (!Rocket || !TargetPawn)
+		return;
+
+	GuidedNukeRockets.push_back({ Rocket, TargetPawn, 8.f, Speed });
+}
+
+static bool IsGuidedNukeObjectValid(const UObject* Object)
+{
+	return IsUsableDeathObject(Object) && Object->Class;
+}
+
+static void ApplyGuidedNukeRocket(AActor* Rocket, AFortPlayerPawnAthena* TargetPawn, float Speed, float DeltaSeconds)
+{
+	auto TargetLocation = TargetPawn->K2_GetActorLocation();
+	TargetLocation.Z += 80.f;
+
+	auto RocketLocation = Rocket->K2_GetActorLocation();
+	auto Direction = (TargetLocation - RocketLocation).GetSafeNormal();
+
+	if (Direction.IsZero())
+		Direction = FVector(0.f, 0.f, -1.f);
+
+	auto Velocity = Direction * Speed;
+	auto Rotation = MakeRotationFromDirection(Direction);
+
+	Rocket->K2_SetActorRotation(Rotation, false);
+
+	auto Step = (DeltaSeconds > 0.f ? DeltaSeconds : 0.f) * Speed;
+	auto Distance = RocketLocation.GetDistanceTo(TargetLocation);
+
+	if (Distance > 0.f && Step > 0.f)
+	{
+		auto NextLocation = Distance <= Step ? TargetLocation : RocketLocation + (Direction * Step);
+		Rocket->K2_SetActorLocation(NextLocation, false, nullptr, true);
+	}
+
+	SetReflectedProperty<FVector>(Rocket, "Velocity", Velocity);
+	SetReflectedProperty<FVector>(Rocket, "InitialVelocity", Velocity);
+	SetReflectedProperty<FVector>(Rocket, "LaunchVelocity", Velocity);
+	SetMatchingNukeTargetVectorProperties(Rocket, TargetLocation);
+	TryCallNukeTargetFunctions(Rocket, TargetPawn, TargetLocation);
+
+	static auto ProjectileMovementClass = FindClass("ProjectileMovementComponent");
+	auto ProjectileMovement = ProjectileMovementClass ? Rocket->GetComponentByClass(ProjectileMovementClass) : nullptr;
+
+	if (ProjectileMovement)
+	{
+		SetReflectedProperty<FVector>(ProjectileMovement, "Velocity", Velocity);
+		SetReflectedProperty<float>(ProjectileMovement, "InitialSpeed", Speed);
+		SetReflectedProperty<float>(ProjectileMovement, "MaxSpeed", Speed);
+		SetReflectedProperty<float>(ProjectileMovement, "ProjectileGravityScale", 0.f);
+		SetReflectedProperty<float>(ProjectileMovement, "HomingAccelerationMagnitude", 0.f);
+		SetReflectedBoolProperty(ProjectileMovement, "bRotationFollowsVelocity", true);
+		SetReflectedBoolProperty(ProjectileMovement, "bIsHomingProjectile", false);
+		SetReflectedProperty<UActorComponent*>(ProjectileMovement, "HomingTargetComponent", nullptr);
+	}
+
+	if (Rocket->HasRootComponent() && Rocket->RootComponent)
+	{
+		if (auto SetPhysicsLinearVelocityFn = Rocket->RootComponent->GetFunction("SetPhysicsLinearVelocity"))
+			Rocket->RootComponent->Call<void>(SetPhysicsLinearVelocityFn, Velocity, false, FName(0));
+	}
+
+	Rocket->ForceNetUpdate();
+}
+
+void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
+{
+	if (GuidedNukeRockets.empty())
+		return;
+
+	for (int i = static_cast<int>(GuidedNukeRockets.size()) - 1; i >= 0; i--)
+	{
+		auto& GuidedRocket = GuidedNukeRockets[i];
+
+		if (!IsGuidedNukeObjectValid(GuidedRocket.Rocket) || !IsGuidedNukeObjectValid(GuidedRocket.TargetPawn))
+		{
+			GuidedNukeRockets.erase(GuidedNukeRockets.begin() + i);
+			continue;
+		}
+
+		GuidedRocket.LifeSeconds -= DeltaSeconds;
+
+		if (GuidedRocket.LifeSeconds <= 0.f || (GuidedRocket.Rocket->HasbActorIsBeingDestroyed() && GuidedRocket.Rocket->bActorIsBeingDestroyed))
+		{
+			GuidedNukeRockets.erase(GuidedNukeRockets.begin() + i);
+			continue;
+		}
+
+		ApplyGuidedNukeRocket(GuidedRocket.Rocket, GuidedRocket.TargetPawn, GuidedRocket.Speed, DeltaSeconds);
+	}
 }
 
 int AFortPlayerControllerAthena::TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage)
@@ -2982,6 +3540,7 @@ cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
 cheat tpto <player name> - Teleports you next to a real player
+cheat nuke [projectile/path] <player name> - Spawns projectiles above a real player
 cheat tp - Teleports to where your crosshair is aiming
 cheat tp <X> <Y> <Z> - Teleports to a location
 cheat launch <X> <Y> <Z> - Launches the player
@@ -4624,6 +5183,119 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					PlayerPawn->CharacterMovement->Velocity = FVector{};
 
 				PlayerController->ClientMessage(FString(L"Teleported next to player!"), FName(), 1.f);
+			}
+			else if (command == "nuke")
+			{
+				auto NukeArgsStart = fullCommand.find(' ');
+
+				if (NukeArgsStart == std::string::npos)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat nuke [projectile/path] <player name>"), FName(), 1.f);
+					return;
+				}
+
+				auto NukeArgs = TrimPlayerCommandString(fullCommand.substr(NukeArgsStart + 1).c_str());
+
+				if (NukeArgs.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat nuke [projectile/path] <player name>"), FName(), 1.f);
+					return;
+				}
+
+				auto ProjectileClass = GetDefaultNukeProjectileClass();
+				auto PlayerName = NukeArgs;
+				auto ProjectileArgEnd = NukeArgs.find(' ');
+
+				if (ProjectileArgEnd != std::string::npos)
+				{
+					auto ProjectileArg = TrimPlayerCommandString(NukeArgs.substr(0, ProjectileArgEnd));
+					auto CandidateProjectileClass = FindNukeProjectileClassByArg(ProjectileArg);
+
+					if (CandidateProjectileClass)
+					{
+						ProjectileClass = CandidateProjectileClass;
+						PlayerName = TrimPlayerCommandString(NukeArgs.substr(ProjectileArgEnd + 1));
+					}
+					else if (ProjectileArg.find('/') != std::string::npos || ProjectileArg.find('.') != std::string::npos || ProjectileArg.ends_with("_c"))
+					{
+						PlayerController->ClientMessage(FString(L"Failed to find projectile class. Try a class path, generated class path, or short object name."), FName(), 1.f);
+						return;
+					}
+				}
+
+				if (!ProjectileClass)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to find default Ostrich rocket projectile class."), FName(), 1.f);
+					return;
+				}
+
+				if (PlayerName.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat nuke [projectile/path] <player name>"), FName(), 1.f);
+					return;
+				}
+
+				std::string MatchedName;
+				bool bAmbiguous = false;
+				auto TargetPC = FindRealPlayerByNameForCommand(PlayerName, PlayerController, MatchedName, bAmbiguous, true);
+
+				if (bAmbiguous)
+				{
+					PlayerController->ClientMessage(FString(L"Multiple real players matched that name. Please be more specific."), FName(), 1.f);
+					return;
+				}
+
+				if (!TargetPC || !TargetPC->Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find a real player with that name."), FName(), 1.f);
+					return;
+				}
+
+				auto TargetPawn = TargetPC->Pawn;
+				auto TargetLocation = TargetPawn->K2_GetActorLocation();
+				auto AimLocation = TargetLocation;
+				AimLocation.Z += 80.f;
+
+				constexpr int RocketCount = 100;
+				constexpr double GoldenAngle = 2.39996322972865332;
+				constexpr double DiskRadius = 1800.0;
+				constexpr double SpawnHeight = 6500.0;
+				constexpr double RocketSpeed = 5500.0;
+				int SpawnedRockets = 0;
+
+				for (int i = 0; i < RocketCount; i++)
+				{
+					double NormalizedIndex = RocketCount > 1 ? static_cast<double>(i) / static_cast<double>(RocketCount - 1) : 0.0;
+					double Radius = DiskRadius * sqrt(NormalizedIndex);
+					double Angle = GoldenAngle * i;
+
+					FVector SpawnLocation(
+						TargetLocation.X + (cos(Angle) * Radius),
+						TargetLocation.Y + (sin(Angle) * Radius),
+						TargetLocation.Z + SpawnHeight
+					);
+
+					auto Direction = (AimLocation - SpawnLocation).GetSafeNormal();
+
+					if (Direction.IsZero())
+						Direction = FVector(0.f, 0.f, -1.f);
+
+					auto SpawnRotation = MakeRotationFromDirection(Direction);
+					auto Rocket = UWorld::SpawnActor(ProjectileClass, SpawnLocation, SpawnRotation, PlayerController);
+
+					if (!Rocket)
+						continue;
+
+					if (Rocket->HasInstigator() && PlayerController->Pawn)
+						Rocket->Instigator = PlayerController->Pawn;
+
+					ConfigureNukeRocket(Rocket, TargetPawn, AimLocation, Direction * RocketSpeed);
+					RegisterGuidedNukeRocket(Rocket, TargetPawn, static_cast<float>(RocketSpeed));
+					SpawnedRockets++;
+				}
+
+				auto Message = L"Spawned " + std::to_wstring(SpawnedRockets) + L" projectiles above " + std::wstring(MatchedName.begin(), MatchedName.end()) + L"!";
+				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
 			}
 			else if (command == "botemote")
 			{
