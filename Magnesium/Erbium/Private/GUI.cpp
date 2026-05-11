@@ -744,7 +744,7 @@ void GUI::Init()
                                 {
                                     RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
                                     RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
-                                    RespawnPlaylist->RespawnHeight.Value = 20000;
+                                    RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
                                 }
                                 if (RespawnPlaylist->HasRespawnTime())
                                 {
@@ -786,6 +786,7 @@ void GUI::Init()
                     }
 
                     ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
+                    ImGui::Checkbox("Midzone Respawns", &FConfiguration::bMidZoneRespawning);
 
                     ImGui::PushItemWidth(Width);
                     if (ImGui::SliderInt("Respawn Time", &FConfiguration::RespawnTime, 1, 10))

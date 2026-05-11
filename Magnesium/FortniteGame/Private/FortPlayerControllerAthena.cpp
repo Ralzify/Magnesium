@@ -104,6 +104,107 @@ void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena
 }
 static std::unordered_set<AFortPlayerControllerAthena*> PlayersInitialized;
 
+static bool IsFiniteRespawnLocation(FVector Location)
+{
+	return std::isfinite(static_cast<double>(Location.X)) &&
+		std::isfinite(static_cast<double>(Location.Y)) &&
+		std::isfinite(static_cast<double>(Location.Z));
+}
+
+static AFortSafeZoneIndicator* GetRespawnSafeZoneIndicator(AFortGameMode* GameMode)
+{
+	if (!GameMode)
+		return nullptr;
+
+	if (GameMode->HasSafeZoneIndicator() && GameMode->SafeZoneIndicator)
+		return GameMode->SafeZoneIndicator;
+
+	auto GameState = GameMode->GameState;
+
+	if (GameState && GameState->HasSafeZoneIndicator() && GameState->SafeZoneIndicator)
+		return (AFortSafeZoneIndicator*)GameState->SafeZoneIndicator;
+
+	return nullptr;
+}
+
+static bool TryGetSafeZoneRespawnCenter(AFortGameMode* GameMode, FVector& OutCenter)
+{
+	auto SafeZoneIndicator = GetRespawnSafeZoneIndicator(GameMode);
+
+	if (!SafeZoneIndicator)
+		return false;
+
+	auto TryUseCenter = [&](FVector Center, bool bAllowZero) -> bool
+	{
+		if (!IsFiniteRespawnLocation(Center) || (!bAllowZero && Center.IsZero()))
+			return false;
+
+		OutCenter = Center;
+		return true;
+	};
+
+	FVector PhaseCenter{};
+	bool bHasPhaseCenter = false;
+
+	if (SafeZoneIndicator->HasSafeZonePhases() && SafeZoneIndicator->HasCurrentPhase())
+	{
+		auto& SafeZonePhases = SafeZoneIndicator->SafeZonePhases;
+		auto CurrentPhase = SafeZoneIndicator->CurrentPhase;
+
+		if (SafeZonePhases.IsValidIndex(CurrentPhase))
+		{
+			auto& PhaseInfo = SafeZonePhases.Get(CurrentPhase, FFortSafeZonePhaseInfo::Size());
+			PhaseCenter = PhaseInfo.Center;
+			bHasPhaseCenter = true;
+		}
+	}
+
+	if (auto GetSafeZoneCenterFn = SafeZoneIndicator->GetFunction("GetSafeZoneCenter"))
+	{
+		auto Center = SafeZoneIndicator->Call<FVector>(GetSafeZoneCenterFn);
+
+		if (TryUseCenter(Center, bHasPhaseCenter || !Center.IsZero()))
+			return true;
+	}
+
+	if (bHasPhaseCenter && TryUseCenter(PhaseCenter, true))
+		return true;
+
+	if (SafeZoneIndicator->HasNextCenter() && TryUseCenter(SafeZoneIndicator->NextCenter, false))
+		return true;
+
+	if (SafeZoneIndicator->HasLastCenter() && TryUseCenter(SafeZoneIndicator->LastCenter, false))
+		return true;
+
+	if (SafeZoneIndicator->HasPreviousCenter() && TryUseCenter(SafeZoneIndicator->PreviousCenter, false))
+		return true;
+
+	return false;
+}
+
+static bool TryGetConfiguredRespawnLocation(AFortGameMode* GameMode, FVector& OutLocation)
+{
+	if (FConfiguration::bForceRespawns && FConfiguration::bMidZoneRespawning)
+	{
+		FVector SafeZoneCenter{};
+
+		if (TryGetSafeZoneRespawnCenter(GameMode, SafeZoneCenter))
+		{
+			OutLocation = SafeZoneCenter;
+			OutLocation.Z = SafeZoneCenter.Z + static_cast<double>(FConfiguration::RespawnHeight);
+			return true;
+		}
+	}
+
+	if (FConfiguration::HasCustomRespawnPoint)
+	{
+		OutLocation = FConfiguration::CustomRespawnPoint;
+		return true;
+	}
+
+	return false;
+}
+
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
 void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, FFrame& Stack)
@@ -170,8 +271,9 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	else
 		bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerController->PlayerState);
 
-	if (bRespawnAllowed && FConfiguration::HasCustomRespawnPoint)
-		FortPawn->K2_TeleportTo(FConfiguration::CustomRespawnPoint, FRotator(0.f, 0.f, 0.f));
+	FVector ConfiguredRespawnLocation{};
+	if (bRespawnAllowed && TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
+		FortPawn->K2_TeleportTo(ConfiguredRespawnLocation, FRotator(0.f, 0.f, 0.f));
 
 	if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1") && VersionInfo.FortniteVersion == 14.40)
 	{
@@ -2443,6 +2545,10 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		SpawnTransform.Translation = PlayerState->RespawnData.RespawnLocation;
 		SpawnTransform.Rotation = Rotation;
 
+		FVector ConfiguredRespawnLocation{};
+		if (TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
+			SpawnTransform.Translation = ConfiguredRespawnLocation;
+
 		auto Scale = FVector(1, 1, 1);
 		SpawnTransform.Scale3D = Scale;
 
@@ -4306,7 +4412,6 @@ cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
 cheat tpto <exact player name> - Teleports you next to a real player
-cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 projectiles and targets them to a player or crosshair
 cheat tp - Teleports to where your crosshair is aiming
 cheat tp <X> <Y> <Z> - Teleports to a location
 cheat launch <X> <Y> <Z> - Launches the player
@@ -5976,6 +6081,12 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					PlayerPawn->CharacterMovement->Velocity = FVector{};
 
 				PlayerController->ClientMessage(FString(L"Teleported next to player!"), FName(), 1.f);
+			}
+			else if (command == "troll")
+			{
+				PlayerController->ClientMessage(FString(LR"(
+cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 projectiles and targets them to a player or crosshair
+)"), FName(), 1.f);
 			}
 			else if (command == "nuke")
 			{

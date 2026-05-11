@@ -110,6 +110,7 @@ struct FConfiguration
 
     static inline auto bForceRespawns = false; // build your client with this too!
     static inline auto bKeepInventory = false;
+	static inline auto bMidZoneRespawning = false;
     static inline auto bJoinInProgress = false;
 	static inline auto PermanentRespawn = false;
     static inline auto RespawnTime = 3;
