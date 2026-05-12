@@ -3264,9 +3264,21 @@ static const UClass* GetDefaultNukeProjectileClass()
 	static const UClass* DefaultNukeProjectileClass = nullptr;
 
 	if (!DefaultNukeProjectileClass)
-		DefaultNukeProjectileClass = FindActorClassByCommandArg("/Game/Athena/DrivableVehicles/Mech/B_Prj_Ostrich_Rocket.B_Prj_Ostrich_Rocket_C");
+		DefaultNukeProjectileClass = FindActorClassByCommandArg("/Game/Weapons/FORT_RocketLaunchers/Blueprints/B_Prj_Ranged_Rocket_Athena.B_Prj_Ranged_Rocket_Athena_C");
 
 	return DefaultNukeProjectileClass;
+}
+
+static bool IsObjectShortCommandArg(const std::string& Arg)
+{
+	auto NormalizedArg = NormalizePlayerCommandString(Arg);
+	return !NormalizedArg.empty() && Misc::ObjectNames.find(NormalizedArg) != Misc::ObjectNames.end();
+}
+
+static bool IsNukePlayerTargetKeyword(const std::string& Arg)
+{
+	auto NormalizedArg = NormalizePlayerCommandString(Arg);
+	return NormalizedArg == "target" || NormalizedArg == "player";
 }
 
 static std::vector<std::string> SplitPlayerCommandArgs(const std::string& Args)
@@ -6085,7 +6097,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			else if (command == "troll")
 			{
 				PlayerController->ClientMessage(FString(LR"(
-cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 projectiles and targets them to a player or crosshair
+cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawns 100 projectiles and targets them to a player or crosshair
 )"), FName(), 1.f);
 			}
 			else if (command == "nuke")
@@ -6107,14 +6119,21 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 p
 				bool bNukeDamageEnabled = true;
 				auto NukeTokens = SplitPlayerCommandArgs(NukeArgs);
 				size_t PlayerNameStartIndex = 0;
+				bool bExplicitPlayerTarget = false;
 
 				if (!NukeTokens.empty())
 				{
 					auto ProjectileArg = TrimPlayerCommandString(NukeTokens[0]);
 					auto NormalizedProjectileArg = NormalizePlayerCommandString(ProjectileArg);
 					bool bExplicitProjectileArg = ProjectileArg.find('/') != std::string::npos || ProjectileArg.find('.') != std::string::npos || NormalizedProjectileArg.ends_with("_c");
+					bool bShortProjectileArg = IsObjectShortCommandArg(ProjectileArg);
 
-					if (NukeTokens.size() > 1 || bExplicitProjectileArg)
+					if (IsNukePlayerTargetKeyword(ProjectileArg))
+					{
+						bExplicitPlayerTarget = true;
+						PlayerNameStartIndex = 1;
+					}
+					else if (NukeTokens.size() > 1 || bExplicitProjectileArg || bShortProjectileArg)
 					{
 						auto CandidateProjectileClass = FindActorClassByCommandArg(ProjectileArg);
 
@@ -6123,7 +6142,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 p
 							ProjectileClass = CandidateProjectileClass;
 							PlayerNameStartIndex = 1;
 						}
-						else if (bExplicitProjectileArg)
+						else if (bExplicitProjectileArg || bShortProjectileArg)
 						{
 							PlayerController->ClientMessage(FString(L"Failed to find projectile class. Try a class path, generated class path, or short object name."), FName(), 1.f);
 							return;
@@ -6136,6 +6155,13 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 p
 					auto ModifierArg = TrimPlayerCommandString(NukeTokens[PlayerNameStartIndex]);
 					auto NormalizedModifierArg = NormalizePlayerCommandString(ModifierArg);
 					float ModifierValue = 0.f;
+
+					if (IsNukePlayerTargetKeyword(ModifierArg))
+					{
+						bExplicitPlayerTarget = true;
+						PlayerNameStartIndex++;
+						break;
+					}
 
 					if (NormalizedModifierArg == "nodmg" || NormalizedModifierArg == "nodamage" || NormalizedModifierArg == "no-damage")
 					{
@@ -6175,6 +6201,12 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <name> - Spawns 100 p
 				}
 
 				auto PlayerName = JoinPlayerCommandArgs(NukeTokens, PlayerNameStartIndex);
+
+				if (bExplicitPlayerTarget && PlayerName.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat nuke [projectile/path] [s2] [h100] [nodmg] <exact player name>"), FName(), 1.f);
+					return;
+				}
 
 				if (!ProjectileClass)
 				{
