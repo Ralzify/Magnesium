@@ -473,7 +473,7 @@ const std::unordered_map<std::string, std::string> Misc::ObjectNames = {
 	{ "battlebus", "/Game/Athena/Aircraft/AthenaAircraft.AthenaAircraft_C" },
 	{ "warbus", "/MoonFlaxWarBus/Gameplay/Vehicle/MoonFlaxWarBus_Vehicle.MoonFlaxWarBus_Vehicle_C" },
 	{ "tank", "/Tank/Vehicle/Tank_Vehicle.Tank_Vehicle_C" },
-	{ "octane", "/RockVehicle/Rock_Vehicle.Rock_Vehicle_C" },
+	{ "octane", "/RockVehicleBR/Vehicle/Rock_Vehicle_BR.Rock_Vehicle_BR_C" },
 	{ "rocketracing", "/RockVehicle/Rock_Vehicle.Rock_Vehicle_C" },
 	{ "racing", "/RockVehicle/Rock_Vehicle.Rock_Vehicle_C" },
 	{ "dirtbike", "/Dirtbike/Vehicle/Motorcycle_DirtBike_Vehicle.Motorcycle_DirtBike_Vehicle_C" },
