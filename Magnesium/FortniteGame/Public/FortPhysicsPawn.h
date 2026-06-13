@@ -114,7 +114,11 @@ class AFortAthenaVehicle : public AActor
 public:
     UCLASS_COMMON_MEMBERS(AFortAthenaVehicle);
 
+    DEFINE_PROP(HealthSet, UFortHealthSet*);
+
     DEFINE_FUNC(FindSeatIndex, int32);
+    DEFINE_FUNC(OnRep_HealthSet, void);
+    DEFINE_FUNC(DestroyVehicle, void);
 };
 
 class AFortAthenaSKPushCannon : public AFortAthenaVehicle

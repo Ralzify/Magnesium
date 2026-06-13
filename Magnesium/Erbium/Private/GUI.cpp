@@ -107,6 +107,111 @@ void SmallSeparator(float Width, float Thickness = 1.0f)
     ImGui::Dummy(ImVec2(Width, Thickness + 4));
 }
 
+static const char* GetSelectedPlaylistModeName()
+{
+    switch (GUI::SelectedPlaylist)
+    {
+    case (int)Playlist::Solos:
+        return "Solos";
+    case (int)Playlist::Duos:
+        return "Duos";
+    case (int)Playlist::Trios:
+        return "Trios";
+    case (int)Playlist::Squads:
+        return "Squads";
+    case (int)Playlist::ZBSolos:
+        return "Zero Build Solos";
+    case (int)Playlist::ZBDuos:
+        return "Zero Build Duos";
+    case (int)Playlist::ZBTrios:
+        return "Zero Build Trios";
+    case (int)Playlist::ZBSquads:
+        return "Zero Build Squads";
+    case (int)Playlist::Playground:
+        return "Playground";
+    case (int)Playlist::Creative:
+        return "Creative";
+    case (int)Playlist::OneShotSolos:
+        return "One Shot Solos";
+    case (int)Playlist::OneShotDuos:
+        return "One Shot Duos";
+    case (int)Playlist::OneShotSquads:
+        return "One Shot Squads";
+    case (int)Playlist::SiphonSolos:
+        return "Siphon Solos";
+    case (int)Playlist::SiphonDuos:
+        return "Siphon Duos";
+    case (int)Playlist::SiphonSquads:
+        return "Siphon Squads";
+    case (int)Playlist::UnvSolos:
+        return "Unvaulted Solos";
+    case (int)Playlist::UnvDuos:
+        return "Unvaulted Duos";
+    case (int)Playlist::UnvTrios:
+        return "Unvaulted Trios";
+    case (int)Playlist::UnvSquads:
+        return "Unvaulted Squads";
+    case (int)Playlist::SlideSolos:
+        return "Slide Solos";
+    case (int)Playlist::SlideDuos:
+        return "Slide Duos";
+    case (int)Playlist::FILSolos:
+        return "Floor Is Lava Solos";
+    case (int)Playlist::FILDuos:
+        return "Floor Is Lava Duos";
+    case (int)Playlist::FILSquads:
+        return "Floor Is Lava Squads";
+    case (int)Playlist::TournamentSolos:
+        return "Tournament Solos";
+    case (int)Playlist::TournamentDuos:
+        return "Tournament Duos";
+    case (int)Playlist::TournamentTrios:
+        return "Tournament Trios";
+    case (int)Playlist::TournamentSquads:
+        return "Tournament Squads";
+    case (int)Playlist::ArenaSolos:
+        return "Arena Solos";
+    case (int)Playlist::ArenaDuos:
+        return "Arena Duos";
+    case (int)Playlist::ArenaTrios:
+        return "Arena Trios";
+    case (int)Playlist::ArenaSquads:
+        return "Arena Squads";
+    case (int)Playlist::ArenaZBSolos:
+        return "Arena Zero Build Solos";
+    case (int)Playlist::ArenaZBDuos:
+        return "Arena Zero Build Duos";
+    case (int)Playlist::ArenaZBTrios:
+        return "Arena Zero Build Trios";
+    case (int)Playlist::ArenaZBSquads:
+        return "Arena Zero Build Squads";
+    case (int)Playlist::Gav:
+        return "Gav 1v1 Map";
+    case (int)Playlist::Retrac1v1:
+        return "Retrac 1v1 Map";
+    case (int)Playlist::RetracTurtle:
+        return "Retrac Turtle Fights";
+    case (int)Playlist::RetracWater:
+        return "Retrac Water Map";
+    case (int)Playlist::TiltedZW:
+        return "Tilted Zone Wars";
+    case (int)Playlist::RewindDZW:
+        return "Rewind Desert Zone Wars";
+    case (int)Playlist::OnlyUp:
+        return "Only Up Map";
+    case (int)Playlist::Twine1v1:
+        return "Twine 1v1 Map";
+    case (int)Playlist::Boxfight:
+        return "Boxfights";
+    case (int)Playlist::Event:
+        return "Event Playlist";
+    case (int)Playlist::Custom:
+        return "Custom";
+    default:
+        return "Unknown";
+    }
+}
+
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
@@ -455,6 +560,15 @@ void GUI::Init()
                 ImGui::TextColored(Color, "N/A");
             }
 
+            ImGui::Text("- Mode: %s", GetSelectedPlaylistModeName());
+            if (FConfiguration::bInfiniteRender)
+            {
+                ImGui::TextUnformatted("- Infinite Render: ");
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Enabled");
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextUnformatted(" (only works on the last player to join!)");
+            }
             ImGui::Text("- Server Port: %d", FConfiguration::Port);
             ImGui::Text("- Server Tick Rate: %.1f", FConfiguration::MaxTickRate);
 
@@ -462,28 +576,10 @@ void GUI::Init()
             {
                 auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 
-                auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
-
-                if (Playlist)
-                {
-                    FString Name = UKismetTextLibrary::Conv_TextToString(Playlist->UIDisplayName);
-                    ImGui::Text((UEAllocatedString("- Playlist: ") + Name.ToString()).c_str());
-                }
-
                 int AliveCount = 0;
 
                 if (GameMode)
                     AliveCount = GameMode->AlivePlayers.Num();
-
-                if (FConfiguration::bInfiniteRender)
-                {
-                    Color = ImVec4(0.0f, 1.0f, 0.0f, 1.0f); // green
-                    ImGui::Text("- Infinite Render: ");
-                    ImGui::SameLine(0.0f, 0.0f);
-                    ImGui::TextColored(Color, "Enabled");
-
-                    ImGui::Text("- NOTE: Infinite Render only works on the last player to join!");
-                }
 
                 ImGui::Text("- Players: %d", AliveCount);
 
@@ -555,8 +651,10 @@ void GUI::Init()
             bool bIsTiltedZW = (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW));
             bool bIsTwine = (SelectedPlaylist == static_cast<int>(Playlist::Twine1v1));
             bool bIsBoxfight = (SelectedPlaylist == static_cast<int>(Playlist::Boxfight));
+            bool bShowsOnlyUpPreGameConfig = bIsOnlyUp && gsStatus < Joinable;
+            bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsDesertZW && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight;
 
-            if (gsStatus <= Joinable)
+            if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig))
             {
                 ImGui::Spacing();
                 ImGui::Spacing();
@@ -568,47 +666,12 @@ void GUI::Init()
                     ImGui::Text("Pre-Game Configuration:");
                     SmallSeparator(Width);
 
-                    if (bIsGavMap)
+                    if (bShowsOnlyUpPreGameConfig)
                     {
-                        ImGui::Text("- Playing Gav 1v1 Map.");
+                        ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
+                        ImGui::Checkbox("Player Has Pickaxe", &FConfiguration::bHasPickaxe);
                     }
-                    else if (bIsEventPlaylist)
-                    {
-                        ImGui::Text("- Playing Event Playlist.");
-                    }
-                    else if (bIsRetrac1v1 || bIsRetracTurtle)
-                    {
-                        ImGui::Text("- Playing Retrac Custom Map.");
-                    }
-                    else if (bIsCreative)
-                    {
-                        ImGui::Text("- Playing Creative.");
-                    }
-                    else if (bIsDesertZW)
-                    {
-                        ImGui::Text("- Playing Rewind Custom Map.");
-                    }
-                    else if (bIsTiltedZW)
-                    {
-                        ImGui::Text("- Playing Tilted Zone Wars Map.");
-                    }
-                    else if (bIsTwine)
-                    {
-                        ImGui::Text("- Playing Twine 1v1 Map.");
-                    }
-                    else if (bIsBoxfight)
-                    {
-                        ImGui::Text("- Playing Boxfight Map.");
-                    }
-                    else if (bIsOnlyUp)
-                    {
-                        if (gsStatus < Joinable)
-                        {
-                            ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
-                            ImGui::Checkbox("Player Has Pickaxe", &FConfiguration::bHasPickaxe);
-                        }
-                    }
-                    else
+                    else if (bShowsDefaultPreGameConfig)
                     {
                         if (gsStatus <= Joinable)
                         {
@@ -1858,18 +1921,22 @@ void GUI::Init()
             if (gsStatus < StartedMatch)
             {
                 ImGui::Checkbox("Late Game", &FConfiguration::bLateGame);
-                if (VersionInfo.FortniteVersion > 2.50)
-                    ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
-                ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
-                ImGui::Checkbox("Use Versionized Lategame Loadouts", &FConfiguration::bUseVersionizedLoadout);
-                ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);
 
-                ImGui::PushItemWidth(Width);
-                ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
-                ImGui::PopItemWidth();
+                if (FConfiguration::bLateGame)
+                {
+                    if (VersionInfo.FortniteVersion > 2.50)
+                        ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
+                    ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
+                    ImGui::Checkbox("Use Versionized Lategame Loadouts", &FConfiguration::bUseVersionizedLoadout);
+                    ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);
+
+                    ImGui::PushItemWidth(Width);
+                    ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
+                    ImGui::PopItemWidth();
+                }
             }
 
-            if (gsStatus < StartedMatch)
+            if (gsStatus < StartedMatch && FConfiguration::bLateGame)
             {
             static char PrimaryWeaponBuffer[256] = { 0 };
             static char SecondaryWeaponBuffer[256] = { 0 };

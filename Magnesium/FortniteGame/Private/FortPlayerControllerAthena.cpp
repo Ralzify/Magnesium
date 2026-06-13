@@ -3399,17 +3399,6 @@ static bool LooksLikeSizeOrHeightModifierArg(const std::string& Arg)
 	return std::isdigit(static_cast<unsigned char>(ValueStart)) || ValueStart == '.' || ValueStart == '-' || ValueStart == '+';
 }
 
-static float ClampCommandFloat(float Value, float Min, float Max)
-{
-	if (Value < Min)
-		return Min;
-
-	if (Value > Max)
-		return Max;
-
-	return Value;
-}
-
 static std::wstring FormatCommandFloatForMessage(float Value)
 {
 	std::ostringstream Stream;
@@ -3418,9 +3407,6 @@ static std::wstring FormatCommandFloatForMessage(float Value)
 	auto Text = Stream.str();
 	return std::wstring(Text.begin(), Text.end());
 }
-
-static constexpr float MinCommandScale = 0.05f;
-static constexpr float MaxCommandScale = 20.f;
 
 static bool FunctionHasSingleCommandInputParam(UFunction* Function, uint32 ExpectedElementSize)
 {
@@ -3799,6 +3785,32 @@ static bool TryCallFloatCommandFunction(UObject* Object, const char* FunctionNam
 
 	Object->Call<void>(Function, Value);
 	return true;
+}
+
+static bool TryApplySummonHealth(AActor* Actor, float Health)
+{
+	if (!Actor)
+		return false;
+
+	if (auto Vehicle = Actor->Cast<AFortAthenaVehicle>())
+	{
+		if (Vehicle->HealthSet)
+		{
+			auto& VehicleHealth = Vehicle->HealthSet->Health;
+			VehicleHealth.CurrentValue = Health;
+			VehicleHealth.BaseValue = Health;
+			VehicleHealth.UnclampedCurrentValue = Health;
+			VehicleHealth.UnclampedBaseValue = Health;
+			Vehicle->OnRep_HealthSet();
+
+			if (Health <= 0.f)
+				Vehicle->DestroyVehicle();
+
+			return true;
+		}
+	}
+
+	return TryCallFloatCommandFunction(Actor, "SetHealth", Health);
 }
 
 static void ConfigureNukeRocketDamageProperties(AActor* Rocket, bool bDamageEnabled)
@@ -5708,7 +5720,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					if (TryParsePrefixedCommandFloat(CurrentArg, 's', ParsedScale))
 					{
-						BotScale = ClampCommandFloat(ParsedScale, MinCommandScale, MaxCommandScale);
+						BotScale = ParsedScale;
 						continue;
 					}
 
@@ -5728,7 +5740,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					if (CurrentArg.find('.') != std::string::npos && TryParseCommandFloat(CurrentArg, ParsedScale))
 					{
-						BotScale = ClampCommandFloat(ParsedScale, MinCommandScale, MaxCommandScale);
+						BotScale = ParsedScale;
 						continue;
 					}
 
@@ -6109,11 +6121,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				auto ProjectileClass = GetDefaultNukeProjectileClass();
 				constexpr float DefaultNukeScale = 1.f;
-				constexpr float MinNukeScale = 0.1f;
-				constexpr float MaxNukeScale = 20.f;
 				constexpr float DefaultNukeHeightMeters = 65.f;
-				constexpr float MinNukeHeightMeters = 0.f;
-				constexpr float MaxNukeHeightMeters = 5000.f;
 				auto NukeScale = DefaultNukeScale;
 				auto NukeHeightMeters = DefaultNukeHeightMeters;
 				bool bNukeDamageEnabled = true;
@@ -6179,14 +6187,14 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 					if (TryParsePrefixedCommandFloat(ModifierArg, 's', ModifierValue))
 					{
-						NukeScale = ClampCommandFloat(ModifierValue, MinNukeScale, MaxNukeScale);
+						NukeScale = ModifierValue;
 						PlayerNameStartIndex++;
 						continue;
 					}
 
 					if (TryParsePrefixedCommandFloat(ModifierArg, 'h', ModifierValue))
 					{
-						NukeHeightMeters = ClampCommandFloat(ModifierValue, MinNukeHeightMeters, MaxNukeHeightMeters);
+						NukeHeightMeters = ModifierValue;
 						PlayerNameStartIndex++;
 						continue;
 					}
@@ -7045,7 +7053,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				if (SummonArgsStart == std::string::npos)
 				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [direction] [p<pitch>]"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [hp<health>] [direction] [p<pitch>]"), FName(), 1.f);
 					return;
 				}
 
@@ -7054,7 +7062,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				if (SummonTokens.empty())
 				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [direction] [p<pitch>]"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [hp<health>] [direction] [p<pitch>]"), FName(), 1.f);
 					return;
 				}
 
@@ -7067,18 +7075,16 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				bool HasLocation = false;
 				bool HasExplicitHeight = false;
+				bool HasExplicitHealth = false;
 				auto Loc = PlayerController->Pawn->K2_GetActorLocation();
 
 				auto Rotation = PlayerController->Pawn->K2_GetActorRotation();
 				int Count = 1;
 				constexpr float DefaultSummonScale = 1.f;
-				constexpr float MinSummonScale = 0.1f;
-				constexpr float MaxSummonScale = 20.f;
 				constexpr float DefaultSummonHeightMeters = 2.f;
-				constexpr float MinSummonHeightMeters = 0.f;
-				constexpr float MaxSummonHeightMeters = 5000.f;
 				auto SummonScale = DefaultSummonScale;
 				auto SummonHeightMeters = DefaultSummonHeightMeters;
+				auto SummonHealth = 0.f;
 
 				std::map<std::wstring, float> DirectionToYaw = {
 					{L"N", 0.0f}, {L"E", 90.0f}, {L"S", 180.0f}, {L"W", 270.0f},
@@ -7092,13 +7098,28 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 					if (TryParsePrefixedCommandFloat(CurrentArg, 's', ModifierValue))
 					{
-						SummonScale = ClampCommandFloat(ModifierValue, MinSummonScale, MaxSummonScale);
+						SummonScale = ModifierValue;
 						continue;
+					}
+
+					if (CurrentArg.size() > 2 &&
+						std::tolower(static_cast<unsigned char>(CurrentArg[0])) == 'h' &&
+						std::tolower(static_cast<unsigned char>(CurrentArg[1])) == 'p')
+					{
+						if (TryParseCommandFloat(CurrentArg.substr(2), ModifierValue))
+						{
+							SummonHealth = ModifierValue;
+							HasExplicitHealth = true;
+							continue;
+						}
+
+						PlayerController->ClientMessage(FString(L"Invalid summon health. Use hp1 for 1 health or hp100 for 100 health."), FName(), 1.f);
+						return;
 					}
 
 					if (TryParsePrefixedCommandFloat(CurrentArg, 'h', ModifierValue))
 					{
-						SummonHeightMeters = ClampCommandFloat(ModifierValue, MinSummonHeightMeters, MaxSummonHeightMeters);
+						SummonHeightMeters = ModifierValue;
 						HasExplicitHeight = true;
 						continue;
 					}
@@ -7153,25 +7174,17 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						continue;
 					}
 
-					PlayerController->ClientMessage(FString(L"Invalid summon argument. Use count, X Y Z, s2, h100, p45/r45, or a compass direction."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Invalid summon argument. Use count, X Y Z, s2, h100, hp100, p45/r45, or a compass direction."), FName(), 1.f);
 					return;
 				}
 
 				auto AppliedSummonHeightMeters = (!HasLocation || HasExplicitHeight) ? SummonHeightMeters : 0.f;
 				Loc.Z += AppliedSummonHeightMeters * 100.f;
 
-				int Max = 100;
-
 				if (Count < 1)
 				{
 					PlayerController->ClientMessage(FString(L"Summon count must be at least 1."), FName(), 1.f);
 					return;
-				}
-
-				if (Count > Max && IPStr != "127.0.0.1")
-				{
-					PlayerController->ClientMessage(FString(L"dawg your trying too much"), FName(), 1.f);
-					Count = Max;
 				}
 
 				int AmountSpawned = 0;
@@ -7189,12 +7202,16 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					if (auto Car = Actor->Cast<AFortDagwoodVehicle>())
 						Car->SetFuel(100.f);
 
+					if (HasExplicitHealth)
+						TryApplySummonHealth(Actor, SummonHealth);
+
 					Actor->ForceNetUpdate();
 					AmountSpawned++;
 				}
 
 				auto Message = L"Spawned " + std::to_wstring(AmountSpawned) + L" actor(s)! (s" + FormatCommandFloatForMessage(SummonScale) +
-					L" h" + FormatCommandFloatForMessage(AppliedSummonHeightMeters) + L"m)";
+					L" h" + FormatCommandFloatForMessage(AppliedSummonHeightMeters) + L"m" +
+					(HasExplicitHealth ? std::wstring(L" hp") + FormatCommandFloatForMessage(SummonHealth) : std::wstring()) + L")";
 				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
 			}
 			else if (command == "skydive")
