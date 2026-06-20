@@ -274,17 +274,6 @@ void Main()
         FConfiguration::bKeepInventory = true;
         FConfiguration::MaxTickRate = 60.f;
     }
-    else if (wcsstr(FConfiguration::Playlist, L"/Game/Rewind/Playlist_DesertMode.Playlist_DesertMode"))
-    {
-        terrainOpen = L"open /Game/Rewind/DesertZoneWars.DesertZoneWars";
-        FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 200;
-        FConfiguration::bInfiniteAmmo = true;
-        FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-        FConfiguration::MaxTickRate = 60.f;
-    }
     else if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlists/Playlist_1v1Twine.Playlist_1v1Twine"))
     {
         terrainOpen = L"open /Game/Twine/GameModes/1v1/GameMode_1v1";

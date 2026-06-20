@@ -38,7 +38,13 @@ void AFortMinigame::SetState(AFortMinigame* Minigame, uint8 NewState)
     {
         for (int i = 0; i < Players.Num(); i++)
         {
+            if (!Players[i])
+                continue;
+
             auto Player = Players[i]->Cast<AFortPlayerStateAthena>();
+            if (!Player || !Player->GetOwner())
+                continue;
+
             auto Controller = Player->GetOwner()->Cast<AFortPlayerControllerAthena>();
             if (!Controller)
                 continue;
@@ -53,7 +59,8 @@ void AFortMinigame::SetState(AFortMinigame* Minigame, uint8 NewState)
         std::thread([Minigame, NewState]()
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            SetStateOG(Minigame, NewState);
+            if (Minigame && !IsBadReadPtr(Minigame) && SetStateOG)
+                SetStateOG(Minigame, NewState);
         }).detach();    
     }
     else if (NewState == EFortMinigameState::GetPostGameReset())
@@ -83,6 +90,11 @@ void AFortMinigame::Hook()
 {
     if (!GetDefaultObj())
         return;
-    
-    //Utils::Hook(FindSetState(), SetState, SetStateOG);
+
+    if (VersionInfo.FortniteVersion < 18.00 || VersionInfo.FortniteVersion >= 19.00)
+        return;
+
+    auto SetStateAddr = FindSetState();
+    if (SetStateAddr)
+        Utils::Hook(SetStateAddr, SetState, SetStateOG);
 }

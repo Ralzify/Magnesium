@@ -123,23 +123,26 @@ void Events::StartEvent()
 						GameMode->GameState->GamePhaseStep = (uint8)EAthenaGamePhaseStep::StormHolding;
 					}
 
-					auto MeshActor = MeshActors[0];
-
 					auto Scr = (ASpecialEventScript*)Target;
 
 					Scr->DelayAfterConentLoad = 0.6f;
 
-					auto MeshNetworkSubsystem = TUObjectArray::FindFirstObject("MeshNetworkSubsystem");
+					if (MeshActors.Num() > 0)
+					{
+						auto MeshActor = MeshActors[0];
+						auto MeshNetworkSubsystem = TUObjectArray::FindFirstObject("MeshNetworkSubsystem");
 
-					if (MeshNetworkSubsystem)
-						*(uint8_t*)(__int64(MeshNetworkSubsystem) + MeshNetworkSubsystem->GetOffset("NodeType")) = 0;
+						if (MeshNetworkSubsystem)
+							*(uint8_t*)(__int64(MeshNetworkSubsystem) + MeshNetworkSubsystem->GetOffset("NodeType")) = 0;
 
-					MeshActor->MeshRootStartEvent();
+						MeshActor->MeshRootStartEvent();
 
-					if (MeshNetworkSubsystem)
-						*(uint8_t*)(__int64(MeshNetworkSubsystem) + MeshNetworkSubsystem->GetOffset("NodeType")) = 2;
-					MeshActor->OnRep_RootStartTime();
-					//Target->Call(const_cast<UFunction*>(Function), 0, 0.f);
+						if (MeshNetworkSubsystem)
+							*(uint8_t*)(__int64(MeshNetworkSubsystem) + MeshNetworkSubsystem->GetOffset("NodeType")) = 2;
+						MeshActor->OnRep_RootStartTime();
+					}
+
+					Target->Call(const_cast<UFunction*>(Function), 0, 0.f);
 				}
 				else
 				{
@@ -178,7 +181,16 @@ void Events::StartEvent()
 
 				auto EventModeActivator = FindObject<UFortItemDefinition>(L"/EventMode/Items/WID_EventMode_Activator.WID_EventMode_Activator");
 
-				PlayerController->WorldInventory->GiveItem(EventModeActivator);
+				if (EventModeActivator)
+				{
+					auto EventModeActivatorInstance = PlayerController->WorldInventory->GiveItem(EventModeActivator);
+
+					if (EventModeActivatorInstance)
+					{
+						PlayerController->ServerExecuteInventoryItem(EventModeActivatorInstance->ItemEntry.ItemGuid);
+						PlayerController->ClientEquipItem(EventModeActivatorInstance->ItemEntry.ItemGuid, true);
+					}
+				}
 			}
 		}
 
@@ -192,37 +204,51 @@ void Events::StartEvent()
 void (*ActivatePhaseOG)(ASpecialEventScript* _this, int IndexToActivate, float a3);
 void ActivatePhase(ASpecialEventScript* _this, int IndexToActivate, float a3)
 {
+	if (!_this || IsBadReadPtr(_this))
+		return;
+
 	// for some reason the 2 functions below dont handle datalayers
 	if (VersionInfo.FortniteVersion >= 23)
 	{
+		auto DataLayerManager = UWorld::GetWorld() ? UWorld::GetWorld()->GetDataLayerManager() : nullptr;
+
 		// should be in UnloadLevelsAtPhaseEnd
-		if (_this->ReplicatedActivePhaseIndex >= 0)
+		if (DataLayerManager && _this->PhaseInfoArray.IsValidIndex(_this->ReplicatedActivePhaseIndex))
 		{
 			auto& OldPhaseInfo = _this->PhaseInfoArray.Get(_this->ReplicatedActivePhaseIndex, FPhaseInfo::Size());
 			for (int i = 0; i < OldPhaseInfo.DataLayers.Num(); i++)
 			{
 				auto& DL = OldPhaseInfo.DataLayers.Get(i, FPhaseDataLayerEntry::Size());
 
-				UWorld::GetWorld()->GetDataLayerManager()->SetDataLayerRuntimeState(DL.DataLayerAsset, 0, DL.bIsRecursive);
+				DataLayerManager->SetDataLayerRuntimeState(DL.DataLayerAsset, 0, DL.bIsRecursive);
 			}
 		}
 
 		// should be in LoadLevelsAtIndex
-		auto& PhaseInfo = _this->PhaseInfoArray.Get(IndexToActivate, FPhaseInfo::Size());
-		for (int i = 0; i < PhaseInfo.DataLayers.Num(); i++)
+		if (DataLayerManager && _this->PhaseInfoArray.IsValidIndex(IndexToActivate))
 		{
-			auto& DL = PhaseInfo.DataLayers.Get(i, FPhaseDataLayerEntry::Size());
+			auto& PhaseInfo = _this->PhaseInfoArray.Get(IndexToActivate, FPhaseInfo::Size());
+			for (int i = 0; i < PhaseInfo.DataLayers.Num(); i++)
+			{
+				auto& DL = PhaseInfo.DataLayers.Get(i, FPhaseDataLayerEntry::Size());
 
-			UWorld::GetWorld()->GetDataLayerManager()->SetDataLayerRuntimeState(DL.DataLayerAsset, 2, DL.bIsRecursive);
+				DataLayerManager->SetDataLayerRuntimeState(DL.DataLayerAsset, 2, DL.bIsRecursive);
+			}
 		}
 	}
 
 	_this->ReplicatedActivePhaseIndex = IndexToActivate;
 
-	ActivatePhaseOG(_this, IndexToActivate, a3);
+	if (ActivatePhaseOG)
+		ActivatePhaseOG(_this, IndexToActivate, a3);
 }
 
 void Events::Hook()
 {
-	Utils::Hook(FindActivatePhase(), ActivatePhase, ActivatePhaseOG);
+	if (VersionInfo.FortniteVersion < 23)
+		return;
+
+	auto ActivatePhaseAddr = FindActivatePhase();
+	if (ActivatePhaseAddr)
+		Utils::Hook(ActivatePhaseAddr, ActivatePhase, ActivatePhaseOG);
 }

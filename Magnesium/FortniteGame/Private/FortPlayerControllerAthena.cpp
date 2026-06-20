@@ -720,14 +720,14 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			}
 
 
-		/*auto pickaxeEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& entry)
+		auto pickaxeEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& entry)
 			{ return entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>(); }, FFortItemEntry::Size());
 
 		if (pickaxeEntry && VersionInfo.FortniteVersion > 3)
 		{
 			PlayerController->ServerExecuteInventoryItem(pickaxeEntry->ItemGuid);
 			PlayerController->ClientEquipItem(pickaxeEntry->ItemGuid, true);
-		}*/
+		}
 
 		UFortKismetLibrary::UpdatePlayerCustomCharacterPartsVisualization(PlayerController->PlayerState);
 		if (!UFortKismetLibrary::UpdatePlayerCustomCharacterPartsVisualization__Ptr && ApplyCharacterCustomization)

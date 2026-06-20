@@ -194,9 +194,7 @@ static const char* GetSelectedPlaylistModeName()
     case (int)Playlist::RetracWater:
         return "Retrac Water Map";
     case (int)Playlist::TiltedZW:
-        return "Tilted Zone Wars";
-    case (int)Playlist::RewindDZW:
-        return "Rewind Desert Zone Wars";
+        return "Tilted FFA";
     case (int)Playlist::OnlyUp:
         return "Only Up Map";
     case (int)Playlist::Twine1v1:
@@ -642,7 +640,6 @@ void GUI::Init()
             }
 
             bool bIsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
-            bool bIsDesertZW = (SelectedPlaylist == static_cast<int>(Playlist::RewindDZW));
             bool bIsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
             bool bIsRetrac1v1 = (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1));
             bool bIsRetracTurtle = (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle));
@@ -652,7 +649,8 @@ void GUI::Init()
             bool bIsTwine = (SelectedPlaylist == static_cast<int>(Playlist::Twine1v1));
             bool bIsBoxfight = (SelectedPlaylist == static_cast<int>(Playlist::Boxfight));
             bool bShowsOnlyUpPreGameConfig = bIsOnlyUp && gsStatus < Joinable;
-            bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsDesertZW && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight;
+            bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight;
+            bool bShowsDefaultMatchSettings = bShowsDefaultPreGameConfig;
 
             if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig))
             {
@@ -768,7 +766,7 @@ void GUI::Init()
                 }
             }
 
-            if (!bIsGavMap && !bIsDesertZW && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsBoxfight && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine)
+            if (bShowsDefaultMatchSettings)
             {
             ImGui::Spacing();
             ImGui::Spacing();
@@ -1108,9 +1106,6 @@ void GUI::Init()
         }
         case 1:
         {
-            ImGui::Text("Gamemodes:");
-            SmallSeparator(Width);
-
             static bool bInitializedPlaylist = false;
 
             if (!bInitializedPlaylist)
@@ -1119,6 +1114,36 @@ void GUI::Init()
                     SelectedPlaylist = static_cast<int>(Playlist::UnvSolos);
 
                 bInitializedPlaylist = true;
+            }
+
+            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
+            {
+                ImGui::Text("Custom Playlists - (Requires PAK Files):");
+                SmallSeparator(Width);
+
+                if (VersionInfo.FortniteVersion == 27.11)
+                {
+                    ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
+                    ImGui::RadioButton("Only Up Map", &SelectedPlaylist, (int)Playlist::OnlyUp);
+                    ImGui::RadioButton("Tilted FFA", &SelectedPlaylist, (int)Playlist::TiltedZW);
+                }
+
+                if (VersionInfo.FortniteVersion == 14.40)
+                {
+                    ImGui::RadioButton("Retrac 1v1 Map", &SelectedPlaylist, (int)Playlist::Retrac1v1);
+                    ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
+                    //ImGui::RadioButton("Retrac Water Map", &SelectedPlaylist, (int)Playlist::RetracWater);
+                    //ImGui::RadioButton("Twine 1v1 Map", &SelectedPlaylist, (int)Playlist::Twine1v1);
+                }
+
+                if (VersionInfo.FortniteVersion == 30.00)
+                {
+                    ImGui::RadioButton("Boxfights", &SelectedPlaylist, (int)Playlist::Boxfight);
+                }
+
+                ImGui::Spacing();
+                ImGui::Text("Playlists:");
+                SmallSeparator(Width);
             }
 
             ImGui::RadioButton("Solos", &SelectedPlaylist, (int)Playlist::Solos);
@@ -1205,35 +1230,6 @@ void GUI::Init()
             }
 
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
-
-            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
-            {
-                ImGui::Spacing();
-
-                ImGui::Text("Custom Maps (require additional paks):");
-                SmallSeparator(Width);
-
-                if (VersionInfo.FortniteVersion == 27.11)
-                {
-                    ImGui::RadioButton("Gav 1v1 Map", &SelectedPlaylist, (int)Playlist::Gav);
-                    ImGui::RadioButton("Rewind Desert Zone Wars", &SelectedPlaylist, (int)Playlist::RewindDZW);
-                    ImGui::RadioButton("Only Up Map", &SelectedPlaylist, (int)Playlist::OnlyUp);
-                    ImGui::RadioButton("Tilted Zone Wars", &SelectedPlaylist, (int)Playlist::TiltedZW);
-                }
-
-                if (VersionInfo.FortniteVersion == 14.40)
-                {
-                    ImGui::RadioButton("Retrac 1v1 Map", &SelectedPlaylist, (int)Playlist::Retrac1v1);
-                    ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
-                    //ImGui::RadioButton("Retrac Water Map", &SelectedPlaylist, (int)Playlist::RetracWater);
-                    //ImGui::RadioButton("Twine 1v1 Map", &SelectedPlaylist, (int)Playlist::Twine1v1);
-                }
-
-                if (VersionInfo.FortniteVersion == 30.00)
-                {
-                    ImGui::RadioButton("Boxfights", &SelectedPlaylist, (int)Playlist::Boxfight);
-                }
-            }
 
             switch (SelectedPlaylist)
             {
@@ -1460,12 +1456,6 @@ void GUI::Init()
             case (int)Playlist::TiltedZW:
             {
                 FConfiguration::Playlist = L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett";
-                FConfiguration::bLateGame = false;
-                break;
-			}
-            case (int)Playlist::RewindDZW:
-            {
-                FConfiguration::Playlist = L"/Game/Rewind/Playlist_DesertMode.Playlist_DesertMode";
                 FConfiguration::bLateGame = false;
                 break;
 			}
@@ -2531,18 +2521,11 @@ void GUI::Init()
                 Hyperlink("- Retrac : Creators of 1v1 & Turtle Fights Maps", "https://discord.gg/retrac");
             }
 
-            if (SelectedPlaylist == static_cast<int>(Playlist::RewindDZW))
-            {
-                ImGui::Spacing();
-
-                Hyperlink("- Rewind : Creators of Desert Zone Wars Map", "https://discord.gg/retrac");
-            }
-
             if (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp) || (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW)))
             {
                 ImGui::Spacing();
 
-                Hyperlink("- Jett : Maker of Only Up & Tilted Zone Wars Maps", "https://discord.com/channels/1469866169635962884/1473850399994806362/1473850399994806362");
+                Hyperlink("- Jett : Maker of Only Up & Tilted FFA Maps", "https://discord.com/channels/1469866169635962884/1473850399994806362/1473850399994806362");
             }
 
             if (g_EmbedTexture)

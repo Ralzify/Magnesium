@@ -58,7 +58,6 @@ enum class Playlist : int
     RetracTurtle,
     RetracWater,
     TiltedZW,
-    RewindDZW,
     OnlyUp,
     Twine1v1,
     Boxfight,
