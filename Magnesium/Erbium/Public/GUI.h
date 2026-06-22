@@ -61,6 +61,7 @@ enum class Playlist : int
     OnlyUp,
     Twine1v1,
     Boxfight,
+    Backrooms,
     Event,
     Custom
 };

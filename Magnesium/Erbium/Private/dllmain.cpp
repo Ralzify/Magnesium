@@ -308,6 +308,15 @@ void Main()
         FConfiguration::bKeepInventory = true;
         FConfiguration::MaxTickRate = 60.f;
     }
+    else if (VersionInfo.FortniteVersion == 7.40 && GUI::SelectedPlaylist == static_cast<int>(Playlist::Backrooms))
+    {
+        terrainOpen = L"open /Game/Crow/Backrooms/Backrooms";
+        FConfiguration::bJoinInProgress = true;
+        FConfiguration::bForceRespawns = true;
+        FConfiguration::PermanentRespawn = true;
+        FConfiguration::HasCustomRespawnPoint = true;
+        FConfiguration::CustomRespawnPoint = FVector(0.f, 0.f, 85.275009f);
+    }
     else if (FConfiguration::bIsCustomMap && FConfiguration::CustomMap && FConfiguration::CustomMap[0] != L'\0')
     {
         terrainOpen = FConfiguration::CustomMap;

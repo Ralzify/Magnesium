@@ -201,6 +201,8 @@ static const char* GetSelectedPlaylistModeName()
         return "Twine 1v1 Map";
     case (int)Playlist::Boxfight:
         return "Boxfights";
+    case (int)Playlist::Backrooms:
+        return "Backrooms Map";
     case (int)Playlist::Event:
         return "Event Playlist";
     case (int)Playlist::Custom:
@@ -648,8 +650,9 @@ void GUI::Init()
             bool bIsTiltedZW = (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW));
             bool bIsTwine = (SelectedPlaylist == static_cast<int>(Playlist::Twine1v1));
             bool bIsBoxfight = (SelectedPlaylist == static_cast<int>(Playlist::Boxfight));
+            bool bIsBackrooms = (SelectedPlaylist == static_cast<int>(Playlist::Backrooms));
             bool bShowsOnlyUpPreGameConfig = bIsOnlyUp && gsStatus < Joinable;
-            bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight;
+            bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight && !bIsBackrooms;
             bool bShowsDefaultMatchSettings = bShowsDefaultPreGameConfig;
 
             if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig))
@@ -1116,10 +1119,15 @@ void GUI::Init()
                 bInitializedPlaylist = true;
             }
 
-            if (VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
+            if (VersionInfo.FortniteVersion == 7.40 || VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
             {
                 ImGui::Text("Custom Playlists - (Requires PAK Files):");
                 SmallSeparator(Width);
+
+                if (VersionInfo.FortniteVersion == 7.40)
+                {
+                    ImGui::RadioButton("Backrooms Map", &SelectedPlaylist, (int)Playlist::Backrooms);
+                }
 
                 if (VersionInfo.FortniteVersion == 27.11)
                 {
@@ -1477,6 +1485,12 @@ void GUI::Init()
                 FConfiguration::bLateGame = false;
                 break;
 			}
+            case (int)Playlist::Backrooms:
+            {
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
+                FConfiguration::bLateGame = false;
+                break;
+            }
             case (int)Playlist::Event:
             {
                 for (auto& Event : Events::EventsArray)
@@ -1910,7 +1924,22 @@ void GUI::Init()
 
             if (gsStatus < StartedMatch)
             {
+                bool bIsCustomMap = SelectedPlaylist == static_cast<int>(Playlist::Gav)
+                    || SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1)
+                    || SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle)
+                    || SelectedPlaylist == static_cast<int>(Playlist::RetracWater)
+                    || SelectedPlaylist == static_cast<int>(Playlist::TiltedZW)
+                    || SelectedPlaylist == static_cast<int>(Playlist::OnlyUp)
+                    || SelectedPlaylist == static_cast<int>(Playlist::Twine1v1)
+                    || SelectedPlaylist == static_cast<int>(Playlist::Boxfight)
+                    || SelectedPlaylist == static_cast<int>(Playlist::Backrooms);
+
+                if (bIsCustomMap)
+                    FConfiguration::bLateGame = false;
+
+                ImGui::BeginDisabled(bIsCustomMap);
                 ImGui::Checkbox("Late Game", &FConfiguration::bLateGame);
+                ImGui::EndDisabled();
 
                 if (FConfiguration::bLateGame)
                 {
