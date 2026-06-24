@@ -579,7 +579,7 @@ bool    ImGui_ImplDX11_CreateDeviceObjects()
         desc.MipLODBias = 0.f;
         desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
         desc.MinLOD = 0.f;
-        desc.MaxLOD = 0.f;
+        desc.MaxLOD = D3D11_FLOAT32_MAX; // allow mipmapped textures (e.g. the logo) to use their mip chain
         bd->pd3dDevice->CreateSamplerState(&desc, &bd->pTexSamplerLinear);
     }
 

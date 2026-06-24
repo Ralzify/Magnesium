@@ -23,6 +23,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "EmbeddedImage.h"
+#include "Icon.h" // ATLAS logo (ported menu branding)
 
 #pragma comment(lib, "d3d11.lib")
 
@@ -34,6 +35,17 @@ ID3D11ShaderResourceView* g_EmbedTexture = nullptr;
 int EmbedWidth = 0;
 int EmbedHeight = 0;
 
+// Ported ATLAS-style menu logo
+ID3D11ShaderResourceView* g_LogoTexture = nullptr;
+int g_LogoW = 0, g_LogoH = 0;
+
+// Grey/dark theme accent (highlights, active tab, checkmarks, sliders) - soft cool silver
+#define ACCENT_R 0.780f
+#define ACCENT_G 0.820f
+#define ACCENT_B 0.910f
+static ImVec4 Accent(float a = 1.f) { return ImVec4(ACCENT_R, ACCENT_G, ACCENT_B, a); }
+static ImVec4 AccentDk(float a = 1.f) { return ImVec4(0.50f, 0.54f, 0.64f, a); } // darker for active
+
 bool LoadTextureFromMemory(const unsigned char* buffer, int buffer_size, ID3D11Device* d3dDevice, ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height)
 {
     int image_width = 0;
@@ -43,32 +55,44 @@ bool LoadTextureFromMemory(const unsigned char* buffer, int buffer_size, ID3D11D
     if (image_data == NULL)
         return false;
 
+    // Full mip chain + GPU-generated mips so large source images downscale smoothly
+    // to small on-screen sizes (e.g. the 1024px logo) instead of looking pixelated.
     D3D11_TEXTURE2D_DESC desc;
     ZeroMemory(&desc, sizeof(desc));
     desc.Width = image_width;
     desc.Height = image_height;
-    desc.MipLevels = 1;
+    desc.MipLevels = 0; // 0 => allocate a full mip chain
     desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
     desc.CPUAccessFlags = 0;
 
     ID3D11Texture2D* pTexture = NULL;
-    D3D11_SUBRESOURCE_DATA subResource;
-    subResource.pSysMem = image_data;
-    subResource.SysMemPitch = desc.Width * 4;
-    subResource.SysMemSlicePitch = 0;
-    d3dDevice->CreateTexture2D(&desc, &subResource, &pTexture);
+    d3dDevice->CreateTexture2D(&desc, NULL, &pTexture);
+    if (pTexture == NULL)
+    {
+        stbi_image_free(image_data);
+        return false;
+    }
+
+    ID3D11DeviceContext* ctx = NULL;
+    d3dDevice->GetImmediateContext(&ctx);
+    ctx->UpdateSubresource(pTexture, 0, NULL, image_data, image_width * 4, 0);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
     ZeroMemory(&srvDesc, sizeof(srvDesc));
     srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = desc.MipLevels;
+    srvDesc.Texture2D.MipLevels = (UINT)-1;
     srvDesc.Texture2D.MostDetailedMip = 0;
     d3dDevice->CreateShaderResourceView(pTexture, &srvDesc, out_srv);
+    if (*out_srv)
+        ctx->GenerateMips(*out_srv);
+    if (ctx)
+        ctx->Release();
     pTexture->Release();
 
     *out_width = image_width;
@@ -105,6 +129,35 @@ void SmallSeparator(float Width, float Thickness = 1.0f)
     Draw->AddLine(Pos, ImVec2(Pos.x + Width, Pos.y), ImGui::GetColorU32(ImGuiCol_Separator), Thickness);
 
     ImGui::Dummy(ImVec2(Width, Thickness + 4));
+}
+
+// One full-width vertical tab in the left sidebar. Sets *activeUI to uiValue on click.
+static void SidebarTab(const char* label, int uiValue, float yPos, float tabH, int* activeUI)
+{
+    ImGui::PushID(uiValue);
+    const bool active = (*activeUI == uiValue);
+
+    ImGui::SetCursorPos(ImVec2(0.f, yPos));
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 size(ImGui::GetContentRegionAvail().x, tabH);
+
+    if (ImGui::InvisibleButton("##tab", size))
+        *activeUI = uiValue;
+    const bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (active)
+        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::GetColorU32(Accent(0.12f)));
+    else if (hovered)
+        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::GetColorU32(Accent(0.06f)));
+
+    ImVec4 textCol = active ? Accent() : ImVec4(0.60f, 0.63f, 0.69f, 1.f);
+    if (!active && hovered) textCol = ImVec4(0.85f, 0.87f, 0.92f, 1.f);
+
+    const ImVec2 ts = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(p.x + 26.f, p.y + (size.y - ts.y) * 0.5f), ImGui::GetColorU32(textCol), label);
+
+    ImGui::PopID();
 }
 
 static const char* GetSelectedPlaylistModeName()
@@ -287,6 +340,7 @@ void GUI::Init()
         return;
 
     LoadTextureFromMemory(embedded_image, sizeof(embedded_image), g_pd3dDevice, &g_EmbedTexture, &EmbedWidth, &EmbedHeight);
+    LoadTextureFromMemory(Icon, sizeof(Icon), g_pd3dDevice, &g_LogoTexture, &g_LogoW, &g_LogoH);
 
     ID3D11RenderTargetView* g_mainRenderTargetView;
 
@@ -330,29 +384,46 @@ void GUI::Init()
     mStyle.ScrollbarRounding = 16.0f;
 
     ImGuiStyle& style = mStyle;
-    style.Colors[ImGuiCol_Text] = ImVec4(0.85f, 0.95f, 0.90f, 0.80f);
-    style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.85f, 0.95f, 0.90f, 0.30f);
-    style.Colors[ImGuiCol_TitleBg] = ImVec4(0.29f, 0.29f, 0.29f, 1.00f);
-    style.Colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.20f, 0.22f, 0.27f, 0.75f);
-    style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.29f, 0.29f, 0.29f, 1.00f);
-    style.Colors[ImGuiCol_FrameBg] = ImVec4(0.29f, 0.29f, 0.29f, 1.00f);
-    style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.43f, 0.43f, 0.43f, 0.85f);
-    style.Colors[ImGuiCol_FrameBgActive] = ImVec4(0.46f, 0.46f, 0.46f, 1.00f);
-    style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.20f, 0.22f, 0.27f, 0.47f);
-    style.Colors[ImGuiCol_CheckMark] = ImVec4(0.67f, 0.67f, 0.67f, 1.00f);
-    style.Colors[ImGuiCol_SliderGrab] = ImVec4(0.20f, 0.20f, 0.20f, 0.67f);
-    style.Colors[ImGuiCol_SliderGrabActive] = ImVec4(0.59f, 0.59f, 0.59f, 1.00f);
-    style.Colors[ImGuiCol_Button] = ImVec4(0.25f, 0.25f, 0.25f, 0.75f);
-    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.43f, 0.43f, 0.43f, 0.85f);
-    style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.46f, 0.46f, 0.46f, 1.00f);
-    style.Colors[ImGuiCol_Header] = ImVec4(0.92f, 0.18f, 0.29f, 0.76f);
-    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.92f, 0.18f, 0.29f, 0.86f);
-    style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.92f, 0.18f, 0.29f, 1.00f);
-    style.Colors[ImGuiCol_TextSelectedBg] = ImVec4(0.92f, 0.18f, 0.29f, 0.43f);
-    style.Colors[ImGuiCol_PopupBg] = ImVec4(0.20f, 0.22f, 0.27f, 0.9f);
-    style.Colors[ImGuiCol_Tab] = ImVec4(0.25f, 0.25f, 0.25f, 1.0f);
-    style.Colors[ImGuiCol_TabSelected] = ImVec4(0.29f, 0.29f, 0.29f, 1.0f);
-    style.Colors[ImGuiCol_TabHovered] = ImVec4(0.32f, 0.32f, 0.32f, 1.0f);
+    auto C = [](float r, float g, float b, float a = 1.f) { return ImVec4(r, g, b, a); };
+    ImVec4* col = style.Colors;
+
+    // Neutral graphite dark/grey theme (slight cool tint), ATLAS-style spread.
+    col[ImGuiCol_WindowBg]             = C(0.090f, 0.094f, 0.106f, 1.00f); // graphite background
+    col[ImGuiCol_ChildBg]              = C(0.090f, 0.094f, 0.106f, 1.00f);
+    col[ImGuiCol_PopupBg]              = C(0.063f, 0.067f, 0.078f, 0.98f); // bar
+    col[ImGuiCol_Border]               = C(0.196f, 0.204f, 0.227f, 1.00f);
+    col[ImGuiCol_BorderShadow]         = C(0.f, 0.f, 0.f, 0.f);
+    col[ImGuiCol_Text]                 = C(0.882f, 0.894f, 0.918f, 1.00f);
+    col[ImGuiCol_TextDisabled]         = C(0.435f, 0.451f, 0.490f, 1.00f);
+    col[ImGuiCol_TextSelectedBg]       = Accent(0.28f);
+    col[ImGuiCol_FrameBg]              = C(0.137f, 0.145f, 0.165f, 1.00f);
+    col[ImGuiCol_FrameBgHovered]       = C(0.176f, 0.184f, 0.208f, 1.00f);
+    col[ImGuiCol_FrameBgActive]        = C(0.216f, 0.227f, 0.255f, 1.00f);
+    col[ImGuiCol_TitleBg]              = C(0.063f, 0.067f, 0.078f, 1.00f);
+    col[ImGuiCol_TitleBgActive]        = C(0.063f, 0.067f, 0.078f, 1.00f);
+    col[ImGuiCol_TitleBgCollapsed]     = C(0.063f, 0.067f, 0.078f, 0.90f);
+    col[ImGuiCol_MenuBarBg]            = C(0.063f, 0.067f, 0.078f, 1.00f);
+    col[ImGuiCol_CheckMark]            = Accent();
+    col[ImGuiCol_SliderGrab]           = Accent();
+    col[ImGuiCol_SliderGrabActive]     = AccentDk();
+    col[ImGuiCol_Button]               = C(0.157f, 0.165f, 0.188f, 1.00f);
+    col[ImGuiCol_ButtonHovered]        = C(0.216f, 0.227f, 0.255f, 1.00f);
+    col[ImGuiCol_ButtonActive]         = C(0.255f, 0.267f, 0.298f, 1.00f);
+    col[ImGuiCol_Header]               = Accent(0.14f);
+    col[ImGuiCol_HeaderHovered]        = Accent(0.22f);
+    col[ImGuiCol_HeaderActive]         = Accent(0.30f);
+    col[ImGuiCol_Separator]            = C(0.196f, 0.204f, 0.227f, 1.00f);
+    col[ImGuiCol_SeparatorHovered]     = Accent(0.40f);
+    col[ImGuiCol_SeparatorActive]      = Accent(0.70f);
+    col[ImGuiCol_ScrollbarBg]          = C(0.063f, 0.067f, 0.078f, 0.40f);
+    col[ImGuiCol_ScrollbarGrab]        = C(0.196f, 0.204f, 0.227f, 1.00f);
+    col[ImGuiCol_ScrollbarGrabHovered] = C(0.255f, 0.267f, 0.298f, 1.00f);
+    col[ImGuiCol_ScrollbarGrabActive]  = C(0.318f, 0.333f, 0.369f, 1.00f);
+    col[ImGuiCol_Tab]                  = C(0.063f, 0.067f, 0.078f, 1.00f);
+    col[ImGuiCol_TabHovered]           = Accent(0.18f);
+    col[ImGuiCol_TabSelected]          = C(0.090f, 0.094f, 0.106f, 1.00f);
+    col[ImGuiCol_PlotLines]            = Accent();
+    col[ImGuiCol_PlotHistogram]        = Accent();
     //ImGui::StyleColorsDark();
 
     //ImGuiStyle& style = ImGui::GetStyle();
@@ -419,12 +490,18 @@ void GUI::Init()
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(WindowWidth * main_scale, WindowHeight * main_scale), ImGuiCond_Always);
 
-        ImGui::Begin("Magnesium", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar);
-        ImGui::BeginChild("MainScrollRegion", ImVec2(0, 0), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+        ImGui::Begin("Magnesium", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleVar();
+
+        const float W = ImGui::GetWindowWidth();
+        const float H = ImGui::GetWindowHeight();
+        const ImVec2 wp = ImGui::GetWindowPos();
+        const float TopBarH = 48.f;
+        const float SidebarW = 150.f;
 
         int SelectedUI = 0;
         int hasEvent = 0;
-
         if (hasEvent == 0)
         {
             hasEvent = 1;
@@ -432,87 +509,143 @@ void GUI::Init()
             {
                 if (Event.EventVersion != VersionInfo.FortniteVersion)
                     continue;
-
                 hasEvent = 2;
             }
         }
-        if (ImGui::BeginTabBar(""))
+
+        // ---- Top bar (#284a2c): logo + branding ----
+        ImGui::GetWindowDrawList()->AddRectFilled(wp, ImVec2(wp.x + W, wp.y + TopBarH),
+            ImGui::GetColorU32(ImVec4(0.063f, 0.067f, 0.078f, 1.f)));
         {
-            if (ImGui::BeginTabItem("Match"))
-            {
-                SelectedUI = 0;
-                ImGui::EndTabItem();
-            }
+            const float LogoSize = 32.f;
+            const float PadL = 14.f;
+            ImGui::SetCursorPos(ImVec2(PadL, (TopBarH - LogoSize) * 0.5f));
+            if (g_LogoTexture)
+                ImGui::Image((void*)g_LogoTexture, ImVec2(LogoSize, LogoSize));
+            else
+                ImGui::Dummy(ImVec2(LogoSize, LogoSize));
 
-            if (!FConfiguration::bReadyToStart)
-            {
-                if (&FConfiguration::bLateGame)
-                {
-                    if (ImGui::BeginTabItem("Lategame"))
-                    {
-                        SelectedUI = 3;
-                        ImGui::EndTabItem();
-                    }
-                }
+            ImGui::SameLine(PadL + LogoSize + 10.f);
+            const float TitleY = (TopBarH - ImGui::GetTextLineHeight()) * 0.5f;
+            ImGui::SetCursorPosY(TitleY);
+            ImGui::PushStyleColor(ImGuiCol_Text, Accent());
+            ImGui::Text("MAGNESIUM");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0.f, 7.f);
+            ImGui::SetCursorPosY(TitleY);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.60f, 0.62f, 0.68f, 1.f));
+            ImGui::Text("| Gameserver");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0.f, 8.f);
+            ImGui::SetCursorPosY(TitleY);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.54f, 1.f));
+            ImGui::TextUnformatted("v2.0.0");
+            ImGui::PopStyleColor();
 
-                if (ImGui::BeginTabItem("Playlist"))
-                {
-                    SelectedUI = 1;
-                    ImGui::EndTabItem();
-                }
-
-                if (SelectedPlaylist == static_cast<int>(Playlist::Creative))
-                {
-                    if (ImGui::BeginTabItem("Creative"))
-                    {
-                        SelectedUI = 5;
-                        ImGui::EndTabItem();
-                    }
-                }
-
-                if (FConfiguration::bIsCustomMap)
-                {
-                    if (ImGui::BeginTabItem("Custom Map"))
-                    {
-                        SelectedUI = 6;
-                        ImGui::EndTabItem();
-					}
-                }
-
-                if (ImGui::BeginTabItem("Player Bot"))
-                {
-                    SelectedUI = 4;
-                    ImGui::EndTabItem();
-                }
-            }
-
-            if (gsStatus >= Joinable)
-            {
-                if (ImGui::BeginTabItem("Players"))
-                {
-                    SelectedUI = 2;
-                    ImGui::EndTabItem();
-                }
-            }
-
-            if (FConfiguration::bEnableTrickshotTab)
-            {
-                if (ImGui::BeginTabItem("Trickshot"))
-                {
-                    SelectedUI = 7;
-                    ImGui::EndTabItem();
-                }
-            }
-
-            if (ImGui::BeginTabItem("Credits"))
-            {
-                SelectedUI = 8;
-                ImGui::EndTabItem();
-            }
-
-            ImGui::EndTabBar();
+            // FN / UE versions on the right, aligned to the visible viewport so they
+            // never run off the window edge.
+            char ver[48];
+            snprintf(ver, sizeof(ver), "FN %.2f  \xC2\xB7  UE %.2f", VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
+            const float verW = ImGui::CalcTextSize(ver).x;
+            const float rightEdge = ImGui::GetIO().DisplaySize.x;
+            ImGui::SetCursorPos(ImVec2(rightEdge - verW - 18.f, TitleY));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 0.92f));
+            ImGui::TextUnformatted(ver);
+            ImGui::PopStyleColor();
         }
 
+        // divider lines (drawn on top so child backgrounds don't cover them)
+        {
+            ImDrawList* fdl = ImGui::GetForegroundDrawList();
+            const ImU32 lineCol = IM_COL32(50, 52, 58, 255);
+            fdl->AddLine(ImVec2(wp.x, wp.y + TopBarH), ImVec2(wp.x + W, wp.y + TopBarH), lineCol, 1.f);
+            fdl->AddLine(ImVec2(wp.x + SidebarW, wp.y + TopBarH), ImVec2(wp.x + SidebarW, wp.y + H), lineCol, 1.f);
+        }
+
+        // ---- Sidebar (#284a2c): vertical tabs replacing the old tab bar ----
+        static int s_ActiveUI = 0;
+        ImGui::SetCursorPos(ImVec2(0.f, TopBarH));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.063f, 0.067f, 0.078f, 1.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+        ImGui::BeginChild("##sidebar", ImVec2(SidebarW, H - TopBarH), false, ImGuiWindowFlags_NoScrollbar);
+        {
+            const float TabH = 38.f;
+            const float TabsTop = 12.f;
+            float yy = TabsTop;
+            float activeY = -1.f;
+            const bool inMatch = !FConfiguration::bReadyToStart;
+
+            struct TabDef { const char* label; int ui; bool show; };
+            TabDef tabs[] = {
+                { "Match",      0, true },
+                { "Lategame",   3, inMatch },
+                { "Playlist",   1, inMatch },
+                { "Creative",   5, inMatch && SelectedPlaylist == static_cast<int>(Playlist::Creative) },
+                { "Custom Map", 6, inMatch && FConfiguration::bIsCustomMap },
+                { "Player Bot", 4, inMatch },
+                { "Players",    2, gsStatus >= Joinable },
+                { "Trickshot",  7, FConfiguration::bEnableTrickshotTab },
+                { "Credits",    8, true },
+            };
+
+            for (auto& t : tabs)
+            {
+                if (!t.show) continue;
+                SidebarTab(t.label, t.ui, yy, TabH, &s_ActiveUI);
+                if (s_ActiveUI == t.ui) activeY = yy + TabH * 0.5f;
+                yy += TabH;
+            }
+
+            if (activeY < 0.f) { s_ActiveUI = 0; activeY = TabsTop + TabH * 0.5f; }
+
+            static float s_IndY = -1.f;
+            if (s_IndY < 0.f) s_IndY = activeY;
+            float lerp = ImGui::GetIO().DeltaTime * 16.f; if (lerp > 1.f) lerp = 1.f;
+            s_IndY += (activeY - s_IndY) * lerp;
+            const ImVec2 sbPos = ImGui::GetWindowPos();
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(sbPos.x, sbPos.y + s_IndY - 9.f), ImVec2(sbPos.x + 3.f, sbPos.y + s_IndY + 9.f),
+                ImGui::GetColorU32(Accent()), 2.f);
+
+            // Primary CTA pinned to the bottom of the sidebar: start the server.
+            if (gsStatus == NotReady && !FConfiguration::bReadyToStart)
+            {
+                const float bMargin = 12.f;
+                const float bH = 40.f;
+                const float bW = SidebarW - bMargin * 2.f;
+                // Anchor to the visible viewport height (the window is taller than the
+                // actual client area, so using H would push this off-screen).
+                const float visH = ImGui::GetIO().DisplaySize.y;
+                ImGui::SetCursorPos(ImVec2(bMargin, (visH - TopBarH) - bH - bMargin));
+                const ImVec2 bp = ImGui::GetCursorScreenPos();
+                if (ImGui::InvisibleButton("##startserver", ImVec2(bW, bH)))
+                    FConfiguration::bReadyToStart = true;
+                const bool bHov = ImGui::IsItemHovered();
+                const bool bAct = ImGui::IsItemActive();
+                ImDrawList* bdl = ImGui::GetWindowDrawList();
+                const ImVec4 fillC = bAct ? ImVec4(0.62f, 0.66f, 0.78f, 1.f)
+                                    : (bHov ? ImVec4(0.88f, 0.91f, 0.97f, 1.f) : Accent());
+                bdl->AddRectFilled(bp, ImVec2(bp.x + bW, bp.y + bH), ImGui::GetColorU32(fillC), 6.f);
+
+                const char* bLbl = "START SERVER";
+                const ImVec2 bts = ImGui::CalcTextSize(bLbl);
+                const ImVec2 tpos(bp.x + (bW - bts.x) * 0.5f, bp.y + (bH - bts.y) * 0.5f);
+                const ImU32 tcol = IM_COL32(16, 18, 22, 255);
+                bdl->AddText(tpos, tcol, bLbl);
+                bdl->AddText(ImVec2(tpos.x + 1.f, tpos.y), tcol, bLbl); // faux-bold
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+        SelectedUI = s_ActiveUI;
+
+        // ---- Content panel (inset; transparent so the #32703b background shows) ----
+        const float ContentPadX = 22.f;
+        ImGui::SetCursorPos(ImVec2(SidebarW + ContentPadX, TopBarH + 14.f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+        ImGui::BeginChild("##content", ImVec2((W - SidebarW) - ContentPadX * 2.f, (H - TopBarH) - 26.f), false);
         float Width = 260.0f;
         float Height = 0.0f;
 
@@ -1090,20 +1223,7 @@ void GUI::Init()
                 }
             }
 
-            if (gsStatus == NotReady)
-            {
-                ImGui::Spacing();
-                ImGui::Spacing();
-                ImGui::Spacing();
-
-                if (!FConfiguration::bReadyToStart)
-                {
-                    if (ImGui::Button("Start the Server", ImVec2(Width, 30)))
-                    {
-                        FConfiguration::bReadyToStart = true;
-                    }
-                }
-            }
+            // "Start Server" button moved to the sidebar (bottom) for easy access.
 
             break;
         }
@@ -2427,7 +2547,7 @@ void GUI::Init()
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
 
             ImGui::Checkbox("Auto Pause TODM", &FConfiguration::bAutoPauseTODM);
-            
+
             if (FConfiguration::bAutoPauseTODM)
             {
                 ImGui::PushItemWidth(Width);
@@ -2520,51 +2640,83 @@ void GUI::Init()
         }
         case 8:
         {
-            ImGui::Text("Credits:");
-            SmallSeparator(Width);
-
-            Hyperlink("- Erbium : Base of the project.", "https://github.com/plooshi/Erbium");
-
-            //ImGui::Spacing();
-
-            //Hyperlink("- Epic Games", "https://www.fortnite.com/");
-
-            if (FConfiguration::bInfiniteRender)
+            auto rule = []()
             {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float w = ImGui::GetContentRegionAvail().x;
+                dl->AddLine(ImVec2(p.x, p.y + 1.f), ImVec2(p.x + w, p.y + 1.f), ImGui::GetColorU32(Accent(0.30f)), 1.f);
+                ImGui::Dummy(ImVec2(0.f, 9.f));
+            };
+            auto credit = [](const char* name, const char* role, const char* url)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, Accent(0.95f));
+                ImGui::TextUnformatted(name);
+                ImGui::PopStyleColor();
+                if (url && url[0])
+                {
+                    if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    if (ImGui::IsItemClicked()) ShellExecuteA(0, "open", url, 0, 0, SW_SHOWNORMAL);
+                }
+                ImGui::SameLine(0.f, 8.f);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.58f, 0.60f, 0.66f, 1.f));
+                ImGui::Text("- %s", role);
+                ImGui::PopStyleColor();
                 ImGui::Spacing();
+            };
 
-                Hyperlink("- Sweefy/Milxnor : Helped with figuring out Infinite Render", "https://x.com/Sweefyyy");
-            }
-
-            if (SelectedPlaylist == static_cast<int>(Playlist::Gav))
+            // Header: logo + title
+            if (g_LogoTexture)
             {
-                ImGui::Spacing();
-
-                Hyperlink("- Gav : Maker of 27.11 1v1 Map", "https://github.com/gavbowersdomain/27.11-Mods/tree/main/Mods/1v1");
+                ImGui::Image((void*)g_LogoTexture, ImVec2(44.f, 44.f));
+                ImGui::SameLine(0.f, 12.f);
             }
+            ImGui::BeginGroup();
+            ImGui::PushStyleColor(ImGuiCol_Text, Accent());
+            ImGui::TextUnformatted("MAGNESIUM");
+            ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 1.f));
+            ImGui::TextUnformatted("Gameserver  -  v2.0.0");
+            ImGui::PopStyleColor();
+            ImGui::EndGroup();
 
-            if (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1) || (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle)))
+            ImGui::Dummy(ImVec2(0.f, 14.f));
+
+            ImGui::PushStyleColor(ImGuiCol_Text, Accent(0.85f));
+            ImGui::TextUnformatted("CORE");
+            ImGui::PopStyleColor();
+            rule();
+            credit("Erbium", "Base of the project", "https://github.com/plooshi/Erbium");
+
+            const bool anyContrib = FConfiguration::bInfiniteRender
+                || SelectedPlaylist == static_cast<int>(Playlist::Gav)
+                || SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1)
+                || SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle)
+                || SelectedPlaylist == static_cast<int>(Playlist::OnlyUp)
+                || SelectedPlaylist == static_cast<int>(Playlist::TiltedZW);
+
+            if (anyContrib)
             {
-                ImGui::Spacing();
+                ImGui::Dummy(ImVec2(0.f, 10.f));
+                ImGui::PushStyleColor(ImGuiCol_Text, Accent(0.85f));
+                ImGui::TextUnformatted("CONTRIBUTORS");
+                ImGui::PopStyleColor();
+                rule();
 
-                Hyperlink("- Retrac : Creators of 1v1 & Turtle Fights Maps", "https://discord.gg/retrac");
+                if (FConfiguration::bInfiniteRender)
+                    credit("Sweefy / Milxnor", "Infinite Render research", "https://x.com/Sweefyyy");
+                if (SelectedPlaylist == static_cast<int>(Playlist::Gav))
+                    credit("Gav", "Maker of the 27.11 1v1 map", "https://github.com/gavbowersdomain/27.11-Mods/tree/main/Mods/1v1");
+                if (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1) || SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle))
+                    credit("Retrac", "Creator of the 1v1 & Turtle Fight maps", "https://discord.gg/retrac");
+                if (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp) || SelectedPlaylist == static_cast<int>(Playlist::TiltedZW))
+                    credit("Jett", "Maker of the Only Up & Tilted FFA maps", "https://discord.com/channels/1469866169635962884/1473850399994806362/1473850399994806362");
             }
 
-            if (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp) || (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW)))
-            {
-                ImGui::Spacing();
-
-                Hyperlink("- Jett : Maker of Only Up & Tilted FFA Maps", "https://discord.com/channels/1469866169635962884/1473850399994806362/1473850399994806362");
-            }
-
-            if (g_EmbedTexture)
-            {
-                ImGui::NewLine();
-                ImGui::NewLine();
-
-                ImGui::Text(":3");
-                ImGui::Image((void*)g_EmbedTexture, ImVec2((float)EmbedWidth / 3.0f, (float)EmbedHeight / 3.0f));
-            }
+            ImGui::Dummy(ImVec2(0.f, 18.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.44f, 0.50f, 1.f));
+            ImGui::TextUnformatted("Thank you for using Magnesium.");
+            ImGui::PopStyleColor();
 
             break;
         }
@@ -2575,8 +2727,10 @@ void GUI::Init()
         }
 
         ImGui::Dummy(ImVec2(0.0f, 40.0f));
-        ImGui::EndChild();
-        ImGui::End();
+        ImGui::EndChild();      // content panel
+        ImGui::PopStyleVar();   // content WindowPadding
+        ImGui::PopStyleColor(); // content ChildBg
+        ImGui::End();           // window
 
 
         ImGui::Render();
