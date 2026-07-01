@@ -5,6 +5,9 @@
 #include "../../Erbium/Public/GUI.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
+#include "../Public/AbilitySystemComponent.h"
+
+#include <cmath>
 
 uint32_t NetworkObjectListOffset = 0;
 uint32_t ReplicationFrameOffset = 0;
@@ -495,6 +498,660 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 	ViewerMap.clear();
 }
 
+static bool GetActiveStormEffectHandle(UAbilitySystemComponent* AbilitySystemComponent, UClass* StormEffectClass, FActiveGameplayEffectHandle& OutHandle)
+{
+	if (!AbilitySystemComponent || !StormEffectClass)
+		return false;
+
+	auto& Effects = AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+
+	for (int i = 0; i < Effects.Num(); i++)
+	{
+		auto& Effect = Effects.Get(i, FActiveGameplayEffect::Size());
+
+		if (Effect.Spec.Def && Effect.Spec.Def->IsA(StormEffectClass))
+		{
+			OutHandle = *(FActiveGameplayEffectHandle*)(__int64(&Effect) + 0xc);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void RemoveStormEffect(UAbilitySystemComponent* AbilitySystemComponent, UClass* StormEffectClass)
+{
+	if (!AbilitySystemComponent || !StormEffectClass)
+		return;
+
+	static auto RemoveActiveGameplayEffectBySourceEffectFn = const_cast<UFunction*>(FindObject<UFunction>(L"/Script/GameplayAbilities.AbilitySystemComponent.RemoveActiveGameplayEffectBySourceEffect"));
+	if (!RemoveActiveGameplayEffectBySourceEffectFn)
+		return;
+
+	struct
+	{
+		UClass* GameplayEffect;
+		UObject* InstigatorAbilitySystemComponent;
+		int StacksToRemove;
+	} Params{ StormEffectClass, AbilitySystemComponent, 1 };
+
+	AbilitySystemComponent->ProcessEvent(RemoveActiveGameplayEffectBySourceEffectFn, &Params);
+}
+
+static bool TrySetReflectedBool(UObject* Object, const char* PropertyName, bool Value, bool& bOutChanged)
+{
+	if (!Object)
+		return false;
+
+	auto Property = Object->GetProperty(PropertyName, 0x20000);
+	if (!Property)
+		return false;
+
+	auto Offset = GetFromOffset<uint32>(Property, Offsets::Offset_Internal);
+	auto FieldMask = Property->GetFieldMask();
+	auto& ByteValue = GetFromOffset<uint8_t>(Object, Offset);
+	bool bPreviousValue = FieldMask != 0 ? (ByteValue & FieldMask) != 0 : ByteValue != 0;
+
+	if (FieldMask != 0)
+	{
+		if (Value)
+			ByteValue |= FieldMask;
+		else
+			ByteValue &= ~FieldMask;
+	}
+	else
+	{
+		ByteValue = Value ? 1 : 0;
+	}
+
+	bOutChanged = bPreviousValue != Value;
+	return true;
+}
+
+static void TryCallZeroedFunction(UObject* Object, const char* FunctionName)
+{
+	if (!Object)
+		return;
+
+	auto Function = Object->GetFunction(FunctionName);
+	if (!Function)
+		return;
+
+	auto ParamsSize = Function->GetPropertiesSize();
+	if (ParamsSize <= 0)
+	{
+		Object->ProcessEvent(Function, nullptr);
+		return;
+	}
+
+	auto Params = FMemory::Malloc(ParamsSize);
+	memset((PBYTE)Params, 0, ParamsSize);
+	Object->ProcessEvent(Function, Params);
+	FMemory::Free(Params);
+}
+
+static void SyncReflectedStormState(AFortPlayerPawnAthena* Pawn, bool bInZone)
+{
+	if (!Pawn)
+		return;
+
+	bool bAnyStormPropertyFound = false;
+	bool bAnyStormPropertyChanged = false;
+
+	struct FStormBoolProperty
+	{
+		const char* Name;
+		bool Value;
+	};
+
+	const FStormBoolProperty StormProperties[] =
+	{
+		{ "bIsInsideSafeZone", bInZone },
+		{ "bIsInSafeZone", bInZone },
+		{ "bIsOutsideSafeZone", !bInZone },
+		{ "bIsInAnyStorm", !bInZone },
+		{ "bIsInStorm", !bInZone },
+		{ "bInStorm", !bInZone }
+	};
+
+	for (auto& StormProperty : StormProperties)
+	{
+		bool bChanged = false;
+		if (TrySetReflectedBool(Pawn, StormProperty.Name, StormProperty.Value, bChanged))
+		{
+			bAnyStormPropertyFound = true;
+			bAnyStormPropertyChanged |= bChanged;
+		}
+	}
+
+	if (!bAnyStormPropertyChanged)
+		return;
+
+	static const char* StormOnRepFunctions[] =
+	{
+		"OnRep_IsInsideSafeZone",
+		"OnRep_bIsInsideSafeZone",
+		"OnRep_IsInSafeZone",
+		"OnRep_bIsInSafeZone",
+		"OnRep_IsOutsideSafeZone",
+		"OnRep_bIsOutsideSafeZone",
+		"OnRep_IsInAnyStorm",
+		"OnRep_bIsInAnyStorm",
+		"OnRep_IsInStorm",
+		"OnRep_bIsInStorm",
+		"OnRep_InStorm"
+	};
+
+	for (auto OnRepFunction : StormOnRepFunctions)
+		TryCallZeroedFunction(Pawn, OnRepFunction);
+
+	if (bAnyStormPropertyFound)
+		Pawn->ForceNetUpdate();
+}
+
+static void SetSafeZoneAppliedGameplayEffectHandle(AFortPlayerPawnAthena* Pawn, const FActiveGameplayEffectHandle* StormEffectHandle)
+{
+	if (!Pawn)
+		return;
+
+	auto Property = Pawn->GetProperty("SafeZoneAppliedGE");
+	if (!Property)
+		return;
+
+	auto ElementSize = GetFromOffset<uint32>(Property, Offsets::ElementSize);
+	if (ElementSize < sizeof(int32) || ElementSize > 0x20)
+		return;
+
+	auto Offset = GetFromOffset<uint32>(Property, Offsets::Offset_Internal);
+	auto Destination = (PBYTE)(__int64(Pawn) + Offset);
+	memset(Destination, 0, ElementSize);
+
+	if (StormEffectHandle)
+		memcpy(Destination, StormEffectHandle, (std::min)(ElementSize, (uint32)sizeof(FActiveGameplayEffectHandle)));
+
+	TryCallZeroedFunction(Pawn, "OnRep_SafeZoneAppliedGE");
+	Pawn->ForceNetUpdate();
+}
+
+static bool IsFiniteSafeZoneVector(FVector Location)
+{
+	return std::isfinite(static_cast<double>(Location.X)) &&
+		std::isfinite(static_cast<double>(Location.Y)) &&
+		std::isfinite(static_cast<double>(Location.Z));
+}
+
+static bool IsUsableSafeZoneRadius(float Radius, bool bAllowZero = false)
+{
+	return (bAllowZero ? Radius >= 0.f : Radius > 0.f) && std::isfinite(static_cast<double>(Radius));
+}
+
+static bool TryUseSafeZoneCircle(FVector Center, float Radius, FVector& OutCenter, float& OutRadius, bool bAllowZeroCenter, bool bAllowZeroRadius = false)
+{
+	if (!IsUsableSafeZoneRadius(Radius, bAllowZeroRadius) || !IsFiniteSafeZoneVector(Center) || (!bAllowZeroCenter && Center.IsZero()))
+		return false;
+
+	OutCenter = Center;
+	OutRadius = Radius;
+	return true;
+}
+
+static bool TryGetCurrentPhaseSafeZoneCircle(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, float& OutRadius)
+{
+	if (!SafeZoneIndicator || !SafeZoneIndicator->HasSafeZonePhases() || !SafeZoneIndicator->HasCurrentPhase())
+		return false;
+
+	if (!FFortSafeZonePhaseInfo::HasCenter() || !FFortSafeZonePhaseInfo::HasRadius())
+		return false;
+
+	auto& SafeZonePhases = SafeZoneIndicator->SafeZonePhases;
+	auto CurrentPhase = SafeZoneIndicator->CurrentPhase;
+
+	if (!SafeZonePhases.IsValidIndex(CurrentPhase))
+		return false;
+
+	auto& PhaseInfo = SafeZonePhases.Get(CurrentPhase, FFortSafeZonePhaseInfo::Size());
+	return TryUseSafeZoneCircle(PhaseInfo.Center, PhaseInfo.Radius, OutCenter, OutRadius, true, true);
+}
+
+static bool TryGetLiveSafeZoneCenter(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, bool bAllowZeroCenter)
+{
+	if (!SafeZoneIndicator)
+		return false;
+
+	if (auto GetSafeZoneCenterFn = SafeZoneIndicator->GetFunction("GetSafeZoneCenter"))
+	{
+		auto Center = SafeZoneIndicator->Call<FVector>(GetSafeZoneCenterFn);
+
+		if (IsFiniteSafeZoneVector(Center) && (bAllowZeroCenter || !Center.IsZero()))
+		{
+			OutCenter = Center;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool TryGetInterpolatedSafeZoneCircle(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, float& OutRadius)
+{
+	if (!SafeZoneIndicator ||
+		!SafeZoneIndicator->HasPreviousCenter() || !SafeZoneIndicator->HasPreviousRadius() ||
+		!SafeZoneIndicator->HasNextCenter() || !SafeZoneIndicator->HasNextRadius() ||
+		!SafeZoneIndicator->HasSafeZoneStartShrinkTime() || !SafeZoneIndicator->HasSafeZoneFinishShrinkTime())
+	{
+		return false;
+	}
+
+	auto PreviousCenter = SafeZoneIndicator->PreviousCenter;
+	auto NextCenter = SafeZoneIndicator->NextCenter;
+	auto PreviousRadius = SafeZoneIndicator->PreviousRadius;
+	auto NextRadius = SafeZoneIndicator->NextRadius;
+
+	if (!IsFiniteSafeZoneVector(PreviousCenter) || !IsFiniteSafeZoneVector(NextCenter) ||
+		!IsUsableSafeZoneRadius(PreviousRadius) || !IsUsableSafeZoneRadius(NextRadius, true))
+	{
+		return false;
+	}
+
+	auto StartShrinkTime = SafeZoneIndicator->SafeZoneStartShrinkTime;
+	auto FinishShrinkTime = SafeZoneIndicator->SafeZoneFinishShrinkTime;
+	auto Alpha = 1.f;
+
+	if (FinishShrinkTime > StartShrinkTime)
+	{
+		auto TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+		Alpha = (TimeSeconds - StartShrinkTime) / (FinishShrinkTime - StartShrinkTime);
+
+		if (Alpha < 0.f)
+			Alpha = 0.f;
+		else if (Alpha > 1.f)
+			Alpha = 1.f;
+	}
+
+	auto Center = PreviousCenter + ((NextCenter - PreviousCenter) * Alpha);
+	auto Radius = PreviousRadius + ((NextRadius - PreviousRadius) * Alpha);
+
+	return TryUseSafeZoneCircle(Center, Radius, OutCenter, OutRadius, true, true);
+}
+
+static bool TryGetSafeZoneCircle(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, float& OutRadius)
+{
+	if (!SafeZoneIndicator)
+		return false;
+
+	FVector PhaseCenter{};
+	float PhaseRadius = 0.f;
+	const bool bHasPhaseCircle = TryGetCurrentPhaseSafeZoneCircle(SafeZoneIndicator, PhaseCenter, PhaseRadius);
+
+	FVector LiveCenter{};
+	const bool bHasLiveCenter = TryGetLiveSafeZoneCenter(SafeZoneIndicator, LiveCenter, bHasPhaseCircle);
+
+	if (TryGetInterpolatedSafeZoneCircle(SafeZoneIndicator, OutCenter, OutRadius))
+		return true;
+
+	if (SafeZoneIndicator->HasRadius() && IsUsableSafeZoneRadius(SafeZoneIndicator->Radius))
+	{
+		if (bHasLiveCenter && TryUseSafeZoneCircle(LiveCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, true))
+			return true;
+
+		if (bHasPhaseCircle && TryUseSafeZoneCircle(PhaseCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, true))
+			return true;
+
+		if (SafeZoneIndicator->HasNextCenter() && TryUseSafeZoneCircle(SafeZoneIndicator->NextCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, false))
+			return true;
+
+		if (SafeZoneIndicator->HasLastCenter() && TryUseSafeZoneCircle(SafeZoneIndicator->LastCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, false))
+			return true;
+
+		if (SafeZoneIndicator->HasPreviousCenter() && TryUseSafeZoneCircle(SafeZoneIndicator->PreviousCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, false))
+			return true;
+	}
+
+	if (bHasPhaseCircle)
+	{
+		OutCenter = PhaseCenter;
+		OutRadius = PhaseRadius;
+		return true;
+	}
+
+	if (SafeZoneIndicator->HasNextCenter() && SafeZoneIndicator->HasNextRadius() &&
+		TryUseSafeZoneCircle(SafeZoneIndicator->NextCenter, SafeZoneIndicator->NextRadius, OutCenter, OutRadius, false, true))
+	{
+		return true;
+	}
+
+	if (SafeZoneIndicator->HasLastCenter() && SafeZoneIndicator->HasLastRadius() &&
+		TryUseSafeZoneCircle(SafeZoneIndicator->LastCenter, SafeZoneIndicator->LastRadius, OutCenter, OutRadius, false))
+	{
+		return true;
+	}
+
+	if (SafeZoneIndicator->HasPreviousCenter() && SafeZoneIndicator->HasPreviousRadius() &&
+		TryUseSafeZoneCircle(SafeZoneIndicator->PreviousCenter, SafeZoneIndicator->PreviousRadius, OutCenter, OutRadius, false))
+	{
+		return true;
+	}
+
+	return false;
+}
+
+static bool IsLocationInsideSafeZoneCircle(FVector Location, FVector Center, float Radius)
+{
+	auto DeltaX = static_cast<double>(Center.X - Location.X);
+	auto DeltaY = static_cast<double>(Center.Y - Location.Y);
+	auto RadiusDouble = static_cast<double>(Radius);
+
+	return (DeltaX * DeltaX) + (DeltaY * DeltaY) <= RadiusDouble * RadiusDouble;
+}
+
+static float GetDefaultLowerSeasonStormDamagePerSecond(int Phase)
+{
+	constexpr float DamageByPhase[] = { 1.f, 1.f, 1.f, 2.f, 5.f, 7.5f, 10.f, 10.f, 10.f, 10.f, 10.f, 10.f, 10.f };
+
+	if (Phase < 0)
+		Phase = 0;
+
+	const int LastIndex = (int)(sizeof(DamageByPhase) / sizeof(DamageByPhase[0])) - 1;
+	return DamageByPhase[Phase > LastIndex ? LastIndex : Phase];
+}
+
+static bool ShouldUseLowerSeasonStormFixes()
+{
+	return VersionInfo.FortniteVersion < 7.00;
+}
+
+static bool ShouldSyncStormState()
+{
+	return ShouldUseLowerSeasonStormFixes() || (VersionInfo.FortniteVersion >= 18.00 && VersionInfo.FortniteVersion < 25.20);
+}
+
+static int GetSafeZoneDamagePhase(AFortGameMode* GameMode, AFortSafeZoneIndicator* SafeZoneIndicator)
+{
+	if (GameMode && GameMode->HasSafeZonePhase() && GameMode->SafeZonePhase > 0)
+		return GameMode->SafeZonePhase;
+
+	if (SafeZoneIndicator && SafeZoneIndicator->HasCurrentPhase() && SafeZoneIndicator->CurrentPhase > 0)
+		return SafeZoneIndicator->CurrentPhase;
+
+	return 1;
+}
+
+static float GetStormDamagePerTick(AFortPlayerPawnAthena* Pawn, AFortSafeZoneIndicator* SafeZoneIndicator, int StormPhase)
+{
+	float DefaultDamage = 1.f;
+	if (ShouldUseLowerSeasonStormFixes())
+		DefaultDamage = GetDefaultLowerSeasonStormDamagePerSecond(StormPhase);
+
+	if (ShouldUseLowerSeasonStormFixes())
+		return DefaultDamage;
+
+	if (!SafeZoneIndicator || !SafeZoneIndicator->HasCurrentDamageInfo() || !FFortSafeZoneDamageInfo::HasDamage())
+		return DefaultDamage;
+
+	auto Damage = SafeZoneIndicator->CurrentDamageInfo.Damage;
+
+	if (!std::isfinite(static_cast<double>(Damage)) || Damage <= 0.f)
+		return DefaultDamage;
+
+	if (FFortSafeZoneDamageInfo::HasbPercentageBasedDamage() && SafeZoneIndicator->CurrentDamageInfo.bPercentageBasedDamage)
+	{
+		auto MaxHealth = Pawn ? Pawn->GetMaxHealth() : 100.f;
+
+		if (!std::isfinite(static_cast<double>(MaxHealth)) || MaxHealth <= 0.f)
+			MaxHealth = 100.f;
+
+		Damage *= MaxHealth;
+	}
+
+	return Damage < 1.f ? 1.f : Damage;
+}
+
+static void InvokeStormDamageGameplayCue(UAbilitySystemComponent* AbilitySystemComponent, AFortPlayerControllerAthena* Player, AFortPlayerPawnAthena* Pawn, float Damage)
+{
+	if (!AbilitySystemComponent)
+		return;
+
+	FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+	Context.Instigator = Player;
+	Context.Causer = Pawn;
+	Context.AddSourceObject(Pawn);
+
+	auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
+	memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+
+	const wchar_t* StormDamageCueNames[] =
+	{
+		L"GameplayCue.Athena.Storm.Damage",
+		L"GameplayCue.Athena.SafeZone.Damage",
+		L"GameplayCue.Athena.OutsideSafeZone.Damage",
+		L"GameplayCue.Athena.StormDamage",
+		L"GameplayCue.SafeZone.Damage",
+		L"GameplayCue.Storm.Damage"
+	};
+
+	for (auto CueName : StormDamageCueNames)
+	{
+		FGameplayTag CueTag{};
+		CueTag.TagName = FName(CueName);
+		AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(CueTag, *PredictionKey, Context);
+
+		auto CueParamsStruct = FGameplayCueParameters::StaticStruct();
+		if (CueParamsStruct)
+		{
+			FGameplayCueParameters Params{};
+
+			if (FGameplayCueParameters::HasEffectContext())
+				Params.EffectContext = Context;
+
+			auto RawMagnitudeProperty = FGameplayCueParameters::StaticStruct()->GetProperty("RawMagnitude");
+			if (RawMagnitudeProperty)
+			{
+				auto Offset = GetFromOffset<uint32>(RawMagnitudeProperty, Offsets::Offset_Internal);
+				if (Offset + sizeof(float) <= sizeof(FGameplayCueParameters))
+					GetFromOffset<float>(&Params, Offset) = Damage;
+			}
+
+			auto NormalizedMagnitudeProperty = FGameplayCueParameters::StaticStruct()->GetProperty("NormalizedMagnitude");
+			if (NormalizedMagnitudeProperty)
+			{
+				auto Offset = GetFromOffset<uint32>(NormalizedMagnitudeProperty, Offsets::Offset_Internal);
+				if (Offset + sizeof(float) <= sizeof(FGameplayCueParameters))
+					GetFromOffset<float>(&Params, Offset) = Damage;
+			}
+
+			auto LocationProperty = FGameplayCueParameters::StaticStruct()->GetProperty("Location");
+			if (LocationProperty && Pawn)
+			{
+				auto Offset = GetFromOffset<uint32>(LocationProperty, Offsets::Offset_Internal);
+				if (Offset + sizeof(FVector) <= sizeof(FGameplayCueParameters))
+					GetFromOffset<FVector>(&Params, Offset) = Pawn->K2_GetActorLocation();
+			}
+
+			AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted_WithParams(CueTag, *PredictionKey, Params);
+		}
+	}
+
+	free(PredictionKey);
+}
+
+static void TryForceKillPawnForStorm(AFortPlayerPawnAthena* Pawn)
+{
+	if (!Pawn)
+		return;
+
+	auto ForceKillFn = Pawn->GetFunction("ForceKill");
+
+	if (ForceKillFn)
+	{
+		FGameplayTag DeathTag{};
+		AFortPlayerControllerAthena* InstigatorController = nullptr;
+		AActor* DamageCauser = nullptr;
+		Pawn->Call<void>(ForceKillFn, DeathTag, InstigatorController, DamageCauser);
+		return;
+	}
+
+	Pawn->SetHealth(0.f);
+	Pawn->ForceNetUpdate();
+}
+
+static std::unordered_map<AFortPlayerPawnAthena*, float> LowerSeasonStormDamageTimes;
+
+static void ResetLowerSeasonStormDamageDelay(AFortPlayerPawnAthena* Pawn)
+{
+	if (Pawn)
+		LowerSeasonStormDamageTimes.erase(Pawn);
+}
+
+static void ApplyLowerSeasonStormDamage(AFortPlayerControllerAthena* Player, AFortPlayerPawnAthena* Pawn, float TimeSeconds, UAbilitySystemComponent* AbilitySystemComponent, float Damage)
+{
+	if (!Pawn)
+		return;
+
+	if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
+		return;
+
+	auto LastDamageTimeIt = LowerSeasonStormDamageTimes.find(Pawn);
+	if (LastDamageTimeIt == LowerSeasonStormDamageTimes.end())
+	{
+		LowerSeasonStormDamageTimes[Pawn] = TimeSeconds;
+		return;
+	}
+
+	if (TimeSeconds - LastDamageTimeIt->second < 1.f)
+		return;
+
+	LastDamageTimeIt->second = TimeSeconds;
+
+	auto Health = Pawn->GetHealth();
+	const bool bFatal = Health <= Damage;
+
+	if (bFatal)
+		TryForceKillPawnForStorm(Pawn);
+	else
+		Pawn->SetHealth(Health - Damage);
+
+	InvokeStormDamageGameplayCue(AbilitySystemComponent, Player, Pawn, Damage);
+	Pawn->ForceNetUpdate();
+}
+
+static void SyncStormState(AFortGameMode* GameMode)
+{
+	if (!GameMode || !GameMode->SafeZoneIndicator)
+		return;
+
+	const bool bUseLowerSeasonStormFixes = ShouldUseLowerSeasonStormFixes();
+	if (!bUseLowerSeasonStormFixes && !ShouldSyncStormState())
+		return;
+
+	static auto StormEffectClass = const_cast<UClass*>(FindObject<UClass>(L"/Game/Athena/SafeZone/GE_OutsideSafeZoneDamage.GE_OutsideSafeZoneDamage_C"));
+	static std::unordered_map<AFortPlayerPawnAthena*, bool> LastKnownSafeZoneStates;
+	const float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+
+	for (auto& UncastedPlayer : GameMode->AlivePlayers)
+	{
+		auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
+		if (!Player)
+			continue;
+
+		auto Pawn = Player->MyFortPawn;
+		if (!Pawn)
+			Pawn = Player->Pawn;
+
+		if (!Pawn || !Pawn->IsA(AFortPlayerPawnAthena::StaticClass()))
+			continue;
+
+		auto PawnLocation = Pawn->K2_GetActorLocation();
+		bool bInZone = true;
+
+		if (bUseLowerSeasonStormFixes)
+		{
+			FVector SafeZoneCenter{};
+			float SafeZoneRadius = 0.f;
+
+			if (TryGetSafeZoneCircle(GameMode->SafeZoneIndicator, SafeZoneCenter, SafeZoneRadius))
+				bInZone = IsLocationInsideSafeZoneCircle(PawnLocation, SafeZoneCenter, SafeZoneRadius);
+			else
+				bInZone = GameMode->IsInCurrentSafeZone(PawnLocation, false);
+		}
+		else
+		{
+			bInZone = GameMode->IsInCurrentSafeZone(PawnLocation, false);
+		}
+
+		auto LastKnownSafeZoneState = LastKnownSafeZoneStates.find(Pawn);
+
+		if (LastKnownSafeZoneState == LastKnownSafeZoneStates.end() || LastKnownSafeZoneState->second != bInZone)
+		{
+			printf("Pawn %s new storm status: %s\n", Pawn->Name.ToString().c_str(), bInZone ? "true" : "false");
+			LastKnownSafeZoneStates[Pawn] = bInZone;
+		}
+
+		SyncReflectedStormState(Pawn, bInZone);
+
+		if (!bUseLowerSeasonStormFixes)
+			continue;
+
+		const int StormPhase = GetSafeZoneDamagePhase(GameMode, GameMode->SafeZoneIndicator);
+		const float StormDamage = GetStormDamagePerTick(Pawn, GameMode->SafeZoneIndicator, StormPhase);
+
+		if (bInZone)
+			ResetLowerSeasonStormDamageDelay(Pawn);
+
+		if (!StormEffectClass || !Player->PlayerState)
+		{
+			if (!bInZone)
+				ApplyLowerSeasonStormDamage(Player, Pawn, TimeSeconds, nullptr, StormDamage);
+
+			continue;
+		}
+
+		auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
+		if (!AbilitySystemComponent)
+		{
+			if (!bInZone)
+				ApplyLowerSeasonStormDamage(Player, Pawn, TimeSeconds, nullptr, StormDamage);
+
+			continue;
+		}
+
+		FActiveGameplayEffectHandle StormEffectHandle{};
+		bool bHasStormEffect = GetActiveStormEffectHandle(AbilitySystemComponent, StormEffectClass, StormEffectHandle);
+
+		if (bInZone)
+		{
+			if (bHasStormEffect)
+				RemoveStormEffect(AbilitySystemComponent, StormEffectClass);
+
+			SetSafeZoneAppliedGameplayEffectHandle(Pawn, nullptr);
+			continue;
+		}
+
+		if (!bHasStormEffect)
+		{
+			FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+			Context.Instigator = Player;
+			Context.Causer = Pawn;
+			Context.AddSourceObject(Pawn);
+
+			StormEffectHandle = AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(StormEffectClass, (float)StormPhase, Context);
+			bHasStormEffect = StormEffectHandle.Handle != 0;
+		}
+
+		if (bHasStormEffect)
+		{
+			SetSafeZoneAppliedGameplayEffectHandle(Pawn, &StormEffectHandle);
+
+			AbilitySystemComponent->SetActiveGameplayEffectLevel(StormEffectHandle, StormPhase);
+			AbilitySystemComponent->UpdateActiveGameplayEffectSetByCallerMagnitude(StormEffectHandle,
+				FGameplayTag(FName(L"SetByCaller.StormCampingDamage")), StormDamage);
+			AbilitySystemComponent->UpdateActiveGameplayEffectSetByCallerMagnitude(StormEffectHandle,
+				FGameplayTag(FName(L"SetByCaller.StormShieldDamage")), StormDamage);
+		}
+
+		ApplyLowerSeasonStormDamage(Player, Pawn, TimeSeconds, AbilitySystemComponent, StormDamage);
+	}
+}
+
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
 	if (VersionInfo.FortniteVersion >= 25.20)
@@ -519,7 +1176,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
             UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
         }
 	}
-	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || (VersionInfo.FortniteVersion >= 18 && VersionInfo.FortniteVersion < 25.20)))
+	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || ShouldSyncStormState()))
 	{
 		auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -557,25 +1214,9 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 					TerminateProcess(GetCurrentProcess(), 0);
 			}
 		}
-		else if (Driver == WorldNetDriver && VersionInfo.FortniteVersion >= 18 && VersionInfo.FortniteVersion < 25.20)
+		else if (Driver == WorldNetDriver && ShouldSyncStormState())
 		{
-			for (auto& UncastedPlayer : GameMode->AlivePlayers)
-			{
-				auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
-				if (auto Pawn = Player->MyFortPawn)
-				{
-					bool bInZone = GameMode->IsInCurrentSafeZone(Player->MyFortPawn->K2_GetActorLocation(), false);
-
-					if (Pawn->bIsInsideSafeZone != bInZone || Pawn->bIsInAnyStorm != !bInZone)
-					{
-						printf("Pawn %s new storm status: %s\n", Pawn->Name.ToString().c_str(), bInZone ? "true" : "false");
-						Pawn->bIsInAnyStorm = !bInZone;
-						Pawn->OnRep_IsInAnyStorm();
-						Pawn->bIsInsideSafeZone = bInZone;
-						Pawn->OnRep_IsInsideSafeZone();
-					}
-				}
-			}
+			SyncStormState(GameMode);
 		}
 	}
 
@@ -605,7 +1246,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
 			}
 		}
-		else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || VersionInfo.FortniteVersion >= 18))
+		else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || ShouldSyncStormState()))
 		{
 			auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 			auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -643,25 +1284,9 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 						TerminateProcess(GetCurrentProcess(), 0);
 				}
 			}
-			else if (Driver == WorldNetDriver && VersionInfo.FortniteVersion >= 18)
+			else if (Driver == WorldNetDriver && ShouldSyncStormState())
 			{
-				for (auto& UncastedPlayer : GameMode->AlivePlayers)
-				{
-					auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
-					if (auto Pawn = Player->MyFortPawn)
-					{
-						bool bInZone = GameMode->IsInCurrentSafeZone(Player->MyFortPawn->K2_GetActorLocation(), false);
-
-						if (Pawn->bIsInsideSafeZone != bInZone || Pawn->bIsInAnyStorm != !bInZone)
-						{
-							printf("Pawn %s new storm status: %s\n", Pawn->Name.ToString().c_str(), bInZone ? "true" : "false");
-							Pawn->bIsInAnyStorm = !bInZone;
-							Pawn->OnRep_IsInAnyStorm();
-							Pawn->bIsInsideSafeZone = bInZone;
-							Pawn->OnRep_IsInsideSafeZone();
-						}
-					}
-				}
+				SyncStormState(GameMode);
 			}
 		}
 	}
@@ -747,7 +1372,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 			UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
 		}
 	}
-	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || VersionInfo.FortniteVersion < 25.20))
+	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || ShouldSyncStormState()))
 	{
 		auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -786,25 +1411,9 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 					TerminateProcess(GetCurrentProcess(), 0);
 			}
 		}
-		else if (Driver == WorldNetDriver && VersionInfo.FortniteVersion < 25.20)
+		else if (Driver == WorldNetDriver && ShouldSyncStormState())
 		{
-			for (auto& UncastedPlayer : GameMode->AlivePlayers)
-			{
-				auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
-				if (auto Pawn = Player->MyFortPawn)
-				{
-					bool bInZone = GameMode->IsInCurrentSafeZone(Player->MyFortPawn->K2_GetActorLocation(), false);
-
-					if (Pawn->bIsInsideSafeZone != bInZone || Pawn->bIsInAnyStorm != !bInZone)
-					{
-						printf("Pawn %s new storm status: %s\n", Pawn->Name.ToString().c_str(), bInZone ? "true" : "false");
-						Pawn->bIsInAnyStorm = !bInZone;
-						Pawn->OnRep_IsInAnyStorm();
-						Pawn->bIsInsideSafeZone = bInZone;
-						Pawn->OnRep_IsInsideSafeZone();
-					}
-				}
-			}
+			SyncStormState(GameMode);
 		}
 	}
 

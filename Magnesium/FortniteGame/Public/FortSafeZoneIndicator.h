@@ -48,6 +48,7 @@ public:
     DEFINE_PROP(SafeZoneFinishShrinkTime, float);
     DEFINE_PROP(CurrentPhase, int);
     DEFINE_PROP(PhaseCount, int);
+    DEFINE_PROP(Radius, float);
     DEFINE_PROP(SafeZonePhases, TArray<FFortSafeZonePhaseInfo>);
     DEFINE_PROP(LastCenter, FVector); // old builds
     DEFINE_PROP(LastRadius, float);

@@ -131,6 +131,61 @@ void SmallSeparator(float Width, float Thickness = 1.0f)
     ImGui::Dummy(ImVec2(Width, Thickness + 4));
 }
 
+static float ContentSectionWidth(float FallbackWidth)
+{
+    float Width = ImGui::GetContentRegionAvail().x;
+    if (Width < FallbackWidth)
+        Width = FallbackWidth;
+
+    return Width;
+}
+
+static void SectionHeader(const char* Title, float Width)
+{
+    ImGui::Spacing();
+
+    const float HeaderH = 28.f;
+    const ImVec2 Pos = ImGui::GetCursorScreenPos();
+    const ImVec2 End(Pos.x + Width, Pos.y + HeaderH);
+    auto* Draw = ImGui::GetWindowDrawList();
+
+    Draw->AddRectFilled(Pos, End, ImGui::GetColorU32(ImVec4(0.116f, 0.122f, 0.141f, 1.f)), 4.f);
+    Draw->AddRectFilled(Pos, ImVec2(Pos.x + 3.f, End.y), ImGui::GetColorU32(Accent()), 4.f);
+
+    ImGui::SetCursorScreenPos(ImVec2(Pos.x + 12.f, Pos.y + (HeaderH - ImGui::GetTextLineHeight()) * 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.82f, 0.84f, 0.90f, 1.f));
+    ImGui::TextUnformatted(Title);
+    ImGui::PopStyleColor();
+
+    ImGui::SetCursorScreenPos(ImVec2(Pos.x, End.y + 8.f));
+}
+
+static void BeginSectionBody()
+{
+    ImGui::Indent(10.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.f, 7.f));
+}
+
+static void EndSectionBody()
+{
+    ImGui::PopStyleVar();
+    ImGui::Unindent(10.f);
+}
+
+static bool LabeledSliderInt(const char* Label, const char* Id, int* Value, int Min, int Max, float Width)
+{
+    ImGui::TextUnformatted(Label);
+    ImGui::SetNextItemWidth(Width);
+    return ImGui::SliderInt(Id, Value, Min, Max);
+}
+
+static bool LabeledSliderFloat(const char* Label, const char* Id, float* Value, float Min, float Max, const char* Format, float Width)
+{
+    ImGui::TextUnformatted(Label);
+    ImGui::SetNextItemWidth(Width);
+    return ImGui::SliderFloat(Id, Value, Min, Max, Format);
+}
+
 // One full-width vertical tab in the left sidebar. Sets *activeUI to uiValue on click.
 static void SidebarTab(const char* label, int uiValue, float yPos, float tabH, int* activeUI)
 {
@@ -480,7 +535,6 @@ void GUI::Init()
             float CurrentTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
             if (CurrentTime >= FConfiguration::EventStartBaseTime + FConfiguration::EventStartTime)
             {
-                FConfiguration::bEventStarted = true;
                 printf("[Events] Auto-starting event at T=%.1f\n", CurrentTime);
                 Events::StartEvent();
             }
@@ -648,6 +702,7 @@ void GUI::Init()
         ImGui::BeginChild("##content", ImVec2((W - SidebarW) - ContentPadX * 2.f, (H - TopBarH) - 26.f), false);
         float Width = 260.0f;
         float Height = 0.0f;
+        const float SectionWidth = ContentSectionWidth(Width);
 
         static char commandBuffer[1024] = { 0 };
         static char playlistBuffer[1024] = { 0 };
@@ -655,8 +710,8 @@ void GUI::Init()
         {
         case 0:
         {
-            ImGui::Text("Match Information:");
-            SmallSeparator(Width);
+            SectionHeader("Match Information", SectionWidth);
+            BeginSectionBody();
 
             ImGui::Text("- Status: ");
             ImGui::SameLine(0.0f, 0.0f);
@@ -774,6 +829,8 @@ void GUI::Init()
                 }
             }
 
+            EndSectionBody();
+
             bool bIsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
             bool bIsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
             bool bIsRetrac1v1 = (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1));
@@ -786,19 +843,17 @@ void GUI::Init()
             bool bIsBackrooms = (SelectedPlaylist == static_cast<int>(Playlist::Backrooms));
             bool bShowsOnlyUpPreGameConfig = bIsOnlyUp && gsStatus < Joinable;
             bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight && !bIsBackrooms;
+            bool bShowsEventBusControl = bIsEventPlaylist && VersionInfo.FortniteVersion <= 4.50 && gsStatus == Joinable;
             bool bShowsDefaultMatchSettings = bShowsDefaultPreGameConfig;
 
-            if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig))
+            if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig || bShowsEventBusControl))
             {
-                ImGui::Spacing();
-                ImGui::Spacing();
-
                 static bool bStartedBus = false;
 
                 if (!bStartedBus)
                 {
-                    ImGui::Text("Pre-Game Configuration:");
-                    SmallSeparator(Width);
+                    SectionHeader("Pre-Game Configuration", SectionWidth);
+                    BeginSectionBody();
 
                     if (bShowsOnlyUpPreGameConfig)
                     {
@@ -817,7 +872,7 @@ void GUI::Init()
 
                                 if (!bInitializedZone)
                                 {
-                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 3 : 4;
+                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 1 : 4;
                                     bInitializedZone = true;
                                 }
 
@@ -854,260 +909,60 @@ void GUI::Init()
 
                                 if (FConfiguration::bAutoBusStart)
                                 {
-                                    ImGui::PushItemWidth(Width);
-                                    ImGui::SliderFloat("Bus Start Delay", &FConfiguration::BusStartDelay, 0.0f, 300.0f, "%.1f seconds");
-                                    ImGui::PopItemWidth();
+                                    LabeledSliderFloat("Bus Start Delay", "##bus-start-delay", &FConfiguration::BusStartDelay, 0.0f, 300.0f, "%.1f seconds", Width);
                                 }
 
-                                ImGui::PushItemWidth(Width);
-                                ImGui::SliderFloat("Max Tick Rate", &FConfiguration::MaxTickRate, 5.0f, 180.0f, "%.1f seconds");
-                                ImGui::PopItemWidth();
+                                LabeledSliderFloat("Max Tick Rate", "##max-tick-rate", &FConfiguration::MaxTickRate, 5.0f, 180.0f, "%.1f seconds", Width);
                             }
 
-                            ImGui::Spacing();
-
-                            if (gsStatus == Joinable && ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
-                            {
-                                auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-                                auto WarmupDuration = 10.f;
-
-                                auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                                auto GameState = GameMode->GameState;
-
-                                if (GameState->HasWarmupCountdownEndTime())
-                                {
-                                    GameState->WarmupCountdownStartTime = Time;
-                                    GameState->WarmupCountdownEndTime = Time + WarmupDuration;
-                                    GameMode->WarmupCountdownDuration = WarmupDuration;
-                                    GameMode->WarmupEarlyCountdownDuration = WarmupDuration;
-                                }
-
-                                if (VersionInfo.FortniteVersion > 25.20)
-                                {
-                                    auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-
-                                    if (GamePhaseLogic->HasWarmupCountdownEndTime())
-                                    {
-                                        GamePhaseLogic->WarmupCountdownStartTime = Time;
-                                        GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
-                                        GamePhaseLogic->WarmupCountdownDuration = WarmupDuration;
-                                        GamePhaseLogic->WarmupEarlyCountdownDuration = WarmupDuration;
-                                    }
-                                }
-
-                                bStartedBus = true;
-                            }
                         }
                     }
-                }
-            }
 
-            if (bShowsDefaultMatchSettings)
-            {
-            ImGui::Spacing();
-            ImGui::Spacing();
-
-            ImGui::Text("Match Settings:");
-            SmallSeparator(Width);
-
-            if (gsStatus >= Joinable && gsStatus < Ended && VersionInfo.FortniteVersion > 5.41 && VersionInfo.FortniteVersion <= 16.00)
-            {
-                if (ImGui::Checkbox("Glider Redeploy", &FConfiguration::bGliderRedeploy))
-                {
-                    auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                    auto GliderGameState = GliderGameMode->GameState;
-                    if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
-                        GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
-                }
-            }
-
-            if ((VersionInfo.FortniteVersion >= 8.00 || gsStatus < Joinable) && VersionInfo.FortniteVersion > 2.50)
-            {
-                if (ImGui::Checkbox("Infinite Respawns", &FConfiguration::bForceRespawns))
-                {
-                    if (gsStatus >= Joinable)
+                    if (gsStatus == Joinable && (bShowsDefaultPreGameConfig || bShowsEventBusControl))
                     {
-                        auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                        if (!RespawnPlaylist)
-                            RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+                        ImGui::Spacing();
 
-                        if (RespawnPlaylist)
+                        if (ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                         {
-                            if (FConfiguration::bForceRespawns)
+                            auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+                            auto WarmupDuration = 10.f;
+
+                            auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                            auto GameState = GameMode->GameState;
+
+                            if (GameState->HasWarmupCountdownEndTime())
                             {
-                                if (RespawnPlaylist->HasbRespawnInAir())
-                                    RespawnPlaylist->bRespawnInAir = true;
-                                if (RespawnPlaylist->HasRespawnHeight())
+                                GameState->WarmupCountdownStartTime = Time;
+                                GameState->WarmupCountdownEndTime = Time + WarmupDuration;
+                                GameMode->WarmupCountdownDuration = WarmupDuration;
+                                GameMode->WarmupEarlyCountdownDuration = WarmupDuration;
+                            }
+
+                            if (VersionInfo.FortniteVersion > 25.20)
+                            {
+                                auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+
+                                if (GamePhaseLogic->HasWarmupCountdownEndTime())
                                 {
-                                    RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
-                                    RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
-                                    RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
-                                }
-                                if (RespawnPlaylist->HasRespawnTime())
-                                {
-                                    RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
-                                    RespawnPlaylist->RespawnTime.Curve.RowName = FName();
-                                    RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
-                                }
-
-                                if (RespawnPlaylist->HasRespawnType())
-                                {
-                                    if (FConfiguration::PermanentRespawn)
-                                        RespawnPlaylist->RespawnType = 1;
-                                    else
-                                        RespawnPlaylist->RespawnType = 2;
+                                    GamePhaseLogic->WarmupCountdownStartTime = Time;
+                                    GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
+                                    GamePhaseLogic->WarmupCountdownDuration = WarmupDuration;
+                                    GamePhaseLogic->WarmupEarlyCountdownDuration = WarmupDuration;
                                 }
                             }
-                            else
-                            {
-                                if (RespawnPlaylist->HasRespawnType())
-                                    RespawnPlaylist->RespawnType = 0;
-                            }
-                        }
-                    }
-                }
 
-                if (FConfiguration::bForceRespawns)
-                {
-                    if (ImGui::Checkbox("Storm Respawns", &FConfiguration::PermanentRespawn))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                            if (!RespawnPlaylist)
-                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnType())
-                                RespawnPlaylist->RespawnType = FConfiguration::PermanentRespawn ? 1 : 2;
+                            bStartedBus = true;
                         }
                     }
 
-                    ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
-                    ImGui::Checkbox("Midzone Respawns", &FConfiguration::bMidZoneRespawning);
-
-                    ImGui::PushItemWidth(Width);
-                    if (ImGui::SliderInt("Respawn Time", &FConfiguration::RespawnTime, 1, 10))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                            if (!RespawnPlaylist)
-                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnTime())
-                            {
-                                RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
-                                RespawnPlaylist->RespawnTime.Curve.RowName = FName();
-                                RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
-                            }
-                        }
-                    }
-                    ImGui::PopItemWidth();
-
-                    ImGui::PushItemWidth(Width);
-                    if (ImGui::SliderInt("Respawn Height", &FConfiguration::RespawnHeight, 1000, 50000))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                            if (!RespawnPlaylist)
-                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnHeight())
-                            {
-                                RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
-                                RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
-                                RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
-                            }
-                        }
-                    }
-                    ImGui::PopItemWidth();
-                }
-            }
-            }
-
-            if (gsStatus >= Joinable)
-            {
-                ImGui::Checkbox("Infinite Materials", &FConfiguration::bInfiniteMats);
-                ImGui::Checkbox("Infinite Ammo", &FConfiguration::bInfiniteAmmo);
-                ImGui::Checkbox("Toggle Cheat Commands", &FConfiguration::bEnableCheats);
-                ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
-                ImGui::Checkbox("Siphon", &FConfiguration::bSiphon);
-
-                if (FConfiguration::bSiphon)
-                {
-                    ImGui::SetNextItemWidth(260.0f);
-                    ImGui::InputInt("Siphon Amount", &FConfiguration::SiphonAmount);
-
-                    std::vector<const char*> SiphonAnimations = { "Default" };
-
-                    if (VersionInfo.FortniteVersion >= 11.00)
-                    {
-                        SiphonAnimations.push_back("Slurp");
-                        SiphonAnimations.push_back("Bandage Bazooka");
-                    }
-
-                    if (VersionInfo.FortniteVersion >= 12.50)
-                    {
-                        SiphonAnimations.push_back("Orange Paint");
-                        SiphonAnimations.push_back("Purple Paint");
-                    }
-
-                    SiphonAnimations.push_back("Health Siphon");
-
-                    if (VersionInfo.FortniteVersion >= 19.00)
-                    {
-                        SiphonAnimations.push_back("Med Mist");
-                    }
-
-                    if (VersionInfo.FortniteVersion >= 11.40)
-                    {
-                        SiphonAnimations.push_back("Upgrade Weapon");
-                    }
-
-                    if (FConfiguration::SiphonAnimType >= (int)SiphonAnimations.size())
-                        FConfiguration::SiphonAnimType = 0;
-
-                    ImGui::SetNextItemWidth(260.0f);
-                    ImGui::Combo("Siphon Animation", &FConfiguration::SiphonAnimType, SiphonAnimations.data(), (int)SiphonAnimations.size());
-                }
-
-                if (ImGui::Button("Reset Player Builds", ImVec2(Width, Height)))
-                {
-                    TArray<ABuildingSMActor*> Builds;
-                    Utils::GetAll<ABuildingSMActor>(Builds);
-
-                    for (auto& Build : Builds)
-                    {
-                        if (Build && Build->bPlayerPlaced)
-                            Build->SilentDie(true);
-                    }
-
-                    Builds.Free();
-                }
-
-                if (ImGui::Button("Destroy Floor Loot", ImVec2(Width, Height)))
-                {
-                    TArray<AActor*> Pickups;
-                    Utils::GetAll<AActor>(AFortPickupAthena::StaticClass(), Pickups);
-
-                    for (auto& Pickup : Pickups)
-                    {
-                        if (Pickup)
-                            Pickup->K2_DestroyActor();
-                    }
-
-                    Pickups.Free();
+                    EndSectionBody();
                 }
             }
 
             if (gsStatus == StartedMatch)
             {
-                ImGui::Spacing();
-                ImGui::Spacing();
-
-                ImGui::Text("Storm Settings:");
-                SmallSeparator(Width);
+                SectionHeader("Storm Control", SectionWidth);
+                BeginSectionBody();
 
                 if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone)
                 {
@@ -1177,42 +1032,261 @@ void GUI::Init()
 
                     // UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startshrinksafezone"), nullptr);
                 }
-            }
 
-            if (gsStatus > Joinable)
-            {
-                if (hasEvent == 2)
-                {
-                    for (auto& Event : Events::EventsArray)
-                    {
-                        if (Event.EventVersion == VersionInfo.FortniteVersion && Event.PlaylistPath && wcscmp(FConfiguration::Playlist, Event.PlaylistPath) == 0)
-                        {
-                            if (!FConfiguration::bEventStarted)
-                            {
-                                ImGui::Spacing();
-                                ImGui::Spacing();
-
-                                ImGui::Text("Event:");
-                                SmallSeparator(Width);
-
-                                if (ImGui::Button("Manually Start Event", ImVec2(Width, Height)))
-                                    Events::StartEvent();
-                            }
-                        }
-                    }
-                }
+                EndSectionBody();
             }
 
             if (gsStatus >= Joinable)
             {
-                ImGui::Spacing();
-                ImGui::Spacing();
+                SectionHeader("World Actions", SectionWidth);
+                BeginSectionBody();
 
-                ImGui::Text("Server Console:");
-                SmallSeparator(Width);
+                if (ImGui::Button("Reset Player Builds", ImVec2(Width, Height)))
+                {
+                    TArray<ABuildingSMActor*> Builds;
+                    Utils::GetAll<ABuildingSMActor>(Builds);
 
-                ImGui::SetNextItemWidth(260.0f);
-                ImGui::InputText("", commandBuffer, IM_ARRAYSIZE(commandBuffer));
+                    for (auto& Build : Builds)
+                    {
+                        if (Build && Build->bPlayerPlaced)
+                            Build->SilentDie(true);
+                    }
+
+                    Builds.Free();
+                }
+
+                if (ImGui::Button("Destroy Floor Loot", ImVec2(Width, Height)))
+                {
+                    TArray<AActor*> Pickups;
+                    Utils::GetAll<AActor>(AFortPickupAthena::StaticClass(), Pickups);
+
+                    for (auto& Pickup : Pickups)
+                    {
+                        if (Pickup)
+                            Pickup->K2_DestroyActor();
+                    }
+
+                    Pickups.Free();
+                }
+
+                EndSectionBody();
+
+                if (SelectedPlaylist == (int)Playlist::Event && hasEvent == 2)
+                {
+                    bool bHasMatchingEvent = false;
+
+                    for (auto& Event : Events::EventsArray)
+                    {
+                        const bool bMatchesEventPlaylist = !Event.PlaylistPath || wcscmp(FConfiguration::Playlist, Event.PlaylistPath) == 0;
+
+                        if (Event.EventVersion == VersionInfo.FortniteVersion && bMatchesEventPlaylist)
+                        {
+                            bHasMatchingEvent = true;
+                            break;
+                        }
+                    }
+
+                    if (bHasMatchingEvent)
+                    {
+                        SectionHeader("Event", SectionWidth);
+                        BeginSectionBody();
+
+                        if (ImGui::Button("Start Event", ImVec2(Width, Height)))
+                            Events::StartEvent();
+
+                        EndSectionBody();
+                    }
+                }
+            }
+
+            const bool bCanShowGliderRedeploy = bShowsDefaultMatchSettings && gsStatus >= Joinable && gsStatus < Ended && VersionInfo.FortniteVersion > 5.41 && VersionInfo.FortniteVersion <= 16.00;
+            const bool bCanShowRespawns = bShowsDefaultMatchSettings && ((VersionInfo.FortniteVersion >= 8.00 || gsStatus < Joinable) && VersionInfo.FortniteVersion > 2.50);
+
+            if (bCanShowRespawns)
+            {
+                SectionHeader("Respawns", SectionWidth);
+                BeginSectionBody();
+
+                if (ImGui::Checkbox("Infinite Respawns", &FConfiguration::bForceRespawns))
+                {
+                    if (gsStatus >= Joinable)
+                    {
+                        auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                        if (!RespawnPlaylist)
+                            RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                        if (RespawnPlaylist)
+                        {
+                            if (FConfiguration::bForceRespawns)
+                            {
+                                if (RespawnPlaylist->HasbRespawnInAir())
+                                    RespawnPlaylist->bRespawnInAir = true;
+                                if (RespawnPlaylist->HasRespawnHeight())
+                                {
+                                    RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
+                                    RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
+                                    RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
+                                }
+                                if (RespawnPlaylist->HasRespawnTime())
+                                {
+                                    RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
+                                    RespawnPlaylist->RespawnTime.Curve.RowName = FName();
+                                    RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
+                                }
+
+                                if (RespawnPlaylist->HasRespawnType())
+                                {
+                                    if (FConfiguration::PermanentRespawn)
+                                        RespawnPlaylist->RespawnType = 1;
+                                    else
+                                        RespawnPlaylist->RespawnType = 2;
+                                }
+                            }
+                            else
+                            {
+                                if (RespawnPlaylist->HasRespawnType())
+                                    RespawnPlaylist->RespawnType = 0;
+                            }
+                        }
+                    }
+                }
+
+                if (FConfiguration::bForceRespawns)
+                {
+                    ImGui::Indent(12.f);
+
+                    if (ImGui::Checkbox("Storm Respawns", &FConfiguration::PermanentRespawn))
+                    {
+                        if (gsStatus >= Joinable)
+                        {
+                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                            if (!RespawnPlaylist)
+                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnType())
+                                RespawnPlaylist->RespawnType = FConfiguration::PermanentRespawn ? 1 : 2;
+                        }
+                    }
+
+                    ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
+                    ImGui::Checkbox("Midzone Respawns", &FConfiguration::bMidZoneRespawning);
+
+                    if (LabeledSliderInt("Respawn Time", "##respawn-time", &FConfiguration::RespawnTime, 1, 10, Width))
+                    {
+                        if (gsStatus >= Joinable)
+                        {
+                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                            if (!RespawnPlaylist)
+                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnTime())
+                            {
+                                RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
+                                RespawnPlaylist->RespawnTime.Curve.RowName = FName();
+                                RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
+                            }
+                        }
+                    }
+
+                    if (LabeledSliderInt("Respawn Height", "##respawn-height", &FConfiguration::RespawnHeight, 1000, 50000, Width))
+                    {
+                        if (gsStatus >= Joinable)
+                        {
+                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+                            if (!RespawnPlaylist)
+                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+
+                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnHeight())
+                            {
+                                RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
+                                RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
+                                RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
+                            }
+                        }
+                    }
+
+                    ImGui::Unindent(12.f);
+                }
+
+                EndSectionBody();
+            }
+
+            if (gsStatus >= Joinable)
+            {
+                SectionHeader("Gameplay Toggles", SectionWidth);
+                BeginSectionBody();
+
+                if (bCanShowGliderRedeploy)
+                {
+                    if (ImGui::Checkbox("Glider Redeploy", &FConfiguration::bGliderRedeploy))
+                    {
+                        auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                        auto GliderGameState = GliderGameMode->GameState;
+                        if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
+                            GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
+                    }
+                }
+
+                ImGui::Checkbox("Infinite Materials", &FConfiguration::bInfiniteMats);
+                ImGui::Checkbox("Infinite Ammo", &FConfiguration::bInfiniteAmmo);
+                ImGui::Checkbox("Toggle Cheat Commands", &FConfiguration::bEnableCheats);
+                ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
+                ImGui::Checkbox("Siphon", &FConfiguration::bSiphon);
+
+                if (FConfiguration::bSiphon)
+                {
+                    ImGui::Indent(12.f);
+
+                    ImGui::TextUnformatted("Siphon Amount");
+                    ImGui::SetNextItemWidth(Width);
+                    ImGui::InputInt("##siphon-amount", &FConfiguration::SiphonAmount);
+
+                    std::vector<const char*> SiphonAnimations = { "Default" };
+
+                    if (VersionInfo.FortniteVersion >= 11.00)
+                    {
+                        SiphonAnimations.push_back("Slurp");
+                        SiphonAnimations.push_back("Bandage Bazooka");
+                    }
+
+                    if (VersionInfo.FortniteVersion >= 12.50)
+                    {
+                        SiphonAnimations.push_back("Orange Paint");
+                        SiphonAnimations.push_back("Purple Paint");
+                    }
+
+                    SiphonAnimations.push_back("Health Siphon");
+
+                    if (VersionInfo.FortniteVersion >= 19.00)
+                    {
+                        SiphonAnimations.push_back("Med Mist");
+                    }
+
+                    if (VersionInfo.FortniteVersion >= 11.40)
+                    {
+                        SiphonAnimations.push_back("Upgrade Weapon");
+                    }
+
+                    if (FConfiguration::SiphonAnimType >= (int)SiphonAnimations.size())
+                        FConfiguration::SiphonAnimType = 0;
+
+                    ImGui::TextUnformatted("Siphon Animation");
+                    ImGui::SetNextItemWidth(Width);
+                    ImGui::Combo("##siphon-animation", &FConfiguration::SiphonAnimType, SiphonAnimations.data(), (int)SiphonAnimations.size());
+
+                    ImGui::Unindent(12.f);
+                }
+
+                EndSectionBody();
+            }
+
+            if (gsStatus >= Joinable)
+            {
+                SectionHeader("Server Console", SectionWidth);
+                BeginSectionBody();
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputText("##server-command", commandBuffer, IM_ARRAYSIZE(commandBuffer));
 
                 if (ImGui::Button("Execute Console Command", ImVec2(Width, Height)))
                 {
@@ -1221,6 +1295,8 @@ void GUI::Init()
 
                     UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(wstr.c_str()), nullptr);
                 }
+
+                EndSectionBody();
             }
 
             // "Start Server" button moved to the sidebar (bottom) for easy access.
@@ -1241,8 +1317,8 @@ void GUI::Init()
 
             if (VersionInfo.FortniteVersion == 7.40 || VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
             {
-                ImGui::Text("Custom Playlists - (Requires PAK Files):");
-                SmallSeparator(Width);
+                SectionHeader("Custom Playlists", SectionWidth);
+                BeginSectionBody();
 
                 if (VersionInfo.FortniteVersion == 7.40)
                 {
@@ -1269,10 +1345,11 @@ void GUI::Init()
                     ImGui::RadioButton("Boxfights", &SelectedPlaylist, (int)Playlist::Boxfight);
                 }
 
-                ImGui::Spacing();
-                ImGui::Text("Playlists:");
-                SmallSeparator(Width);
+                EndSectionBody();
             }
+
+            SectionHeader("Playlists", SectionWidth);
+            BeginSectionBody();
 
             ImGui::RadioButton("Solos", &SelectedPlaylist, (int)Playlist::Solos);
             ImGui::RadioButton("Duos", &SelectedPlaylist, (int)Playlist::Duos);
@@ -1358,6 +1435,8 @@ void GUI::Init()
             }
 
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
+
+            EndSectionBody();
 
             switch (SelectedPlaylist)
             {
@@ -1621,7 +1700,6 @@ void GUI::Init()
                             FConfiguration::Playlist = Event.PlaylistPath;
 
                         FConfiguration::bLateGame = false;
-                        FConfiguration::bAutoStartEvent = true;
                         break;
                     }
                 }
@@ -1639,8 +1717,11 @@ void GUI::Init()
 
             if (SelectedPlaylist == (int)Playlist::Custom)
             {
-                ImGui::SetNextItemWidth(260.0f);
-                ImGui::InputText("", playlistBuffer, IM_ARRAYSIZE(playlistBuffer));
+                SectionHeader("Custom Playlist", SectionWidth);
+                BeginSectionBody();
+
+                ImGui::SetNextItemWidth(Width);
+                ImGui::InputText("##custom-playlist", playlistBuffer, IM_ARRAYSIZE(playlistBuffer));
 
                 if (ImGui::Button("Set Playlist", ImVec2(Width, Height)))
                 {
@@ -1650,21 +1731,23 @@ void GUI::Init()
 
                     FConfiguration::Playlist = persistentWstr.c_str();
                 }
+
+                EndSectionBody();
             }
 
             if (SelectedPlaylist == (int)Playlist::Event)
             {
-                ImGui::Spacing();
-                ImGui::Spacing();
+                SectionHeader("Event Settings", SectionWidth);
+                BeginSectionBody();
 
                 ImGui::Checkbox("Auto Start Event", &FConfiguration::bAutoStartEvent);
 
                 if (FConfiguration::bAutoStartEvent)
                 {
-                    ImGui::PushItemWidth(Width);
-                    ImGui::SliderFloat("Event Start Time", &FConfiguration::EventStartTime, 30.0f, 300.0f, "%.1f seconds");
-                    ImGui::PopItemWidth();
+                    LabeledSliderFloat("Event Start Time", "##event-start-time", &FConfiguration::EventStartTime, 30.0f, 300.0f, "%.1f seconds", Width);
                 }
+
+                EndSectionBody();
             }
 
             break;
@@ -1701,8 +1784,9 @@ void GUI::Init()
 
             if (!bIsInspecting)
             {
-                ImGui::Text(("Players Connected: " + std::to_string(AllControllers.size())).c_str());
-                SmallSeparator(Width);
+                const std::string Header = "Players Connected: " + std::to_string(AllControllers.size());
+                SectionHeader(Header.c_str(), SectionWidth);
+                BeginSectionBody();
 
                 for (int i = 0; i < AllControllers.size(); i++)
                 {
@@ -1747,6 +1831,8 @@ void GUI::Init()
                         bIsInspecting = true;
                     }
                 }
+
+                EndSectionBody();
             }
             else
             {
@@ -1772,8 +1858,8 @@ void GUI::Init()
                     break;
                 }
 
-                ImGui::Text("Player Information:");
-                SmallSeparator(Width);
+                SectionHeader("Player Information", SectionWidth);
+                BeginSectionBody();
 
                 auto InspectedPlayerState = (AFortPlayerStateAthena*)AllControllers[InspectedPlayerIdx].first->PlayerState;
                 auto InspectedConnection = AllControllers[InspectedPlayerIdx].second;
@@ -1800,10 +1886,10 @@ void GUI::Init()
                 ImGui::SameLine(0.0f, 0.0f);
                 ImGui::TextColored(ImVec4(0.278f, 0.612f, 0.945f, 1.0f), "%.0f", TargetPawn->GetShield());
 
-                ImGui::Spacing();
+                EndSectionBody();
 
-                ImGui::Text("Configure Player:");
-                SmallSeparator(Width);
+                SectionHeader("Player Actions", SectionWidth);
+                BeginSectionBody();
 
                 if (ImGui::Button("Copy Player's Location", ImVec2(Width, Height)))
                 {
@@ -2033,14 +2119,16 @@ void GUI::Init()
                         //nameStr.clear();
                     }
                 }
+
+                EndSectionBody();
             }
 
             break;
         }
         case 3:
         {
-            ImGui::Text("Lategame Options:");
-            SmallSeparator(Width);
+            SectionHeader("Lategame Options", SectionWidth);
+            BeginSectionBody();
 
             if (gsStatus < StartedMatch)
             {
@@ -2052,7 +2140,8 @@ void GUI::Init()
                     || SelectedPlaylist == static_cast<int>(Playlist::OnlyUp)
                     || SelectedPlaylist == static_cast<int>(Playlist::Twine1v1)
                     || SelectedPlaylist == static_cast<int>(Playlist::Boxfight)
-                    || SelectedPlaylist == static_cast<int>(Playlist::Backrooms);
+                    || SelectedPlaylist == static_cast<int>(Playlist::Backrooms)
+                    || SelectedPlaylist == static_cast<int>(Playlist::Event);
 
                 if (bIsCustomMap)
                     FConfiguration::bLateGame = false;
@@ -2069,11 +2158,11 @@ void GUI::Init()
                     ImGui::Checkbox("Use Versionized Lategame Loadouts", &FConfiguration::bUseVersionizedLoadout);
                     ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);
 
-                    ImGui::PushItemWidth(Width);
-                    ImGui::SliderInt("Starting Zone", &FConfiguration::LateGameZone, 1, 7);
-                    ImGui::PopItemWidth();
+                    LabeledSliderInt("Starting Zone", "##starting-zone", &FConfiguration::LateGameZone, 1, 7, Width);
                 }
             }
+
+            EndSectionBody();
 
             if (gsStatus < StartedMatch && FConfiguration::bLateGame)
             {
@@ -2118,10 +2207,8 @@ void GUI::Init()
                     bBuffersInitialized = true;
                 }
 
-                ImGui::NewLine();
-
-                ImGui::Text("Custom Loadout Slots:");
-                SmallSeparator(Width);
+                SectionHeader("Custom Loadout Slots", SectionWidth);
+                BeginSectionBody();
 
                 ImGui::PushItemWidth(Width);
                 ImGui::InputText("Slot 1", PrimaryWeaponBuffer, sizeof(PrimaryWeaponBuffer));
@@ -2180,10 +2267,10 @@ void GUI::Init()
                     }
                 }
 
-                ImGui::Spacing();
+                EndSectionBody();
 
-                ImGui::Text("Save/Load Loadout:");
-                SmallSeparator(Width);
+                SectionHeader("Save/Load Loadout", SectionWidth);
+                BeginSectionBody();
 
                 if (ImGui::Button("Save Loadout to File", ImVec2(Width, Height)))
                 {
@@ -2230,6 +2317,8 @@ void GUI::Init()
                         LoadoutStatusMessage.clear();
                     }
                 }
+
+                EndSectionBody();
             }
             } // gsStatus < StartedMatch
 
@@ -2237,15 +2326,18 @@ void GUI::Init()
         }
         case 4:
         {
-            ImGui::Text("Customize Player Bot:");
-            SmallSeparator(Width);
+            SectionHeader("Bot Stats", SectionWidth);
+            BeginSectionBody();
 
             ImGui::PushItemWidth(Width);
             ImGui::InputInt("Bot Health", &FConfiguration::BotHealth);
             ImGui::InputInt("Bot Shield", &FConfiguration::BotShield);
             ImGui::PopItemWidth();
 
-            ImGui::Spacing();
+            EndSectionBody();
+
+            SectionHeader("Bot Names", SectionWidth);
+            BeginSectionBody();
 
             ImGui::Checkbox("Use Custom Bot Names", &FConfiguration::UseCustomBotNames);
 
@@ -2266,12 +2358,14 @@ void GUI::Init()
                 }
             }
 
+            EndSectionBody();
+
             break;
         }
         case 5:
         {
-            ImGui::Text("Use Custom Plot:");
-            SmallSeparator(Width);
+            SectionHeader("Creative Plot", SectionWidth);
+            BeginSectionBody();
 
             ImGui::RadioButton("Temperate Island", &SelectedPlot, (int)Plot::Temperate);
             ImGui::RadioButton("Meadow Island", &SelectedPlot, (int)Plot::Meadow);
@@ -2299,6 +2393,8 @@ void GUI::Init()
             ImGui::RadioButton("Fortilla Island", &SelectedPlot, (int)Plot::Fortilla);
             ImGui::RadioButton("Debris Island", &SelectedPlot, (int)Plot::Debris);
             ImGui::RadioButton("Custom", &SelectedPlot, (int)Plot::Custom);
+
+            EndSectionBody();
 
             switch (SelectedPlot)
             {
@@ -2436,22 +2532,23 @@ void GUI::Init()
         }
         case 6:
         {
-            ImGui::Text("Custom Map Configuration:");
-            SmallSeparator(Width);
+            SectionHeader("Custom Map Configuration", SectionWidth);
+            BeginSectionBody();
 
 			ImGui::Checkbox("One Kill Ends Game", &FConfiguration::AutoEndGame);
 
-            ImGui::Spacing();
-			ImGui::Spacing();
+            EndSectionBody();
 
-            ImGui::Text("Use Custom Map (VERY EXPERIMENTAL):");
-            SmallSeparator(Width);
+            SectionHeader("Custom Map", SectionWidth);
+            BeginSectionBody();
 
             ImGui::RadioButton("Athena Faceoff", &SelectedMap, (int)Map::Faceoff);
             ImGui::RadioButton("Papaya (Party Royale)", &SelectedMap, (int)Map::Papaya);
             ImGui::RadioButton("The Combine", &SelectedMap, (int)Map::Crucible);
             ImGui::RadioButton("Flat Grid", &SelectedMap, (int)Map::FlatGrid);
             ImGui::RadioButton("Prop Hunt", &SelectedMap, (int)Map::PropHunt);
+
+            EndSectionBody();
 
             switch (SelectedMap)
             {
@@ -2515,8 +2612,8 @@ void GUI::Init()
         }
         case 7:
         {
-            ImGui::Text("Trickshot Customization:");
-            SmallSeparator(Width);
+            SectionHeader("Trickshot Customization", SectionWidth);
+            BeginSectionBody();
 
             if (gsStatus < Joinable)
             {
@@ -2550,9 +2647,7 @@ void GUI::Init()
 
             if (FConfiguration::bAutoPauseTODM)
             {
-                ImGui::PushItemWidth(Width);
-                ImGui::SliderInt("Time Of Day", &FConfiguration::TODMTime, 1, 24);
-                ImGui::PopItemWidth();
+                LabeledSliderInt("Time Of Day", "##time-of-day", &FConfiguration::TODMTime, 1, 24, Width);
             }
 
             if (FConfiguration::bRideableProjectiles)
@@ -2635,6 +2730,8 @@ void GUI::Init()
                     }
                 }
             }
+
+            EndSectionBody();
 
             break;
         }

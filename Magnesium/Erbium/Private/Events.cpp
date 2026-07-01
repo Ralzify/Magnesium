@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Public/Events.h"
+#include "../Public/Configuration.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include <thread>
@@ -55,7 +56,7 @@ void Events::StartEvent()
 		if (Event.EventVersion != VersionInfo.FortniteVersion)
 			continue;
 
-		UObject* LoaderObject = nullptr;
+		AActor* LoaderObject = nullptr;
 		if (Event.LoaderClass)
 			if (const UClass* LoaderClass = FindObject<UClass>(Event.LoaderClass))
 			{
@@ -65,7 +66,7 @@ void Events::StartEvent()
 				//AllLoaders.Free();
 			}
 
-		UObject* ScriptingObject = nullptr;
+		AActor* ScriptingObject = nullptr;
 		if (Event.ScriptingClass)
 			if (const UClass* ScriptingClass = FindObject<UClass>(Event.ScriptingClass))
 			{
@@ -195,6 +196,7 @@ void Events::StartEvent()
 		}
 
 		printf("[Events] Started!\n");
+		FConfiguration::bEventStarted = true;
 		return;
 	}
 
