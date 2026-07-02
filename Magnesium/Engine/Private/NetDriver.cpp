@@ -6,6 +6,7 @@
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
 #include "../Public/AbilitySystemComponent.h"
+#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 
 #include <cmath>
 
@@ -1174,6 +1175,9 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
+	// Universal PlayerAI system (separate from the bot command and native AI).
+	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+
 	if (Driver->ClientConnections.Num() > 0)
 		ServerReplicateActors(Driver, DeltaSeconds);
 
@@ -1238,6 +1242,9 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 uint64_t ServerReplicateActors_;
 void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
+	// Universal PlayerAI system (separate from the bot command and native AI).
+	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+
 	if (Driver->ReplicationDriver)
 	{
 		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
@@ -1355,6 +1362,9 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	}
 
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
+
+	// Universal PlayerAI system (separate from the bot command and native AI).
+	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
 
 	if (Driver->ClientConnections.Num() > 0)
 	{

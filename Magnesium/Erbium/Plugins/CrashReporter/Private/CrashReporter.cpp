@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Public/CrashReporter.h"
+#include "../../../PlayerAI/Public/PlayerAIFaultGuard.h"
 #include <TlHelp32.h>
 #include <winternl.h>
 #include <sstream>
@@ -58,6 +59,12 @@ DWORD FormatNtStatus(NTSTATUS nsCode, TCHAR** ppszMessage)
 LONG WINAPI ErbiumUnhandledExceptionFilter(LPEXCEPTION_POINTERS ExceptionInfo)
 {
     if ((ExceptionInfo->ExceptionRecord->ExceptionCode & 0x80000000) == 0 || (ExceptionInfo->ExceptionRecord->ExceptionCode & 0x30000000) != 0)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    // A PlayerAI SEH guard is active on this thread and will contain this
+    // fault (feature degrade instead of a crash) - let the frame handler
+    // run. All other exceptions are reported exactly as before.
+    if (GPlayerAIGuardedNativeCallDepth > 0)
         return EXCEPTION_CONTINUE_SEARCH;
 
     FreezeOtherThreads();

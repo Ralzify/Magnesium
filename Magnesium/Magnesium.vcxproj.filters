@@ -52,6 +52,15 @@
     <Filter Include="Magnesium\Hex">
       <UniqueIdentifier>{c0b9cd8c-373d-4cf3-9008-8cd5ebbbf2d6}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Magnesium\PlayerAI">
+      <UniqueIdentifier>{6070f7e4-7f17-490b-bcb8-556d2b49b098}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Magnesium\PlayerAI\Public">
+      <UniqueIdentifier>{289a626a-33c0-41f3-bf70-1cc6aafa8c41}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Magnesium\PlayerAI\Private">
+      <UniqueIdentifier>{387cc740-ed62-4e13-aca7-5af29a683aac}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -346,6 +355,109 @@
     </ClCompile>
     <ClCompile Include="FortniteGame\Private\FortQuestManager.cpp">
       <Filter>FortniteGame\Private</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Erbium\PlayerAI\Public\AIDebugLogger.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\AINameGenerator.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\AISkillProfile.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\CombatBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\DamageBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\EliminationBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\EmoteBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\InventoryBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\LandingBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\LootingBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAIConfig.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAIFillManager.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAIIntegration.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAISettings.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAISpawner.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\NavigationBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIConfig.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIController.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIEntity.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIFaultGuard.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIManager.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIStateMachine.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PlayerAITypes.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\PreMatchBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\ReplicationBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\TransportBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\VersionFeatureAdapter.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\VictoryConditionBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\ZoneRotationBehavior.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Erbium\PlayerAI\Private\MagnesiumPlayerAI.cpp">
+      <Filter>Magnesium\PlayerAI\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\PlayerAI\Private\PlayerAIBehaviors.cpp">
+      <Filter>Magnesium\PlayerAI\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\PlayerAI\Private\PlayerAIManager.cpp">
+      <Filter>Magnesium\PlayerAI\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\PlayerAI\Private\PlayerAISupport.cpp">
+      <Filter>Magnesium\PlayerAI\Private</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

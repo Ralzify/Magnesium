@@ -13,6 +13,8 @@
 #include "../../FortniteGame/Public/BuildingSMActor.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
+#include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
+#include "../PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 #include <sstream>
 #include <fstream>
 #include <string>
@@ -2375,6 +2377,27 @@ void GUI::Init()
         }
         case 4:
         {
+            // Universal PlayerAI system. This toggle is the only required
+            // setting: when enabled, the lobby automatically fills with
+            // PlayerAI players (up to the existing max player count) once a
+            // real player joins. Completely separate from the bot command
+            // settings below, which remain untouched.
+            SectionHeader("AI Players", SectionWidth);
+            BeginSectionBody();
+
+            ImGui::Checkbox("Enable AIs", &MagnesiumPlayerAISettings::bEnableAIs);
+
+            if (MagnesiumPlayerAISettings::bEnableAIs)
+            {
+                ImGui::TextColored(ImVec4(0.60f, 0.62f, 0.68f, 1.f),
+                    "Lobby fills with PlayerAI players once a real player joins.");
+                ImGui::TextColored(ImVec4(0.60f, 0.62f, 0.68f, 1.f), "%s",
+                    MagnesiumPlayerAIIntegration::GetStatusLine());
+                ImGui::Checkbox("Verbose PlayerAI Logging", &MagnesiumPlayerAISettings::bVerboseLogging);
+            }
+
+            EndSectionBody();
+
             SectionHeader("Bot Stats", SectionWidth);
             BeginSectionBody();
 
