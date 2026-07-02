@@ -186,6 +186,45 @@ static bool LabeledSliderFloat(const char* Label, const char* Id, float* Value, 
     return ImGui::SliderFloat(Id, Value, Min, Max, Format);
 }
 
+static std::string FormatDurationSeconds(double Seconds)
+{
+    long long TotalSeconds = (long long)floor(Seconds);
+    if (TotalSeconds < 0)
+        TotalSeconds = 0;
+
+    const long long Days = TotalSeconds / 86400;
+    TotalSeconds %= 86400;
+    const long long Hours = TotalSeconds / 3600;
+    TotalSeconds %= 3600;
+    const long long Minutes = TotalSeconds / 60;
+    const long long RemainingSeconds = TotalSeconds % 60;
+
+    std::string Result;
+    auto AppendUnit = [&Result](long long Value, const char* Singular)
+        {
+            if (Value <= 0)
+                return;
+
+            if (!Result.empty())
+                Result += " ";
+
+            Result += std::to_string(Value);
+            Result += " ";
+            Result += Singular;
+            if (Value != 1)
+                Result += "s";
+        };
+
+    AppendUnit(Days, "Day");
+    AppendUnit(Hours, "Hour");
+    AppendUnit(Minutes, "Minute");
+
+    if (Result.empty() || RemainingSeconds > 0)
+        AppendUnit(RemainingSeconds, "Second");
+
+    return Result;
+}
+
 // One full-width vertical tab in the left sidebar. Sets *activeUI to uiValue on click.
 static void SidebarTab(const char* label, int uiValue, float yPos, float tabH, int* activeUI)
 {
@@ -593,7 +632,7 @@ void GUI::Init()
             ImGui::SameLine(0.f, 8.f);
             ImGui::SetCursorPosY(TitleY);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.54f, 1.f));
-            ImGui::TextUnformatted("v2.0.0");
+            ImGui::TextUnformatted("v2.1.0");
             ImGui::PopStyleColor();
 
             // FN / UE versions on the right, aligned to the visible viewport so they
@@ -771,7 +810,8 @@ void GUI::Init()
 
                 ImGui::Text("- Players: %d", AliveCount);
 
-                ImGui::Text((std::string("- Uptime: ") + std::to_string((int)floor(UGameplayStatics::GetTimeSeconds(GameMode))) + "s").c_str());
+                const std::string Uptime = FormatDurationSeconds(GameMode ? UGameplayStatics::GetTimeSeconds(GameMode) : 0.0);
+                ImGui::Text("- Uptime: %s", Uptime.c_str());
 
                 static std::string LastElimStatusMessage;
                 static std::chrono::high_resolution_clock::time_point AddMessageTime;
@@ -843,7 +883,16 @@ void GUI::Init()
             bool bIsBackrooms = (SelectedPlaylist == static_cast<int>(Playlist::Backrooms));
             bool bShowsOnlyUpPreGameConfig = bIsOnlyUp && gsStatus < Joinable;
             bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight && !bIsBackrooms;
-            bool bShowsEventBusControl = bIsEventPlaylist && VersionInfo.FortniteVersion <= 4.50 && gsStatus == Joinable;
+            const bool bEventStartsOnSpawnIsland =
+                VersionInfo.FortniteVersion <= 4.50 ||
+                VersionInfo.FortniteVersion == 6.21 ||
+                VersionInfo.FortniteVersion == 7.20 ||
+                VersionInfo.FortniteVersion == 7.30 ||
+                VersionInfo.FortniteVersion == 8.51 ||
+                VersionInfo.FortniteVersion == 9.40 ||
+                VersionInfo.FortniteVersion == 9.41 ||
+                VersionInfo.FortniteVersion == 10.40;
+            bool bShowsEventBusControl = bIsEventPlaylist && bEventStartsOnSpawnIsland && gsStatus == Joinable;
             bool bShowsDefaultMatchSettings = bShowsDefaultPreGameConfig;
 
             if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig || bShowsEventBusControl))
@@ -2773,7 +2822,7 @@ void GUI::Init()
             ImGui::TextUnformatted("MAGNESIUM");
             ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 1.f));
-            ImGui::TextUnformatted("Gameserver  -  v2.0.0");
+            ImGui::TextUnformatted("Gameserver  -  v2.1.0");
             ImGui::PopStyleColor();
             ImGui::EndGroup();
 

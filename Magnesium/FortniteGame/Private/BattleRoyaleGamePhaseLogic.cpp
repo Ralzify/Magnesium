@@ -770,6 +770,13 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 				for (auto& UncastedPlayer : GameMode->AlivePlayers)
 				{
 					auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
+					if (!Player)
+						continue;
+
+					auto PlayerState = (AFortPlayerStateAthena*)Player->PlayerState;
+					if (PlayerState && PlayerState->HasbIsABot() && PlayerState->bIsABot)
+						continue;
+
 					if (auto Pawn = Player->MyFortPawn)
 					{
 						bool bInZone = IsInCurrentSafeZone(Player->MyFortPawn->K2_GetActorLocation(), false);

@@ -1034,6 +1034,15 @@ static void ApplyLowerSeasonStormDamage(AFortPlayerControllerAthena* Player, AFo
 	Pawn->ForceNetUpdate();
 }
 
+static bool IsStormIgnoredBot(AFortPlayerControllerAthena* Player)
+{
+	if (!Player || !Player->PlayerState)
+		return false;
+
+	auto PlayerState = (AFortPlayerStateAthena*)Player->PlayerState;
+	return PlayerState->HasbIsABot() && PlayerState->bIsABot;
+}
+
 static void SyncStormState(AFortGameMode* GameMode)
 {
 	if (!GameMode || !GameMode->SafeZoneIndicator)
@@ -1051,6 +1060,9 @@ static void SyncStormState(AFortGameMode* GameMode)
 	{
 		auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
 		if (!Player)
+			continue;
+
+		if (IsStormIgnoredBot(Player))
 			continue;
 
 		auto Pawn = Player->MyFortPawn;
