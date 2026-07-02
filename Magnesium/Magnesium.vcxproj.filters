@@ -246,6 +246,9 @@
     <ClInclude Include="Erbium\Public\Calendar.h">
       <Filter>Magnesium\Public</Filter>
     </ClInclude>
+    <ClInclude Include="FortniteGame\Public\FortControllerComponent_VictoryCrowns.h">
+      <Filter>FortniteGame\Public</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Erbium\Private\dllmain.cpp">

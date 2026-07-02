@@ -555,6 +555,24 @@ namespace SDK
 		DEFINE_FUNC(K2_GetComponentToWorld, FTransform);
 	};
 
+	class UGameFrameworkComponent : public UActorComponent
+	{
+	public:
+		UCLASS_COMMON_MEMBERS(UGameFrameworkComponent);
+	};
+
+	class UControllerComponent : public UGameFrameworkComponent
+	{
+	public:
+		UCLASS_COMMON_MEMBERS(UControllerComponent);
+	};
+
+	class UFortControllerComponent : public UControllerComponent
+	{
+	public:
+		UCLASS_COMMON_MEMBERS(UFortControllerComponent);
+	};
+
 	enum class ENetDormancy : uint8_t
 	{
 		DORM_Never = 0,

@@ -16,6 +16,7 @@
 #include "../Public/FortInventory.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../Erbium/Public/Misc.h"
+#include "../Public/FortControllerComponent_VictoryCrowns.h"
 
 #include <d3d11.h>
 #include <sstream>
@@ -2160,6 +2161,20 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 						free(Value);
 						KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
 						StateValues.Free();
+
+						auto CrownsComponent = KillerPlayerController->GetComponentByClass(UFortControllerComponent_VictoryCrowns::StaticClass());
+
+						if (CrownsComponent)
+						{
+							auto VictoryCrownsComp = (UFortControllerComponent_VictoryCrowns*)CrownsComponent;
+
+							VictoryCrownsComp->AuthorityHasHeldCrownItem(Crown);
+
+							VictoryCrownsComp->bWonCrownInMatch = true;
+							VictoryCrownsComp->bWonRoyalRoyale = true;
+							VictoryCrownsComp->OnRep_WonCrownInMatch();
+							VictoryCrownsComp->OnRep_WonRoyalRoyale();
+						}
 					}
 				}
 
