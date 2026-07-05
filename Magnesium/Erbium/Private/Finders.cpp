@@ -218,6 +218,8 @@ uint64_t FindCreateNetDriver()
             CreateNetDriver = Memcury::Scanner::FindPattern("E8 ?? ?? ?? ?? 4C 8B 44 24 ?? 48 8B D0 48 8B CB E8 ?? ?? ?? ?? 48 83 C4 ?? 5B C3").Get();
             if (!CreateNetDriver)
                 CreateNetDriver = Memcury::Scanner::FindPattern("33 D2 E8 ?? ?? ?? ?? 48 8B D0 4C 8B C3 48 8B CF E8 ?? ?? ?? ?? 48 8B 5C 24 ?? 48 83 C4 ?? 5F C3").Get();
+            if (!CreateNetDriver)
+                CreateNetDriver = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 44 89 40 ? 57 41 54 41 55 41 56 41 57 48 83 EC ? 48 63 81").Get();
         }
 
         if (CreateNetDriver)
