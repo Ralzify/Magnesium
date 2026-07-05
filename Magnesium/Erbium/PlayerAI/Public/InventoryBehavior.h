@@ -37,6 +37,10 @@ public:
     // Returns the amount healed (0 when no item was available).
     static float ConsumeHealingItem(PlayerAIController& AI, bool bShield);
 
+    // Equips a healing/shield item in hand so healing is visible to other
+    // players. Returns false when no such item exists.
+    static bool EquipHealingItem(PlayerAIController& AI, bool bShield);
+
     // True when this item would be a useful upgrade for the AI.
     static bool WantsItem(PlayerAIController& AI, const UFortItemDefinition* ItemDef);
 };

@@ -35,6 +35,17 @@ public:
     float CachedGroundZ = 0.f;
     float NextGroundSnapTime = 0.f;
     float NextThinkTime = 0.f;
+    float PosVertVel = 0.f;          // swept-walking vertical velocity (position fallback)
+    bool bPosGrounded = false;       // swept-walking: resting on real collision
+    float LastRepathTime = 0.f;      // native backend path (re)issue throttle
+    bool bSprintAbilityActivated = false;
+    bool bNativeFiring = false;      // real trigger held (any backend)
+    bool bGroundAheadValid = true;   // last ground sample found walkable terrain
+    FVector MoveProbeLoc{};          // input-movement probe (simulated backend)
+    float MoveProbeTime = 0.f;
+    float FireTapEndTime = 0.f;      // trigger tap release time (simulated fire)
+    int ProbeAmmoAtTap = -1;         // loaded ammo at trigger pull (real-fire probe)
+    float JumpStopTime = 0.f;        // when to release a held native jump
 
     // ---- Stuck detection ----
     FVector LastStuckCheckLocation{};
@@ -52,6 +63,7 @@ public:
     bool bVirtualTransport = false;  // native aircraft unavailable -> simulated seat
     bool bThankedDriver = false;
     bool bJumpedFromTransport = false;
+    bool bAirPawnSeen = false;       // an airborne pawn existed after the jump
     float TransportPhaseStartTime = 0.f;
     float ForcedJumpTime = 0.f;
     float ThankDriverTime = 0.f;
@@ -70,6 +82,7 @@ public:
     int MagazineRemaining = 0;
     bool bHasCloseRange = false;
     bool bHasMediumRange = false;
+    bool bHealingItemEquipped = false; // holding a heal item during the Healing state
     int HealingItemCount = 0;
     int ShieldItemCount = 0;
 

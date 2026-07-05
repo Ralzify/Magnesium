@@ -36,6 +36,11 @@ void ABuildingSMActor::OnDamageServer(ABuildingSMActor* Actor, float Damage, FGa
 		return OnDamageServerOG(Actor, Damage, DamageTags, Momentum, HitInfo, InstigatedBy, DamageCauser, EffectContext);
 	if (!DamageCauser || !DamageCauser->IsA<AFortWeapon>() || !((AFortWeapon*)DamageCauser)->WeaponData->IsA(UFortWeaponMeleeItemDefinition::StaticClass()))
 		return OnDamageServerOG(Actor, Damage, DamageTags, Momentum, HitInfo, InstigatedBy, DamageCauser, EffectContext);
+	// Harvest resources go to a player controller's world inventory - other
+	// instigators (native AI bot controllers, pawns on some versions) have
+	// no world inventory at this offset and crashed below.
+	if (!InstigatedBy->IsA<AFortPlayerControllerAthena>() || !Controller->WorldInventory)
+		return OnDamageServerOG(Actor, Damage, DamageTags, Momentum, HitInfo, InstigatedBy, DamageCauser, EffectContext);
 
 	auto Resource = UFortKismetLibrary::K2_GetResourceItemDefinition(Actor->ResourceType);
 	if (!Resource)
@@ -656,25 +661,37 @@ _out:
 
 void ABuildingSMActor::PostLoadHook()
 {
-	if (!GetDefaultObj()->HasBuildingResourceAmountOverride())
+	SDK::DbgLog("  [BSM] 0 start (CDO=%p)\n", (void*)GetDefaultObj());
+	bool _hasOverride = GetDefaultObj() && GetDefaultObj()->HasBuildingResourceAmountOverride();
+	SDK::DbgLog("  [BSM] 0a HasBuildingResourceAmountOverride=%d\n", (int)_hasOverride);
+	if (!_hasOverride)
 	{
+		SDK::DbgLog("  [BSM] 0b pre-FindPattern#1\n");
 		GetSparseClassData_ = Memcury::Scanner::FindPattern("48 83 EC ? 48 8B 81 ? ? ? ? 45 33 C0 4C 8B C9").Get();
+		SDK::DbgLog("  [BSM] 0c FP#1=%p\n", (void*)GetSparseClassData_);
 
 		if (!GetSparseClassData_)
 			GetSparseClassData_ = Memcury::Scanner::FindPattern("48 83 EC ? 48 8B 81 ? ? ? ? 48 85 C0 74 ? 48 83 C4 ? C3").Get();
+		SDK::DbgLog("  [BSM] 0d FP#2 done GSCD=%p\n", (void*)GetSparseClassData_);
 
 		if (!GetSparseClassData_)
 			GetSparseClassData_ = Memcury::Scanner::FindPattern("48 83 EC ? 48 8B 81 ? ? ? ? 45 33 C0 48 85 C0 75").Get();
+		SDK::DbgLog("  [BSM] 0e FP#3 done GSCD=%p\n", (void*)GetSparseClassData_);
 	}
+	SDK::DbgLog("  [BSM] 1 sparse-class-data done\n");
 	if (VersionInfo.FortniteVersion >= 18)
 	{
 		SpawnDecoVft = FindSpawnDecoVft();
+		SDK::DbgLog("  [BSM] 2 SpawnDecoVft=%p\n", (void*)SpawnDecoVft);
 		ShouldAllowServerSpawnDecoVft = FindShouldAllowServerSpawnDecoVft();
+		SDK::DbgLog("  [BSM] 3 ShouldAllowServerSpawnDecoVft=%p\n", (void*)ShouldAllowServerSpawnDecoVft);
 	}
 
 	auto OnDamageServerAddr = FindFunctionCall(L"OnDamageServer", VersionInfo.EngineVersion == 4.16 ? std::vector<uint8_t>{ 0x4C, 0x89, 0x4C } : VersionInfo.EngineVersion == 4.19 || VersionInfo.EngineVersion >= 4.27 ? std::vector<uint8_t>{ 0x48, 0x8B, 0xC4 } : std::vector<uint8_t>{ 0x40, 0x55 });
+	SDK::DbgLog("  [BSM] 4 OnDamageServerAddr=%p\n", (void*)OnDamageServerAddr);
 
 	Utils::Hook(OnDamageServerAddr, OnDamageServer, OnDamageServerOG);
+	SDK::DbgLog("  [BSM] 5 OnDamageServer hooked\n");
 
 	if (auto Func = AFortDecoTool::GetDefaultObj()->GetFunction("ServerSpawnDeco"))
 		Utils::ExecHook(Func, AFortDecoTool::ServerSpawnDeco_, AFortDecoTool::ServerSpawnDeco_OG);
@@ -696,4 +713,5 @@ void ABuildingSMActor::PostLoadHook()
 
 		Utils::ExecHook(Func2, AFortDecoTool::ServerCreateBuildingAndSpawnDeco, AFortDecoTool::ServerCreateBuildingAndSpawnDecoOG);
 	}
+	SDK::DbgLog("  [BSM] 6 PostLoadHook complete\n");
 }

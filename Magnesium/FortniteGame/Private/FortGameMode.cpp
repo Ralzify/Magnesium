@@ -10,6 +10,7 @@
 #include "../Public/FortSafeZoneIndicator.h"
 #include "../../Engine/Public/DataTableFunctionLibrary.h"
 #include "../../Erbium/Public/Configuration.h"
+#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 #include "../Public/FortLootPackage.h"
 #include "../Public/BuildingFoundation.h"
 #include "../../Erbium/Public/LateGame.h"
@@ -247,6 +248,9 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 {
     Stack.IncrementCode();
 
+    static bool _rtsmLogged = false;
+    if (!_rtsmLogged) { _rtsmLogged = true; SDK::DbgLog("[GameMode] ReadyToStartMatch_ FIRST FIRE Context=%p\n", Context); }
+
     static auto FrontendMode = FindClass("FortGameModeFrontend");
     if (Context->IsA(FrontendMode))
     {
@@ -264,6 +268,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
         //if (!FindListenCall())
         {
+            SDK::DbgLog("[GameMode] ReadyToStart Listen: ENTER setup=%d\n", (int)setup);
             auto World = UWorld::GetWorld();
             auto Engine = UEngine::GetEngine();
             auto NetDriverName = FName(L"GameNetDriver");
@@ -274,12 +279,16 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             UNetDriver* NetDriver = nullptr;
             if (VersionInfo.FortniteVersion >= 16.00)
             {
+                SDK::DbgLog("[GameMode] Listen: GetWorldContext=%p CreateNetDriver=%p\n",
+                    (void*)FindGetWorldContext(), (void*)FindCreateNetDriverWorldContext());
                 void* WorldCtx = ((void* (*)(UEngine*, UWorld*)) FindGetWorldContext())(Engine, World);
                 World->NetDriver = NetDriver = ((UNetDriver * (*)(UEngine*, void*, FName, int)) FindCreateNetDriverWorldContext())(Engine, WorldCtx, NetDriverName, 0);
+                SDK::DbgLog("[GameMode] Listen: WorldCtx=%p NetDriver=%p\n", WorldCtx, (void*)NetDriver);
             }
             else
                 World->NetDriver = NetDriver = ((UNetDriver * (*)(UEngine*, UWorld*, FName)) FindCreateNetDriver())(Engine, World, NetDriverName);
-            if (VersionInfo.FortniteVersion >= 20)
+            if (!NetDriver) { SDK::DbgLog("[GameMode] Listen: NetDriver NULL, abort\n"); }
+            if (VersionInfo.FortniteVersion >= 20 && NetDriver)
                 NetDriver->NetServerMaxTickRate = 30;
 
             NetDriver->NetDriverName = NetDriverName;
@@ -306,10 +315,14 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
             auto InitListen = (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&)) FindInitListen();
             auto SetWorld = (void (*)(UNetDriver*, UWorld*)) FindSetWorld();
+            SDK::DbgLog("[GameMode] Listen: InitListen=%p SetWorld=%p Port=%d\n",
+                (void*)InitListen, (void*)SetWorld, (int)FConfiguration::Port);
 
             SetWorld(NetDriver, World);
             FString Err;
-            if (InitListen(NetDriver, World, URL, false, Err))
+            bool ok = InitListen(NetDriver, World, URL, false, Err);
+            SDK::DbgLog("[GameMode] Listen: InitListen returned %d\n", (int)ok);
+            if (ok)
                 SetWorld(NetDriver, World);
             else
                 printf("Failed to listen!");
@@ -1765,6 +1778,11 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
     auto GameMode = (AFortGameMode*)Context;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
+    // PlayerAI must be off the aircraft's books before the native exit
+    // processing runs: its auto-jump rejects connectionless controllers
+    // and kills the AI as leftover passengers instead.
+    MagnesiumPlayerAIIntegration::OnAircraftDropZoneEnding();
+
     if (FConfiguration::bLateGame)
     {
         static auto CompClass = FindClass("FortControllerComponent_Aircraft");
@@ -2021,8 +2039,9 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
     //if (VersionInfo.EngineVersion == 4.25)
     //    SetupPlaylist(GameMode, GameState);
 
-    printf("[GameMode] FinishWorldInitialization\n");
+    SDK::DbgLog("[GameMode] FinishWorldInitialization entered (this=%p GameState=%p) pre-OG\n", (void*)_this, (void*)GameState);
     FinishWorldInitializationOG(_this, WorldManager);
+    SDK::DbgLog("[GameMode] FinishWorldInitialization post-OG\n");
 
 
     auto AddToTierData = [&](const UDataTable* Table, TArray<FFortLootTierData*>& TempArr)
@@ -2431,9 +2450,45 @@ void PlayerCanRestart(UObject* Context, FFrame& Stack, bool* Ret)
     *Ret = true;
 }
 
+// 32.11: AGameMode::ReadyToStartMatch is a pure-native call, so Magnesium's ExecHook never fires and the
+// match is never configured. Hook it by direct RVA (Remix approach): configure playlist/warmup once, then
+// defer the actual readiness decision to the original.
+bool (*ReadyToStartMatch_DirectOG)(AFortGameModeAthena*) = nullptr;
+bool ReadyToStartMatch_Direct(AFortGameModeAthena* GameMode)
+{
+    static bool s_setup = false;
+    if (!s_setup)
+    {
+        s_setup = true;
+        auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+        // 32.11: Magnesium's default (Playlist_DefaultSolo) doesn't exist on this build; use the BlastBerry
+        // playlist Remix uses so SetupPlaylist actually resolves a valid playlist + GamePhaseLogic.
+        FConfiguration::Playlist = L"/BlastBerry/Playlists/Playlist_SunflowerSolo.Playlist_SunflowerSolo";
+        SDK::DbgLog("[GameMode] ReadyToStartMatch_Direct FIRST FIRE (GM=%p GS=%p)\n", (void*)GameMode, (void*)GameState);
+        if (GameMode->HasWarmupRequiredPlayerCount())
+            GameMode->WarmupRequiredPlayerCount = 1;
+        SetupPlaylist(GameMode, GameState);
+        auto _pl = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+        SDK::DbgLog("[GameMode] ReadyToStartMatch_Direct: SetupPlaylist done; Playlist=%p\n", (void*)_pl);
+    }
+    return ReadyToStartMatch_DirectOG(GameMode);
+}
+
 void AFortGameMode::Hook()
 {
-    Utils::ExecHook(GetDefaultObj()->GetFunction("ReadyToStartMatch"), ReadyToStartMatch_, ReadyToStartMatch_OG);
+    if (VersionInfo.FortniteVersion >= 32.00)
+    {
+        auto rtsm = Memcury::PE::GetModuleBase() + 0x918B180;
+        SDK::DbgLog("[GameMode] 32.11 direct ReadyToStartMatch hook @ %p (prologue=%08X)\n", (void*)rtsm, *(uint32_t*)rtsm);
+        Utils::Hook(rtsm, ReadyToStartMatch_Direct, ReadyToStartMatch_DirectOG);
+    }
+    else
+    {
+        auto _rtsmFn = GetDefaultObj()->GetFunction("ReadyToStartMatch");
+        SDK::DbgLog("[GameMode] Hook: ReadyToStartMatch UFunction=%p (CDO=%p)\n", (void*)_rtsmFn, (void*)GetDefaultObj());
+        Utils::ExecHook(_rtsmFn, ReadyToStartMatch_, ReadyToStartMatch_OG);
+    }
+    SDK::DbgLog("[GameMode] Hook: FindFinishWorldInitialization=%p\n", (void*)FindFinishWorldInitialization());
     Utils::Hook(FindFinishWorldInitialization(), FinishWorldInitialization, FinishWorldInitializationOG);
     //if (VersionInfo.EngineVersion == 4.16)
     //    Utils::Hook(Memcury::Scanner::FindPattern("40 55 53 56 41 56 48 8D 6C 24 ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 ? 48 8B 01 48 8B F1").Get(), OnWorldInitDone, OnWorldInitDoneOG);

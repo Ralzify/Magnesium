@@ -36,6 +36,17 @@ public:
     // Best-effort cleanup, safe to call multiple times.
     static void OnGameserverShutdown();
 
+    // True when the controller belongs to a PlayerAI entity (any backend).
+    // For engine hooks that must exclude PlayerAI from real-player flows
+    // (e.g. aircraft boarding). Cheap; false when the system is idle.
+    static bool IsPlayerAIController(void* PlayerController);
+
+    // Called from the OnAircraftExitedDropZone hook BEFORE the native exit
+    // processing runs: jumps out / unboards every PlayerAI still connected
+    // to the aircraft (the native auto-jump rejects connectionless
+    // controllers and kills the AI instead). No-op when idle.
+    static void OnAircraftDropZoneEnding();
+
     // Status string for the configuration UI (Player Bot Tab).
     static const char* GetStatusLine();
 

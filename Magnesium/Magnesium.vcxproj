@@ -197,6 +197,7 @@
     <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAIIntegration.h" />
     <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAISettings.h" />
     <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAISpawner.h" />
+    <ClInclude Include="Erbium\PlayerAI\Public\NativePlayerAIBackend.h" />
     <ClInclude Include="Erbium\PlayerAI\Public\NavigationBehavior.h" />
     <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIConfig.h" />
     <ClInclude Include="Erbium\PlayerAI\Public\PlayerAIController.h" />
@@ -265,6 +266,7 @@
     <ClCompile Include="Erbium\Private\LateGame.cpp" />
     <ClCompile Include="Erbium\Private\Misc.cpp" />
     <ClCompile Include="Erbium\PlayerAI\Private\MagnesiumPlayerAI.cpp" />
+    <ClCompile Include="Erbium\PlayerAI\Private\NativePlayerAIBackend.cpp" />
     <ClCompile Include="Erbium\PlayerAI\Private\PlayerAIBehaviors.cpp" />
     <ClCompile Include="Erbium\PlayerAI\Private\PlayerAIManager.cpp" />
     <ClCompile Include="Erbium\PlayerAI\Private\PlayerAISupport.cpp" />

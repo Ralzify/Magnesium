@@ -49,13 +49,26 @@ public:
     // Puts an AI player into the aircraft using the same native path real
     // players use. Returns false when unavailable (caller uses fallback).
     static bool EnterAircraft(AFortPlayerControllerAthena* PC);
+    // Takes an AI player off the aircraft and gives it a fresh pawn (native
+    // jump RPC when the version accepts it, otherwise the same RestartPlayer
+    // sequence Magnesium's own jump hook uses). True when a pawn exists.
     static bool JumpFromAircraft(AFortPlayerControllerAthena* PC);
+    // Starts the native skydive on a pawn (fault guarded, version safe).
+    static bool TryBeginSkydiving(AFortPlayerPawnAthena* Pawn);
+    // Last-resort unboard: clears the replicated in-aircraft flag directly
+    // (controller and player state) when the native jump refuses to.
+    static void ForceLeaveAircraft(AFortPlayerControllerAthena* PC);
 
     // ---- Movement / world ----------------------------------------------------
     // Ground location under/near a world position (safe fallback: input).
     // Pass the asking pawn when available so the trace ignores it; if the
     // native trace faults on a version it disables itself for the session.
     static FVector FindGroundLocation(const FVector& Near, bool& bOutFound, AFortPlayerPawnAthena* IgnorePawn = nullptr);
+
+    // True while ground tracing works on this version. When false, all
+    // movement/landing logic runs trace-free (native physics + landing
+    // target anchors) instead of treating "no ground data" as blocked.
+    static bool IsGroundTraceReliable();
     static bool SupportsCrouch(AFortPlayerPawnAthena* Pawn);
     static bool SupportsGliding();
 
@@ -67,6 +80,24 @@ public:
 
     // ---- DBNO -------------------------------------------------------------------
     static bool SupportsDBNO();
+
+    // ---- Weapon fire ---------------------------------------------------------------
+    // Attempts to activate the equipped weapon's real fire ability through
+    // the same server activation path real clients use, so connected
+    // players see and hear actual gunfire. Fault guarded; disables itself
+    // for the session when the version rejects it (simulated combat keeps
+    // working either way).
+    static bool TryFireEquippedWeapon(AFortPlayerControllerAthena* PC, AFortPlayerPawnAthena* Pawn);
+
+    // Fault-guarded server-side ability activation (shared by weapon fire,
+    // sprint, ...). Returns false when the activation faulted.
+    static bool TryActivateAbilityHandle(UAbilitySystemComponent* ASC, FGameplayAbilitySpecHandle Handle);
+
+    // ---- Cosmetics -------------------------------------------------------------------
+    // Picks a random character skin from the cosmetics that exist in the
+    // hosted build and applies it (hero + character parts). Falls back to
+    // the default soldier when the build has no usable skins.
+    static void ApplyRandomSkin(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn);
 
     // ---- Death --------------------------------------------------------------------
     // Kills a pawn through the native death pipeline (ForceKill) so kill

@@ -30,6 +30,12 @@ public:
     // unavailable). Returns the new pawn or nullptr.
     static AFortPlayerPawnAthena* SpawnPawnAt(PlayerAIController& AI, const FVector& Location, bool bGround);
 
+    // Post-aircraft-jump setup: wires the fresh RestartPlayer pawn like a
+    // PlayerAI pawn, moves it to the aircraft and starts the native
+    // skydive. Returns true when the pawn is skydiving; false when it was
+    // placed at the landing target directly (no skydive support).
+    static bool FinishAircraftJumpPawn(PlayerAIController& AI);
+
     // Fully removes a PlayerAI entity from the match (pre-match room making
     // or shutdown). Updates alive counts safely.
     static void DespawnEntity(PlayerAIController& AI, const char* Reason);

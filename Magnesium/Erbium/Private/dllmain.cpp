@@ -41,6 +41,9 @@ void Main()
     printf("Initializing SDK...\n");
     SDK::Init();
 
+    if (VersionInfo.FortniteVersion >= 32.00)
+        SDK::DumpObjArrayDiag();
+
     if constexpr (FConfiguration::bGUI)
     {
         if constexpr (FConfiguration::bUseStdoutLog)
@@ -61,6 +64,8 @@ void Main()
         }
     }
 
+    SDK::DbgLog("Main: start pressed\n");
+
     if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
         FConfiguration::bEnableIris = false;
 
@@ -72,18 +77,36 @@ void Main()
 
     if (VersionInfo.EngineVersion >= 5.0)
     {
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogFortUIDirector None"), nullptr);
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogFortUIManager None"), nullptr);
+        auto _w0 = UWorld::GetWorld();
+        SDK::DbgLog("Main: cp0a GetWorld=%p\n", (void*)_w0);
+        auto _cmd0 = FString(L"log LogFortUIDirector None");
+        SDK::DbgLog("Main: cp0a2 FString built (len=%d)\n", _cmd0.Num());
+        UKismetSystemLibrary::ExecuteConsoleCommand(_w0, _cmd0, nullptr);
+        SDK::DbgLog("Main: cp0b first ExecuteConsoleCommand ok\n");
+        UKismetSystemLibrary::ExecuteConsoleCommand(_w0, FString(L"log LogFortUIManager None"), nullptr);
     }
     if (VersionInfo.FortniteVersion == 20.40)
     {
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogSpecialRelevancyHealthComponent None"), nullptr);
     }
+    SDK::DbgLog("Main: cp1 (pre EV5.1 / console cmds ok)\n");
     if (VersionInfo.EngineVersion >= 5.1)
     {
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"net.AllowEncryption 0"), nullptr);
 
-        auto DefaultCurieGlobals = FindClass("CurieGlobals")->GetDefaultObj();
+        if (VersionInfo.FortniteVersion >= 32.00)
+        {
+            // 32.11: BlastBerry is a WorldPartition map. On the injected listen server the server-side
+            // streaming thrashes (constant cell add/remove -> ABuildingActor physics re-init) which
+            // grinds the shared game thread. Disable server streaming so cells load once and stay.
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"wp.Runtime.EnableServerStreaming 0"), nullptr);
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"wp.Runtime.EnableServerStreamingOut 0"), nullptr);
+            SDK::DbgLog("Main: cp2a (wp server streaming disabled for 32.11)\n");
+        }
+
+        SDK::DbgLog("Main: cp2 (net.AllowEncryption ok, pre CurieGlobals)\n");
+        auto CurieClass = FindClass("CurieGlobals");
+        auto DefaultCurieGlobals = CurieClass ? CurieClass->GetDefaultObj() : nullptr;
 
         if (DefaultCurieGlobals)
         {
@@ -93,6 +116,7 @@ void Main()
             //    *(bool*)(uintptr_t(DefaultCurieGlobals) + Offset) = false;
         }
     }
+    SDK::DbgLog("Main: cp3 (pre Iris block)\n");
     if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
     {
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIris None"), nullptr);
@@ -113,7 +137,8 @@ void Main()
         if (IrisBool)
             *IrisBool = true;
 
-        if (VersionInfo.FortniteVersion >= 29)
+        SDK::DbgLog("Main: cp4 (Iris cvars done, pre FilterConfigs)\n");
+        if (VersionInfo.FortniteVersion >= 29 && VersionInfo.FortniteVersion < 32.00) // 32.11: FObjectReplicationBridgeFilterConfig::Size() is wrong here -> loop hangs; needs the real 32.11 struct layout
         {
             auto ReplicationBridgeConfig = UObjectReplicationBridgeConfig::GetDefaultObj();
 
@@ -131,6 +156,7 @@ void Main()
         }
         //UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"net.Iris.UseIrisReplication 1"), nullptr);
     }
+    SDK::DbgLog("Main: cp5 (Iris block done, pre EV5.4)\n");
     if (VersionInfo.EngineVersion >= 5.4)
     {
         // sprint fix
@@ -166,6 +192,7 @@ void Main()
     if constexpr (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)
         curl_global_init(CURL_GLOBAL_ALL);
 
+    SDK::DbgLog("Main: cp6 (pre Hooking / FindNullsAndRetTrues)\n");
     sprintf_s(GUI::windowTitle, VersionInfo.EngineVersion >= 5.0 ? "Magnesium (FN %.2f, UE %.1f)" : (VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "Magnesium (FN %.2f, UE %.2f)" : "Magnesium (FN %.1f, UE %.2f)"), VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
     SetConsoleTitleA(GUI::windowTitle);
 
@@ -191,21 +218,42 @@ void Main()
         Utils::Patch<uint32_t>(RetTrueFunc, 0xc0ffc031);
         Utils::Patch<uint8_t>(RetTrueFunc + 4, 0xc3);
     }
+    SDK::DbgLog("Main: cp7 (Null/RetTrue patches applied)\n");
 
     auto GameSessionPatch = FindGameSessionPatch();
     if (GameSessionPatch)
         Utils::Patch<uint8_t>(GameSessionPatch, 0x85);
+    SDK::DbgLog("Main: cp8 (GameSessionPatch=%p)\n", (void*)GameSessionPatch);
 
     MH_Initialize();
+    SDK::DbgLog("Main: cp9 (MH_Initialize done, installing %zu hooks)\n", _HookFuncs.size());
 
-    for (auto& HookFunc : _HookFuncs)
-        HookFunc();
+    {
+        int _hi = 0;
+        HMODULE _mod = GetModuleHandleW(L"Magnesium.dll");
+        for (auto& HookFunc : _HookFuncs)
+        {
+            SDK::DbgLog("Main: hook[%d] %s pre\n", _hi,
+                _hi < (int)_HookNames.size() ? _HookNames[_hi] : "?");
+            HookFunc();
+            SDK::DbgLog("Main: hook[%d] post\n", _hi);
+            _hi++;
+        }
+    }
+    SDK::DbgLog("Main: cp10 (all _HookFuncs installed)\n");
 
     MH_EnableHook(MH_ALL_HOOKS);
+    SDK::DbgLog("Main: cp11 (hooks enabled)\n");
 
-    *(bool*)FindGIsClient() = false;
-    if (VersionInfo.EngineVersion > 4.20) // 3.6 and below have a crash on ALandscapeProxy
-        *(bool*)FindGIsServer() = true;
+    auto _gic = FindGIsClient();
+    auto _gis = FindGIsServer();
+    SDK::DbgLog("Main: GIsClient=%p GIsServer=%p\n", (void*)_gic, (void*)_gis);
+    if (_gic)
+        *(bool*)_gic = false;
+    SDK::DbgLog("Main: cp12 (GIsClient set)\n");
+    if (VersionInfo.EngineVersion > 4.20 && _gis) // 3.6 and below have a crash on ALandscapeProxy
+        *(bool*)_gis = true;
+    SDK::DbgLog("Main: cp13 (GIsServer set)\n");
 
     srand((uint32_t)time(0));
 
@@ -213,6 +261,7 @@ void Main()
     {
         UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Remove(0);
     }
+    SDK::DbgLog("Main: cp14 (LocalPlayers handled)\n");
 
     const wchar_t* terrainOpen = L"open Athena_Terrain";
 
@@ -327,7 +376,9 @@ void Main()
     {
         if (VersionInfo.FortniteVersion >= 27.00)
         {
-            if (VersionInfo.FortniteVersion >= 28.00)
+            if (VersionInfo.FortniteVersion >= 32.00)
+                terrainOpen = L"open BlastBerry_Terrain"; // Ch5 S4 (32.11) island — net mode forced to DedicatedServer via AttemptDeriveFromURL hook
+            else if (VersionInfo.FortniteVersion >= 28.00)
                 terrainOpen = L"open Helios_Terrain";
         }
         else if (VersionInfo.FortniteVersion >= 23.00)
@@ -338,20 +389,80 @@ void Main()
             terrainOpen = L"open Apollo_Terrain";
     }
 
-    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(terrainOpen), nullptr);
+    // DIAGNOSTIC: defer the map load until AFTER all hooks are installed, so it doesn't run
+    // concurrently on the game thread while Main is still installing post-load hooks.
+    SDK::DbgLog("Main: cp15 terrain-open DEFERRED (%ls)\n", terrainOpen);
 
     auto EncryptionPatch = FindEncryptionPatch();
     if (EncryptionPatch)
         Utils::Patch<uint8_t>(EncryptionPatch, 0x74);
     else
         printf("Matchmaking is NOT supported on this version, please make a github issue.\n");
+    SDK::DbgLog("Main: cp17 EncryptionPatch=%p\n", (void*)EncryptionPatch);
 
-    for (auto& HookFunc : _PostLoadHookFuncs)
-        HookFunc();
+    SDK::DbgLog("Main: cp17b installing %zu post-load hooks\n", _PostLoadHookFuncs.size());
+    {
+        int _pi = 0;
+        for (auto& HookFunc : _PostLoadHookFuncs)
+        {
+            SDK::DbgLog("Main: plhook[%d] %s pre\n", _pi,
+                _pi < (int)_PostLoadHookNames.size() ? _PostLoadHookNames[_pi] : "?");
+            HookFunc();
+            SDK::DbgLog("Main: plhook[%d] post\n", _pi);
+            _pi++;
+        }
+    }
+    SDK::DbgLog("Main: cp18 PostLoadHooks done\n");
 
     MH_EnableHook(MH_ALL_HOOKS);
 
     Misc::bHookedAll = true;
+    SDK::DbgLog("Main: cp19 all hooks installed; issuing deferred terrain-open (%ls)\n", terrainOpen);
+
+    // 32.11 ground-truth crash/boot patches (Remix, verified on CL 38202817). These are raw byte
+    // patches whose signatures don't exist in Magnesium's universal scanner; version-gated so no
+    // other build is touched. The two ChangeGameSessionID rets fix the netmode-init read-null AV.
+    if (VersionInfo.FortniteVersion >= 32.00)
+    {
+        auto base = Memcury::PE::GetModuleBase();
+        auto P8  = [&](uintptr_t rva, uint8_t  v) { if (SDK::MemReadable((void*)(base + rva), 1)) Utils::Patch<uint8_t>(base + rva, v); };
+        auto P16 = [&](uintptr_t rva, uint16_t v) { if (SDK::MemReadable((void*)(base + rva), 2)) Utils::Patch<uint16_t>(base + rva, v); };
+        auto P32 = [&](uintptr_t rva, uint32_t v) { if (SDK::MemReadable((void*)(base + rva), 4)) Utils::Patch<uint32_t>(base + rva, v); };
+        SDK::DbgLog("Main: cp19b applying 32.11 crash patches (base=%p)\n", (void*)base);
+        P8(0x537F4A0, 0xC3); // UnsafeEnvironment
+        P8(0x4336BAC, 0xC3); // RequestExit
+        P8(0x27B3958, 0xC3); // ChangeGameSessionID crash 1
+        P8(0x27B3598, 0xC3); // ChangeGameSessionID crash 2 (netmode-init read-null AV)
+        P8(0x1D91EEC, 0xC3); // GFX crash
+        P8(0x2C7D6F0, 0xC3); // Pedestal BeginPlay
+        P8(0x1BED9A8, 0xC3); // KickPlayer
+        P8(0x338C8F8, 0x01); // SpawnServerActor patch
+        P8(0x721A50C, 0xEB);
+        P8(0x2C7736C, 0xC3); // controller disconnected
+        P8(0x3E2C464, 0xC3); // update required
+        P8(0x2C78CDC, 0xC3); // another controller
+        P8(0x3E6E09D, 0xEB); // goofy crash
+        P8(0x27306AC, 0xC3); // more crash
+        P8(0xAF29848, 0xC3); // pawn crash
+        P8(0x19D7D70, 0xC3); // weapon crash
+        P8(0x2CAF22C, 0xC3); // widget crash
+        P8(0x2CB06C8, 0xC3); // widget crash
+        P8(0x1E349CB, 0x85); // gamephase step
+        P16(0xA6E634D, 0xE990); // respawn kick
+        P32(0x20AEF8C, 0xC0FFC031); // localplayer spawnplayactor
+        P8(0x20AEF90, 0xC3);
+        P8(0x9B2A080, 0xC3); // entitlement crash
+        P32(0x7C86D88, 0xC0FFC031); // canactivateability
+        P8(0x7C86D8C, 0xC3);
+        P8(0x6D3E210, 0xC3); // cosmetic crash
+        P8(0xC6A3B28, 0xC3); // fire spread fix
+        if (SDK::MemReadable((void*)(base + 0x12D4E1CA), 1)) *(bool*)(base + 0x12D4E1CA) = false;
+        if (SDK::MemReadable((void*)(base + 0x12D4E166), 1)) *(bool*)(base + 0x12D4E166) = true;
+        SDK::DbgLog("Main: cp19c 32.11 crash patches done\n");
+    }
+
+    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(terrainOpen), nullptr);
+    SDK::DbgLog("Main: cp20 terrain-open issued — Main() COMPLETE\n");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule,

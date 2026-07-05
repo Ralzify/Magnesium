@@ -1354,17 +1354,25 @@ void SendClientMoveAdjustments(UNetDriver* Driver)
 
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
+	static int _tf = 0;
+	bool _lg = VersionInfo.FortniteVersion >= 32.00 && _tf < 4;
+	if (_lg) SDK::DbgLog("[TickFlush] #%d ENTER Driver=%p\n", _tf, (void*)Driver);
+
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
 		auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+		if (_lg) SDK::DbgLog("[TickFlush] #%d GamePhaseLogic=%p\n", _tf, (void*)GamePhaseLogic);
 		if (GamePhaseLogic)
 			GamePhaseLogic->Tick();
 	}
+	if (_lg) SDK::DbgLog("[TickFlush] #%d post-GamePhase\n", _tf);
 
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
+	if (_lg) SDK::DbgLog("[TickFlush] #%d post-NukeRockets\n", _tf);
 
 	// Universal PlayerAI system (separate from the bot command and native AI).
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OnServerTick\n", _tf);
 
 	if (Driver->ClientConnections.Num() > 0)
 	{
@@ -1439,7 +1447,10 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		}
 	}
 
-	return TickFlushOG(Driver, DeltaSeconds);
+	if (_lg) { SDK::DbgLog("[TickFlush] #%d pre-OG (calling TickFlushOG)\n", _tf); }
+	TickFlushOG(Driver, DeltaSeconds);
+	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OG done\n", _tf);
+	if (VersionInfo.FortniteVersion >= 32.00 && _tf < 4) _tf++;
 }
 
 void (*SetNetDormancyOG)(AActor* Actor, int NewDormancy);

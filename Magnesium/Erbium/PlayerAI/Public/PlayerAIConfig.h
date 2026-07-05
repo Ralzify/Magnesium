@@ -26,6 +26,11 @@ public:
     // Delay after the first real player joins before filling starts.
     static inline float FillStartDelaySeconds = 2.0f;
 
+    // Gradual fill: one PlayerAI joins every so often (randomized), like a
+    // lobby filling with real players, instead of 99 appearing at once.
+    static inline float FillSpawnIntervalMin = 0.30f;
+    static inline float FillSpawnIntervalMax = 0.80f;
+
     // ---- Thinking / updates ----------------------------------------------
     static inline float ThinkIntervalMin = 0.30f;
     static inline float ThinkIntervalMax = 0.60f;
@@ -44,7 +49,7 @@ public:
     static inline float ThankDriverChance = 0.30f;      // only if supported
     static inline float JumpDistanceMin = 8000.f;       // jump window around target
     static inline float JumpDistanceMax = 30000.f;
-    static inline float ForcedJumpTimeAfterPhase = 40.f; // fallback jump timer
+    static inline float ForcedJumpTimeAfterPhase = 26.f; // fallback jump timer (drop windows can be short)
     static inline float LandingJitterRadius = 4000.f;
 
     // ---- Looting -----------------------------------------------------------

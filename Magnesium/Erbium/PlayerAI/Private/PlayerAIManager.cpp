@@ -140,6 +140,36 @@ void PlayerAIController::Update(float Now, float DeltaSeconds, FPlayerAIWorldSna
         break;
     }
 
+    // Simulated backend: keep idle pawns planted on the ground.
+    if (!Entity.bNativeBacked &&
+        (PlayerAIIsGroundState(GetState()) || GetState() == EPlayerAIState::PreMatchIdle ||
+         GetState() == EPlayerAIState::PreMatchEmoting || GetState() == EPlayerAIState::PreMatchWalking))
+        NavigationBehavior::SettleIdle(*this, Now, DeltaSeconds);
+
+    // Void rescue: anyone who somehow fell below the world gets put back on
+    // a sane anchor instead of falling forever / dying silently.
+    if (PlayerAIIsGroundState(GetState()))
+    {
+        auto RescuePawn = GetPawn();
+
+        if (RescuePawn)
+        {
+            FVector RescueLoc = RescuePawn->K2_GetActorLocation();
+
+            if (RescueLoc.Z < -7000.0)
+            {
+                FVector Anchor = bHasLandingTarget ? LandingTarget : HomeLocation;
+                Anchor.Z = Anchor.Z + 300.0;
+
+                RescuePawn->K2_TeleportTo(Anchor, RescuePawn->K2_GetActorRotation(), false, true);
+                NavigationBehavior::ClearMoveTarget(*this);
+                PosVertVel = 0.f;
+                bPosGrounded = false; // swept gravity re-verifies footing
+                AIDebugLogger::Log("Navigation", "%s rescued from below the world", Entity.DisplayName.c_str());
+            }
+        }
+    }
+
     CombatBehavior::Tick(*this, Now, DeltaSeconds, World);
 
     // ---- Staggered decision making ----
@@ -167,6 +197,16 @@ void PlayerAIController::Think(float Now, FPlayerAIWorldSnapshot& World)
             // (e.g. lategame instant drop): run the transport flow now, it
             // handles missing aircraft with the landing fallback.
             TransportBehavior::OnTransportPhaseStarted(*this, Now, World);
+        }
+
+        // The drop window closed while this AI was still "aboard" (parked):
+        // jump IMMEDIATELY. The spawn island gets torn down when the
+        // aircraft finishes - anyone still parked there dies.
+        if (World.Phase == EPlayerAIMatchPhase::InProgress && !bJumpedFromTransport &&
+            (GetState() == EPlayerAIState::InTransport || GetState() == EPlayerAIState::ChoosingLandingSpot ||
+             GetState() == EPlayerAIState::WaitingForTransport))
+        {
+            ForcedJumpTime = Now;
         }
 
         ObservedPhase = World.Phase;
@@ -528,9 +568,16 @@ PlayerAIController* PlayerAIManager::FindByController(AFortPlayerControllerAthen
     if (!PC)
         return nullptr;
 
+    // Pointer comparison only - PC may be a real player controller, a
+    // simulated PlayerAI controller or a native bot controller.
     for (auto& Controller : Controllers)
-        if (Controller && Controller->Entity.PC == PC)
+    {
+        if (!Controller)
+            continue;
+
+        if (Controller->Entity.PC == PC || Controller->Entity.NativeController == (AActor*)PC)
             return Controller.get();
+    }
 
     return nullptr;
 }

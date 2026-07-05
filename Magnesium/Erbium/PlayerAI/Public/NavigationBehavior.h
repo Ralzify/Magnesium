@@ -3,9 +3,9 @@
 // Magnesium PlayerAI - NavigationBehavior
 //
 // Version independent navigation. No single version specific nav system is
-// relied on: movement is server side steering (velocity + ground snapping
-// through the generic ground trace), with stuck detection and escalating
-// recovery (repath -> nearby point -> new target -> teleport as last resort).
+// relied on: input-driven walking where the engine simulates it, otherwise
+// engine-swept walking (real capsule collision + swept gravity), with stuck
+// detection and escalating recovery (repath -> new target -> teleport).
 //
 // TODO: connect this to the Magnesium map/POI data system if a richer nav
 //       source (nav mesh / waypoint graph) is available for a version.
@@ -31,8 +31,12 @@ public:
     static void CheckStuck(PlayerAIController& AI, float Now);
 
     // Occasional jumps to look natural / get over small obstacles.
-    static void TryJump(PlayerAIController& AI);
+    static void TryJump(PlayerAIController& AI, float Now);
 
     // Steering while skydiving/gliding toward the landing target.
     static void StepAirMovement(PlayerAIController& AI, float DeltaSeconds);
+
+    // Swept-walking backend: gravity for idle pawns so nobody hovers after
+    // placements, landings or teleports.
+    static void SettleIdle(PlayerAIController& AI, float Now, float DeltaSeconds);
 };

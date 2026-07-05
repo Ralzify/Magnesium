@@ -403,6 +403,9 @@
     <ClInclude Include="Erbium\PlayerAI\Public\MagnesiumPlayerAISpawner.h">
       <Filter>Magnesium\PlayerAI\Public</Filter>
     </ClInclude>
+    <ClInclude Include="Erbium\PlayerAI\Public\NativePlayerAIBackend.h">
+      <Filter>Magnesium\PlayerAI\Public</Filter>
+    </ClInclude>
     <ClInclude Include="Erbium\PlayerAI\Public\NavigationBehavior.h">
       <Filter>Magnesium\PlayerAI\Public</Filter>
     </ClInclude>
@@ -448,6 +451,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Erbium\PlayerAI\Private\MagnesiumPlayerAI.cpp">
+      <Filter>Magnesium\PlayerAI\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\PlayerAI\Private\NativePlayerAIBackend.cpp">
       <Filter>Magnesium\PlayerAI\Private</Filter>
     </ClCompile>
     <ClCompile Include="Erbium\PlayerAI\Private\PlayerAIBehaviors.cpp">

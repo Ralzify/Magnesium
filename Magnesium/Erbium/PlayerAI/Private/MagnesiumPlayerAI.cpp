@@ -12,6 +12,7 @@
 #include "../Public/PlayerAIManager.h"
 #include "../Public/PlayerAIConfig.h"
 #include "../Public/PlayerAIFaultGuard.h"
+#include "../Public/NativePlayerAIBackend.h"
 #include "../Public/AIDebugLogger.h"
 #include "../Public/AINameGenerator.h"
 #include "../Public/VersionFeatureAdapter.h"
@@ -151,6 +152,20 @@ static bool PlayerAIFindSpawnTransform(FTransform& OutTransform)
     return false;
 }
 
+// Pushes a manual PlayersLeft change to clients. Newer versions (C4+) use
+// push-model replication where a raw property write never replicates on
+// its own - flushing dormancy and forcing a net update marks the game
+// state dirty on every version (harmless no-ops on legacy replication).
+static void PlayerAIPushPlayersLeft(AFortGameStateAthena* GameState)
+{
+    if (!GameState)
+        return;
+
+    GameState->OnRep_PlayersLeft();
+    GameState->FlushNetDormancy();
+    GameState->ForceNetUpdate();
+}
+
 // Registers the entity in the same match participation structures real
 // players use so damage / eliminations / kill credit / alive counts / win
 // conditions work natively.
@@ -239,7 +254,7 @@ static bool PlayerAIRegisterMatchParticipant(AFortPlayerControllerAthena* PC, AF
     // TODO: connect this to the Magnesium alive count system if custom
     //       team-based counting is added later.
     GameState->PlayersLeft++;
-    GameState->OnRep_PlayersLeft();
+    PlayerAIPushPlayersLeft(GameState);
     GameMode->AlivePlayers.Add(PC);
 
     return true;
@@ -292,24 +307,105 @@ static void PlayerAIGiveStartingItems(AFortPlayerControllerAthena* PC)
     }
 }
 
-static void PlayerAIApplyDisplayName(AFortPlayerControllerAthena* PC, AFortPlayerStateAthena* PlayerState, const std::string& Name)
+static void PlayerAIApplyDisplayName(AFortPlayerControllerAthena* PC, AActor* AnyController, AFortPlayerStateAthena* PlayerState, const std::string& Name)
 {
     auto GameMode = VersionFeatureAdapter::GetGameMode();
 
     std::wstring Wide(Name.begin(), Name.end());
     FString DisplayName = FString(Wide.c_str());
 
-    if (std::floor(VersionInfo.FortniteVersion) < 9)
+    if (PC && std::floor(VersionInfo.FortniteVersion) < 9)
     {
         PC->ServerChangeName(DisplayName);
     }
-    else if (GameMode)
+    else if (GameMode && AnyController)
     {
-        GameMode->ChangeName(PC, DisplayName, true);
+        // AGameMode::ChangeName takes any controller (native bot
+        // controllers included).
+        GameMode->ChangeName((AFortPlayerControllerAthena*)AnyController, DisplayName, true);
     }
 
+    // ALWAYS also write the player state name property directly: several
+    // versions (seen on 6.x and 10.40) ignore the change for connectionless
+    // controllers, which showed every PlayerAI with the same name.
     if (PlayerState)
+    {
+        static auto PlayerNameOffset = [&]
+            {
+                auto Off = PlayerState->GetOffset("PlayerNamePrivate");
+                if (Off == -1)
+                    Off = PlayerState->GetOffset("PlayerName");
+                return Off;
+            }();
+
+        if (PlayerNameOffset != -1)
+            GetFromOffset<FString>(PlayerState, PlayerNameOffset) = FString(Wide.c_str());
+        else
+            AIDebugLogger::MissingFeature("PlayerAIDisplayName",
+                "no player name property found - PlayerAI names may not display");
+
         PlayerState->OnRep_PlayerName();
+
+        // Diagnostic readback: GetPlayerName() is what nameplates/killfeed
+        // resolve - a mismatch here means this version stores the display
+        // name somewhere else (seen as "all AI share one name").
+        if (AIDebugLogger::bVerbose)
+        {
+            FString Applied = PlayerState->GetPlayerName();
+            const bool bMatches = Applied.Data && Applied.NumElements > 1 &&
+                Applied.NumElements < 512 && Applied.Data[0] == (wchar_t)Name[0];
+
+            AIDebugLogger::Verbose("Names", "%s: prop %s, readback %s", Name.c_str(),
+                PlayerNameOffset != -1 ? "written" : "MISSING",
+                bMatches ? "ok" : "MISMATCH");
+        }
+    }
+}
+
+// Fault-isolated loader for the fall-immunity effect (loading nonexistent
+// paths can fault on some builds, and this runs inside the spawn path).
+// (Kept free of unwindable C++ objects for SEH.)
+static const UClass* PlayerAITryLoadImmunityGE()
+{
+    GPlayerAIGuardedNativeCallDepth++;
+
+    const UClass* Result = nullptr;
+
+    __try
+    {
+        Result = FindObject<UClass>(L"/Game/Athena/Items/Gameplay/BackPacks/Ashton/GE_AshtonPack_FallDamageImmune.GE_AshtonPack_FallDamageImmune_C");
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Result = nullptr;
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+    return Result;
+}
+
+// Fall damage immunity: landings (and clumsy pathing) must never kill a
+// PlayerAI. The gameplay effect exists on Chapter 2+ versions; older
+// versions are covered by the soft-landing assist instead.
+static void PlayerAIApplyFallImmunity(AFortPlayerStateAthena* PlayerState)
+{
+    if (!PlayerState || !PlayerState->HasAbilitySystemComponent() || !PlayerState->AbilitySystemComponent)
+        return;
+
+    // The asset shipped with Chapter 2 - never attempt the load below 11.00.
+    if (VersionInfo.FortniteVersion < 11.00)
+        return;
+
+    static auto ImmunityGE = PlayerAITryLoadImmunityGE();
+
+    if (!ImmunityGE)
+    {
+        AIDebugLogger::MissingFeature("FallDamageImmunityGE", "PlayerAI relies on the soft-landing assist instead");
+        return;
+    }
+
+    auto ASC = PlayerState->AbilitySystemComponent;
+    ASC->BP_ApplyGameplayEffectToSelf(ImmunityGE, 1.f, ASC->MakeEffectContext());
 }
 
 PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
@@ -329,6 +425,42 @@ PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
     {
         AIDebugLogger::Error("Spawner", "no usable spawn location - PlayerAI spawn skipped");
         return nullptr;
+    }
+
+    // ---- Native backend first: engine bots (navmesh pathing, native
+    // movement/sprint/swimming, real weapons). Falls through to the
+    // simulated pipeline when unavailable.
+    if (NativePlayerAIBackend::IsAvailable())
+    {
+        const std::string Name = AINameGenerator::NextName();
+        const int PlayersLeftBefore = GameState->PlayersLeft;
+
+        auto Entity = NativePlayerAIBackend::SpawnNativeEntity(Transform, Name);
+
+        if (Entity.IsValid())
+        {
+            PlayerAIApplyDisplayName(nullptr, Entity.NativeController, Entity.PlayerState, Name);
+            VersionFeatureAdapter::ApplyRandomSkin(Entity.PlayerState, Entity.GetPawn());
+            PlayerAIApplyFallImmunity(Entity.PlayerState);
+
+            // The native spawn normally registers the bot in the alive
+            // counting itself - compensate only when this version did not.
+            if (GameState->PlayersLeft == PlayersLeftBefore)
+            {
+                GameState->PlayersLeft++;
+                PlayerAIPushPlayersLeft(GameState);
+                Entity.bManualAliveCount = true;
+            }
+
+            return PlayerAIManager::RegisterEntity(Entity);
+        }
+
+        // Backend may have disabled itself (missing SpawnBot etc.) - if it
+        // is still available this was a transient failure worth retrying.
+        if (NativePlayerAIBackend::IsAvailable())
+            return nullptr;
+
+        AIDebugLogger::Log("Spawner", "native backend unavailable - using the simulated backend");
     }
 
     // Player pawn class: the same class real players use.
@@ -400,10 +532,11 @@ PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
         return nullptr;
     }
 
-    VersionFeatureAdapter::ApplyDefaultCosmetics(PlayerState, Pawn);
+    VersionFeatureAdapter::ApplyRandomSkin(PlayerState, Pawn);
+    PlayerAIApplyFallImmunity(PlayerState);
 
     const std::string Name = AINameGenerator::NextName();
-    PlayerAIApplyDisplayName(PC, PlayerState, Name);
+    PlayerAIApplyDisplayName(PC, PC, PlayerState, Name);
 
     PlayerAIGiveStartingItems(PC);
 
@@ -473,10 +606,76 @@ AFortPlayerPawnAthena* MagnesiumPlayerAISpawner::SpawnPawnAt(PlayerAIController&
 
     AI.CachedGroundZ = (float)SpawnLoc.Z - 150.f;
 
+    // Placement data can be a canopy/roof height: swept gravity drops the
+    // pawn onto real collision over the next ticks instead of trusting it.
+    AI.PosVertVel = 0.f;
+    AI.bPosGrounded = false;
+
     // Re-equip the pickaxe / best weapon after the new pawn exists.
     PlayerAIGiveStartingItems(PC);
 
     return Pawn;
+}
+
+bool MagnesiumPlayerAISpawner::FinishAircraftJumpPawn(PlayerAIController& AI)
+{
+    auto PC = AI.Entity.PC;
+    auto Pawn = AI.GetPawn();
+
+    if (!PC || !Pawn)
+        return false;
+
+    // Same post-spawn wiring SpawnPawnAt does (RestartPlayer possessed the
+    // pawn already).
+    PC->MyFortPawn = Pawn;
+
+    if (AI.Entity.PlayerState)
+    {
+        Pawn->PlayerState = AI.Entity.PlayerState;
+        Pawn->OnRep_PlayerState();
+    }
+
+    Pawn->SetMaxHealth(100.f);
+    Pawn->SetHealth(100.f);
+    Pawn->SetMaxShield(100.f);
+
+    ReplicationBehavior::SetupPawnReplication(Pawn);
+    VersionFeatureAdapter::ApplyDefaultCosmetics(AI.Entity.PlayerState, Pawn);
+
+    AI.PosVertVel = 0.f;
+    AI.bPosGrounded = false;
+
+    PlayerAIGiveStartingItems(PC);
+
+    // Drop point: the aircraft when present, otherwise high above the
+    // landing target.
+    auto Aircraft = VersionFeatureAdapter::GetAircraft();
+    FVector Start = Aircraft ? Aircraft->K2_GetActorLocation() : FVector(AI.LandingTarget);
+
+    if (Start.Z < AI.LandingTarget.Z + 5000.0)
+        Start.Z = AI.LandingTarget.Z + 8000.0;
+
+    Pawn->K2_TeleportTo(Start, Pawn->K2_GetActorRotation(), false, true);
+    ReplicationBehavior::PushTeleportUpdate(Pawn);
+
+    if (VersionFeatureAdapter::TryBeginSkydiving(Pawn))
+    {
+        AI.bAirPawnSeen = true;
+        return true;
+    }
+
+    // No skydive support: place at the landing target instead of
+    // free-falling from aircraft height (fall damage would be lethal).
+    bool bFound = false;
+    FVector Ground = VersionFeatureAdapter::FindGroundLocation(AI.LandingTarget, bFound);
+    FVector Spot = bFound ? Ground : FVector(AI.LandingTarget);
+    Spot.Z += 150.f;
+
+    Pawn->K2_TeleportTo(Spot, Pawn->K2_GetActorRotation(), false, true);
+    ReplicationBehavior::PushTeleportUpdate(Pawn);
+    AI.CachedGroundZ = (float)Spot.Z - 150.f;
+
+    return false;
 }
 
 void MagnesiumPlayerAISpawner::DespawnEntity(PlayerAIController& AI, const char* Reason)
@@ -490,6 +689,47 @@ void MagnesiumPlayerAISpawner::DespawnEntity(PlayerAIController& AI, const char*
     // Only decrement live match counters when the AI still occupied a slot
     // (dead AI already left the alive counts through the native pipeline).
     const bool bWasAlive = AI.IsAlive();
+
+    // ---- Native backend entity ----
+    if (AI.Entity.bNativeBacked)
+    {
+        auto NativePawn = AI.GetPawn();
+
+        if (NativePawn)
+            NativePawn->K2_DestroyActor();
+
+        auto Bot = AI.Entity.NativeController;
+
+        if (Bot && GameMode && GameMode->HasAliveBots())
+        {
+            for (int i = 0; i < GameMode->AliveBots.Num(); i++)
+            {
+                if (GameMode->AliveBots[i] == Bot)
+                {
+                    GameMode->AliveBots.Remove(i);
+                    break;
+                }
+            }
+        }
+
+        if (bWasAlive && GameState && GameState->PlayersLeft > 0)
+        {
+            GameState->PlayersLeft--;
+            PlayerAIPushPlayersLeft(GameState);
+        }
+
+        if (AI.Entity.PlayerState)
+            AI.Entity.PlayerState->K2_DestroyActor();
+
+        if (Bot)
+            Bot->K2_DestroyActor();
+
+        AI.Entity.NativeController = nullptr;
+        AI.Entity.NativePawn = nullptr;
+        AI.Entity.PlayerState = nullptr;
+        AI.bDeathHandled = true;
+        return;
+    }
 
     auto Pawn = AI.GetPawn();
 
@@ -507,7 +747,7 @@ void MagnesiumPlayerAISpawner::DespawnEntity(PlayerAIController& AI, const char*
                 if (bWasAlive && GameState && GameState->PlayersLeft > 0)
                 {
                     GameState->PlayersLeft--;
-                    GameState->OnRep_PlayersLeft();
+                    PlayerAIPushPlayersLeft(GameState);
                 }
                 break;
             }
@@ -538,10 +778,19 @@ void MagnesiumPlayerAISpawner::DespawnEntity(PlayerAIController& AI, const char*
 // MagnesiumPlayerAIFillManager
 // ============================================================================
 
+static int PlayerAISpawnFaults = 0;
+static float PlayerAISpawnBackoffUntil = 0.f;
+static float PlayerAINextFillSpawnTime = 0.f;
+static float PlayerAINextFillDiagnosticTime = 0.f;
+
 void MagnesiumPlayerAIFillManager::Reset()
 {
     bFillStarted = false;
     FillAllowedAtTime = 0.f;
+    PlayerAISpawnFaults = 0;
+    PlayerAISpawnBackoffUntil = 0.f;
+    PlayerAINextFillSpawnTime = 0.f;
+    PlayerAINextFillDiagnosticTime = 0.f;
 }
 
 void MagnesiumPlayerAIFillManager::OnRealPlayerJoined(float Now, int RealPlayerCount)
@@ -591,8 +840,6 @@ static bool PlayerAITrySpawnOne(PlayerAIController** OutController)
     return bOk;
 }
 
-static int PlayerAISpawnFaults = 0;
-static bool bPlayerAISpawningDisabled = false;
 
 void MagnesiumPlayerAIFillManager::Tick(float Now, int RealPlayerCount, bool bAnyRealPlayerSpawned, EPlayerAIMatchPhase Phase)
 {
@@ -625,29 +872,38 @@ void MagnesiumPlayerAIFillManager::Tick(float Now, int RealPlayerCount, bool bAn
     const int Desired = MagnesiumPlayerAIConfig::ComputeDesiredPlayerAICount(RealPlayerCount);
     const int Current = PlayerAIManager::GetTotalCount();
 
-    if (Current < Desired && !bPlayerAISpawningDisabled)
+    // Periodic diagnostic so "nothing is spawning" is always explainable
+    // from the log.
+    if (Current == 0 && Desired > 0 && Now >= PlayerAINextFillDiagnosticTime)
     {
-        const int ToSpawn = (Desired - Current) < PlayerAIConfig::MaxSpawnsPerTick ? (Desired - Current) : PlayerAIConfig::MaxSpawnsPerTick;
+        PlayerAINextFillDiagnosticTime = Now + 10.f;
+        AIDebugLogger::Log("Fill", "waiting to fill: desired %d, current %d, faults %d, backoff %.0fs",
+            Desired, Current, PlayerAISpawnFaults, PlayerAISpawnBackoffUntil > Now ? PlayerAISpawnBackoffUntil - Now : 0.f);
+    }
 
-        for (int i = 0; i < ToSpawn; i++)
+    if (Current < Desired && Now >= PlayerAISpawnBackoffUntil && Now >= PlayerAINextFillSpawnTime)
+    {
+        // Gradual fill: one PlayerAI at a time, spaced like players joining.
+        PlayerAINextFillSpawnTime = Now + PlayerAIRandRange(PlayerAIConfig::FillSpawnIntervalMin, PlayerAIConfig::FillSpawnIntervalMax);
+
+        PlayerAIController* NewController = nullptr;
+
+        if (!PlayerAITrySpawnOne(&NewController))
         {
-            PlayerAIController* NewController = nullptr;
+            PlayerAISpawnFaults++;
+            AIDebugLogger::Error("Fill", "PlayerAI spawn faulted (%d) - contained", PlayerAISpawnFaults);
 
-            if (!PlayerAITrySpawnOne(&NewController))
+            if (PlayerAISpawnFaults % 3 == 0)
             {
-                PlayerAISpawnFaults++;
-                AIDebugLogger::Error("Fill", "PlayerAI spawn faulted (%d/3) - contained", PlayerAISpawnFaults);
-
-                if (PlayerAISpawnFaults >= 3)
-                {
-                    bPlayerAISpawningDisabled = true;
-                    AIDebugLogger::Error("Fill", "PlayerAI spawning disabled after repeated faults - existing PlayerAI keep running");
-                }
-                break;
+                // Back off instead of giving up: transient early-lobby
+                // faults must not kill the whole fill.
+                PlayerAISpawnBackoffUntil = Now + 15.f;
+                AIDebugLogger::Error("Fill", "PlayerAI spawning backing off for 15s after repeated faults");
             }
-
-            if (!NewController)
-                break; // logged inside; retry next tick
+        }
+        else if (NewController)
+        {
+            PlayerAISpawnFaults = 0;
         }
     }
     else if (Current > Desired)
@@ -753,6 +1009,7 @@ void MagnesiumPlayerAIIntegration::OnMatchEnded()
     AIDebugLogger::Log("Lifecycle", "OnMatchEnded");
     PlayerAIManager::OnMatchEnded();
     MagnesiumPlayerAIFillManager::Reset();
+    NativePlayerAIBackend::Reset();
 }
 
 void MagnesiumPlayerAIIntegration::OnGameserverShutdown()
@@ -761,6 +1018,84 @@ void MagnesiumPlayerAIIntegration::OnGameserverShutdown()
     PlayerAIManager::Shutdown("gameserver shutdown");
     MagnesiumPlayerAIFillManager::Reset();
     KnownRealPlayerControllers.clear();
+}
+
+bool MagnesiumPlayerAIIntegration::IsPlayerAIController(void* PlayerController)
+{
+    return PlayerAIManager::IsPlayerAI((AFortPlayerControllerAthena*)PlayerController);
+}
+
+void MagnesiumPlayerAIIntegration::OnAircraftDropZoneEnding()
+{
+    if (!PlayerAIManager::bInitialized || PlayerAIManager::GetTotalCount() == 0)
+        return;
+
+    const float Now = VersionFeatureAdapter::GetTimeSeconds();
+    int Jumped = 0;
+    int Unboarded = 0;
+
+    for (auto& AI : PlayerAIManager::GetControllers())
+    {
+        if (!AI || AI->Entity.bNativeBacked || !AI->Entity.PC)
+            continue;
+
+        const auto State = AI->GetState();
+
+        if (State == EPlayerAIState::Dead || State == EPlayerAIState::MatchEnded)
+            continue;
+
+        auto PC = AI->Entity.PC;
+        const bool bAboard = VersionFeatureAdapter::IsInAircraft(PC);
+        const bool bNeedsJump = !AI->bJumpedFromTransport &&
+            (State == EPlayerAIState::InTransport || State == EPlayerAIState::WaitingForTransport ||
+             State == EPlayerAIState::ChoosingLandingSpot);
+
+        if (!bAboard && !bNeedsJump)
+            continue;
+
+        // Jump anyone who has not left the bus yet - after this hook the
+        // native exit processing treats leftover passengers as AFK and
+        // kills connectionless controllers instead of auto-jumping them.
+        if (bNeedsJump)
+        {
+            if (!AI->bHasLandingTarget)
+            {
+                auto Aircraft = VersionFeatureAdapter::GetAircraft();
+                AI->LandingTarget = Aircraft ? Aircraft->K2_GetActorLocation() : FVector{};
+                AI->LandingTarget.Z = 0.0;
+                AI->bHasLandingTarget = true;
+            }
+
+            AI->JumpedAtTime = Now;
+            AI->bJumpedFromTransport = true;
+
+            if (VersionFeatureAdapter::JumpFromAircraft(PC) && AI->GetPawn())
+            {
+                if (MagnesiumPlayerAISpawner::FinishAircraftJumpPawn(*AI))
+                    AI->SetState(EPlayerAIState::Gliding, "drop zone ending");
+                else
+                    AI->SetState(EPlayerAIState::SearchingForLoot, "drop zone ending placement");
+            }
+            else
+            {
+                // The JumpingFromTransport handler places them via the
+                // landing fallback within a few seconds.
+                AI->SetState(EPlayerAIState::JumpingFromTransport, "drop zone ending");
+            }
+
+            Jumped++;
+        }
+
+        // Sticky flag: take them off the aircraft's books directly.
+        if (VersionFeatureAdapter::IsInAircraft(PC))
+        {
+            VersionFeatureAdapter::ForceLeaveAircraft(PC);
+            Unboarded++;
+        }
+    }
+
+    if (Jumped || Unboarded)
+        AIDebugLogger::Log("Transport", "drop zone ending: force-jumped %d, force-unboarded %d PlayerAI", Jumped, Unboarded);
 }
 
 const char* MagnesiumPlayerAIIntegration::GetStatusLine()
@@ -774,6 +1109,14 @@ void MagnesiumPlayerAIIntegration::OnServerTickInternal(UNetDriver* Driver, floa
 
     if (!World || !Driver || Driver != World->NetDriver)
         return;
+
+    // Lategame skips the pre-match/transport/landing phases the PlayerAI
+    // system plays through - it is forced off while Enable AIs is on.
+    if (MagnesiumPlayerAISettings::bEnableAIs && FConfiguration::bLateGame)
+    {
+        FConfiguration::bLateGame = false;
+        AIDebugLogger::Log("Integration", "Lategame was enabled - forced OFF because Enable AIs is on");
+    }
 
     const float Now = VersionFeatureAdapter::GetTimeSeconds();
 
@@ -815,6 +1158,11 @@ void MagnesiumPlayerAIIntegration::OnServerTickInternal(UNetDriver* Driver, floa
     }
 
     const auto Phase = VersionFeatureAdapter::GetMatchPhase();
+
+    // Warm up the native backend (bot mutator + runtime navmesh) while the
+    // lobby is still forming so paths exist by the time the AI need them.
+    if (Phase == EPlayerAIMatchPhase::PreMatch && NativePlayerAIBackend::IsAvailable())
+        NativePlayerAIBackend::EnsureInitialized();
 
     // ---- Lifecycle: pre-match / transport / match end ----
     if (!bPreMatchFired && Phase == EPlayerAIMatchPhase::PreMatch)

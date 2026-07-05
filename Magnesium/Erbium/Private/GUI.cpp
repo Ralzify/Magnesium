@@ -14,7 +14,6 @@
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
 #include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
-#include "../PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 #include <sstream>
 #include <fstream>
 #include <string>
@@ -1356,16 +1355,6 @@ void GUI::Init()
         }
         case 1:
         {
-            static bool bInitializedPlaylist = false;
-
-            if (!bInitializedPlaylist)
-            {
-                if (VersionInfo.FortniteVersion == 11.31 || VersionInfo.FortniteVersion == 12.41)
-                    SelectedPlaylist = static_cast<int>(Playlist::UnvSolos);
-
-                bInitializedPlaylist = true;
-            }
-
             if (VersionInfo.FortniteVersion == 7.40 || VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
             {
                 SectionHeader("Custom Playlists", SectionWidth);
@@ -2194,10 +2183,13 @@ void GUI::Init()
                     || SelectedPlaylist == static_cast<int>(Playlist::Backrooms)
                     || SelectedPlaylist == static_cast<int>(Playlist::Event);
 
-                if (bIsCustomMap)
+                // Lategame skips the phases PlayerAI plays through, so it is
+                // forced off and greyed out while Enable AIs is on.
+                const bool bLockLateGame = bIsCustomMap || MagnesiumPlayerAISettings::bEnableAIs;
+                if (bLockLateGame)
                     FConfiguration::bLateGame = false;
 
-                ImGui::BeginDisabled(bIsCustomMap);
+                ImGui::BeginDisabled(bLockLateGame);
                 ImGui::Checkbox("Late Game", &FConfiguration::bLateGame);
                 ImGui::EndDisabled();
 
@@ -2377,23 +2369,15 @@ void GUI::Init()
         }
         case 4:
         {
-            // Universal PlayerAI system. This toggle is the only required
-            // setting: when enabled, the lobby automatically fills with
-            // PlayerAI players (up to the existing max player count) once a
-            // real player joins. Completely separate from the bot command
-            // settings below, which remain untouched.
             SectionHeader("AI Players", SectionWidth);
             BeginSectionBody();
 
-            ImGui::Checkbox("Enable AIs", &MagnesiumPlayerAISettings::bEnableAIs);
+            ImGui::Checkbox("Enable AIs (EXPERIMENTAL)", &MagnesiumPlayerAISettings::bEnableAIs);
 
             if (MagnesiumPlayerAISettings::bEnableAIs)
             {
-                ImGui::TextColored(ImVec4(0.60f, 0.62f, 0.68f, 1.f),
-                    "Lobby fills with PlayerAI players once a real player joins.");
-                ImGui::TextColored(ImVec4(0.60f, 0.62f, 0.68f, 1.f), "%s",
-                    MagnesiumPlayerAIIntegration::GetStatusLine());
-                ImGui::Checkbox("Verbose PlayerAI Logging", &MagnesiumPlayerAISettings::bVerboseLogging);
+                if (FConfiguration::bLateGame)
+                    FConfiguration::bLateGame = false;
             }
 
             EndSectionBody();

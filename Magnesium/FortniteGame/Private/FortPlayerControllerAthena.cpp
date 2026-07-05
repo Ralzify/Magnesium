@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/FortGameMode.h"
+#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
+#include "../../Erbium/PlayerAI/Public/AIDebugLogger.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/BuildingSMActor.h"
 #include "../Public/FortKismetLibrary.h"
@@ -1947,6 +1949,13 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		KillerPawn = nullptr;
 
 	auto KillerPlayerController = (KillerPlayerState && KillerPlayerState->HasOwner() && IsUsableDeathObject(KillerPlayerState->Owner)) ? KillerPlayerState->Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+
+	// PlayerAI victim diagnostic: kill credit for the killer flows from this
+	// report - a missing killer here explains "no credit for killing AI".
+	if (MagnesiumPlayerAIIntegration::IsPlayerAIController(PlayerController))
+		AIDebugLogger::Log("Elimination", "AI death report: killerPS %d, killerPawn %d, killerCtrl %d",
+			KillerPlayerState ? 1 : 0, KillerPawn ? 1 : 0,
+			(KillerPawn && KillerPawn->Controller) ? 1 : 0);
 	FGameplayTagContainer EmptyDeathTags{};
 	auto& DeathTags = DeathReport.HasTags() ? DeathReport.Tags : EmptyDeathTags;
 
@@ -8076,6 +8085,13 @@ void AFortPlayerControllerAthena::EnterAircraft(UObject* Object, AActor* Aircraf
 	else
 		PlayerController = (AFortPlayerControllerAthena*)Object;
 
+	// PlayerAI entities are never real aircraft passengers: the native
+	// aircraft kills anyone still flagged aboard when the drop zone ends,
+	// and the jump RPC rejects connectionless controllers on old versions.
+	// Their bus ride + skydive is handled by the PlayerAI transport flow.
+	if (MagnesiumPlayerAIIntegration::IsPlayerAIController(PlayerController))
+		return;
+
 	if (!FConfiguration::bKeepInventory && PlayerController->WorldInventory)
 	{
 		UEAllocatedVector<FGuid> GuidsToRemove;
@@ -8726,10 +8742,13 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	CanAffordToPlaceBuildableClass_ = FindCanAffordToPlaceBuildableClass();
 	PayBuildableClassPlacementCost_ = FindPayBuildableClassPlacementCost();
 	InitializePlayerGameplayAbilities_ = FindInitializePlayerGameplayAbilities();
+	SDK::DbgLog("  [FPC] 1 finds done\n");
 
 	auto DefaultFortPC = DefaultObjImpl("FortPlayerController");
+	SDK::DbgLog("  [FPC] 2 DefaultFortPC=%p\n", (void*)DefaultFortPC);
 
 	Utils::Hook(FindGetPlayerViewPoint(), GetPlayerViewPoint, GetPlayerViewPointOG);
+	SDK::DbgLog("  [FPC] 3 GetPlayerViewPoint hooked\n");
 	// they only stripped it on athena for some reason
 	//auto ServerAcknowledgePossessionIdx = GetDefaultObj()->GetFunction("ServerAcknowledgePossession")->GetVTableIndex();
 	//Utils::Hook<AFortPlayerControllerAthena>(ServerAcknowledgePossessionIdx, DefaultFortPC->Vft[ServerAcknowledgePossessionIdx]);
@@ -8738,27 +8757,37 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	{
         auto ServerRestartPlayerIdx = GetDefaultObj()->GetFunction("ServerRestartPlayer")->GetVTableIndex();
         auto DefaultFortPCZone = DefaultObjImpl("FortPlayerControllerZone");
-        Utils::Hook<AFortPlayerControllerAthena>(ServerRestartPlayerIdx, DefaultFortPCZone->Vft[ServerRestartPlayerIdx]);
+        SDK::DbgLog("  [FPC] 4 ServerRestartPlayerIdx=0x%X DefaultFortPCZone=%p\n", ServerRestartPlayerIdx, (void*)DefaultFortPCZone);
+        if (DefaultFortPCZone && ServerRestartPlayerIdx < 0x1000)
+            Utils::Hook<AFortPlayerControllerAthena>(ServerRestartPlayerIdx, DefaultFortPCZone->Vft[ServerRestartPlayerIdx]);
 
 		if (VersionInfo.FortniteVersion >= 15 && VersionInfo.FortniteVersion < 16)
 			Utils::Hook(uint64_t(DefaultObjImpl("PlayerController")->Vft[ServerRestartPlayerIdx]), ServerRestartPlayer_);
 	}
+	SDK::DbgLog("  [FPC] 5 ServerRestartPlayer done\n");
 
 	auto ServerSuicideIdx = GetDefaultObj()->GetFunction("ServerSuicide")->GetVTableIndex();
 	auto DefaultFortPCZone = DefaultObjImpl("FortPlayerControllerZone");
-	Utils::Hook<AFortPlayerControllerAthena>(ServerSuicideIdx, DefaultFortPCZone->Vft[ServerSuicideIdx]);
+	SDK::DbgLog("  [FPC] 6 ServerSuicideIdx=0x%X\n", ServerSuicideIdx);
+	if (DefaultFortPCZone && ServerSuicideIdx < 0x1000)
+		Utils::Hook<AFortPlayerControllerAthena>(ServerSuicideIdx, DefaultFortPCZone->Vft[ServerSuicideIdx]);
 
 	//if (VersionInfo.FortniteVersion >= 11)
 	//{
 	if (VersionInfo.FortniteVersion < 11)
 		ServerAttemptAircraftJumpVft = GetDefaultObj()->GetFunction("ServerAttemptAircraftJump")->GetVTableIndex();
 	
+	SDK::DbgLog("  [FPC] 7 ServerSuicide done, pre-aircraft\n");
 	auto ServerAttemptAircraftJumpPC = GetDefaultObj()->GetFunction("ServerAttemptAircraftJump");
 	if (!ServerAttemptAircraftJumpPC)
-		Utils::ExecHook(DefaultObjImpl("FortControllerComponent_Aircraft")->GetFunction("ServerAttemptAircraftJump"), ServerAttemptAircraftJump_, ServerAttemptAircraftJump_OG);
+	{
+		if (auto acc = DefaultObjImpl("FortControllerComponent_Aircraft"))
+			Utils::ExecHook(acc->GetFunction("ServerAttemptAircraftJump"), ServerAttemptAircraftJump_, ServerAttemptAircraftJump_OG);
+	}
 	else
 		Utils::ExecHook(ServerAttemptAircraftJumpPC, ServerAttemptAircraftJump_);
 	//}
+	SDK::DbgLog("  [FPC] 8 aircraft done\n");
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerAcknowledgePossession"), ServerAcknowledgePossession);
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerExecuteInventoryItem"), ServerExecuteInventoryItem_);
@@ -8766,7 +8795,9 @@ void AFortPlayerControllerAthena::PostLoadHook()
 
 	// same as serveracknowledgepossession
 	auto ServerReturnToMainMenuIdx = GetDefaultObj()->GetFunction("ServerReturnToMainMenu")->GetVTableIndex();
-	Utils::Hook<AFortPlayerControllerAthena>(ServerReturnToMainMenuIdx, DefaultFortPC->Vft[ServerReturnToMainMenuIdx]);
+	if (DefaultFortPC && ServerReturnToMainMenuIdx < 0x1000)
+		Utils::Hook<AFortPlayerControllerAthena>(ServerReturnToMainMenuIdx, DefaultFortPC->Vft[ServerReturnToMainMenuIdx]);
+	SDK::DbgLog("  [FPC] 9 ServerReturnToMainMenu done\n");
 
 	//if (VersionInfo.FortniteVersion != 1.72 && VersionInfo.FortniteVersion != 1.8)
 	{

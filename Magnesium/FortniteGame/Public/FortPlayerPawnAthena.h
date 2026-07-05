@@ -125,6 +125,17 @@ public:
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
     DEFINE_PROP(VehicleInputComponent, UObject*);
 
+    // Used by the PlayerAI system (native player-bot driving).
+    DEFINE_PROP(CurrentMovementStyle, uint8);
+    DEFINE_PROP(RemoteViewPitch, uint8); // replicated aim pitch clients render
+    DEFINE_FUNC(AddMovementInput, void);
+    DEFINE_FUNC(Jump, void);
+    DEFINE_FUNC(StopJumping, void);
+    DEFINE_FUNC(Crouch, void);
+    DEFINE_FUNC(UnCrouch, void);
+    DEFINE_FUNC(PawnStartFire, void);
+    DEFINE_FUNC(PawnStopFire, void);
+
     DEFINE_FUNC(BeginSkydiving, void);
     DEFINE_FUNC(GetHealth, float);
     DEFINE_FUNC(GetShield, float);

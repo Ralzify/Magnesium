@@ -662,11 +662,16 @@ void SetInventoryStateValue()
 
 void AFortInventory::PostLoadHook()
 {
+    SDK::DbgLog("  [FI] 0 pre-FindSetPickupItems\n");
     SetPickupItems = FindSetPickupItems();
+    SDK::DbgLog("  [FI] 0a pre-FindOnItemInstanceAddedVft\n");
     OnItemInstanceAddedVft = FindOnItemInstanceAddedVft();
+    SDK::DbgLog("  [FI] 0b pre-FindClearAbility\n");
     ClearAbility_ = FindClearAbility();
+    SDK::DbgLog("  [FI] 1 finds done\n");
 
     Utils::Hook(FindRemoveInventoryItem(), RemoveInventoryItem);
+    SDK::DbgLog("  [FI] 2 RemoveInventoryItem hooked\n");
     // need to see if these are used
     //Utils::Hook(FindRemoveInventoryStateValue(), RemoveInventoryStateValue);
     //Utils::Hook(FindSetInventoryStateValue(), SetInventoryStateValue);
@@ -701,5 +706,8 @@ void AFortInventory::PostLoadHook()
         }
     }
 
-    Utils::ExecHook(DefaultObjImpl("FortAthenaSupplyDrop")->GetFunction("SpawnPickup"), SpawnPickup_);
+    SDK::DbgLog("  [FI] 3 SetOwningInventory block done\n");
+    if (auto sd = DefaultObjImpl("FortAthenaSupplyDrop"))
+        Utils::ExecHook(sd->GetFunction("SpawnPickup"), SpawnPickup_);
+    SDK::DbgLog("  [FI] 4 PostLoadHook complete\n");
 }

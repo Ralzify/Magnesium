@@ -657,8 +657,10 @@ void AFortPlayerPawnAthena::ServerThrowCarriedPlayer_(UObject* Context, FFrame& 
 
 void AFortPlayerPawnAthena::PostLoadHook()
 {
+	SDK::DbgLog("  [PPA] 0 pre-finds\n");
 	OnRep_ZiplineState = FindOnRep_ZiplineState();
 	SetPickupTarget_ = FindSetPickupTarget();
+	SDK::DbgLog("  [PPA] 1 finds done (ZS=%p SPT=%p)\n", (void*)OnRep_ZiplineState, (void*)SetPickupTarget_);
 
 	auto ServerHandlePickupInfoFn = GetDefaultObj()->GetFunction("ServerHandlePickupInfo");
 
@@ -670,8 +672,13 @@ void AFortPlayerPawnAthena::PostLoadHook()
 		Utils::ExecHook(GetDefaultObj()->GetFunction("ServerHandlePickupWithRequestedSwap"), ServerHandlePickupWithRequestedSwap);
 	}
 
-	Utils::Hook(FindFinishedTargetSpline(), FinishedTargetSpline, FinishedTargetSplineOG);
+	SDK::DbgLog("  [PPA] 1b pickup-info exechooks done, pre-FindFinishedTargetSpline\n");
+	auto _fts = FindFinishedTargetSpline();
+	SDK::DbgLog("  [PPA] 2 FindFinishedTargetSpline=%p\n", (void*)_fts);
+	Utils::Hook(_fts, FinishedTargetSpline, FinishedTargetSplineOG);
+	SDK::DbgLog("  [PPA] 2b spline hook done\n");
 	Utils::ExecHook(GetDefaultObj()->GetFunction("OnCapsuleBeginOverlap"), OnCapsuleBeginOverlap_, OnCapsuleBeginOverlap_OG);
+	SDK::DbgLog("  [PPA] 3 spline+overlap hooks done\n");
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerSendZiplineState"), ServerSendZiplineState);
 	Utils::ExecHook(GetDefaultObj()->GetFunction("MovingEmoteStopped"), MovingEmoteStopped);
@@ -680,11 +687,14 @@ void AFortPlayerPawnAthena::PostLoadHook()
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("EmoteStopped"), EmoteStopped_, EmoteStopped_OG);
 
+	SDK::DbgLog("  [PPA] 4 exec hooks done, pre-EndSkydiving\n");
 	auto EndSkydivingFn = GetDefaultObj()->GetFunction("EndSkydiving");
 
 	if (EndSkydivingFn)
 		Utils::Hook<AFortPlayerPawnAthena>(EndSkydivingFn->GetVTableIndex(), EndSkydiving, EndSkydivingOG);
+	SDK::DbgLog("  [PPA] 5 EndSkydiving done\n");
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerReviveFromDBNO"), ServerReviveFromDBNO_, ServerReviveFromDBNO_OG);
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerThrowCarriedPlayer"), ServerThrowCarriedPlayer_, ServerThrowCarriedPlayer_OG);
+	SDK::DbgLog("  [PPA] 6 PostLoadHook complete\n");
 }

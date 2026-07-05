@@ -14,6 +14,46 @@ inline uint64_t ImageBase = *(uint64_t*)(__readgsqword(0x60) + 0x10);
 
 namespace SDK
 {
+	// FN 32.11+ stores GObjects/Object/reflection-Next pointers as ~ROR16(value ^ key).
+	__forceinline uint64_t DecryptObjPtr(uint64_t Encrypted, uint32_t Key)
+	{
+		uint64_t v = Encrypted ^ (uint64_t)Key;
+		v = (v >> 16) | (v << 48); // ROR 16
+		return ~v;
+	}
+
+	// FN 32.11+ stores the FProperty byte-offset as ~(value ^ key).
+	__forceinline uint32_t DecryptPropOffset(uint32_t Raw)
+	{
+		if (Offsets::bEncryptedObjects && Offsets::EncPropOffsetKey)
+			return ~(Raw ^ Offsets::EncPropOffsetKey);
+		return Raw;
+	}
+
+	// Reliable "is this range committed & readable" check via VirtualQuery (IsBadReadPtr lies).
+	inline bool MemReadable(const void* p, size_t n)
+	{
+		if (!p)
+			return false;
+		auto addr = (const uint8_t*)p;
+		auto end = addr + n;
+		while (addr < end)
+		{
+			MEMORY_BASIC_INFORMATION mbi{};
+			if (!VirtualQuery(addr, &mbi, sizeof(mbi)))
+				return false;
+			if (mbi.State != MEM_COMMIT)
+				return false;
+			DWORD prot = mbi.Protect & 0xFF;
+			if (!(prot & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)))
+				return false;
+			if (mbi.Protect & PAGE_GUARD)
+				return false;
+			addr = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+		}
+		return true;
+	}
+
 	class FName
 	{
 	public:
@@ -50,6 +90,9 @@ namespace SDK
 
 		bool IsValid() const
 		{
+			// Encrypted FName indices (FN 32.11+) aren't ordered, so ">0" is wrong; None is still 0.
+			if (Offsets::bEncryptedObjects)
+				return ComparisonIndex != 0;
 			return ComparisonIndex > 0;
 		}
 
@@ -231,14 +274,57 @@ namespace SDK
 		friend class UStruct;
 	};
 
+	// FN 32.11 reordered UObject: Name and ObjectFlags are swapped (0x08 <-> 0x18) and the
+	// internal index is encrypted (~(x ^ 0x693FB2C4)). These proxies live at Magnesium's
+	// historical member offsets but read/write the version-correct location, so every
+	// existing Obj->Name / Obj->Index / Obj->ObjectFlags call site keeps working unchanged.
+	struct FObjFlagsProxy // Magnesium offset 0x08
+	{
+		int32 _raw;
+		__forceinline int32* ptr() const
+		{
+			return VersionInfo.FortniteVersion >= 32.00 ? (int32*)((char*)this + 0x10) : (int32*)&_raw;
+		}
+		__forceinline operator int32() const { return *ptr(); }
+		__forceinline FObjFlagsProxy& operator=(int32 v) { *ptr() = v; return *this; }
+		__forceinline FObjFlagsProxy& operator&=(int32 v) { *ptr() &= v; return *this; }
+		__forceinline FObjFlagsProxy& operator|=(int32 v) { *ptr() |= v; return *this; }
+	};
+	struct FObjIndexProxy // Magnesium offset 0x0C
+	{
+		int32 _raw;
+		__forceinline operator int32() const
+		{
+			return VersionInfo.FortniteVersion >= 32.00 ? ~(_raw ^ 0x693FB2C4) : _raw;
+		}
+	};
+	struct FNameProxy // Magnesium offset 0x18
+	{
+		FName _raw;
+		__forceinline FName& ref() const
+		{
+			return VersionInfo.FortniteVersion >= 32.00 ? *(FName*)((char*)this - 0x10) : *(FName*)&_raw;
+		}
+		__forceinline operator FName() const { return ref(); }
+		__forceinline UEAllocatedString ToString() const { return ref().ToString(); }
+		__forceinline UEAllocatedWString ToWString() const { return ref().ToWString(); }
+		__forceinline UEAllocatedString ToSDKString() const { return ref().ToSDKString(); }
+		__forceinline UEAllocatedWString ToSDKWString() const { return ref().ToSDKWString(); }
+		__forceinline std::string ToUtf8() const { return ref().ToUtf8(); }
+		__forceinline bool IsValid() const { return ref().IsValid(); }
+		__forceinline bool operator==(const FName& o) const { return ref() == o; }
+		__forceinline bool operator!=(const FName& o) const { return ref() != o; }
+		__forceinline FNameProxy& operator=(const FName& o) { ref() = o; return *this; }
+	};
+
 	class UObject
 	{
 	public:
 		void** Vft;
-		int32 ObjectFlags;
-		int32 Index;
+		FObjFlagsProxy ObjectFlags;
+		FObjIndexProxy Index;
 		class UClass* Class;
-		class FName Name;
+		FNameProxy Name;
 		UObject* Outer;
 
 	public:
@@ -246,14 +332,14 @@ namespace SDK
 
 		bool IsDefaultObject() const
 		{
-			return ObjectFlags & 0x10;
+			return (int32)ObjectFlags & 0x10;
 		}
 
 		__declspec(noinline) uint32 GetOffset(const char* Name, uint64_t CastFlags = 0) const
 		{
 			auto Prop = GetProperty(Name, CastFlags);
 			if (!Prop) return -1;
-			return GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+			return DecryptPropOffset(GetFromOffset<uint32>(Prop, Offsets::Offset_Internal));
 		}
 
 		bool IsA(const class UClass* Clss) const
@@ -312,6 +398,11 @@ namespace SDK
 	public:
 		const UField* FField_GetNext() const
 		{
+			if (Offsets::bEncryptedObjects && Offsets::EncFieldNextKey)
+			{
+				uint64_t Enc = GetFromOffset<uint64_t>(this, Offsets::FField_Next);
+				return Enc ? (const UField*)DecryptObjPtr(Enc, Offsets::EncFieldNextKey) : nullptr;
+			}
 			return GetFromOffset<UField*>(this, Offsets::FField_Next);
 		}
 
@@ -322,12 +413,18 @@ namespace SDK
 
 		const UField* GetNext() const
 		{
+			if (Offsets::bEncryptedObjects && Offsets::EncFieldNextKey)
+			{
+				uint64_t Enc = GetFromOffset<uint64_t>(this, 0x28);
+				return Enc ? (const UField*)DecryptObjPtr(Enc, Offsets::EncFieldNextKey) : nullptr;
+			}
 			return GetFromOffset<UField*>(this, 0x28);
 		}
 
 		FName& GetName() const
 		{
-			return GetFromOffset<FName>(this, 0x18);
+			// A UField is a UObject, so its name lives at the (reordered on 32.11) UObject::Name offset.
+			return GetFromOffset<FName>(this, VersionInfo.FortniteVersion >= 32.00 ? 0x08 : 0x18);
 		}
 
 		const uint8 GetFieldMask() const
@@ -351,7 +448,13 @@ namespace SDK
 
 		const UField* GetChildProperties() const
 		{
-			return GetFromOffset<UField*>(this, 0x50);
+			uint32 off = Offsets::ChildProperties ? Offsets::ChildProperties : 0x50;
+			if (Offsets::bEncChildProperties && Offsets::EncFieldNextKey)
+			{
+				uint64_t Enc = GetFromOffset<uint64_t>(this, off);
+				return Enc ? (const UField*)DecryptObjPtr(Enc, Offsets::EncFieldNextKey) : nullptr;
+			}
+			return GetFromOffset<UField*>(this, off);
 		}
 
 		const UField* GetChildren() const
@@ -368,7 +471,7 @@ namespace SDK
 			if (!Prop)
 				return -1;
 
-			return GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+			return DecryptPropOffset(GetFromOffset<uint32>(Prop, Offsets::Offset_Internal));
 		}
 	};
 
@@ -387,13 +490,19 @@ namespace SDK
 		UEAllocatedWString ws(s.begin(), s.end());
 		auto PropName = FName(ws);
 
-		for (const UStruct* Clss = this; Clss; Clss = (const UStruct*)Clss->GetSuper())
+		int superGuard = 0;
+		for (const UStruct* Clss = this; Clss && superGuard++ < 4096; Clss = (const UStruct*)Clss->GetSuper())
 		{
+			int fieldGuard = 0;
 			if (VersionInfo.FortniteVersion >= 12.10)
 			{
-				for (const UField* Prop = Clss->GetChildProperties(); Prop; Prop = Prop->FField_GetNext())
+				for (const UField* Prop = Clss->GetChildProperties(); Prop && fieldGuard++ < 100000; Prop = Prop->FField_GetNext())
 				{
-					if (CastFlags != 0)
+					// FN 32.11 reorders/encrypts FField::ClassPrivate and FFieldClass::CastFlags, so
+					// dereferencing Prop+0x8 -> +0x10 for the cast-flag filter reads garbage/encrypted
+					// memory and faults. ChildProperties only holds properties (unique names within a
+					// class), so a name-only match is correct — skip the filter on 32.11.
+					if (CastFlags != 0 && VersionInfo.FortniteVersion < 32.00)
 					{
 						auto FieldClass = *(void**)(__int64(Prop) + 0x8);
 						auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);
@@ -408,7 +517,7 @@ namespace SDK
 			}
 			else
 			{
-				for (const UField* Prop = Clss->GetChildren(); Prop; Prop = Prop->GetNext())
+				for (const UField* Prop = Clss->GetChildren(); Prop && fieldGuard++ < 100000; Prop = Prop->GetNext())
 				{
 					if ((CastFlags == 0 || Prop->Class->GetCastFlags() & CastFlags) && Prop->GetName() == PropName)
 						return Prop;
@@ -430,10 +539,16 @@ namespace SDK
 		UEAllocatedWString ws(s.begin(), s.end());
 		auto PropName = FName(ws);
 
-		for (const UStruct* Clss = Class; Clss; Clss = (const UStruct*)Clss->GetSuper())
-			for (const UField* Prop = Clss->GetChildren(); Prop; Prop = Prop->GetNext())
-				if (Prop->Class->GetCastFlags() & 0x80000 && Prop->GetName() == PropName)
+		// Children() is the UFunction chain, so a name match is sufficient. Requiring
+		// GetCastFlags (CASTCLASS_UFunction) breaks on 32.11 where that offset isn't resolved yet.
+		int superGuard = 0;
+		for (const UStruct* Clss = Class; Clss && superGuard++ < 4096; Clss = (const UStruct*)Clss->GetSuper())
+		{
+			int fieldGuard = 0;
+			for (const UField* Prop = Clss->GetChildren(); Prop && fieldGuard++ < 100000; Prop = Prop->GetNext())
+				if ((VersionInfo.FortniteVersion >= 32.00 || Prop->Class->GetCastFlags() & 0x80000) && Prop->GetName() == PropName)
 					return (UFunction*)Prop;
+		}
 
 		return nullptr;
 		//return (UFunction*)GetProperty(Name, 0x80000);
@@ -442,10 +557,14 @@ namespace SDK
 
 	__declspec(noinline) inline UFunction* UObject::GetFunction(FName Name) const
 	{
-		for (const UStruct* Clss = Class; Clss; Clss = (const UStruct*)Clss->GetSuper())
-			for (const UField* Prop = Clss->GetChildren(); Prop; Prop = Prop->GetNext())
-				if (Prop->Class->GetCastFlags() & 0x80000 && Prop->GetName() == Name)
+		int superGuard = 0;
+		for (const UStruct* Clss = Class; Clss && superGuard++ < 4096; Clss = (const UStruct*)Clss->GetSuper())
+		{
+			int fieldGuard = 0;
+			for (const UField* Prop = Clss->GetChildren(); Prop && fieldGuard++ < 100000; Prop = Prop->GetNext())
+				if ((VersionInfo.FortniteVersion >= 32.00 || Prop->Class->GetCastFlags() & 0x80000) && Prop->GetName() == Name)
 					return (UFunction*)Prop;
+		}
 
 		return nullptr;
 		//return (UFunction*)GetProperty(Name, 0x80000);
@@ -514,11 +633,19 @@ namespace SDK
 			auto Addr = ValidateRef.Get();
 
 			if (!Addr)
-				Addr = Memcury::Scanner(GetNativeFunc()).ScanFor({ 0x0F, 0x95 }).Get();
+			{
+				// FN 32.11: GetNativeFunc() may read a reordered offset and return garbage; only
+				// scan from it if it's a readable code pointer, else bail (never fault).
+				auto nf = (uintptr_t)GetNativeFunc();
+				if (nf && MemReadable((void*)nf, 0x10))
+					Addr = Memcury::Scanner(nf).ScanFor({ 0x0F, 0x95 }).Get();
+			}
 
-			if (Addr)
+			if (Addr && MemReadable((void*)Addr, 0x10))
 				for (int i = 0; i < 2000; i++)
 				{
+					if (!MemReadable((void*)(Addr + i), 6))
+						break;
 					if (*((uint8*)Addr + i) == 0xFF && (*((uint8*)Addr + i + 1) == 0x90 || *((uint8*)Addr + i + 1) == 0x93 || *((uint8*)Addr + i + 1) == 0xA0))
 					{
 						auto VTIndex = *(uint32_t*)(Addr + i + 2);
@@ -567,10 +694,10 @@ namespace SDK
 
 			if (VersionInfo.FortniteVersion >= 12.10)
 				for (const UField* _Pr = GetChildProperties(); _Pr; _Pr = _Pr->FField_GetNext())
-					p.NameOffsetMap.push_back({ GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
+					p.NameOffsetMap.push_back({ DecryptPropOffset(GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal)), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
 			else
 				for (const UField* _Pr = GetChildren(); _Pr; _Pr = _Pr->GetNext())
-					p.NameOffsetMap.push_back({ GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
+					p.NameOffsetMap.push_back({ DecryptPropOffset(GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal)), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
 
 			p.Size = GetPropertiesSize();
 			return p;
@@ -583,10 +710,10 @@ namespace SDK
 
 			if (VersionInfo.FortniteVersion >= 12.10)
 				for (const UField* _Pr = GetChildProperties(); _Pr; _Pr = _Pr->FField_GetNext())
-					p.NameOffsetMap.push_back({ _Pr->FField_GetName().ToSDKString(), GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
+					p.NameOffsetMap.push_back({ _Pr->FField_GetName().ToSDKString(), DecryptPropOffset(GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal)), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
 			else
 				for (const UField* _Pr = GetChildren(); _Pr; _Pr = _Pr->GetNext())
-					p.NameOffsetMap.push_back({ _Pr->GetName().ToSDKString(), GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
+					p.NameOffsetMap.push_back({ _Pr->GetName().ToSDKString(), DecryptPropOffset(GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal)), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
 
 			p.Size = GetPropertiesSize();
 			return p;
@@ -619,8 +746,16 @@ namespace SDK
 		}
 
 		auto Params = Function->GetParams();
-		auto Mem = FMemory::Malloc(Params.Size);
-		memset((PBYTE)Mem, 0, Params.Size);
+
+		// FN 32.11 encrypts/relocates the FProperty ElementSize/PropertyFlags fields and the UStruct
+		// PropertiesSize, so the reflection-derived sizes/flags are unreliable (and Malloc(garbage)
+		// crashes). ProcessEvent uses the UFunction's own ParmsSize internally, so a fixed over-alloc
+		// is safe; copy each arg by its true C++ size to the correctly-resolved Offset, and skip the
+		// PropertyFlags-based out-param filter/copy-back (boot calls are in-param/void).
+		const bool bFN32 = VersionInfo.FortniteVersion >= 32.00;
+		const size_t allocSize = bFN32 ? 0x1000 : Params.Size;
+		auto Mem = FMemory::Malloc(allocSize);
+		memset((PBYTE)Mem, 0, allocSize);
 
 		size_t i = 0;
 		([&]
@@ -630,7 +765,7 @@ namespace SDK
 
 				auto& Param = Params.NameOffsetMap[i];
 
-				if (((Param.PropertyFlags & 0x100) != 0 && (Param.PropertyFlags & 0x8000000) == 0) || (Param.PropertyFlags & 0x400) != 0)
+				if (!bFN32 && (((Param.PropertyFlags & 0x100) != 0 && (Param.PropertyFlags & 0x8000000) == 0) || (Param.PropertyFlags & 0x400) != 0))
 				{
 					i++;
 					return;
@@ -638,39 +773,38 @@ namespace SDK
 
 				const auto& Arg = args;
 
-				memcpy(PBYTE(__int64(Mem) + Param.Offset), (const PBYTE)&Arg, Param.ElementSize);
+				const size_t copySize = bFN32 ? sizeof(std::remove_reference_t<decltype(args)>) : Param.ElementSize;
+				memcpy(PBYTE(__int64(Mem) + Param.Offset), (const PBYTE)&Arg, copySize);
 				i++;
 			}(), ...);
 
 		ProcessEvent(Function, Mem);
 
-		i = 0;
-		([&] {
-			if (i >= Params.NameOffsetMap.size())
-				return;
+		if (!bFN32)
+		{
+			i = 0;
+			([&] {
+				if (i >= Params.NameOffsetMap.size())
+					return;
 
-			auto& Param = Params.NameOffsetMap[i];
+				auto& Param = Params.NameOffsetMap[i];
 
-			if (((Param.PropertyFlags & 0x100) == 0 && (Param.PropertyFlags & 0x8000000) == 0) || (Param.PropertyFlags & 0x400) != 0)
-			{
+				if (((Param.PropertyFlags & 0x100) == 0 && (Param.PropertyFlags & 0x8000000) == 0) || (Param.PropertyFlags & 0x400) != 0)
+				{
+					i++;
+					return;
+				}
+
+				const auto& Arg = args;
+
+				if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(args)>>)
+				{
+					if (Arg != nullptr)
+						memcpy((PBYTE)Arg, (const PBYTE)(__int64(Mem) + Param.Offset), Param.ElementSize);
+				}
 				i++;
-				return;
-			}
-
-			const auto& Arg = args;
-
-			if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(args)>>)
-			{
-				if (Arg != nullptr)
-					memcpy((PBYTE)Arg, (const PBYTE)(__int64(Mem) + Param.Offset), Param.ElementSize);
-			}
-			else if constexpr (std::is_reference_v<decltype(args)>)
-			{
-				//if ((Param.PropertyFlags & 0x2) != 0)
-				//	memcpy((PBYTE)&Arg, (const PBYTE)(__int64(Mem) + Param.Offset), Param.ElementSize);
-			}
-			i++;
-			}(), ...);
+				}(), ...);
+		}
 
 		if constexpr (!std::is_void_v<Ret>)
 		{
@@ -699,6 +833,30 @@ namespace SDK
 		int32 Flags;
 		int32 ClusterRootIndex;
 		int32 SerialNumber;
+
+		// On encrypted builds (FN 32.11+) the live pointer is at +0x10 and the
+		// reachability flags word is at +0x4 (this struct's plain layout is unused there).
+		const UObject* GetObject() const
+		{
+			if (Offsets::bEncryptedObjects)
+			{
+				uint64_t Enc = *(const uint64_t*)((const uint8_t*)this + 0x10);
+				return Enc ? (const UObject*)DecryptObjPtr(Enc, Offsets::EncObjItemKey) : nullptr;
+			}
+			return Object;
+		}
+
+		int32 GetFlags() const
+		{
+			return Offsets::bEncryptedObjects ? *(const int32*)((const uint8_t*)this + 0x4) : Flags;
+		}
+
+		int32& SerialRef()
+		{
+			if (Offsets::bEncryptedObjects)
+				return *(int32*)((uint8_t*)this + 0x8); // SerialNumber sits at +0x8 on encrypted builds
+			return SerialNumber;
+		}
 	};
 
 	class TUObjectArrayUnchunked
@@ -743,6 +901,8 @@ namespace SDK
 	public:
 		inline int Num() const
 		{
+			if (Offsets::bEncryptedObjects)
+				return ~(*(const uint32_t*)&NumElements ^ Offsets::EncObjNumKey);
 			return NumElements;
 		}
 
@@ -753,13 +913,17 @@ namespace SDK
 
 		inline FUObjectItem* GetItemByIndex(const int32 Index) const
 		{
-			if (Index < 0 || Index > NumElements)
+			if (Index < 0 || Index > Num())
 				return nullptr;
 
 			const int32 ChunkIndex = Index / NumElementsPerChunk;
 			const int32 ChunkOffset = Index % NumElementsPerChunk;
 
-			return Objects[ChunkIndex] + ChunkOffset;
+			FUObjectItem** Chunks = Objects;
+			if (Offsets::bEncryptedObjects)
+				Chunks = (FUObjectItem**)DecryptObjPtr((uint64_t)Objects, Offsets::EncObjArrayKey);
+
+			return Chunks[ChunkIndex] + ChunkOffset;
 		}
 	};
 
@@ -790,7 +954,7 @@ namespace SDK
 		static const UObject* GetObjectByIndex(const int32 Index)
 		{
 			const FUObjectItem* Item = GetItemByIndex(Index);
-			return Item ? Item->Object : nullptr;
+			return Item ? Item->GetObject() : nullptr;
 		}
 
 		static const UObject* FindObject(const char* Name, uint64 TypeFlags = 0, const UClass* TargetClass = nullptr)
@@ -799,14 +963,20 @@ namespace SDK
 			UEAllocatedWString ws(s.begin(), s.end());
 			auto ObjName = FName(ws);
 
+			// Unreachable/pending-kill mask differs on encrypted builds (matches the game's own check).
+			const int32 SkipFlags = Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+
 			for (int i = 0; i < Num(); i++)
 			{
 				const FUObjectItem* Item = GetItemByIndex(i);
-				if (!Item || !Item->Object || (Item->Flags & 0x20))
+				if (!Item || (Item->GetFlags() & SkipFlags))
 					continue;
 
-				const UObject* Obj = Item->Object;
-				if (Obj->Class && (TypeFlags == 0 || Obj->Class->GetCastFlags() & TypeFlags) && Obj->Name == ObjName && (!TargetClass || Obj->IsA(TargetClass)))
+				const UObject* Obj = Item->GetObject();
+				// On 32.11 ClassCastFlags is encrypted/unresolved, so skip the cast-flag pre-filter
+				// and rely on the name (+ optional TargetClass) match instead.
+				const bool typeOk = (TypeFlags == 0) || Offsets::bEncryptedObjects || (Obj && Obj->Class && (Obj->Class->GetCastFlags() & TypeFlags));
+				if (Obj && Obj->Class && typeOk && Obj->Name == ObjName && (!TargetClass || Obj->IsA(TargetClass)))
 					return Obj;
 			}
 			return nullptr;
@@ -849,7 +1019,12 @@ namespace SDK
 		auto Item = (FUObjectItem*)TUObjectArray::GetItemByIndex(Index);
 
 		if (Item)
-			Item->Flags |= 1 << 30;
+		{
+			if (Offsets::bEncryptedObjects)
+				*(int32*)((uint8_t*)Item + 0x4) |= 1 << 30; // flags word is at +0x4 on encrypted builds
+			else
+				Item->Flags |= 1 << 30;
+		}
 	}
 
 	inline const UClass* FindClass(const char* Name)
@@ -885,22 +1060,34 @@ namespace SDK
 
 	inline uint64_t UClass::GetCastFlags() const
 	{
+		// Detect the ClassCastFlags offset once and cache it. The old code re-scanned the whole
+		// object array on every call when it couldn't find the offset (Offset stayed 0) — on 32.11
+		// the range was too small (UStruct grew), which froze the server. Now: cache via Tried,
+		// widen the range, and guard reads so a bad offset can never fault.
 		static int32 Offset = 0;
-		if (Offset == 0)
+		static bool Tried = false;
+		if (!Tried)
 		{
+			Tried = true;
 			auto ClassObj = TUObjectArray::FindObject("Class");
 			auto ActorObj = TUObjectArray::FindObject("Actor");
-			for (int i = 0x28; i < 0x1a0; i += 4)
+			if (ClassObj && ActorObj)
 			{
-				if (*(uint64_t*)(__int64(ClassObj) + i) == 0x29 && *(uint64_t*)(__int64(ActorObj) + i) == 0x1000000000)
+				for (int i = 0x28; i < 0x400; i += 4)
 				{
-					Offset = i;
-					break;
+					if (!MemReadable((const char*)ClassObj + i, 8) || !MemReadable((const char*)ActorObj + i, 8))
+						break;
+					if (*(uint64_t*)(__int64(ClassObj) + i) == 0x29 && *(uint64_t*)(__int64(ActorObj) + i) == 0x1000000000)
+					{
+						Offset = i;
+						break;
+					}
 				}
 			}
+			DbgLog("[32.11] GetCastFlags offset resolved = 0x%X\n", Offset);
 		}
 
-		return *(uint64_t*)(__int64(this) + Offset);
+		return Offset ? *(uint64_t*)(__int64(this) + Offset) : 0;
 	}
 
 	inline UObject* UClass::GetDefaultObj() const
@@ -1021,10 +1208,10 @@ namespace SDK
 				ObjectIndex = Object->Index;
 				auto Item = TUObjectArray::GetItemByIndex(Object->Index);
 
-				if (Item->SerialNumber == 0)
-					Item->SerialNumber = StartingSerial++;
+				if (Item->SerialRef() == 0)
+					Item->SerialRef() = StartingSerial++;
 
-				ObjectSerialNumber = Item->SerialNumber;
+				ObjectSerialNumber = Item->SerialRef();
 
 			}
 			else
@@ -1046,10 +1233,10 @@ namespace SDK
 
 			auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
 
-			if (!Item || Item->SerialNumber != ObjectSerialNumber)
+			if (!Item || Item->SerialRef() != ObjectSerialNumber)
 				return nullptr;
 
-			return Item->Object;
+			return Item->GetObject();
 		}
 		const UObject* operator->() const
 		{
@@ -1316,6 +1503,370 @@ namespace SDK
 	inline void UpdateNumElemsPerChunk()
 	{
 		TUObjectArrayChunked::NumElementsPerChunk = 0x10400;
+	}
+
+	// Empirically resolves the four encrypted/reordered reflection offsets on the LIVE client by
+	// matching the known layouts of small stable structs (Guid: A/B/C/D @ 0/4/8/0xC, Vector: X/Y/Z
+	// @ 0/8/0x10, Color: B/G/R/A @ 0/1/2/3). For each it locates UStruct::ChildProperties,
+	// FField::Name, FField::Next and FProperty::Offset_Internal and detects whether the Next pointer
+	// and the byte-offset are encrypted. Fully MemReadable-gated so it can never fault. On success it
+	// writes the resolved values into Offsets:: so GetProperty/GetOffset work for every class.
+	// Returns true if it resolved from the given struct.
+	inline bool ResolveReflFromStruct(const uint8_t* strct, const int32* nameIdxs,
+		const uint32* byteOffs, int nProps, const char* dbgName)
+	{
+		if (!strct || nProps < 2)
+			return false;
+
+		for (uint32_t CP = 0x40; CP <= 0x220; CP += 8) // ChildProperties (plain FField* head)
+		{
+			if (!MemReadable(strct + CP, 8))
+				continue;
+			uint64_t rawHead = *(const uint64_t*)(strct + CP);
+			if (!rawHead)
+				continue;
+
+			// The ChildProperties head may be stored plain or ~ROR16(x^key) encrypted (FN 32.11
+			// encrypts FField/property pointers but leaves UObject* like Children plain).
+			for (int he = 0; he < 2; he++)
+			{
+			const uint8_t* head = (he == 0) ? (const uint8_t*)rawHead
+				: (Offsets::EncFieldNextKey ? (const uint8_t*)DecryptObjPtr(rawHead, Offsets::EncFieldNextKey) : nullptr);
+			const bool headEnc = (he == 1);
+			if (!head || !MemReadable(head, 0x88))
+				continue;
+
+			for (uint32_t NM = 0x08; NM <= 0x3C; NM += 4) // FField::Name (FName, 4-byte index)
+			{
+				int32 hn = *(const int32*)(head + NM);
+				int headProp = -1;
+				for (int k = 0; k < nProps; k++)
+					if (hn == nameIdxs[k]) { headProp = k; break; }
+				if (headProp < 0)
+					continue; // head's name isn't one of our known props — wrong CP/NM
+
+				for (uint32_t NX = 0x08; NX <= 0x38; NX += 8) // FField::Next (enc or plain)
+				{
+					if (!MemReadable(head + NX, 8))
+						continue;
+					uint64_t raw = *(const uint64_t*)(head + NX);
+					if (!raw)
+						continue;
+
+					// Try the encrypted interpretation first (matches FField_GetNext's default path),
+					// then plain. The correct one lands on a sibling FField with a *different* known name.
+					const uint8_t* nxt = nullptr;
+					bool nextEnc = false;
+					if (Offsets::EncFieldNextKey)
+					{
+						const uint8_t* dec = (const uint8_t*)DecryptObjPtr(raw, Offsets::EncFieldNextKey);
+						if (MemReadable(dec, 0x88))
+						{
+							int32 n2 = *(const int32*)(dec + NM);
+							for (int k = 0; k < nProps; k++)
+								if (n2 == nameIdxs[k] && k != headProp) { nxt = dec; nextEnc = true; break; }
+						}
+					}
+					if (!nxt && MemReadable((const uint8_t*)raw, 0x88))
+					{
+						const uint8_t* pl = (const uint8_t*)raw;
+						int32 n2 = *(const int32*)(pl + NM);
+						for (int k = 0; k < nProps; k++)
+							if (n2 == nameIdxs[k] && k != headProp) { nxt = pl; break; }
+					}
+					if (!nxt)
+						continue;
+
+					// Walk the whole chain and collect (field ptr, which prop) pairs.
+					const uint8_t* fields[8]; int fprop[8]; int cnt = 0;
+					const uint8_t* cur = head;
+					for (int step = 0; step < nProps + 2 && cur && MemReadable(cur, 0x88); step++)
+					{
+						int32 cn = *(const int32*)(cur + NM);
+						int pk = -1;
+						for (int k = 0; k < nProps; k++)
+							if (cn == nameIdxs[k]) { pk = k; break; }
+						if (pk < 0 || cnt >= 8)
+							break;
+						fields[cnt] = cur; fprop[cnt] = pk; cnt++;
+						if (!MemReadable(cur + NX, 8))
+							break;
+						uint64_t r = *(const uint64_t*)(cur + NX);
+						if (!r) { cur = nullptr; break; }
+						cur = nextEnc ? (const uint8_t*)DecryptObjPtr(r, Offsets::EncFieldNextKey)
+							: (const uint8_t*)r;
+					}
+					if (cnt < 2)
+						continue;
+
+					// Find Offset_Internal: the uint32 field whose value == the known byte-offset for
+					// every collected property (checked both plain and ~(v^key) encrypted).
+					for (uint32_t OI = 0x38; OI <= 0x94; OI += 4)
+					{
+						bool plainOk = true, encOk = (Offsets::EncPropOffsetKey != 0), anyNonZero = false;
+						for (int i = 0; i < cnt; i++)
+						{
+							if (!MemReadable(fields[i] + OI, 4)) { plainOk = encOk = false; break; }
+							uint32 rv = *(const uint32*)(fields[i] + OI);
+							uint32 want = byteOffs[fprop[i]];
+							if (want) anyNonZero = true;
+							if (rv != want) plainOk = false;
+							if ((~(rv ^ Offsets::EncPropOffsetKey)) != want) encOk = false;
+						}
+						if (!anyNonZero || (!plainOk && !encOk))
+							continue;
+
+						Offsets::ChildProperties = CP;
+						Offsets::FField_Name = NM;
+						Offsets::FField_Next = NX;
+						Offsets::Offset_Internal = OI;
+						Offsets::bEncChildProperties = headEnc;
+
+						// Resolve ElementSize (FProperty): the uint32 that equals each property's
+						// element size (== the spacing between consecutive members). Then PropertyFlags
+						// is the uint64 immediately after it (standard FProperty sub-layout).
+						{
+							uint32 expES = (nProps >= 2) ? (byteOffs[1] - byteOffs[0]) : 4;
+							if (expES == 0) expES = 4;
+							auto checkES = [&](uint32_t ES) -> bool {
+								for (int i = 0; i < cnt; i++)
+									if (!MemReadable(fields[i] + ES, 4) || *(const uint32*)(fields[i] + ES) != expES)
+										return false;
+								return true;
+							};
+							// Prefer the standard-relative slot (Offset_Internal-0x10); else scan.
+							if (OI >= 0x40 && checkES(OI - 0x10)) { Offsets::ElementSize = OI - 0x10; Offsets::PropertyFlags = OI - 0xc; }
+							else for (uint32_t ES = 0x30; ES < OI; ES += 4)
+								if (checkES(ES)) { Offsets::ElementSize = ES; Offsets::PropertyFlags = ES + 4; break; }
+						}
+						// NOTE: never clear EncFieldNextKey here — the (working) function chain
+						// GetNext() at 0x28 relies on it; the property FField::Next uses the same key.
+						if (plainOk && !encOk)
+							Offsets::EncPropOffsetKey = 0; // offset is stored plain
+						DbgLog("[reflres] via %s (props=%d): ChildProperties=0x%X(%s) FField::Name=0x%X "
+							"FField::Next=0x%X(%s) Offset_Internal=0x%X(%s)\n",
+							dbgName, cnt, CP, headEnc ? "enc" : "plain", NM, NX, nextEnc ? "enc" : "plain",
+							OI, (plainOk && !encOk) ? "plain" : "enc");
+						return true;
+					}
+				}
+			}
+			}
+		}
+		return false;
+	}
+
+	// Drives ResolveReflFromStruct across Guid/Vector/Color and reports the outcome.
+	inline void FindReflectionOffsets()
+	{
+		auto guidObj = TUObjectArray::FindObject("Guid");
+		auto vecObj = TUObjectArray::FindObject("Vector");
+		auto colorObj = TUObjectArray::FindObject("Color");
+		DbgLog("--- reflection offset resolver --- Guid=%p Vector=%p Color=%p\n",
+			(void*)guidObj, (void*)vecObj, (void*)colorObj);
+
+		const int32 gIdx[4] = { FName(L"A").ComparisonIndex, FName(L"B").ComparisonIndex,
+			FName(L"C").ComparisonIndex, FName(L"D").ComparisonIndex };
+		const uint32 gOff[4] = { 0x0, 0x4, 0x8, 0xC };
+		const int32 vIdx[3] = { FName(L"X").ComparisonIndex, FName(L"Y").ComparisonIndex,
+			FName(L"Z").ComparisonIndex };
+		const uint32 vOff[3] = { 0x0, 0x8, 0x10 };
+		const int32 cIdx[4] = { FName(L"B").ComparisonIndex, FName(L"G").ComparisonIndex,
+			FName(L"R").ComparisonIndex, FName(L"A").ComparisonIndex };
+		const uint32 cOff[4] = { 0x0, 0x1, 0x2, 0x3 };
+		DbgLog("  name idxs A=%08X B=%08X C=%08X D=%08X X=%08X Y=%08X Z=%08X\n",
+			gIdx[0], gIdx[1], gIdx[2], gIdx[3], vIdx[0], vIdx[1], vIdx[2]);
+
+		bool ok = false;
+		if (guidObj) ok = ResolveReflFromStruct((const uint8_t*)guidObj, gIdx, gOff, 4, "Guid");
+		if (!ok && vecObj) ok = ResolveReflFromStruct((const uint8_t*)vecObj, vIdx, vOff, 3, "Vector");
+		if (!ok && colorObj) ok = ResolveReflFromStruct((const uint8_t*)colorObj, cIdx, cOff, 4, "Color");
+
+		// Resolve UStruct::PropertiesSize (the ProcessEvent params Malloc size). Guid=0x10,
+		// Vector=0x18, Color=0x4 give a unique triple match.
+		if (ok && guidObj && vecObj && colorObj)
+		{
+			const uint8_t* g = (const uint8_t*)guidObj; const uint8_t* v = (const uint8_t*)vecObj; const uint8_t* c = (const uint8_t*)colorObj;
+			for (uint32_t PS = 0x40; PS <= 0x90; PS += 4)
+			{
+				if (!MemReadable(g + PS, 4) || !MemReadable(v + PS, 4) || !MemReadable(c + PS, 4)) continue;
+				if (*(const uint32*)(g + PS) == 0x10 && *(const uint32*)(v + PS) == 0x18 && *(const uint32*)(c + PS) == 0x4)
+				{
+					Offsets::PropertiesSize = PS;
+					break;
+				}
+			}
+		}
+
+		if (ok)
+		{
+			DbgLog("[reflres] RESOLVED. ChildProperties=0x%X FField::Name=0x%X "
+				"FField::Next=0x%X Offset_Internal=0x%X ElementSize=0x%X PropertyFlags=0x%X PropertiesSize=0x%X\n",
+				Offsets::ChildProperties, Offsets::FField_Name, Offsets::FField_Next,
+				Offsets::Offset_Internal, Offsets::ElementSize, Offsets::PropertyFlags, Offsets::PropertiesSize);
+
+			// Ground-truth dump: the resolved first-property FField (raw + prop-offset-decrypted) and
+			// the Guid struct region, so ElementSize/PropertyFlags/PropertiesSize can be read exactly.
+			if (guidObj)
+			{
+				const uint8_t* gs = (const uint8_t*)guidObj;
+				uint64_t rawH = MemReadable(gs + Offsets::ChildProperties, 8) ? *(const uint64_t*)(gs + Offsets::ChildProperties) : 0;
+				const uint8_t* h = Offsets::bEncChildProperties
+					? (const uint8_t*)DecryptObjPtr(rawH, Offsets::EncFieldNextKey) : (const uint8_t*)rawH;
+				DbgLog("[dump] Guid prop0 FField=%p (nameIdx@0x20=%08X):\n", (void*)h,
+					MemReadable(h, 0x24) ? *(const int32*)(h + 0x20) : 0);
+				for (uint32_t o = 0x00; h && o < 0x70; o += 4)
+					if (MemReadable(h + o, 4))
+						DbgLog("   f+0x%X raw=%08X decOff=%08X\n", o, *(const uint32*)(h + o),
+							~(*(const uint32*)(h + o) ^ Offsets::EncPropOffsetKey));
+				DbgLog("[dump] Guid struct @0x40..0x90 (looking for PropertiesSize=0x10):\n");
+				for (uint32_t o = 0x40; o <= 0x90; o += 4)
+					if (MemReadable(gs + o, 4))
+						DbgLog("   g+0x%X=%08X\n", o, *(const uint32*)(gs + o));
+			}
+		}
+		else
+		{
+			DbgLog("[reflres] FAILED to resolve from any known struct — offsets left at defaults\n");
+			// Failure diagnostic: for Guid, dump each candidate head (decrypted with EncFieldNextKey)
+			// and flag any int32 that matches a known Guid/Vector name index, so the true
+			// ChildProperties/FField::Name can be read straight from the log next round.
+			if (guidObj && Offsets::EncFieldNextKey)
+			{
+				auto isName = [&](int32 v) -> const char* {
+					if (v == gIdx[0]) return "A"; if (v == gIdx[1]) return "B";
+					if (v == gIdx[2]) return "C"; if (v == gIdx[3]) return "D";
+					if (v == vIdx[0]) return "X"; if (v == vIdx[1]) return "Y";
+					if (v == vIdx[2]) return "Z"; return nullptr; };
+				const uint8_t* g = (const uint8_t*)guidObj;
+				for (uint32_t CP = 0x40; CP <= 0x220; CP += 8)
+				{
+					if (!MemReadable(g + CP, 8)) continue;
+					uint64_t rawHead = *(const uint64_t*)(g + CP);
+					if (!rawHead) continue;
+					const uint8_t* dec = (const uint8_t*)DecryptObjPtr(rawHead, Offsets::EncFieldNextKey);
+					const uint8_t* pl = (const uint8_t*)rawHead;
+					for (int e = 0; e < 2; e++)
+					{
+						const uint8_t* h = e ? dec : pl;
+						if (!MemReadable(h, 0x40)) continue;
+						char mark[96] = {}; int ml = 0;
+						for (uint32_t j = 0x08; j <= 0x2C; j += 4)
+						{
+							const char* n = isName(*(const int32*)(h + j));
+							if (n && ml < 80) ml += sprintf_s(mark + ml, sizeof(mark) - ml, " @0x%X='%s'", j, n);
+						}
+						DbgLog("  cand guid+0x%X %s->%p : 08=%08X 0C=%08X 10=%08X 14=%08X 18=%08X 1C=%08X 20=%08X 24=%08X 28=%08X%s\n",
+							CP, e ? "dec" : "pl", (void*)h,
+							*(const int32*)(h+0x08),*(const int32*)(h+0x0C),*(const int32*)(h+0x10),*(const int32*)(h+0x14),
+							*(const int32*)(h+0x18),*(const int32*)(h+0x1C),*(const int32*)(h+0x20),*(const int32*)(h+0x24),
+							*(const int32*)(h+0x28), mark);
+					}
+				}
+			}
+		}
+	}
+
+	// Diagnostic: dump the raw object-array state so a wrong key/offset is visible in the log
+	// instead of just crashing. Safe to call before anything else touches the array.
+	inline void DumpObjArrayDiag()
+	{
+		int num = TUObjectArray::Num();
+		uint64_t rawObj = Offsets::GObjectsChunked ? *(unsigned long long*)Offsets::GObjectsChunked : 0ull;
+		uint64_t chunks = Offsets::bEncryptedObjects ? DecryptObjPtr(rawObj, Offsets::EncObjArrayKey) : rawObj;
+		DbgLog("--- ObjArray diag --- Num=%d (0x%X) GObjects=%p rawObjectsField=%016llX chunksPtr=%016llX chunk0=%016llX\n",
+			num, num, (void*)Offsets::GObjectsChunked, rawObj, chunks,
+			(chunks && !IsBadReadPtr((void*)chunks, 8)) ? *(unsigned long long*)chunks : 0ull);
+		if (num <= 0 || num > 50000000)
+		{
+			DbgLog("Num is insane — GObjects/NumKey wrong; aborting diag\n");
+			return;
+		}
+		for (int i = 0; i < 6; i++)
+		{
+			auto item = TUObjectArray::GetItemByIndex(i);
+			const UObject* obj = TUObjectArray::GetObjectByIndex(i);
+			DbgLog("[%d] item=%p obj=%p", i, (void*)item, (void*)obj);
+			if (obj && !IsBadReadPtr((void*)obj, 0x30))
+				DbgLog(" flags=%08X class=%p name=%s", (int32)obj->ObjectFlags,
+					(void*)obj->Class, obj->Name.ToString().c_str());
+			DbgLog("\n");
+		}
+		auto fnClass = FName(L"Class");
+		auto fnActor = FName(L"Actor");
+		DbgLog("FName(Class).idx=0x%08X FName(Actor).idx=0x%08X\n", fnClass.ComparisonIndex, fnActor.ComparisonIndex);
+		auto clsObj = TUObjectArray::FindObject("Class");
+		auto actObj = TUObjectArray::FindObject("Actor");
+		DbgLog("FindObject(Class)=%p FindObject(Actor)=%p\n", (void*)clsObj, (void*)actObj);
+
+		// Find the ClassCastFlags offset: Class metaclass holds 0x29, Actor holds 0x1000000000.
+		// Also dump u64s that differ, to spot the field even if the exact constants changed.
+		if (clsObj && actObj)
+		{
+			for (uint32_t i = 0x40; i < 0x300; i += 8)
+			{
+				if (!MemReadable((const char*)clsObj + i, 8) || !MemReadable((const char*)actObj + i, 8))
+					continue;
+				uint64_t cv = *(const uint64_t*)((const char*)clsObj + i);
+				uint64_t av = *(const uint64_t*)((const char*)actObj + i);
+				if (cv == 0x29 || av == 0x1000000000 || (av & 0x1000000000))
+					DbgLog("  CastFlags? @0x%X  Class=%016llX Actor=%016llX\n", i, cv, av);
+			}
+		}
+
+		// --- Reflection probe (bounded so it can never hang) ---
+		auto actorCls = (const UStruct*)clsObj; // 'Actor' UClass resolved above
+		actorCls = (const UStruct*)actObj;
+		if (actorCls && !IsBadReadPtr((void*)actorCls, 0x100))
+		{
+			DbgLog("--- reflection probe: Actor UClass=%p Super(0x40)=%p ---\n",
+				(void*)actorCls, *(void**)((const char*)actorCls + 0x40));
+
+			// Function chain: Children(0x78) walked via UField::Next(0x28, encrypted)
+			DbgLog("Children@0x78=%p\n", *(void**)((const char*)actorCls + 0x78));
+			const UField* f = actorCls->GetChildren();
+			for (int n = 0; n < 6 && f && !IsBadReadPtr((void*)f, 0x30); n++)
+			{
+				DbgLog("  fn[%d]=%p name=%s\n", n, (void*)f, f->GetName().ToString().c_str());
+				f = f->GetNext();
+			}
+
+		}
+		FindReflectionOffsets();
+
+		// FStructBaseChain (used by IsA) sanity — check the pointer at Class+0x30 without calling IsA.
+		if (actObj && MemReadable((const char*)actObj + 0x30, 0x10))
+		{
+			auto chainArr = *(const void* const*)((const char*)actObj + 0x30);
+			int32 num = *(const int32*)((const char*)actObj + 0x38);
+			DbgLog("StructBaseChain@0x30: arr=%p (readable=%d) numMinusOne=%d\n",
+				(void*)chainArr, (int)MemReadable(chainArr, 8), num);
+		}
+		// Engine/world lookup that GetWorld depends on (IsA base-chain confirmed valid above).
+		auto fortEngine = TUObjectArray::FindFirstObject("FortEngine");
+		DbgLog("FindFirstObject(FortEngine)=%p\n", (void*)fortEngine);
+
+		// Self-test: replicate GetWorld()'s GameViewport->World chain purely via GetOffset so the log
+		// confirms the reflection fix end-to-end before the real start path runs (line 80 of dllmain).
+		if (fortEngine)
+		{
+			uint32 gvOff = ((const UObject*)fortEngine)->GetOffset("GameViewport");
+			DbgLog("[selftest] GetOffset(GameViewport)=0x%X\n", gvOff);
+			if (gvOff != (uint32)-1 && gvOff < 0x2000 && MemReadable((const char*)fortEngine + gvOff, 8))
+			{
+				auto gv = *(const UObject* const*)((const char*)fortEngine + gvOff);
+				DbgLog("[selftest] GameViewport=%p\n", (void*)gv);
+				if (gv && MemReadable(gv, 0x10))
+				{
+					uint32 wOff = gv->GetOffset("World");
+					DbgLog("[selftest] GetOffset(World)=0x%X\n", wOff);
+					if (wOff != (uint32)-1 && wOff < 0x2000 && MemReadable((const char*)gv + wOff, 8))
+						DbgLog("[selftest] World=%p (GetWorld should work)\n",
+							*(void* const*)((const char*)gv + wOff));
+				}
+			}
+		}
+		DbgLog("--- diag end ---\n");
 	}
 
 	inline void InitializeProcessEventVft(uintptr_t PEAddr)

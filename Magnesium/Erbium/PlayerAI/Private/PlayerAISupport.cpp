@@ -9,11 +9,11 @@
 #include "../Public/PlayerAIConfig.h"
 #include "../Public/PlayerAIFaultGuard.h"
 #include "../Public/VersionFeatureAdapter.h"
-#include "../Public/MagnesiumPlayerAISettings.h"
 #include "../../Public/Configuration.h"
 #include "../../Public/GUI.h"
 #include "../../../FortniteGame/Public/FortKismetLibrary.h"
 #include "../../../FortniteGame/Public/FortPlayerControllerAthena.h"
+#include "../../../FortniteGame/Public/FortWeapon.h"
 #include <cstdarg>
 #include <unordered_set>
 #include <vector>
@@ -40,7 +40,7 @@ void AIDebugLogger::Log(const char* Category, const char* Format, ...)
 
 void AIDebugLogger::Verbose(const char* Category, const char* Format, ...)
 {
-    if (!bVerbose && !MagnesiumPlayerAISettings::bVerboseLogging)
+    if (!bVerbose)
         return;
 
     va_list Args;
@@ -594,24 +594,141 @@ bool VersionFeatureAdapter::EnterAircraft(AFortPlayerControllerAthena* PC)
 
 bool VersionFeatureAdapter::JumpFromAircraft(AFortPlayerControllerAthena* PC)
 {
-    if (!PC || !IsInAircraft(PC))
+    if (!PC)
         return false;
 
-    static auto CompClass = FindClass("FortControllerComponent_Aircraft");
-
-    if (CompClass)
+    // Actually flagged aboard (should not happen anymore - the EnterAircraft
+    // hook skips PlayerAI - but old saves/edge versions): try the native
+    // jump RPC first, some versions accept server-side calls.
+    if (IsInAircraft(PC))
     {
-        auto Component = PC->GetAircraftComponent();
+        static auto CompClass = FindClass("FortControllerComponent_Aircraft");
 
-        if (Component)
+        const UObject* Target = PC;
+
+        if (CompClass)
         {
-            Component->ServerAttemptAircraftJump(FRotator{});
+            auto Component = PC->GetAircraftComponent();
+
+            if (Component)
+                Target = Component;
+        }
+
+        auto Fn = Target->GetFunction("ServerAttemptAircraftJump");
+
+        if (Fn)
+            SafeCallNoArgs(Target, Fn);
+
+        if (!IsInAircraft(PC) && PC->MyFortPawn)
             return true;
+    }
+
+    // The RPC rejected the jump (its native validation ignores
+    // connectionless controllers on pre-C2 versions) or the AI was never
+    // aboard: run the same sequence Magnesium's own ServerAttemptAircraftJump
+    // hook uses for modern versions and lategame - a fresh pawn through
+    // RestartPlayer, off the aircraft's books.
+    auto GameMode = GetGameMode();
+
+    if (!GameMode)
+        return false;
+
+    PC->StateName = FName(L"Inactive");
+
+    if (PC->Pawn)
+        PC->UnPossess(PC->Pawn);
+
+    GameMode->RestartPlayer(PC);
+    PC->SetControlRotation(FRotator{});
+
+    auto Pawn = PC->MyFortPawn;
+
+    AIDebugLogger::Verbose("Transport", "restart jump: pawn %d, still aboard: %d",
+        Pawn ? 1 : 0, IsInAircraft(PC) ? 1 : 0);
+
+    return Pawn != nullptr;
+}
+
+// Clears a replicated "bInAircraft"-style bitfield on one object (same
+// reflection pattern as DEFINE_BITFIELD_PROP, but by-name so it works on
+// whichever class carries the flag on a version).
+static bool PlayerAITryClearInAircraftBit(const UObject* Obj)
+{
+    if (!Obj)
+        return false;
+
+    auto Prop = Obj->GetProperty("bInAircraft", 0x20000);
+
+    if (!Prop)
+        return false;
+
+    const auto Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+    const auto Mask = Prop->GetFieldMask();
+
+    if (!Mask)
+        return false;
+
+    GetFromOffset<uint8>(Obj, Offset) &= ~Mask;
+    return true;
+}
+
+void VersionFeatureAdapter::ForceLeaveAircraft(AFortPlayerControllerAthena* PC)
+{
+    if (!PC)
+        return;
+
+    bool bCleared = PlayerAITryClearInAircraftBit(PC);
+
+    if (PC->PlayerState)
+        bCleared |= PlayerAITryClearInAircraftBit(PC->PlayerState);
+
+    AIDebugLogger::Verbose("Transport", "force leave aircraft: flag %s, still aboard: %d",
+        bCleared ? "cleared" : "not found", IsInAircraft(PC) ? 1 : 0);
+}
+
+// Starts the native skydive (BeginSkydiving(bFromAircraft=true)) through a
+// sized parameter buffer - the engine then owns descent, glider deploy and
+// landing exactly like a real bus jumper.
+bool VersionFeatureAdapter::TryBeginSkydiving(AFortPlayerPawnAthena* Pawn)
+{
+    if (!Pawn)
+        return false;
+
+    auto Fn = Pawn->GetFunction("BeginSkydiving");
+
+    if (!Fn)
+    {
+        AIDebugLogger::MissingFeature("BeginSkydivingForPlayerAI",
+            "no BeginSkydiving on this version - PlayerAI lands by direct placement");
+        return false;
+    }
+
+    int Size = 0;
+    int BoolOffset = -1;
+    {
+        auto Params = Fn->GetParams();
+        Size = Params.Size;
+
+        for (auto& Param : Params.NameOffsetMap)
+        {
+            // First byte-sized input parameter = bFromAircraft.
+            if ((Param.PropertyFlags & 0x400) == 0 && Param.ElementSize == 1)
+            {
+                BoolOffset = (int)Param.Offset;
+                break;
+            }
         }
     }
 
-    PC->ServerAttemptAircraftJump(FRotator{});
-    return true;
+    if (Size < 0 || Size > 0x1000)
+        Size = 0x1000;
+
+    std::vector<uint8_t> Buffer((size_t)(Size > 0 ? Size : 1), 0);
+
+    if (BoolOffset >= 0 && BoolOffset < Size)
+        Buffer[(size_t)BoolOffset] = 1; // bFromAircraft = true
+
+    return PlayerAIGuardedProcessEvent(Pawn, Fn, Buffer.data());
 }
 
 // ---- Movement / world -----------------------------------------------------------
@@ -639,11 +756,31 @@ static bool PlayerAITryGroundTrace(UWorld* World, AFortPlayerPawnAthena* IgnoreP
     return bOk;
 }
 
+static bool bGroundTraceDisabled = false;
+static int GroundTraceCalls = 0;
+static int GroundTraceHits = 0;
+
+bool VersionFeatureAdapter::IsGroundTraceReliable()
+{
+    if (bGroundTraceDisabled)
+        return false;
+
+    // Needs a real success rate, not just "did not crash": some versions
+    // return zero vectors from the trace most of the time.
+    if (GroundTraceCalls >= 20 && GroundTraceHits * 10 < GroundTraceCalls * 3)
+    {
+        bGroundTraceDisabled = true;
+        AIDebugLogger::MissingFeature("GroundTraceForPlayerAI",
+            "ground trace rarely finds terrain on this version - PlayerAI runs trace-free");
+        return false;
+    }
+
+    return true;
+}
+
 FVector VersionFeatureAdapter::FindGroundLocation(const FVector& Near, bool& bOutFound, AFortPlayerPawnAthena* IgnorePawn)
 {
     bOutFound = false;
-
-    static bool bGroundTraceDisabled = false;
 
     if (bGroundTraceDisabled)
         return Near;
@@ -659,13 +796,16 @@ FVector VersionFeatureAdapter::FindGroundLocation(const FVector& Near, bool& bOu
     {
         bGroundTraceDisabled = true;
         AIDebugLogger::MissingFeature("GroundTraceForPlayerAI",
-            "native ground trace faulted and was disabled - PlayerAI uses flat movement fallback");
+            "native ground trace faulted and was disabled - PlayerAI runs trace-free");
         return Near;
     }
+
+    GroundTraceCalls++;
 
     if (Ground.X == 0.f && Ground.Y == 0.f && Ground.Z == 0.f)
         return Near;
 
+    GroundTraceHits++;
     bOutFound = true;
     return Ground;
 }
@@ -760,7 +900,9 @@ float VersionFeatureAdapter::GetStormDamagePerSecond()
             Phase = GameMode->SafeZoneIndicator->CurrentPhase;
     }
 
-    // Version specific damage info when available.
+    // Version specific damage info when available. Percentage semantics vary
+    // between versions, so the result is clamped to a sane per-second range -
+    // the fallback must never insta-melt a full-health PlayerAI.
     if (GameMode && GameMode->HasSafeZoneIndicator() && GameMode->SafeZoneIndicator &&
         GameMode->SafeZoneIndicator->HasCurrentDamageInfo() && FFortSafeZoneDamageInfo::HasDamage())
     {
@@ -771,7 +913,12 @@ float VersionFeatureAdapter::GetStormDamagePerSecond()
             if (FFortSafeZoneDamageInfo::HasbPercentageBasedDamage() && GameMode->SafeZoneIndicator->CurrentDamageInfo.bPercentageBasedDamage)
                 Damage *= 100.f;
 
-            return Damage < 1.f ? 1.f : Damage;
+            if (Damage < 1.f)
+                Damage = 1.f;
+            if (Damage > 12.f)
+                Damage = 12.f;
+
+            return Damage;
         }
     }
 
@@ -779,6 +926,105 @@ float VersionFeatureAdapter::GetStormDamagePerSecond()
     static const float PhaseDamage[] = { 1.f, 1.f, 1.f, 2.f, 5.f, 7.f, 8.f, 10.f, 10.f, 10.f };
     const int Index = Phase < 0 ? 0 : (Phase > 9 ? 9 : Phase);
     return PhaseDamage[Index];
+}
+
+// NOTE: version-specific damage info can be percentage based with differing
+// semantics per version - the clamp keeps the fallback from ever melting a
+// full-health PlayerAI in seconds.
+
+// ---- Weapon fire ---------------------------------------------------------------------
+
+// (Kept free of unwindable C++ objects so SEH is allowed here.)
+static bool PlayerAITryActivateAbility(UAbilitySystemComponent* ASC, FGameplayAbilitySpecHandle Handle)
+{
+    GPlayerAIGuardedNativeCallDepth++;
+    bool bOk;
+
+    __try
+    {
+        // Same server-side activation path Magnesium routes real client
+        // ability activation through.
+        uint8_t PredictionKey[0x40] = {};
+        UAbilitySystemComponent::InternalServerTryActivateAbility(ASC, Handle, true, (FPredictionKey*)PredictionKey, nullptr);
+        bOk = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        bOk = false;
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+    return bOk;
+}
+
+bool VersionFeatureAdapter::TryActivateAbilityHandle(UAbilitySystemComponent* ASC, FGameplayAbilitySpecHandle Handle)
+{
+    if (!ASC)
+        return false;
+
+    return PlayerAITryActivateAbility(ASC, Handle);
+}
+
+bool VersionFeatureAdapter::TryFireEquippedWeapon(AFortPlayerControllerAthena* PC, AFortPlayerPawnAthena* Pawn)
+{
+    static bool bWeaponFireDisabled = false;
+    static int WeaponFireFaults = 0;
+
+    if (bWeaponFireDisabled || !PC || !Pawn)
+        return false;
+
+    auto PlayerState = (AFortPlayerStateAthena*)PC->PlayerState;
+
+    if (!PlayerState || !PlayerState->HasAbilitySystemComponent() || !PlayerState->AbilitySystemComponent)
+        return false;
+
+    auto Weapon = Pawn->HasCurrentWeapon() ? (AFortWeapon*)Pawn->CurrentWeapon : nullptr;
+
+    if (!Weapon)
+        return false;
+
+    if (!Weapon->HasPrimaryAbilitySpecHandle())
+    {
+        bWeaponFireDisabled = true;
+        AIDebugLogger::MissingFeature("WeaponFireAbilityForPlayerAI",
+            "no primary ability handle on this version - shots stay simulated (no gunfire cosmetics)");
+        return false;
+    }
+
+    FGameplayAbilitySpecHandle Handle = Weapon->PrimaryAbilitySpecHandle;
+
+    if (Handle.Handle == 0 || Handle.Handle == -1)
+        return false; // weapon not fully initialized yet
+
+    auto ASC = PlayerState->AbilitySystemComponent;
+
+    if (!PlayerAITryActivateAbility(ASC, Handle))
+    {
+        if (++WeaponFireFaults >= 3)
+        {
+            bWeaponFireDisabled = true;
+            AIDebugLogger::MissingFeature("WeaponFireAbilityForPlayerAI",
+                "fire ability activation faulted and was disabled - shots stay simulated");
+        }
+        return false;
+    }
+
+    // Release the simulated trigger right away so automatic weapons fire a
+    // single burst per simulated shot instead of looping forever.
+    auto Spec = ASC->ActivatableAbilities.Items.Search(
+        [&](FGameplayAbilitySpec& Item)
+        {
+            return Item.Handle.Handle == Handle.Handle;
+        },
+        FGameplayAbilitySpec::Size());
+
+    if (Spec)
+    {
+        Spec->InputPressed = false;
+        ASC->ActivatableAbilities.MarkItemDirty(*Spec);
+    }
+
+    return true;
 }
 
 // ---- DBNO --------------------------------------------------------------------------
@@ -850,14 +1096,107 @@ static bool PlayerAITryNativeCustomization(uint64_t NativeFn, AFortPlayerStateAt
     return bOk;
 }
 
+// Writes character part pointers (indexed by EFortCustomPartType, non-null
+// slots only) into the player state, handling both the struct based
+// CharacterParts layout of newer versions and the flat array of older ones.
+static bool PlayerAIWriteCharacterParts(AFortPlayerStateAthena* PlayerState, const UObject* Parts[6])
+{
+    static auto NewStyleCharacterPartsOffset = PlayerState->GetOffset("CharacterParts", 0x100000);
+
+    const UObject** Target = nullptr;
+
+    if (NewStyleCharacterPartsOffset == -1)
+    {
+        static auto CharacterPartsOff = [&]
+            {
+                auto Off = PlayerState->GetOffset("CharacterParts");
+                if (Off == -1)
+                    Off = PlayerState->GetOffset("LocalCharacterParts");
+                return Off;
+            }();
+
+        if (CharacterPartsOff == -1)
+        {
+            AIDebugLogger::MissingFeature("CharacterParts", "PlayerAI keeps engine default appearance");
+            return false;
+        }
+
+        Target = GetFromOffset<const UObject* [0x6]>(PlayerState, CharacterPartsOff);
+    }
+    else
+    {
+        static auto PartsStruct = FindStruct("CustomCharacterParts");
+
+        if (!PartsStruct)
+        {
+            AIDebugLogger::MissingFeature("CustomCharacterParts", "PlayerAI keeps engine default appearance");
+            return false;
+        }
+
+        static auto PartsOffset = PartsStruct->GetOffset("Parts");
+        static auto CharacterPartsOff = PlayerState->GetOffset("CharacterParts");
+
+        if (PartsOffset == -1 || CharacterPartsOff == -1)
+        {
+            AIDebugLogger::MissingFeature("CustomCharacterParts.Parts", "PlayerAI keeps engine default appearance");
+            return false;
+        }
+
+        auto CharacterPartsPtr = (PBYTE)PlayerState + CharacterPartsOff;
+        Target = GetFromOffset<const UObject* [0x6]>(CharacterPartsPtr, PartsOffset);
+    }
+
+    for (int i = 0; i < 6; i++)
+    {
+        if (Parts[i])
+            Target[i] = Parts[i];
+    }
+
+    return true;
+}
+
+// Applies parts through the pawn's own native part selection when a pawn
+// exists - the most reliable application path across versions (native
+// replication + pawn visuals), used on top of the player state write.
+static void PlayerAIChoosePartsOnPawn(AFortPlayerPawnAthena* Pawn, const UObject* Parts[6])
+{
+    if (!Pawn)
+        return;
+
+    for (int i = 0; i < 6; i++)
+    {
+        if (Parts[i])
+            Pawn->ServerChoosePart((uint8)i, Parts[i]);
+    }
+}
+
+// Shared cosmetics finish: replicate the parts and run the native
+// customization polish (fault guarded, disabled after the first fault).
+static void PlayerAIFinishCosmetics(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn)
+{
+    auto OnRepCharacterData = PlayerState->GetFunction("OnRep_CharacterData");
+
+    if (OnRepCharacterData)
+        PlayerState->ProcessEvent(OnRepCharacterData, nullptr);
+
+    static bool bNativeCustomizationDisabled = false;
+
+    if (ApplyCharacterCustomization && Pawn && !bNativeCustomizationDisabled)
+    {
+        if (!PlayerAITryNativeCustomization(ApplyCharacterCustomization, PlayerState, Pawn))
+        {
+            bNativeCustomizationDisabled = true;
+            AIDebugLogger::MissingFeature("NativeCharacterCustomizationForPlayerAI",
+                "native customization call faulted and was disabled - parts replicate via the player state");
+        }
+    }
+}
+
 void VersionFeatureAdapter::ApplyDefaultCosmetics(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn)
 {
     if (!PlayerState)
         return;
 
-    // Default hero + character parts exist on every supported version; skins
-    // beyond this are version specific and intentionally skipped
-    // ("cosmetics only if supported").
     static auto Commando = FindObject(L"/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F", nullptr);
     static auto Commando2 = FindObject(L"/Game/Athena/Heroes/HID_Commando_Athena_01.HID_Commando_Athena_01", nullptr);
 
@@ -874,71 +1213,265 @@ void VersionFeatureAdapter::ApplyDefaultCosmetics(AFortPlayerStateAthena* Player
         return;
     }
 
-    // Mirrors the character part layout handling real players get - struct
-    // based CharacterParts on newer versions, flat array on older ones.
-    static auto NewStyleCharacterPartsOffset = PlayerState->GetOffset("CharacterParts", 0x100000);
+    const UObject* Parts[6] = { Head, Body, nullptr, Backpack, nullptr, nullptr };
 
-    if (NewStyleCharacterPartsOffset == -1)
+    if (PlayerAIWriteCharacterParts(PlayerState, Parts))
     {
-        static auto CharacterPartsOff = [&]
+        PlayerAIChoosePartsOnPawn(Pawn, Parts);
+        PlayerAIFinishCosmetics(PlayerState, Pawn);
+    }
+}
+
+// ---- Random skins from the hosted build ---------------------------------------------
+
+static int SkinCacheAttempts = 0;
+static std::vector<UAthenaCharacterItemDefinition*> CachedSkins;
+static bool bCosmeticPathLoadDisabled = false;
+
+// Fault-isolated cosmetic asset loading: a faulting load must never take a
+// PlayerAI spawn down. One fault disables path loading for the session
+// (already-loaded parts keep resolving through the soft pointers).
+// (Kept free of unwindable C++ objects for SEH.)
+static const UObject* PlayerAITryLoadCosmetic(const wchar_t* Path, const UClass* Class)
+{
+    GPlayerAIGuardedNativeCallDepth++;
+
+    const UObject* Result = nullptr;
+    bool bFaulted = false;
+
+    __try
+    {
+        Result = FindObject(Path, Class);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        bFaulted = true;
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+
+    if (bFaulted)
+    {
+        bCosmeticPathLoadDisabled = true;
+        AIDebugLogger::MissingFeature("CosmeticAssetLoading",
+            "cosmetic asset loading faulted and was disabled - only pre-loaded skins are used");
+    }
+
+    return Result;
+}
+
+static const UObject* PlayerAILoadCosmeticByPath(const UEAllocatedString& Path, const UClass* Class)
+{
+    if (bCosmeticPathLoadDisabled || Path.empty() || Path == "None" || !Class)
+        return nullptr;
+
+    UEAllocatedWString Wide(Path.begin(), Path.end());
+    return PlayerAITryLoadCosmetic(Wide.c_str(), Class);
+}
+
+// Known character definitions with stable names since the early seasons.
+// Cosmetics are cumulative in the paks, so these exist on essentially every
+// build; each is force-loaded through the fault-guarded loader and simply
+// skipped when a build lacks it. This guarantees skin variety even though
+// a fresh server has almost no cosmetics loaded in memory.
+static const wchar_t* PlayerAIKnownSkinNames[] =
+{
+    L"CID_001_Athena_Commando_F_Default", L"CID_002_Athena_Commando_F_Default",
+    L"CID_003_Athena_Commando_F_Default", L"CID_004_Athena_Commando_F_Default",
+    L"CID_005_Athena_Commando_M_Default", L"CID_006_Athena_Commando_M_Default",
+    L"CID_007_Athena_Commando_M_Default", L"CID_008_Athena_Commando_M_Default",
+    L"CID_009_Athena_Commando_M", L"CID_010_Athena_Commando_M",
+    L"CID_011_Athena_Commando_M", L"CID_012_Athena_Commando_M",
+    L"CID_013_Athena_Commando_F", L"CID_014_Athena_Commando_F",
+    L"CID_015_Athena_Commando_F", L"CID_016_Athena_Commando_F",
+    L"CID_017_Athena_Commando_M", L"CID_018_Athena_Commando_M",
+    L"CID_019_Athena_Commando_M", L"CID_020_Athena_Commando_M",
+    L"CID_021_Athena_Commando_F", L"CID_022_Athena_Commando_F",
+    L"CID_023_Athena_Commando_F", L"CID_024_Athena_Commando_F",
+    L"CID_025_Athena_Commando_M", L"CID_026_Athena_Commando_M",
+    L"CID_028_Athena_Commando_F", L"CID_029_Athena_Commando_F_Halloween",
+    L"CID_030_Athena_Commando_M_Halloween", L"CID_031_Athena_Commando_M_Retro",
+    L"CID_032_Athena_Commando_M_Medieval", L"CID_033_Athena_Commando_F_Medieval",
+    L"CID_035_Athena_Commando_M_Medieval", L"CID_039_Athena_Commando_F_Disco",
+    L"CID_045_Athena_Commando_M_HolidaySweater", L"CID_048_Athena_Commando_F_HolidaySweater",
+    L"CID_051_Athena_Commando_M_HolidayElf", L"CID_052_Athena_Commando_F_PSBlue",
+};
+
+static bool bKnownSkinsLoaded = false;
+
+static void PlayerAILoadKnownSkins()
+{
+    if (bKnownSkinsLoaded)
+        return;
+
+    bKnownSkinsLoaded = true;
+
+    auto AddSkin = [&](UAthenaCharacterItemDefinition* CID)
+        {
+            if (!CID || !CID->HasHeroDefinition() || !CID->HeroDefinition)
+                return;
+
+            for (auto Existing : CachedSkins)
+                if (Existing == CID)
+                    return;
+
+            CachedSkins.push_back(CID);
+        };
+
+    for (auto Name : PlayerAIKnownSkinNames)
+    {
+        if (bCosmeticPathLoadDisabled)
+            break;
+
+        UEAllocatedWString Path = UEAllocatedWString(L"/Game/Athena/Items/Cosmetics/Characters/") + Name + L"." + Name;
+        auto CID = (UAthenaCharacterItemDefinition*)PlayerAITryLoadCosmetic(Path.c_str(), UAthenaCharacterItemDefinition::StaticClass());
+        AddSkin(CID);
+    }
+
+    AIDebugLogger::Log("Cosmetics", "%d known skins force-loaded for PlayerAI", (int)CachedSkins.size());
+}
+
+static void PlayerAIBuildSkinCache()
+{
+    // Guaranteed baseline: force-load the known skin set once.
+    PlayerAILoadKnownSkins();
+
+    // Then keep merging in whatever else is loaded in this build's memory
+    // (organic variety) until a reasonable set exists.
+    if (CachedSkins.size() >= 24 || SkinCacheAttempts >= 30)
+        return;
+
+    SkinCacheAttempts++;
+
+    for (int i = 0; i < TUObjectArray::Num(); i++)
+    {
+        auto Object = TUObjectArray::GetObjectByIndex(i);
+
+        if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UAthenaCharacterItemDefinition>())
+            continue;
+
+        auto CID = (UAthenaCharacterItemDefinition*)Object;
+
+        if (!CID->HasHeroDefinition() || !CID->HeroDefinition)
+            continue;
+
+        auto RawName = CID->Name.ToString();
+        std::string Name(RawName.c_str());
+
+        // Player skins only: no NPC/VIP/placeholder cosmetics.
+        const bool bValid = (Name.find("Athena_Commando") != std::string::npos || Name.find("CID_Character") != std::string::npos) &&
+            Name.find("CID_NPC") == std::string::npos &&
+            Name.find("CID_VIP") == std::string::npos &&
+            Name.find("CID_TBD") == std::string::npos;
+
+        if (!bValid)
+            continue;
+
+        bool bKnown = false;
+
+        for (auto Existing : CachedSkins)
+        {
+            if (Existing == CID)
             {
-                auto Off = PlayerState->GetOffset("CharacterParts");
-                if (Off == -1)
-                    Off = PlayerState->GetOffset("LocalCharacterParts");
-                return Off;
-            }();
-
-        if (CharacterPartsOff == -1)
-        {
-            AIDebugLogger::MissingFeature("CharacterParts", "PlayerAI keeps engine default appearance");
-            return;
+                bKnown = true;
+                break;
+            }
         }
 
-        auto& CharacterParts = GetFromOffset<const UObject* [0x6]>(PlayerState, CharacterPartsOff);
-        CharacterParts[0] = Head;
-        CharacterParts[1] = Body;
-        CharacterParts[3] = Backpack;
+        if (!bKnown)
+            CachedSkins.push_back(CID);
     }
-    else
+
+    AIDebugLogger::Log("Cosmetics", "%d player skins available for PlayerAI (scan %d)",
+        (int)CachedSkins.size(), SkinCacheAttempts);
+}
+
+void VersionFeatureAdapter::ApplyRandomSkin(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn)
+{
+    if (!PlayerState)
+        return;
+
+    PlayerAIBuildSkinCache();
+
+    if (CachedSkins.empty())
     {
-        static auto PartsStruct = FindStruct("CustomCharacterParts");
-
-        if (!PartsStruct)
-        {
-            AIDebugLogger::MissingFeature("CustomCharacterParts", "PlayerAI keeps engine default appearance");
-            return;
-        }
-
-        static auto PartsOffset = PartsStruct->GetOffset("Parts");
-        static auto CharacterPartsOff = PlayerState->GetOffset("CharacterParts");
-
-        if (PartsOffset == -1 || CharacterPartsOff == -1)
-        {
-            AIDebugLogger::MissingFeature("CustomCharacterParts.Parts", "PlayerAI keeps engine default appearance");
-            return;
-        }
-
-        auto CharacterPartsPtr = (PBYTE)PlayerState + CharacterPartsOff;
-        auto& CharacterParts = GetFromOffset<const UObject* [0x6]>(CharacterPartsPtr, PartsOffset);
-        CharacterParts[0] = Head;
-        CharacterParts[1] = Body;
-        CharacterParts[3] = Backpack;
+        ApplyDefaultCosmetics(PlayerState, Pawn);
+        return;
     }
 
-    // Native customization is optional polish on top of the replicated
-    // character parts; when it faults for server-side players it gets
-    // disabled instead of crashing the gameserver.
-    static bool bNativeCustomizationDisabled = false;
-
-    if (ApplyCharacterCustomization && Pawn && !bNativeCustomizationDisabled)
+    // Some CIDs have unresolvable parts - try a few random picks before
+    // falling back to the default outfit.
+    for (int Attempt = 0; Attempt < 5; Attempt++)
     {
-        if (!PlayerAITryNativeCustomization(ApplyCharacterCustomization, PlayerState, Pawn))
+        auto CID = CachedSkins[rand() % CachedSkins.size()];
+        auto Hero = CID ? CID->HeroDefinition : nullptr;
+
+        if (!Hero)
+            continue;
+
+        // Resolve the hero specialization character parts (soft references -
+        // resolved by pointer first, force-loaded by path as fallback).
+        const UObject* Parts[6] = {};
+        bool bAnyPart = false;
+
+        if (Hero->HasSpecializations())
         {
-            bNativeCustomizationDisabled = true;
-            AIDebugLogger::MissingFeature("NativeCharacterCustomizationForPlayerAI",
-                "native customization call faulted and was disabled - parts replicate via the player state");
+            for (int s = 0; s < Hero->Specializations.Num(); s++)
+            {
+                auto& SpecSoft = Hero->Specializations.Get(s, FSoftObjectPtr::Size());
+                auto Spec = const_cast<UFortHeroSpecialization*>((const UFortHeroSpecialization*)SpecSoft.Get());
+
+                if (!Spec)
+                {
+                    auto SpecPath = SpecSoft.ObjectID.AssetPathName.ToString();
+                    Spec = (UFortHeroSpecialization*)PlayerAILoadCosmeticByPath(SpecPath, UFortHeroSpecialization::StaticClass());
+                }
+
+                if (!Spec || !Spec->HasCharacterParts())
+                    continue;
+
+                for (int p = 0; p < Spec->CharacterParts.Num(); p++)
+                {
+                    auto& PartSoft = Spec->CharacterParts.Get(p, FSoftObjectPtr::Size());
+                    auto Part = const_cast<UCustomCharacterPart*>((const UCustomCharacterPart*)PartSoft.Get());
+
+                    if (!Part)
+                    {
+                        auto PartPath = PartSoft.ObjectID.AssetPathName.ToString();
+                        Part = (UCustomCharacterPart*)PlayerAILoadCosmeticByPath(PartPath, UCustomCharacterPart::StaticClass());
+                    }
+
+                    if (!Part || !Part->HasCharacterPartType())
+                        continue;
+
+                    const int Index = Part->CharacterPartType;
+
+                    if (Index >= 0 && Index < 6)
+                    {
+                        Parts[Index] = (const UObject*)Part;
+                        bAnyPart = true;
+                    }
+                }
+            }
+        }
+
+        if (!bAnyPart)
+            continue;
+
+        if (PlayerState->HasHeroType())
+            PlayerState->HeroType = (const UObject*)Hero;
+
+        if (PlayerAIWriteCharacterParts(PlayerState, Parts))
+        {
+            PlayerAIChoosePartsOnPawn(Pawn, Parts);
+            PlayerAIFinishCosmetics(PlayerState, Pawn);
+            AIDebugLogger::Verbose("Cosmetics", "applied random skin %s", CID->Name.ToString().c_str());
+            return;
         }
     }
+
+    AIDebugLogger::Log("Cosmetics", "random skin resolution failed %d times - using the default outfit (check the 'known skins' count above)", 5);
+    ApplyDefaultCosmetics(PlayerState, Pawn);
 }
 
 void VersionFeatureAdapter::ResetCaches()

@@ -2,6 +2,7 @@
 #include "../Public/Misc.h"
 #include "../Public/Finders.h"
 #include <algorithm>
+#include <tlhelp32.h>
 #include "../Public/Configuration.h"
 #include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
 #include "../../Engine/Public/NetDriver.h"
@@ -516,8 +517,128 @@ void* Misc::SendRequestNow(void* Arg1, void* MCPData, int)
 	return SendRequestNowOG(Arg1, MCPData, 3); // CXC_Public
 }
 
+bool Listen(); // fwd decl — defined below; driven from GetMaxTickRate on 32.11
+
+static volatile long g_frameCounter = 0;
+static DWORD g_gameThreadId = 0;
+
+// Watchdog: writes directly to its own file (own fflush) since the game thread that flushes the shared
+// debug buffer is the one that hangs. Logs a heartbeat + the RIP where the game thread is stuck.
+static void WDLog(const char* fmt, ...)
+{
+	FILE* f = nullptr;
+	fopen_s(&f, "G:\\Fortnite Builds\\32.11\\FortniteGame\\Binaries\\Win64\\watchdog.log", "a");
+	if (!f) return;
+	va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+	fflush(f); fclose(f);
+}
+static void WatchdogThread()
+{
+	WDLog("[WD] started\n");
+	long last = 0; int stuck = 0; bool reported = false; int hb = 0;
+	while (true)
+	{
+		Sleep(500);
+		long cur = g_frameCounter;
+		long delta = cur - last; last = cur;
+		if ((hb++ % 4) == 0) WDLog("[WD] hb frame=%ld delta=%ld\n", cur, delta);
+		if (delta <= 2 && g_gameThreadId && !reported) // <= ~4 FPS = effectively frozen (crawl)
+		{
+			if (++stuck >= 3) // ~1.5s of crawling
+			{
+				reported = true;
+				auto base = Memcury::PE::GetModuleBase();
+				HANDLE h = OpenThread(THREAD_ALL_ACCESS, FALSE, g_gameThreadId);
+				WDLog("[WD] HANG detected frame=%ld tid=%lu base=%p\n", cur, g_gameThreadId, (void*)base);
+				if (h)
+				{
+					SuspendThread(h);
+					CONTEXT ctx; memset(&ctx, 0, sizeof(ctx)); ctx.ContextFlags = CONTEXT_CONTROL;
+					if (GetThreadContext(h, &ctx))
+					{
+						WDLog("[WD] RIP=+0x%llX (RIP=%p RSP=%p)\n", (uint64_t)(ctx.Rip - base), (void*)ctx.Rip, (void*)ctx.Rsp);
+						// Walk the stack for return addresses inside the Fortnite module (the call chain).
+						uint64_t* sp = (uint64_t*)ctx.Rsp;
+						int found = 0;
+						for (int i = 0; i < 0x1000 && found < 24; i++)
+						{
+							if (!SDK::MemReadable(&sp[i], 8)) continue;
+							uint64_t v = sp[i];
+							if (v >= base && v < base + 0x10000000)
+							{
+								WDLog("[WD]   stack+0x%X -> +0x%llX\n", i * 8, v - base);
+								found++;
+							}
+						}
+					}
+					ResumeThread(h);
+					CloseHandle(h);
+				}
+				// Snapshot every thread's RIP — the busy worker (RIP in a hot module func) is the real grind.
+				WDLog("[WD] --- all-thread RIP scan ---\n");
+				HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+				if (snap != INVALID_HANDLE_VALUE)
+				{
+					THREADENTRY32 te; te.dwSize = sizeof(te);
+					DWORD myPid = GetCurrentProcessId();
+					if (Thread32First(snap, &te))
+					{
+						do {
+							if (te.th32OwnerProcessID != myPid) continue;
+							if (te.th32ThreadID == GetCurrentThreadId()) continue; // skip watchdog itself
+							HANDLE th = OpenThread(THREAD_ALL_ACCESS, FALSE, te.th32ThreadID);
+							if (!th) continue;
+							SuspendThread(th);
+							CONTEXT c; memset(&c, 0, sizeof(c)); c.ContextFlags = CONTEXT_CONTROL;
+							if (GetThreadContext(th, &c))
+							{
+								if (c.Rip >= base && c.Rip < base + 0x10000000)
+									WDLog("[WD] tid=%lu RIP=+0x%llX  <-- in module\n", te.th32ThreadID, (uint64_t)(c.Rip - base));
+							}
+							ResumeThread(th);
+							CloseHandle(th);
+						} while (Thread32Next(snap, &te));
+					}
+					CloseHandle(snap);
+				}
+				WDLog("[WD] --- scan done ---\n");
+			}
+		}
+		else { stuck = 0; last = cur; }
+	}
+}
+
 float Misc::GetMaxTickRate(UEngine* Engine, float DeltaTime, bool bAllowFrameRateSmoothing)
 {
+	if (VersionInfo.FortniteVersion >= 32.00)
+	{
+		g_gameThreadId = GetCurrentThreadId();
+		_InterlockedIncrement(&g_frameCounter);
+	}
+	// 32.11: LoadMap's UWorld::Listen is inlined (no callable 0x2C283E0), so hooking it never fires.
+	// Drive the manual Listen from this per-frame game-thread hook once the athena game mode is up and
+	// no net driver exists yet. SetWorld (0x29664C8) is the correct RVA (Remix uses it).
+	if (VersionInfo.FortniteVersion >= 32.00)
+	{
+		static bool s_listened = false;
+		static int  s_frames = 0;
+		if (!s_listened)
+		{
+			auto World = UWorld::GetWorld();
+			static auto FrontendMode = FindClass("FortGameModeFrontend");
+			if (World && World->AuthorityGameMode && !World->NetDriver &&
+				(!FrontendMode || !World->AuthorityGameMode->IsA(FrontendMode)))
+			{
+				if (++s_frames > 30)
+				{
+					s_listened = true;
+					SDK::DbgLog("[Misc] GetMaxTickRate: triggering FN32 Listen\n");
+					bool ok = Listen();
+					SDK::DbgLog("[Misc] GetMaxTickRate: Listen() returned %d\n", (int)ok);
+				}
+			}
+		}
+	}
 	// improper, DS is supposed to do hitching differently
 	return FConfiguration::MaxTickRate;
 	//return std::clamp(1.f / DeltaTime, 1.f, FConfiguration::MaxTickRate);
@@ -809,11 +930,19 @@ public:
 void (*Test2OG)(FTickFunction* _this, ULevel* Level);
 void Test2(FTickFunction* _this, ULevel* Level)
 {
-	if (!_this->bAllowTickOnDedicatedServer)
-	{
+	// bAllowTickOnDedicatedServer: FTickFunction+0xA bit3 (Remix layout). Use the raw offset on 32.11
+	// where the struct's encrypted reflection can't resolve the bitfield.
+	bool allow = VersionInfo.FortniteVersion >= 32.00
+		? (*(uint8_t*)((char*)_this + 0xA) & 8) != 0
+		: _this->bAllowTickOnDedicatedServer;
+	if (!allow)
 		return;
-	}
 	return Test2OG(_this, Level);
+}
+
+char GetTickableTickType_FN32()
+{
+	return 2; // ETickableTickType::Never — matches Remix (disables client-side tickables on the server)
 }
 
 void Ohio(ABuildingProp_LockDevice* _this, AFortPlayerControllerAthena* ControllerInstigator)
@@ -829,7 +958,8 @@ bool Listen()
 	auto NetDriverName = FName(L"GameNetDriver");
 	auto GameMode = (AFortGameModeAthena*)World->AuthorityGameMode;
 
-	if (GameMode->HasbEnableReplicationGraph())
+	// 32.11 uses Iris; do not force the replication-graph path (matches Remix, which leaves it alone).
+	if (GameMode->HasbEnableReplicationGraph() && VersionInfo.FortniteVersion < 32.00)
 		GameMode->bEnableReplicationGraph = true;
 
 	UNetDriver* NetDriver = nullptr;
@@ -850,7 +980,7 @@ bool Listen()
 	NetDriver->NetDriverName = NetDriverName;
 	NetDriver->World = World;
 
-	if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
+	if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris && VersionInfo.FortniteVersion < 32.00)
 	{
 		*(bool*)(__int64(&NetDriver->ReplicationDriver) + 0x11) = true;
 	}
@@ -860,30 +990,40 @@ bool Listen()
 
 	auto InitListen = (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&)) FindInitListen();
 	auto SetWorld = (void (*)(UNetDriver*, UWorld*)) FindSetWorld();
+	SDK::DbgLog("[Listen] NetDriver=%p InitListen=%p SetWorld=%p\n", (void*)NetDriver, (void*)InitListen, (void*)SetWorld);
 
+	// SetWorld @ 0x29664C8 IS correct (Remix uses the same RVA) — it works when Listen runs during the
+	// engine's UWorld::Listen (hooked for 32.11), not from a mistimed tick trigger.
 	SetWorld(NetDriver, World);
-	for (int i = 0; i < World->LevelCollections.Num(); i++)
+	SDK::DbgLog("[Listen] pre-InitListen SetWorld done\n");
+
+	// Guard the loop against a garbage Num() (32.11 encrypted reflection) to avoid a runaway.
+	int _lcNum = World->LevelCollections.Num();
+	for (int i = 0; i < _lcNum && i < 64; i++)
 	{
 		auto& LevelCollection = World->LevelCollections.Get(i, FLevelCollection::Size());
-
 		LevelCollection.NetDriver = NetDriver;
 	}
 
-	auto URL = (FURL*)malloc(FURL::Size());
-	memset((PBYTE)URL, 0, FURL::Size());
+	size_t urlSize = FURL::Size();
+	if (urlSize == 0 || urlSize > 0x1000) // 32.11 encrypted reflection can return garbage -> huge memset AV
+		urlSize = 0x100;
+	auto URL = (FURL*)malloc(urlSize);
+	memset((PBYTE)URL, 0, urlSize);
 	URL->Port = FConfiguration::Port;
 
-
+	SDK::DbgLog("[Listen] calling InitListen Port=%d...\n", (int)FConfiguration::Port);
 	FString Err;
-	if (!InitListen(NetDriver, World, URL, false, Err))
+	bool ok = InitListen(NetDriver, World, URL, false, Err);
+	SDK::DbgLog("[Listen] InitListen returned %d\n", (int)ok);
+	if (!ok)
 	{
 		printf("Failed to listen!");
-
 		free(URL);
-
 		return false;
 	}
 	SetWorld(NetDriver, World);
+	SDK::DbgLog("[Listen] Listen() complete — server listening on port %d\n", (int)FConfiguration::Port);
 
 	free(URL);
 
@@ -1028,7 +1168,26 @@ void Misc::Hook()
 {
 	if (VersionInfo.FortniteVersion == 23.00 || (VersionInfo.FortniteVersion >= 24.30 && VersionInfo.FortniteVersion != 28.30 && VersionInfo.FortniteVersion != 29.40) || VersionInfo.FortniteVersion >= 30)
 	{
-		auto AttemptDeriveFromURL = Memcury::Scanner::FindPattern("48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 4C 8B C1").Get();
+		uintptr_t AttemptDeriveFromURL = 0;
+		if (VersionInfo.FortniteVersion >= 32.00)
+		{
+			// 32.11: the prologue uses REX.XB (0x43) for push r12-r14, so the generic 0x41 sigs miss.
+			// Remix-confirmed RVAs (CL 38202817): UWorld::AttemptDeriveFromURL @ +0x2196B08, and a
+			// second net-mode fn (InternalGetNetMode) @ +0x16562A4 — both forced to NM_DedicatedServer.
+			auto base = Memcury::PE::GetModuleBase();
+			uintptr_t adfu = base + 0x2196B08;
+			if (*(uint32_t*)adfu == 0x245C8948) // verify "48 89 5C 24" prologue (build matches Remix CL)
+			{
+				AttemptDeriveFromURL = adfu;
+				// NOTE: Remix also hooks InternalGetNetMode (+0x16562A4), but Remix is a dedicated-server
+				// build; forcing EVERY net-mode query to DedicatedServer breaks the injected client's
+				// menu world. AttemptDeriveFromURL alone forces it only where there's no net driver yet.
+			}
+			else
+				SDK::DbgLog("  [Misc] netmode 32.11 RVA mismatch (prologue %08X) — build differs from Remix CL\n", *(uint32_t*)adfu);
+		}
+		if (!AttemptDeriveFromURL)
+			AttemptDeriveFromURL = Memcury::Scanner::FindPattern("48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 4C 8B C1").Get();
 		if (!AttemptDeriveFromURL)
 			AttemptDeriveFromURL = Memcury::Scanner::FindPattern("48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8B D1").Get();
 		if (!AttemptDeriveFromURL)
@@ -1036,8 +1195,22 @@ void Misc::Hook()
 		if (!AttemptDeriveFromURL)
 			AttemptDeriveFromURL = Memcury::Scanner::FindPattern("48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 4C 8B D1").Get();
 
+		SDK::DbgLog("  [Misc] A ADFU=%p pre-Hook/PatchAllNetModes\n", (void*)AttemptDeriveFromURL);
 		Utils::Hook(AttemptDeriveFromURL, GetNetMode);
-		PatchAllNetModes(AttemptDeriveFromURL);
+		PatchAllNetModes(AttemptDeriveFromURL); // Remix uses this on 32.11; needed for consistent netmode
+		SDK::DbgLog("  [Misc] B netmode hook+patch done\n");
+
+		if (VersionInfo.FortniteVersion >= 32.00)
+		{
+			// 32.11: skip client-only tick functions on the dedicated server (Remix/Better-Remix). Testing
+			// in isolation — this is the prime suspect for taming the FortWorldManager tick grind/freeze.
+			auto base = Memcury::PE::GetModuleBase();
+			Utils::Hook(base + 0x19F7AFC, Test2, Test2OG); // RegisterTickFunction
+			Utils::Hook(base + 0x4139B6C, GetTickableTickType_FN32); // GetTickableTickType -> Never
+			SDK::DbgLog("  [Misc] B3 RegisterTickFunction + GetTickableTickType hooks installed (Test2OG=%p)\n", (void*)Test2OG);
+			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)WatchdogThread, nullptr, 0, nullptr); // pinpoint hang
+			SDK::DbgLog("  [Misc] B3b watchdog thread started\n");
+		}
 	}
 	else if (VersionInfo.FortniteVersion >= 28)
 	{
@@ -1055,9 +1228,33 @@ void Misc::Hook()
 	else
 		Utils::Hook(FindGetNetMode(), GetNetMode);
 
-	Utils::Hook(FindSendRequestNow(), SendRequestNow, SendRequestNowOG);
-	Utils::Hook(FindGetMaxTickRate(), GetMaxTickRate);
-	if (VersionInfo.FortniteVersion >= 17)
+	SDK::DbgLog("  [Misc] C pre-SendRequestNow\n");
+	// 32.11: sigs miss (43-vs-41 REX). Remix RVAs. GetMaxTickRate is critical — the real one reads
+	// World->NetDriver->NetServerMaxTickRate, which faults (read null) while NetDriver is still null
+	// during dedicated-server init; hooking it (return a constant) avoids that.
+	if (VersionInfo.FortniteVersion >= 32.00)
+	{
+		auto base = Memcury::PE::GetModuleBase();
+		Utils::Hook(base + 0x7DE4ED0, SendRequestNow, SendRequestNowOG); // SendRequestNow
+		SDK::DbgLog("  [Misc] D pre-GetMaxTickRate (32.11 RVA)\n");
+		Utils::Hook(base + 0x189FE98, GetMaxTickRate); // GetMaxTickRate
+	}
+	else
+	{
+		Utils::Hook(FindSendRequestNow(), SendRequestNow, SendRequestNowOG);
+		SDK::DbgLog("  [Misc] D pre-GetMaxTickRate\n");
+		Utils::Hook(FindGetMaxTickRate(), GetMaxTickRate);
+	}
+	SDK::DbgLog("  [Misc] E GetMaxTickRate done\n");
+	if (VersionInfo.FortniteVersion >= 32.00)
+	{
+		// 32.11: heartbeat prologue sigs miss (43-vs-41 REX). Remix RVA for the matchmaking
+		// checkpoint-heartbeat; hooking it (return -1) stops the server-init blocking on MM.
+		auto hb = Memcury::PE::GetModuleBase() + 0x521AFC0;
+		SDK::DbgLog("  [Misc] heartbeat 32.11 RVA=%p prologue=%08X\n", (void*)hb, *(uint32_t*)hb);
+		Utils::Hook(hb, CheckCheckpointHeartBeat);
+	}
+	else if (VersionInfo.FortniteVersion >= 17)
 	{
 		auto pattern = Memcury::Scanner::FindPattern("48 89 5C 24 10 48 89 6C 24 20 56 57 41 54 41 56 41 57 48 81 EC ? ? ? ? 65 48 8B 04 25 ? ? ? ? 4C 8B F9").Get();
 
@@ -1069,6 +1266,7 @@ void Misc::Hook()
 
 		Utils::Hook(pattern, CheckCheckpointHeartBeat);
 	}
+	SDK::DbgLog("  [Misc] F checkpoint-heartbeat done\n");
 	if (VersionInfo.EngineVersion < 4.20)
 	{
 		auto ApplyHomebaseEffectsOnPlayerSetupAddr = Memcury::Scanner::FindPattern("40 55 53 57 41 54 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 00 4C 8B").Get();
@@ -1114,14 +1312,19 @@ void Misc::Hook()
 		}
 	}
 	
+	SDK::DbgLog("  [Misc] G pedestal block done\n");
 	if (VersionInfo.FortniteVersion >= 23)
 	{
 		auto pattern = Memcury::Scanner::FindPattern("48 8B 01 FF 90 ? ? ? ? 48 8B 8B ? ? ? ? 48 85 C9 74 ? 48 8B 01 FF 90 ? ? ? ? 48 8D 8B");
 
 		auto patchPoint = pattern.ScanFor(VersionInfo.EngineVersion < 5.5 ? std::vector<uint8_t>{ 0x48, 0x89, 0x5C } : std::vector<uint8_t>{ 0x40, 0x53 }, false).ScanFor({0x83, 0xF8, 0x02}).Get();
 
-		Utils::Patch<uint8_t>(patchPoint + 2, 0x1);
+		if (patchPoint)
+			Utils::Patch<uint8_t>(patchPoint + 2, 0x1);
+		else
+			SDK::DbgLog("  [Misc] G! playercount patch scan failed — skipped\n");
 	}
+	SDK::DbgLog("  [Misc] H playercount patch done\n");
 
 	if (VersionInfo.FortniteVersion >= 24.30)
 	{
@@ -1132,6 +1335,7 @@ void Misc::Hook()
 
 		Utils::Hook(sig, CrashSomething, CrashSomethingOG);
 	}
+	SDK::DbgLog("  [Misc] I CrashSomething done; Misc::Hook complete\n");
 
 	//Utils::Hook(ImageBase + 0x1CE85F4, Test);
 	//Utils::Hook(ImageBase + 0x2788BEC, Test, TestOG);

@@ -188,16 +188,22 @@ void UFortGameplayAbility::K2_ExecuteGameplayCueWithParams_(UObject* Context, FF
 
 void UAbilitySystemComponent::Hook()
 {
+    SDK::DbgLog("  [ASC] 1 pre-FindConstructAbilitySpec\n");
     ConstructAbilitySpec = FindConstructAbilitySpec();
+    SDK::DbgLog("  [ASC] 2 CAS=%p pre-FindGiveAbility\n", (void*)ConstructAbilitySpec);
     GiveAbility_ = FindGiveAbility();
+    SDK::DbgLog("  [ASC] 3 GA=%p pre-FindITAA\n", (void*)GiveAbility_);
     InternalTryActivateAbility_ = FindInternalTryActivateAbility();
+    SDK::DbgLog("  [ASC] 4 ITAA=%p\n", (void*)InternalTryActivateAbility_);
 
     uint32 istaIdx = 0;
 
     if (VersionInfo.EngineVersion > 4.20)
     {
         auto OnRep_ReplicatedAnimMontage = GetDefaultObj()->GetFunction("OnRep_ReplicatedAnimMontage");
+        SDK::DbgLog("  [ASC] 5 OnRep=%p pre-GetVTableIndex\n", (void*)OnRep_ReplicatedAnimMontage);
         istaIdx = OnRep_ReplicatedAnimMontage->GetVTableIndex() - 1;
+        SDK::DbgLog("  [ASC] 6 istaIdx=0x%X\n", istaIdx);
     }
     else
     {
@@ -215,7 +221,14 @@ void UAbilitySystemComponent::Hook()
         }
     }
 
-    Utils::HookEvery<UAbilitySystemComponent>(istaIdx, InternalServerTryActivateAbility);
+    SDK::DbgLog("  [ASC] 7 pre-HookEvery(istaIdx=0x%X)\n", istaIdx);
+    // A bad GetVTableIndex (e.g. 32.11 where the resolve fails) yields a garbage index; patching a
+    // wild vtable slot would corrupt the process. Only install when the index looks sane.
+    if (istaIdx != 0 && istaIdx < 0x1000)
+        Utils::HookEvery<UAbilitySystemComponent>(istaIdx, InternalServerTryActivateAbility);
+    else
+        SDK::DbgLog("  [ASC] 7! SKIP HookEvery — istaIdx invalid (0x%X)\n", istaIdx);
+    SDK::DbgLog("  [ASC] 8 post-HookEvery\n");
 
     if (VersionInfo.FortniteVersion >= 8)
     {
@@ -228,4 +241,5 @@ void UAbilitySystemComponent::Hook()
         Utils::ExecHook(UFortGameplayAbility::GetDefaultObj()->GetFunction("K2_AddGameplayCueWithParams"), UFortGameplayAbility::K2_AddGameplayCueWithParams_,
             UFortGameplayAbility::K2_AddGameplayCueWithParams_OG);
     }
+    SDK::DbgLog("  [ASC] 9 Hook() complete\n");
 }

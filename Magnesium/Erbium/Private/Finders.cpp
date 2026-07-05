@@ -24,6 +24,9 @@ uint64_t FindGIsClient()
         if (!sRef)
             sRef = Memcury::Scanner::FindStringRef(L"llowCommandletRendering").Get(); // bro why
 
+        if (!sRef)
+            return GIsClient = 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+
         int Skip = 2;
         uint8_t correctByte = 0;
         for (int i = 0; i < 0x100; i++)
@@ -81,6 +84,9 @@ uint64_t FindGIsServer()
         auto sRef = Memcury::Scanner::FindStringRef(L"AllowCommandletRendering").Get();
         if (!sRef)
             sRef = Memcury::Scanner::FindStringRef(L"llowCommandletRendering").Get(); // bro why
+
+        if (!sRef)
+            return GIsServer = 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
 
         int Skip = 1;
         uint8_t correctByte = 0;
@@ -171,6 +177,9 @@ uint64_t FindGetWorldContext()
     {
         bInitialized = true;
 
+        if (VersionInfo.FortniteVersion >= 32.00)
+            return GetWorldContext = ImageBase + 0x1973A84; // 32.11 (GetWorldContextFromWorld)
+
         GetWorldContext = Memcury::Scanner::FindPattern("48 8B 81 ? ? ? ? 48 63 89 ? ? ? ? 4C 8D 04 C8 49 3B C0 74 ? 48 8B 08 48 39 91 80 02 00 00 75 ? 48 8B C1 C3").Get();
 
         if (!GetWorldContext)
@@ -243,6 +252,9 @@ uint64_t FindCreateNetDriverWorldContext()
     {
         bInitialized = true;
 
+        if (VersionInfo.FortniteVersion >= 32.00)
+            return CreateNetDriver = ImageBase + 0x2EF3758; // 32.11 (CreateNamedNetDriver); sig misses (43-vs-41)
+
         if (std::floor(VersionInfo.FortniteVersion) == 19)
             return CreateNetDriver = Memcury::Scanner::FindPattern("41 56 48 83 EC ? 48 63 81 ? ? ? ? 48 8D ? ? ? ? ? 48 8B B9 ? ? ? ? 4C 8B F2").ScanFor({ 0xC3 }, false).ScanFor({ 0x48 }).Get();
         if (VersionInfo.FortniteVersion >= 20)
@@ -311,6 +323,9 @@ uint64_t FindInitListen()
     {
         bInitialized = true;
 
+        if (VersionInfo.FortniteVersion >= 32.00)
+            return InitListen = ImageBase + 0x734AB88; // 32.11: prologue is 4E 8B DC (REX.WRX), sig misses
+
         if (VersionInfo.EngineVersion >= 5.0)
         {
             InitListen = Memcury::Scanner::FindPattern("4D 8B C8 4C 8B C2 33 D2 FF 90 ? ? ? ? 84 C0 75 ? 80 3D").ScanFor({ 0x4C, 0x8B, 0xDC }, false).Get();
@@ -358,6 +373,9 @@ uint64_t FindSetWorld()
     if (!bInitialized)
     {
         bInitialized = true;
+
+        if (VersionInfo.FortniteVersion >= 32.00)
+            return SetWorld = ImageBase + 0x29664C8; // 32.11 (UNetDriver::SetWorld); sig misses
 
         SetWorld = VersionInfo.FortniteVersion <= 13.20 ? Memcury::Scanner::FindStringRef(L"AOnlineBeaconHost::InitHost failed").ScanFor({ 0x48, 0x8B, 0xD0, 0xE8 }, false).RelativeOffset(4).Get() : 0;
 
@@ -775,6 +793,9 @@ uint64_t FindInternalTryActivateAbility()
 
         auto sRef = Memcury::Scanner::FindStringRef(L"InternalTryActivateAbility called with invalid Handle! ASC: %s. AvatarActor: %s", true, 0, VersionInfo.FortniteVersion >= 16).Get();
 
+        if (!sRef)
+            return InternalTryActivateAbility = 0; // string not present (e.g. 32.11) — avoid *(0 - i) fault
+
         for (int i = 0; i < 1000; i++)
         {
             if (*(uint8_t*)(sRef - i) == 0x48 && *(uint8_t*)(sRef - i + 1) == 0x8B && *(uint8_t*)(sRef - i + 2) == 0xC4)
@@ -930,6 +951,9 @@ uint64_t FindFinishedTargetSpline()
     if (!bInitialized)
     {
         bInitialized = true;
+
+        if (VersionInfo.FortniteVersion >= 32.00)
+            return FinishedTargetSpline = 0; // TODO: 32.11 sig — skipped for now (gameplay hook, not boot-critical)
 
         if (VersionInfo.EngineVersion == 4.16 || VersionInfo.EngineVersion == 4.19)
             return Memcury::Scanner::FindPattern("4C 8B DC 53 55 56 48 83 EC 60 48 8B F1 48 8B 89 ? ? ? ? 48 85 C9").Get();
@@ -1244,6 +1268,8 @@ uint64_t FindRemoveInventoryItem()
         std::vector<uint8_t> funcStart = VersionInfo.EngineVersion == 4.16 ? std::vector<uint8_t>{ 0x44, 0x88, 0x4C } : (VersionInfo.FortniteVersion >= 16 && (VersionInfo.FortniteVersion < 20 || VersionInfo.FortniteVersion >= 22) ? std::vector<uint8_t>{ 0x48, 0x8B, 0xC4 } : std::vector<uint8_t>{ 0x48, 0x89, 0x5C });
 
         auto sRef = FindNameRef(L"ServerRemoveInventoryItem", 0, false);
+        if (!sRef)
+            return RemoveInventoryItem = 0; // name ref absent (e.g. 32.11) — avoid *(0 - i) fault
         uintptr_t uFuncCall = 0;
         for (int i = 0; i < 2000; i++)
         {
@@ -1270,7 +1296,11 @@ uint64_t FindRemoveInventoryItem()
             }
         }
 
+        if (!uFuncCall)
+            return RemoveInventoryItem = 0;
         auto ServerRemoveInventoryItemCall = Memcury::Scanner::FindPointerRef((PVOID)uFuncCall, 0, true);
+        if (!ServerRemoveInventoryItemCall.Get())
+            return RemoveInventoryItem = 0;
 
         for (int i = 0; i < 400; i++)
         {
@@ -1421,6 +1451,9 @@ uint64 FindGiveAbilityAndActivateOnce()
 
         auto sRef = Memcury::Scanner::FindStringRef(L"GiveAbilityAndActivateOnce called on ability %s on the client, not allowed!", true, 0, VersionInfo.EngineVersion >= 5.0).Get();
 
+        if (!sRef)
+            return GiveAbilityAndActivateOnce = 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+
         for (int i = 0; i < 1000; i++)
         {
             if (*(uint8_t*)(sRef - i) == 0x40 && *(uint8_t*)(sRef - i + 1) == 0x55)
@@ -1446,7 +1479,7 @@ uint64_t FindClearAbility()
 
         auto GiveAbilityAndActivateOnce = FindGiveAbilityAndActivateOnce();
 
-        if (!GiveAbilityAndActivateOnce)
+        if (!GiveAbilityAndActivateOnce || !SDK::MemReadable((void*)GiveAbilityAndActivateOnce, 0x810))
             return 0;
 
         int skip = 0;
@@ -2067,6 +2100,9 @@ uint64_t FindGetPlayerViewPoint()
 
     auto ftspRef = Memcury::Scanner::FindStringRef(L"%s failed to spawn a pawn", true, 0, VersionInfo.FortniteVersion >= 19).Get();
 
+    if (!ftspRef)
+        return 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+
     for (int i = 0; i < 1000; i++)
     {
         if (*(uint8_t*)(ftspRef - i) == 0x40 && *(uint8_t*)(ftspRef - i + 1) == 0x53)
@@ -2657,10 +2693,15 @@ uint32 FindSpawnDecoVft()
 {
     auto sRef = Memcury::Scanner::FindStringRef(L"AFortTrapTool::SpawnDeco World is tearing down.  Early-ing out.", false, 0, VersionInfo.FortniteVersion >= 19);
 
+    auto sRefAddr = sRef.Get();
+    SDK::DbgLog("    [SDV] sRef=%p\n", (void*)sRefAddr);
+    if (!sRefAddr)
+        return 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+
     uint64 SpawnDeco = 0;
     for (int i = 0; i < 2000; i++)
     {
-        auto Ptr = (uint8_t*)(sRef.Get() - i);
+        auto Ptr = (uint8_t*)(sRefAddr - i);
 
         if (*Ptr == 0x48 && *(Ptr + 1) == 0x8B && *(Ptr + 2) == 0xC4)
         {
@@ -2673,16 +2714,25 @@ uint32 FindSpawnDecoVft()
             break;
         }
     }
+    SDK::DbgLog("    [SDV] SpawnDeco=%p\n", (void*)SpawnDeco);
 
-    auto ActorVft = DefaultObjImpl("FortTrapTool")->Vft;
+    auto dobj = DefaultObjImpl("FortTrapTool");
+    SDK::DbgLog("    [SDV] dobj=%p\n", (void*)dobj);
+    if (!dobj || !SDK::MemReadable(dobj, 0x10))
+        return 0;
+    auto ActorVft = dobj->Vft;
+    SDK::DbgLog("    [SDV] Vft=%p\n", (void*)ActorVft);
 
     for (int i = 0; i < 0x500; i++)
     {
+        if (!SDK::MemReadable(&ActorVft[i], 8)) // bound the vtable over-read
+            break;
         if (ActorVft[i] == (void*)SpawnDeco)
         {
             return i;
         }
     }
+    SDK::DbgLog("    [SDV] done (not found in vtable)\n");
     return 0;
 }
 
@@ -2690,11 +2740,15 @@ uint32 FindShouldAllowServerSpawnDecoVft()
 {
     auto sRef = Memcury::Scanner::FindStringRef(L"Tried to place deco item %s %s that isn't actually in player inventory!", false, 0, VersionInfo.FortniteVersion >= 19, false);
 
+    auto sRefAddr = sRef.Get();
+    if (!sRefAddr)
+        return 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+
     uint64 ShouldAllowServerSpawnDecoPart = 0;
 
     for (int i = 0; i < 2000; i++)
     {
-        auto Ptr = (uint8_t*)(sRef.Get() - i);
+        auto Ptr = (uint8_t*)(sRefAddr - i);
 
         if (*Ptr == 0x48 && *(Ptr + 1) == 0x83 && *(Ptr + 2) == 0xEC)
         {
@@ -2707,6 +2761,9 @@ uint32 FindShouldAllowServerSpawnDecoVft()
             break;
         }
     }
+
+    if (!ShouldAllowServerSpawnDecoPart)
+        return 0;
 
     uint64 ShouldAllowServerSpawnDeco = 0;
     for (int i = 0; i < 2000; i++)
@@ -2725,7 +2782,10 @@ uint32 FindShouldAllowServerSpawnDecoVft()
         }
     }
 
-    auto ActorVft = DefaultObjImpl("FortDecoTool")->Vft;
+    auto dobj = DefaultObjImpl("FortDecoTool");
+    if (!dobj)
+        return 0;
+    auto ActorVft = dobj->Vft;
 
     for (int i = 0; i < 0x500; i++)
     {
@@ -3334,7 +3394,9 @@ void FindNullsAndRetTrues()
         else
             RetTrueFuncs.push_back(Memcury::Scanner::FindPattern("48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 4C 89 60 20 55 41 56 41 57 48 8B EC 48 83 EC 60 49 8B D9 45 8A").Get());
     }
+    SDK::DbgLog("  [nf] A: NullFuncs patterns done, pre-FindKickPlayer\n");
     RetTrueFuncs.push_back(FindKickPlayer());
+    SDK::DbgLog("  [nf] B: FindKickPlayer done\n");
 
     if (VersionInfo.FortniteVersion >= 23)
     {
@@ -3364,6 +3426,7 @@ void FindNullsAndRetTrues()
 
         NullFuncs.push_back(RequestExitWithStatus);
     }
+    SDK::DbgLog("  [nf] C: RequestExit block done\n");
 
     if (VersionInfo.EngineVersion >= 4.21)
     {
@@ -3402,6 +3465,7 @@ void FindNullsAndRetTrues()
         }
     }
 
+    SDK::DbgLog("  [nf] D: CanActivateAbility block done, pre-HasStreamingLevels\n");
     auto sRef = Memcury::Scanner::FindStringRef(L"AFortPlayerControllerAthena::HasStreamingLevelsCompletedLoadingUnLoading(): %s still not visible", false, 0, VersionInfo.FortniteVersion >= 19).Get();
 
     if (sRef)
@@ -3423,10 +3487,12 @@ void FindNullsAndRetTrues()
         }
     }
 
+    SDK::DbgLog("  [nf] E: HasStreamingLevels done, pre-Curie(FN>=23)\n");
     if (VersionInfo.FortniteVersion >= 23)
     {
         NullFuncs.push_back(Memcury::Scanner::FindStringRef(L"STAT_FortCurieVoxelFirePropagationManager_IgniteGrassInBounds").ScanFor({ 0x48, 0x8B, 0xC4 }, false).Get());
     }
+    SDK::DbgLog("  [nf] F: Curie done, FindNullsAndRetTrues complete\n");
 
     if (VersionInfo.EngineVersion < 5.0)
     {

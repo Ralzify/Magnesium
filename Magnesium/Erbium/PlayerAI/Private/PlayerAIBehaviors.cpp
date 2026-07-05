@@ -26,12 +26,58 @@
 #include "../Public/VictoryConditionBehavior.h"
 #include "../Public/ReplicationBehavior.h"
 #include "../Public/MagnesiumPlayerAISpawner.h"
+#include "../Public/NativePlayerAIBackend.h"
+#include "../Public/PlayerAIFaultGuard.h"
 #include "../../../FortniteGame/Public/FortLootPackage.h"
 #include <unordered_map>
 #include <algorithm>
 
 static constexpr double PLAYERAI_RAD_TO_DEG = 57.29577951308232;
 static constexpr float PLAYERAI_PAWN_HALF_HEIGHT = 90.f;
+
+// ---- Simulated-tier runtime capability probes -------------------------------
+// The engine's own character movement usually simulates connectionless
+// player pawns server side (gravity, collision, real walking) - which is
+// exactly what "walking normally" needs on every version. Probed at runtime;
+// only when a version provably does not move pawns from input does the old
+// position-driven fallback take over.
+static int GSimMovementMode = -1;  // -1 probing, 1 input movement works, 0 position fallback
+static int GSimMoveProbeFails = 0;
+
+// Whether PawnStartFire produces real shots (ammo is consumed). When real
+// fire works, simulated damage switches off - the engine's bullets carry
+// the damage, sound and kill credit.
+static int GRealFireWorks = -1;    // -1 probing, 1 real bullets, 0 cosmetic only
+static int GRealFireProbes = 0;
+
+// When trigger fire is dead, shots go through the weapon's primary fire
+// ability instead (server-activated): real bullets with sound/tracers and
+// native damage where the ability path works on a version.
+static int GAbilityFireWorks = -1; // -1 probing, 1 real bullets, 0 cosmetic only
+static int GAbilityFireProbes = 0;
+
+// Drop/air states: no combat in either direction while skydiving/gliding.
+static bool PlayerAIIsAirState(EPlayerAIState State)
+{
+    return State == EPlayerAIState::ChoosingLandingSpot ||
+           State == EPlayerAIState::WaitingForTransport ||
+           State == EPlayerAIState::InTransport ||
+           State == EPlayerAIState::JumpingFromTransport ||
+           State == EPlayerAIState::Gliding;
+}
+
+static int PlayerAISprintStyleValue()
+{
+    static int Cached = -2;
+
+    if (Cached == -2)
+    {
+        auto Enum = FindEnum("EFortMovementStyle");
+        Cached = Enum ? (int)Enum->GetValue("Sprinting") : -1;
+    }
+
+    return Cached;
+}
 
 // ============================================================================
 // PlayerAIStateMachine
@@ -105,6 +151,12 @@ void NavigationBehavior::ClearMoveTarget(PlayerAIController& AI)
 {
     AI.bHasMoveTarget = false;
 
+    if (AI.Entity.bNativeBacked)
+    {
+        NativePlayerAIBackend::StopMove(AI);
+        return;
+    }
+
     auto Pawn = AI.GetPawn();
 
     if (Pawn && Pawn->HasCharacterMovement() && Pawn->CharacterMovement)
@@ -147,56 +199,192 @@ bool NavigationBehavior::StepMovement(PlayerAIController& AI, float Now, float D
         return true;
     }
 
+    // Native backend: the engine's pathfinding + character movement do the
+    // walking (navmesh paths, real slopes, stairs, no wall climbing, real
+    // swimming) - no position writes at all.
+    if (AI.Entity.bNativeBacked)
+    {
+        NativePlayerAIBackend::MoveTo(AI, AI.MoveTarget, 90.f, true);
+        return false;
+    }
+
     FVector Dir = To / Dist;
 
     float Speed = SpeedOverride > 0.f ? SpeedOverride : AI.Skill.MoveSpeed;
     // Movement quality: lower skill wobbles the speed a little more.
     Speed *= 0.90f + 0.20f * AI.Skill.MovementQuality;
 
-    // Periodic ground snapping keeps the AI walking on terrain without
-    // relying on any single version specific navigation system.
-    if (Now >= AI.NextGroundSnapTime)
+    // ---- Simulated backend, input-driven walking (preferred) --------------
+    // Feed the engine's own character movement instead of writing positions:
+    // real gravity, collision, slopes and step-ups on every version - no
+    // floating, no wall climbing, no flying.
+    if (GSimMovementMode != 0)
     {
-        AI.NextGroundSnapTime = Now + PlayerAIConfig::GroundSnapInterval;
+        // Water/void/ledge guard - only meaningful while ground tracing is
+        // reliable on this version. Without trace data the native collision
+        // handles walls and the void-rescue watchdogs handle the rest;
+        // treating "no data" as "blocked" froze bots and stacked them into
+        // the sky.
+        if (VersionFeatureAdapter::IsGroundTraceReliable())
+        {
+            if (Now >= AI.NextGroundSnapTime)
+            {
+                AI.NextGroundSnapTime = Now + PlayerAIConfig::GroundSnapInterval;
 
-        FVector Ahead = Loc + Dir * 250.0;
-        bool bFound = false;
-        FVector Ground = VersionFeatureAdapter::FindGroundLocation(Ahead, bFound, Pawn);
+                double SampleDist = Speed * 0.35;
 
-        if (bFound)
-            AI.CachedGroundZ = (float)Ground.Z;
+                if (SampleDist < 150.0)
+                    SampleDist = 150.0;
+
+                FVector Ahead = Loc + Dir * SampleDist;
+                bool bFound = false;
+                FVector Ground = VersionFeatureAdapter::FindGroundLocation(Ahead, bFound, Pawn);
+
+                AI.bGroundAheadValid = bFound;
+
+                if (bFound)
+                    AI.CachedGroundZ = (float)Ground.Z;
+            }
+
+            const bool bPreMatchState = AI.GetState() == EPlayerAIState::PreMatchIdle ||
+                AI.GetState() == EPlayerAIState::PreMatchWalking ||
+                AI.GetState() == EPlayerAIState::PreMatchEmoting;
+
+            const double DropAhead = (double)Loc.Z - (double)AI.CachedGroundZ;
+
+            if (!AI.bGroundAheadValid || (bPreMatchState && DropAhead > 600.0) || DropAhead > 4000.0)
+            {
+                // Nothing safe to walk onto: stop; the think/stuck logic
+                // picks a different goal.
+                ClearMoveTarget(AI);
+                return true;
+            }
+        }
+        else
+        {
+            AI.bGroundAheadValid = true;
+        }
+
+        Pawn->AddMovementInput(Dir, 1.f, true);
+
+        FRotator FaceRot{};
+        FaceRot.Yaw = atan2(Dir.Y, Dir.X) * PLAYERAI_RAD_TO_DEG;
+        Pawn->K2_SetActorRotation(FaceRot, false);
+
+        if (AI.Entity.PC)
+            AI.Entity.PC->SetControlRotation(FaceRot);
+
+        // Sprint style for faraway goals (visual only, safe where present).
+        if (Pawn->HasCurrentMovementStyle())
+        {
+            const int Sprinting = PlayerAISprintStyleValue();
+
+            if (Sprinting >= 0 && Dist > 1500.0 && Pawn->CurrentMovementStyle != (uint8)Sprinting)
+                Pawn->CurrentMovementStyle = (uint8)Sprinting;
+        }
+
+        // Probe: does input actually move this pawn on this version?
+        if (GSimMovementMode == -1)
+        {
+            if (AI.MoveProbeTime <= 0.f)
+            {
+                AI.MoveProbeTime = Now + 1.5f;
+                AI.MoveProbeLoc = Loc;
+            }
+            else if (Now >= AI.MoveProbeTime)
+            {
+                const double Moved = Loc.GetDistanceTo(AI.MoveProbeLoc);
+
+                if (Moved > 100.0)
+                {
+                    GSimMovementMode = 1;
+                    AIDebugLogger::Log("Navigation", "native character movement drives PlayerAI on this version (input mode)");
+                }
+                else if (++GSimMoveProbeFails >= 3)
+                {
+                    // Swept walking needs no ground traces, so a failed
+                    // input probe always falls back to it.
+                    GSimMovementMode = 0;
+                    AIDebugLogger::MissingFeature("InputMovementForPlayerAI",
+                        "input does not move pawns on this version - using engine-swept walking");
+                }
+
+                AI.MoveProbeTime = 0.f;
+            }
+        }
+
+        return false;
     }
 
-    FVector NewLoc = Loc + Dir * (Speed * DeltaSeconds);
+    // ---- Position fallback: engine-swept walking ---------------------------
+    // K2_SetActorLocation with bSweep moves the pawn's real collision
+    // capsule: walls and floors block it, stairs step up, and non-blocking
+    // meshes (tree canopies, foliage) are passed straight through. Gravity
+    // is a swept drop every step, so the pawn always rests on actual
+    // geometry - the same collision real player movement uses. No ground
+    // traces, no terrain guessing, nothing that can walk a pawn into the sky.
+    double MoveStep = Speed * DeltaSeconds;
 
-    const double TargetZ = (double)AI.CachedGroundZ + PLAYERAI_PAWN_HALF_HEIGHT;
-    const double DeltaZ = TargetZ - Loc.Z;
+    if (MoveStep > 400.0)
+        MoveStep = 400.0; // hitch guard: never leap on a long frame
 
-    if (fabs(DeltaZ) < 1200.0)
+    const double StepUp = 55.0;    // stair/kerb allowance while grounded
+    const double StepDown = 140.0; // slope follow-down allowance while grounded
+
+    FVector Want = Loc;
+    Want.X = Loc.X + Dir.X * MoveStep;
+    Want.Y = Loc.Y + Dir.Y * MoveStep;
+
+    if (AI.bPosGrounded)
+        Want.Z = Loc.Z + StepUp;
+
+    Pawn->K2_SetActorLocation(Want, true, nullptr, false);
+
+    FVector Mid = Pawn->K2_GetActorLocation();
+
+    // Vertical: integrate gravity; TryJump sets an upward velocity first.
+    AI.PosVertVel -= 2200.f * DeltaSeconds;
+
+    if (AI.PosVertVel < -3800.f)
+        AI.PosVertVel = -3800.f;
+
+    double VertDelta = (double)AI.PosVertVel * DeltaSeconds;
+
+    if (AI.bPosGrounded)
+        VertDelta -= StepUp + StepDown; // undo the lift, follow slopes down
+
+    FVector VertTo = Mid;
+    VertTo.Z = Mid.Z + VertDelta;
+
+    Pawn->K2_SetActorLocation(VertTo, true, nullptr, false);
+
+    FVector Final = Pawn->K2_GetActorLocation();
+
+    if (VertDelta < 0.0)
     {
-        double Alpha = 10.0 * DeltaSeconds;
-        if (Alpha > 1.0)
-            Alpha = 1.0;
-        NewLoc.Z = Loc.Z + DeltaZ * Alpha;
+        // A blocked drop means standing on real geometry; a completed one
+        // means airborne (ledge, jump apex) - keep falling next step.
+        const bool bOnGround = Final.Z > VertTo.Z + 1.0;
+
+        if (bOnGround)
+            AI.PosVertVel = 0.f;
+
+        AI.bPosGrounded = bOnGround;
     }
-    else
+    else if (Final.Z < VertTo.Z - 1.0)
     {
-        // Large height difference (cliff/fall) - keep the current Z and let
-        // gravity / next ground snap sort it out.
-        NewLoc.Z = Loc.Z;
+        AI.PosVertVel = 0.f; // jump bumped a ceiling: start falling
     }
 
     FRotator FaceRot{};
     FaceRot.Yaw = atan2(Dir.Y, Dir.X) * PLAYERAI_RAD_TO_DEG;
     Pawn->K2_SetActorRotation(FaceRot, false);
 
-    Pawn->K2_SetActorLocation(NewLoc, false, nullptr, true);
-
     // Velocity is replicated and drives movement animations on clients.
     if (Pawn->HasCharacterMovement() && Pawn->CharacterMovement)
     {
         FVector Vel = Dir * Speed;
-        Vel.Z = 0;
+        Vel.Z = AI.PosVertVel;
         Pawn->CharacterMovement->Velocity = Vel;
     }
 
@@ -217,48 +405,123 @@ void NavigationBehavior::StepAirMovement(PlayerAIController& AI, float DeltaSeco
     const double Dist = To.Magnitude();
     FVector Dir = Dist > 1.0 ? To / Dist : FVector(1, 0, 0);
 
+    // Every Gliding pawn is engine-managed now (native aircraft jump or the
+    // native backend's skydive): the engine handles descent, collision and
+    // landing - we only steer horizontally with input and brake edge cases.
+    // (All manual descent/position writing is gone: it tunneled pawns
+    // through terrain and fought the native glider.)
+    if (Dist > 300.0)
+        Pawn->AddMovementInput(Dir, 1.f, true);
+
     if (Pawn->HasCharacterMovement() && Pawn->CharacterMovement)
     {
-        auto CurVel = Pawn->CharacterMovement->Velocity;
+        auto Vel = Pawn->CharacterMovement->Velocity;
+        const double AnchorZ = (double)AI.LandingTarget.Z;
+        bool bAdjust = false;
 
-        double HorizSpeed = Dist > 6000.0 ? 1500.0 : (Dist * 0.25);
-        FVector NewVel = Dir * HorizSpeed;
-        NewVel.Z = CurVel.Z; // let the native skydive/glide handle fall speed
+        // Brake lethal free-falls near the ground (no glider deployed).
+        if (Vel.Z < -3200.0 && (Loc.Z - AnchorZ) < 4000.0)
+        {
+            Vel.Z = -1200.0;
+            bAdjust = true;
+        }
+        // Push barely-descending skydivers down (an input-less skydive can
+        // hang almost still - AI floating in the sky).
+        else if (Vel.Z > -400.0 && (Loc.Z - AnchorZ) > 1200.0)
+        {
+            Vel.Z = -1000.0;
+            bAdjust = true;
+        }
 
-        Pawn->CharacterMovement->Velocity = NewVel;
+        if (bAdjust)
+            Pawn->CharacterMovement->Velocity = Vel;
     }
 
-    FRotator FaceRot{};
-    FaceRot.Yaw = atan2(Dir.Y, Dir.X) * PLAYERAI_RAD_TO_DEG;
-    Pawn->K2_SetActorRotation(FaceRot, false);
+    FRotator SteerRot{};
+    SteerRot.Yaw = atan2(Dir.Y, Dir.X) * PLAYERAI_RAD_TO_DEG;
+    Pawn->K2_SetActorRotation(SteerRot, false);
 }
 
-void NavigationBehavior::TryJump(PlayerAIController& AI)
+void NavigationBehavior::TryJump(PlayerAIController& AI, float Now)
 {
-    static bool bJumpDisabled = false;
+    auto Pawn = AI.GetPawn();
+
+    if (!Pawn)
+        return;
+
+    // Native backend: a real jump through the possessed pawn.
+    if (AI.Entity.bNativeBacked)
+    {
+        NativePlayerAIBackend::Jump(AI);
+        return;
+    }
+
+    // Simulated backend with working input movement: real jump, released
+    // shortly after (a held jump makes the pawn re-jump on every landing).
+    if (GSimMovementMode != 0)
+    {
+        Pawn->Jump();
+        AI.JumpStopTime = Now + 0.30f;
+        return;
+    }
+
+    // Swept-walking fallback: a real parabolic hop over the same collision.
+    if (AI.bPosGrounded)
+    {
+        AI.PosVertVel = 680.f;
+        AI.bPosGrounded = false;
+    }
+}
+
+void NavigationBehavior::SettleIdle(PlayerAIController& AI, float Now, float DeltaSeconds)
+{
+    // Idle gravity for swept-walking pawns (with working input movement the
+    // native character movement keeps everyone grounded). Placements and
+    // teleports can leave a pawn hovering - swept drops land it on real
+    // collision, falling straight through non-blocking canopies and roofs
+    // that fooled the old ground traces.
+    if (AI.Entity.bNativeBacked || GSimMovementMode != 0 || AI.bHasMoveTarget)
+        return;
+
+    // Cheap while grounded (short probe a few times a second); per-tick
+    // integration only while actually falling.
+    if (AI.bPosGrounded)
+    {
+        if (Now < AI.NextGroundSnapTime)
+            return;
+
+        AI.NextGroundSnapTime = Now + 0.4f;
+    }
 
     auto Pawn = AI.GetPawn();
 
-    if (!Pawn || bJumpDisabled)
+    if (!Pawn)
         return;
 
-    // Standard parameterless Jump, invoked with a sized zeroed parameter
-    // buffer inside a fault guard. Jumping is flavor: when unsupported the
-    // AI simply keeps walking.
-    auto JumpFn = Pawn->GetFunction("Jump");
+    FVector Loc = Pawn->K2_GetActorLocation();
 
-    if (!JumpFn)
-    {
-        bJumpDisabled = true;
-        AIDebugLogger::MissingFeature("JumpForPlayerAI", "no Jump function on this version - PlayerAI keeps walking");
-        return;
-    }
+    AI.PosVertVel -= 2200.f * DeltaSeconds;
 
-    if (!VersionFeatureAdapter::SafeCallNoArgs(Pawn, JumpFn))
-    {
-        bJumpDisabled = true;
-        AIDebugLogger::MissingFeature("JumpForPlayerAI", "native jump faulted and was disabled - PlayerAI keeps walking");
-    }
+    if (AI.PosVertVel < -3800.f)
+        AI.PosVertVel = -3800.f;
+
+    double VertDelta = (double)AI.PosVertVel * DeltaSeconds;
+
+    if (AI.bPosGrounded)
+        VertDelta -= 40.0; // grounded probe depth
+
+    FVector VertTo = Loc;
+    VertTo.Z = Loc.Z + VertDelta;
+
+    Pawn->K2_SetActorLocation(VertTo, true, nullptr, false);
+
+    FVector Final = Pawn->K2_GetActorLocation();
+    const bool bOnGround = Final.Z > VertTo.Z + 1.0;
+
+    if (bOnGround)
+        AI.PosVertVel = 0.f;
+
+    AI.bPosGrounded = bOnGround;
 }
 
 void NavigationBehavior::CheckStuck(PlayerAIController& AI, float Now)
@@ -295,7 +558,7 @@ void NavigationBehavior::CheckStuck(PlayerAIController& AI, float Now)
                 Side.X += PlayerAIRandRange(-800.f, 800.f);
                 Side.Y += PlayerAIRandRange(-800.f, 800.f);
                 SetMoveTarget(AI, RandomPointNear(Side, 400.f));
-                TryJump(AI);
+                TryJump(AI, Now);
             }
             else if (AI.StuckCounter < PlayerAIConfig::StuckRetriesBeforeTeleport)
             {
@@ -309,17 +572,35 @@ void NavigationBehavior::CheckStuck(PlayerAIController& AI, float Now)
             else
             {
                 // Recovery 3 (last resort): teleport to a valid point near
-                // the target and force a replication update.
+                // the target - ONLY onto traced ground and NEVER upward.
+                // The trace happily reports tree canopies and prop tops as
+                // "ground"; teleporting up there is what made AI pop into
+                // the air and float around the treetops.
                 bool bFound = false;
                 FVector Ground = VersionFeatureAdapter::FindGroundLocation(AI.MoveTarget, bFound, Pawn);
-                FVector SafePoint = bFound ? Ground : Loc;
-                SafePoint.Z += 100.f;
 
-                AIDebugLogger::Log("Navigation", "%s teleport recovery to (%.0f, %.0f, %.0f) after repeated stuck detection",
-                    AI.Entity.DisplayName.c_str(), SafePoint.X, SafePoint.Y, SafePoint.Z);
+                if (bFound && Ground.Z <= Loc.Z + 250.0)
+                {
+                    FVector SafePoint = Ground;
+                    SafePoint.Z += 100.f;
 
-                Pawn->K2_TeleportTo(SafePoint, Pawn->K2_GetActorRotation(), false, true);
-                ReplicationBehavior::PushTeleportUpdate(Pawn);
+                    AIDebugLogger::Log("Navigation", "%s teleport recovery to (%.0f, %.0f, %.0f) after repeated stuck detection",
+                        AI.Entity.DisplayName.c_str(), SafePoint.X, SafePoint.Y, SafePoint.Z);
+
+                    Pawn->K2_TeleportTo(SafePoint, Pawn->K2_GetActorRotation(), false, true);
+                    ReplicationBehavior::PushTeleportUpdate(Pawn);
+                    AI.PosVertVel = 0.f;
+                    AI.bPosGrounded = false; // swept gravity re-verifies footing
+                }
+                else
+                {
+                    // Upward or unknown destination: abandon this goal and
+                    // walk somewhere else instead of teleporting badly.
+                    ClearMoveTarget(AI);
+                    AI.LootContainerTarget = nullptr;
+                    AI.LootPickupTarget = nullptr;
+                }
+
                 AI.StuckCounter = 0;
             }
         }
@@ -399,7 +680,20 @@ void PreMatchBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSn
     case EPlayerAIState::PreMatchIdle:
     {
         if (Now < AI.PreMatchActionEndTime)
+        {
+            // Idle look-around: turn left/right occasionally like a real
+            // player scanning the island.
+            if (PlayerAIRandChance(0.06f))
+            {
+                FRotator LookRot = Pawn->K2_GetActorRotation();
+                LookRot.Yaw = LookRot.Yaw + PlayerAIRandRange(-130.f, 130.f);
+                Pawn->K2_SetActorRotation(LookRot, false);
+
+                if (AI.Entity.PC)
+                    AI.Entity.PC->SetControlRotation(LookRot);
+            }
             break;
+        }
 
         // Never stand still for too long: pick the next natural action.
         if (PlayerAIRandChance(PlayerAIConfig::PreMatchEmoteChance) && EmoteBehavior::TryStartEmote(AI, Now))
@@ -427,7 +721,7 @@ void PreMatchBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSn
         }
 
         if (PlayerAIRandChance(PlayerAIConfig::PreMatchJumpChance))
-            NavigationBehavior::TryJump(AI);
+            NavigationBehavior::TryJump(AI, Now);
 
         NavigationBehavior::CheckStuck(AI, Now);
         break;
@@ -453,6 +747,29 @@ void PreMatchBehavior::Tick(PlayerAIController& AI, float Now, float DeltaSecond
 {
     if (AI.GetState() == EPlayerAIState::PreMatchWalking)
         NavigationBehavior::StepMovement(AI, Now, DeltaSeconds, AI.Skill.MoveSpeed * 0.85f);
+
+    // Island edge rescue: anyone who slips off the pre-match island gets
+    // put back at their spawn point instead of dying in the void.
+    auto Pawn = AI.GetPawn();
+
+    if (Pawn)
+    {
+        FVector Loc = Pawn->K2_GetActorLocation();
+
+        if (Loc.Z < AI.HomeLocation.Z - 3000.0)
+        {
+            FVector Back = AI.HomeLocation;
+            Back.Z = Back.Z + 100.0;
+
+            Pawn->K2_TeleportTo(Back, Pawn->K2_GetActorRotation(), false, true);
+            ReplicationBehavior::PushTeleportUpdate(Pawn);
+            NavigationBehavior::ClearMoveTarget(AI);
+            AI.PosVertVel = 0.f;
+            AI.bPosGrounded = false; // swept gravity re-verifies footing
+
+            AIDebugLogger::Verbose("Navigation", "%s rescued from the island edge", AI.Entity.DisplayName.c_str());
+        }
+    }
 }
 
 // ============================================================================
@@ -467,6 +784,7 @@ void TransportBehavior::OnTransportPhaseStarted(PlayerAIController& AI, float No
     AI.bEnteredTransport = false;
     AI.bVirtualTransport = false;
     AI.bJumpedFromTransport = false;
+    AI.bAirPawnSeen = false;
     AI.bThankedDriver = false;
     NavigationBehavior::ClearMoveTarget(AI);
 
@@ -483,50 +801,23 @@ void TransportBehavior::OnTransportPhaseStarted(PlayerAIController& AI, float No
 
 void TransportBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSnapshot& World)
 {
-    auto PC = AI.Entity.PC;
-
-    if (!PC)
+    if (!AI.Entity.IsValid())
         return;
 
     switch (AI.GetState())
     {
     case EPlayerAIState::WaitingForTransport:
     {
-        // The native flow may have put us into the aircraft already.
-        if (VersionFeatureAdapter::IsInAircraft(PC))
-        {
-            AI.bEnteredTransport = true;
-            AI.SetState(EPlayerAIState::InTransport, "native aircraft entry");
-            break;
-        }
+        // Parked-seat transport model (works on every version): the warmup
+        // pawn stays parked while the AI is "in the bus", and at jump time
+        // it is placed at the aircraft's position and skydives down.
+        NavigationBehavior::ClearMoveTarget(AI);
 
-        // Remove the leftover warmup pawn (real player pawns are removed by
-        // the native transport flow; ours may linger on versions where that
-        // flow ignores server side players).
-        auto Pawn = AI.GetPawn();
+        if (AI.Entity.bNativeBacked)
+            NativePlayerAIBackend::StopFire(AI);
 
-        if (Pawn)
-        {
-            Pawn->K2_DestroyActor();
-
-            if (PC->HasMyFortPawn())
-                PC->MyFortPawn = nullptr;
-        }
-
-        if (VersionFeatureAdapter::EnterAircraft(PC))
-        {
-            AI.bEnteredTransport = true;
-            AI.SetState(EPlayerAIState::InTransport, "entered aircraft");
-        }
-        else
-        {
-            // Safe fallback: simulated transport seat. The AI joins the
-            // match at its landing target when its jump time arrives.
-            AI.bVirtualTransport = true;
-            AI.bEnteredTransport = true;
-            AIDebugLogger::MissingFeature("AircraftEntryForPlayerAI", "using simulated transport seat + landing placement");
-            AI.SetState(EPlayerAIState::InTransport, "simulated transport seat");
-        }
+        AI.bEnteredTransport = true;
+        AI.SetState(EPlayerAIState::InTransport, "boarded transport");
         break;
     }
 
@@ -537,9 +828,9 @@ void TransportBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldS
         {
             AI.bThankedDriver = true;
 
-            if (!AI.bVirtualTransport && PlayerAIRandChance(PlayerAIConfig::ThankDriverChance))
+            if (PlayerAIRandChance(PlayerAIConfig::ThankDriverChance))
             {
-                if (VersionFeatureAdapter::ThankDriver(PC))
+                if (VersionFeatureAdapter::ThankDriver(AI.Entity.PC))
                     AIDebugLogger::Verbose("Transport", "%s thanked the driver", AI.Entity.DisplayName.c_str());
             }
         }
@@ -560,23 +851,66 @@ void TransportBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldS
                     (PlayerAIConfig::JumpDistanceMax - PlayerAIConfig::JumpDistanceMin) * ((AI.AIIndex * 37) % 100) / 100.0;
 
                 bWantsJump = Dist <= JumpWindow;
+
+                // The drop window is about to close: bail out now. Anyone
+                // still "aboard" when the aircraft finishes dies with the
+                // spawn island teardown.
+                if (!bWantsJump && Aircraft->HasDropEndTime() && Aircraft->DropEndTime > 1.f &&
+                    Now >= Aircraft->DropEndTime - 2.f)
+                    bWantsJump = true;
             }
         }
 
         if (bWantsJump)
         {
             AI.JumpedAtTime = Now;
+            AI.bJumpedFromTransport = true;
 
-            if (!AI.bVirtualTransport && VersionFeatureAdapter::JumpFromAircraft(PC))
+            if (AI.Entity.bNativeBacked)
             {
-                AI.bJumpedFromTransport = true;
-                AI.SetState(EPlayerAIState::JumpingFromTransport, "jumped from transport");
+                // Native bots are not aircraft passengers (they live in
+                // AliveBots) - simulated seat + native skydive.
+                auto Aircraft = VersionFeatureAdapter::GetAircraft();
+                FVector Start = Aircraft ? Aircraft->K2_GetActorLocation() : (AI.LandingTarget + FVector(0, 0, 15000.f));
+
+                if (Start.Z < AI.LandingTarget.Z + 5000.0)
+                    Start.Z = AI.LandingTarget.Z + 8000.0;
+
+                NativePlayerAIBackend::SkydiveFrom(AI, Start);
+                AI.SetState(EPlayerAIState::Gliding, "jumped from transport");
+                break;
+            }
+
+            // Simulated tier: PlayerAI are never real aircraft passengers
+            // (the EnterAircraft hook skips them - anyone still flagged
+            // aboard when the drop zone ends is killed by the native
+            // aircraft; the jump RPC also rejects connectionless
+            // controllers on old versions). The jump is a fresh pawn at
+            // the aircraft that skydives down through the engine's own
+            // skydive/glider/landing flow.
+            auto OldPawn = AI.GetPawn();
+
+            if (OldPawn)
+            {
+                // The parked warmup pawn is a leftover ghost.
+                OldPawn->K2_DestroyActor();
+            }
+
+            if (VersionFeatureAdapter::JumpFromAircraft(AI.Entity.PC) && AI.GetPawn())
+            {
+                if (MagnesiumPlayerAISpawner::FinishAircraftJumpPawn(AI))
+                    AI.SetState(EPlayerAIState::Gliding, "skydiving from aircraft");
+                else
+                    AI.SetState(EPlayerAIState::SearchingForLoot, "direct landing placement");
+            }
+            else if (MagnesiumPlayerAISpawner::SpawnPawnAt(AI, AI.LandingTarget, true))
+            {
+                // No jump pawn on this version: direct landing placement.
+                AI.SetState(EPlayerAIState::SearchingForLoot, "direct landing placement");
             }
             else
             {
-                // Fallback: place the AI directly at its landing spot.
-                AI.bJumpedFromTransport = true;
-                AI.SetState(EPlayerAIState::JumpingFromTransport, "simulated jump");
+                AI.bJumpedFromTransport = false; // retry next think
             }
         }
         break;
@@ -584,30 +918,22 @@ void TransportBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldS
 
     case EPlayerAIState::JumpingFromTransport:
     {
+        // Waiting for the native jump to hand us the skydiving pawn.
         auto Pawn = AI.GetPawn();
 
-        if (Pawn && !AI.bVirtualTransport)
+        if (Pawn)
         {
-            // Native jump produced a skydiving pawn.
             AI.SetState(EPlayerAIState::Gliding, "skydiving");
             break;
         }
 
-        // Simulated seat or the native jump did not produce a pawn in time:
-        // spawn the pawn at the landing target (logged fallback).
-        if (AI.bVirtualTransport || Now - AI.JumpedAtTime > 3.f)
+        if (Now - AI.JumpedAtTime > 4.f)
         {
-            auto NewPawn = MagnesiumPlayerAISpawner::SpawnPawnAt(AI, AI.LandingTarget, true);
-
-            if (NewPawn)
-            {
-                AI.SetState(EPlayerAIState::Landing, "fallback landing placement");
-            }
-            else if (Now - AI.JumpedAtTime > 10.f)
-            {
-                AIDebugLogger::Error("Transport", "%s could not enter the match - retrying landing placement", AI.Entity.DisplayName.c_str());
-                AI.JumpedAtTime = Now; // retry loop, never crash
-            }
+            // The native jump produced nothing: direct placement fallback.
+            if (MagnesiumPlayerAISpawner::SpawnPawnAt(AI, AI.LandingTarget, true))
+                AI.SetState(EPlayerAIState::SearchingForLoot, "fallback landing placement");
+            else
+                AI.JumpedAtTime = Now; // retry, never crash
         }
         break;
     }
@@ -620,6 +946,28 @@ void TransportBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldS
 // ============================================================================
 // LandingBehavior
 // ============================================================================
+
+// Force-ends a stuck skydive/glider through the engine's own landing path
+// (fault guarded) - without it a pawn whose landing we assisted can stand
+// on the ground frozen with the glider still out.
+// (Kept free of unwindable C++ objects so SEH is allowed here.)
+static void PlayerAITryEndSkydiving(AFortPlayerPawnAthena* Pawn)
+{
+    if (!Pawn || !AFortPlayerPawnAthena::EndSkydivingOG)
+        return;
+
+    GPlayerAIGuardedNativeCallDepth++;
+
+    __try
+    {
+        AFortPlayerPawnAthena::EndSkydivingOG(Pawn);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+}
 
 static std::vector<FPlayerAILandingCluster> LandingClusters;
 
@@ -749,10 +1097,23 @@ bool LandingBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSna
 {
     auto Pawn = AI.GetPawn();
 
+    if (Pawn)
+        AI.bAirPawnSeen = true;
+
     if (!Pawn)
     {
-        // Pawn vanished mid-air (e.g. version quirk): use the fallback
-        // landing placement instead of freezing.
+        // An airborne pawn existed and is now gone: it died mid-air (fall,
+        // void, real damage) through the native pipeline - accept the death
+        // so alive counts stay correct. Only when the native jump never
+        // produced a pawn do we use the landing placement fallback.
+        if (AI.bAirPawnSeen)
+        {
+            AI.bDeathHandled = true;
+            AI.SetState(EPlayerAIState::Dead, "died before landing");
+            EliminationBehavior::OnEliminated(AI, Now);
+            return false;
+        }
+
         if (Now - AI.JumpedAtTime > 4.f)
         {
             auto NewPawn = MagnesiumPlayerAISpawner::SpawnPawnAt(AI, AI.LandingTarget, true);
@@ -766,23 +1127,70 @@ bool LandingBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSna
         return false;
     }
 
+    // Mid-air death with the pawn still present goes through the normal
+    // death handling (never respawned).
+    if (Pawn->GetHealth() <= 0.f)
+    {
+        DamageBehavior::DetectDeath(AI, Now);
+        return false;
+    }
+
     FVector Loc = Pawn->K2_GetActorLocation();
+
+    bool bGroundKnown = false;
+    FVector Ground{};
+    {
+        bool bFound = false;
+        Ground = VersionFeatureAdapter::FindGroundLocation(Loc, bFound, Pawn);
+        bGroundKnown = bFound;
+    }
+
+    // Trace-free anchor: the landing target's Z comes from real container
+    // positions, so it IS terrain height at that spot.
+    const double AnchorZ = AI.bHasLandingTarget ? (double)AI.LandingTarget.Z : (double)AI.CachedGroundZ;
+    const double HeightAboveGround = bGroundKnown ? (Loc.Z - Ground.Z) : (Loc.Z - AnchorZ);
 
     bool bStillAirborne = false;
 
-    if (Pawn->HasbIsSkydiving())
-        bStillAirborne = Pawn->bIsSkydiving;
+    if (Pawn->HasbIsSkydiving() && Pawn->bIsSkydiving)
+        bStillAirborne = true;
     else
+        bStillAirborne = HeightAboveGround > 500.0;
+
+    // Soft landing assist - ONLY for a genuine fast free-fall with no
+    // glider. Gliding pawns are engine-managed; interrupting a working
+    // glider froze pawns on the ground with the glider still out.
+    bool bNeedsAssist = false;
+
+    if (Pawn->HasCharacterMovement() && Pawn->CharacterMovement)
+        bNeedsAssist = Pawn->CharacterMovement->Velocity.Z < -3200.0;
+
+    if (bStillAirborne && bNeedsAssist && HeightAboveGround < 900.0)
     {
-        bool bFound = false;
-        FVector Ground = VersionFeatureAdapter::FindGroundLocation(Loc, bFound, Pawn);
-        bStillAirborne = bFound && (Loc.Z - Ground.Z) > 500.0;
+        FVector LandSpot = Loc;
+        LandSpot.Z = (bGroundKnown ? Ground.Z : AnchorZ) + 100.0;
+
+        Pawn->K2_TeleportTo(LandSpot, Pawn->K2_GetActorRotation(), false, true);
+        AI.PosVertVel = 0.f;
+        AI.bPosGrounded = false; // swept gravity re-verifies footing
+
+        if (Pawn->HasCharacterMovement() && Pawn->CharacterMovement)
+            Pawn->CharacterMovement->Velocity = FVector{};
+
+        ReplicationBehavior::PushTeleportUpdate(Pawn);
+        Loc = LandSpot;
+        bStillAirborne = false;
     }
 
     if (!bStillAirborne)
     {
+        // Glider cleanup: if the skydive state is still set once we are on
+        // the ground, end it through the engine's own landing path.
+        if (Pawn->HasbIsSkydiving() && Pawn->bIsSkydiving)
+            PlayerAITryEndSkydiving(Pawn);
+
         AIDebugLogger::Verbose("Landing", "%s landed at (%.0f, %.0f)", AI.Entity.DisplayName.c_str(), Loc.X, Loc.Y);
-        AI.CachedGroundZ = (float)Loc.Z - PLAYERAI_PAWN_HALF_HEIGHT;
+        AI.CachedGroundZ = bGroundKnown ? (float)Ground.Z : (float)(Loc.Z - PLAYERAI_PAWN_HALF_HEIGHT);
         AI.LootingSinceTime = Now;
         AI.SetState(EPlayerAIState::SearchingForLoot, "landed");
         return true;
@@ -813,6 +1221,67 @@ bool LandingBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSna
 // ============================================================================
 // InventoryBehavior
 // ============================================================================
+
+// Inventory source differs per backend: simulated AI use the player world
+// inventory, native bots use the bot controller's own inventory.
+static AFortInventory* PlayerAIGetInventory(PlayerAIController& AI)
+{
+    if (AI.Entity.bNativeBacked)
+    {
+        auto Bot = NativePlayerAIBackend::GetBotController(AI);
+        return Bot && Bot->HasInventory() ? Bot->Inventory : nullptr;
+    }
+
+    return AI.Entity.PC ? AI.Entity.PC->WorldInventory : nullptr;
+}
+
+// Loaded ammo of the currently equipped entry (-1 when unknown) - used to
+// detect whether real trigger fire consumes ammo on this version.
+static int PlayerAIGetEquippedLoadedAmmo(PlayerAIController& AI)
+{
+    auto Inventory = PlayerAIGetInventory(AI);
+
+    if (!Inventory)
+        return -1;
+
+    auto& Entries = Inventory->Inventory.ReplicatedEntries;
+
+    for (int i = 0; i < Entries.Num(); i++)
+    {
+        auto Entry = (FFortItemEntry*)((PBYTE)Entries.GetData() + (i * FFortItemEntry::Size()));
+
+        if (!Entry)
+            continue;
+
+        if (Entry->ItemGuid == AI.EquippedItemGuid)
+            return Entry->HasLoadedAmmo() ? Entry->LoadedAmmo : -1;
+    }
+
+    return -1;
+}
+
+static void PlayerAIEquipEntry(PlayerAIController& AI, FFortItemEntry* Entry)
+{
+    if (!Entry || !Entry->ItemDefinition)
+        return;
+
+    if (AI.Entity.bNativeBacked)
+    {
+        auto Pawn = AI.GetPawn();
+
+        if (Pawn)
+            Pawn->EquipWeaponDefinition((UFortItemDefinition*)Entry->ItemDefinition, Entry->ItemGuid);
+        return;
+    }
+
+    auto PC = AI.Entity.PC;
+
+    if (!PC)
+        return;
+
+    PC->ServerExecuteInventoryItem(Entry->ItemGuid);
+    PC->ClientEquipItem(Entry->ItemGuid, true);
+}
 
 static std::string PlayerAIToLowerName(const UFortItemDefinition* ItemDef)
 {
@@ -914,15 +1383,13 @@ bool InventoryBehavior::WantsItem(PlayerAIController& AI, const UFortItemDefinit
 
 bool InventoryBehavior::TakePickup(PlayerAIController& AI, AFortPickupAthena* Pickup)
 {
-    auto PC = AI.Entity.PC;
-
-    if (!PC || !Pickup)
+    if (!Pickup)
         return false;
 
     if (Pickup->HasbPickedUp() && Pickup->bPickedUp)
         return false;
 
-    auto Inventory = PC->WorldInventory;
+    auto Inventory = PlayerAIGetInventory(AI);
 
     if (!Inventory)
         return false;
@@ -951,12 +1418,12 @@ bool InventoryBehavior::TakePickup(PlayerAIController& AI, AFortPickupAthena* Pi
 
 void InventoryBehavior::RefreshAndEquipBest(PlayerAIController& AI, bool bPreferCloseRange)
 {
-    auto PC = AI.Entity.PC;
+    auto Inventory = PlayerAIGetInventory(AI);
 
-    if (!PC || !PC->WorldInventory)
+    if (!Inventory)
         return;
 
-    auto& Entries = PC->WorldInventory->Inventory.ReplicatedEntries;
+    auto& Entries = Inventory->Inventory.ReplicatedEntries;
 
     AI.bHasCloseRange = false;
     AI.bHasMediumRange = false;
@@ -1037,8 +1504,7 @@ void InventoryBehavior::RefreshAndEquipBest(PlayerAIController& AI, bool bPrefer
     if (AI.EquippedRole != EPlayerAIWeaponRole::None && !PlayerAIRandChance(AI.Skill.WeaponSwapSkill))
         return;
 
-    PC->ServerExecuteInventoryItem(ToEquip->ItemGuid);
-    PC->ClientEquipItem(ToEquip->ItemGuid, true);
+    PlayerAIEquipEntry(AI, ToEquip);
 
     AI.EquippedItemGuid = ToEquip->ItemGuid;
     AI.EquippedRole = ClassifyItem(ToEquip->ItemDefinition);
@@ -1047,14 +1513,49 @@ void InventoryBehavior::RefreshAndEquipBest(PlayerAIController& AI, bool bPrefer
     AIDebugLogger::Verbose("Inventory", "%s equipped %s", AI.Entity.DisplayName.c_str(), ToEquip->ItemDefinition->Name.ToString().c_str());
 }
 
+bool InventoryBehavior::EquipHealingItem(PlayerAIController& AI, bool bShield)
+{
+    auto Inventory = PlayerAIGetInventory(AI);
+
+    if (!Inventory)
+        return false;
+
+    auto& Entries = Inventory->Inventory.ReplicatedEntries;
+
+    // Preferred type first, the other kind as fallback.
+    for (int Pass = 0; Pass < 2; Pass++)
+    {
+        const auto WantedRole = (Pass == 0) == bShield ? EPlayerAIWeaponRole::Shield : EPlayerAIWeaponRole::Healing;
+
+        for (int i = 0; i < Entries.Num(); i++)
+        {
+            auto Entry = (FFortItemEntry*)((PBYTE)Entries.GetData() + (i * FFortItemEntry::Size()));
+
+            if (!Entry || !Entry->ItemDefinition)
+                continue;
+
+            if (ClassifyItem(Entry->ItemDefinition) != WantedRole)
+                continue;
+
+            PlayerAIEquipEntry(AI, Entry);
+
+            AI.EquippedItemGuid = Entry->ItemGuid;
+            AI.EquippedRole = WantedRole;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 float InventoryBehavior::ConsumeHealingItem(PlayerAIController& AI, bool bShield)
 {
-    auto PC = AI.Entity.PC;
+    auto Inventory = PlayerAIGetInventory(AI);
 
-    if (!PC || !PC->WorldInventory)
+    if (!Inventory)
         return 0.f;
 
-    auto& Entries = PC->WorldInventory->Inventory.ReplicatedEntries;
+    auto& Entries = Inventory->Inventory.ReplicatedEntries;
 
     for (int i = 0; i < Entries.Num(); i++)
     {
@@ -1071,11 +1572,11 @@ float InventoryBehavior::ConsumeHealingItem(PlayerAIController& AI, bool bShield
         if (Entry->HasCount() && Entry->Count > 1)
         {
             Entry->Count = Entry->Count - 1;
-            PC->WorldInventory->UpdateEntry(*Entry);
+            Inventory->UpdateEntry(*Entry);
         }
         else
         {
-            PC->WorldInventory->Remove(Entry->ItemGuid);
+            Inventory->Remove(Entry->ItemGuid);
         }
 
         if (bShield)
@@ -1429,6 +1930,30 @@ void ZoneRotationBehavior::TickStormDamage(PlayerAIController& AI, float Now, FP
     if (Health <= 0.f)
         return;
 
+    // The fallback may only ever damage once the storm has actually CLOSED
+    // on its target circle. Before that, standing outside the next circle
+    // is completely safe - damaging there was killing PlayerAI shortly
+    // after they landed.
+    bool bStormClosed = false;
+
+    if (World.GameMode && World.GameMode->HasSafeZoneIndicator() && World.GameMode->SafeZoneIndicator)
+    {
+        auto Indicator = World.GameMode->SafeZoneIndicator;
+
+        if (Indicator->HasSafeZoneFinishShrinkTime())
+        {
+            const float Finish = Indicator->SafeZoneFinishShrinkTime;
+            bStormClosed = Finish > 1.f && Now >= Finish;
+        }
+    }
+
+    if (!bStormClosed)
+    {
+        AI.bOutsideZone = false;
+        AI.bStormFallbackActive = false;
+        return;
+    }
+
     const bool bInside = VersionFeatureAdapter::IsInsideSafeZone(Pawn->K2_GetActorLocation());
 
     if (bInside)
@@ -1483,9 +2008,16 @@ bool CombatBehavior::IsValidEnemy(PlayerAIController& AI, AFortPlayerControllerA
     if (!Enemy || Enemy == AI.Entity.PC)
         return false;
 
-    auto EnemyPawn = Enemy->HasMyFortPawn() && Enemy->MyFortPawn ? Enemy->MyFortPawn : Enemy->Pawn;
+    // NOTE: only AController base properties (Pawn/PlayerState) are safe
+    // here - the enemy may be a real player controller, a simulated PlayerAI
+    // controller or a native bot controller.
+    auto EnemyPawn = Enemy->Pawn;
 
     if (!EnemyPawn || EnemyPawn->GetHealth() <= 0.f)
+        return false;
+
+    // Never target players who are still skydiving/gliding (bus jumpers).
+    if (EnemyPawn->HasbIsSkydiving() && EnemyPawn->bIsSkydiving)
         return false;
 
     auto MyPS = AI.Entity.PlayerState;
@@ -1505,9 +2037,16 @@ bool CombatBehavior::IsValidEnemy(PlayerAIController& AI, AFortPlayerControllerA
 
 AFortPlayerControllerAthena* CombatBehavior::DetectEnemy(PlayerAIController& AI, FPlayerAIWorldSnapshot& World)
 {
+    // No combat while mid-drop: skydiving/gliding AI never pick fights.
+    if (PlayerAIIsAirState(AI.GetState()))
+        return nullptr;
+
     auto Pawn = AI.GetPawn();
 
     if (!Pawn || !World.GameMode)
+        return nullptr;
+
+    if (Pawn->HasbIsSkydiving() && Pawn->bIsSkydiving)
         return nullptr;
 
     FVector Loc = Pawn->K2_GetActorLocation();
@@ -1515,32 +2054,39 @@ AFortPlayerControllerAthena* CombatBehavior::DetectEnemy(PlayerAIController& AI,
     AFortPlayerControllerAthena* Best = nullptr;
     double BestDist = AI.Skill.DetectionRange;
 
-    // ONE shared detection path for real human players and other PlayerAI
-    // players: everyone in the alive players list is a potential enemy.
-    for (auto& Uncasted : World.GameMode->AlivePlayers)
-    {
-        auto Enemy = (AFortPlayerControllerAthena*)Uncasted;
+    // ONE shared detection path for real human players, simulated PlayerAI
+    // and native-bot PlayerAI: both alive lists are scanned.
+    auto ScanList = [&](TArray<AActor*>& List)
+        {
+            for (auto& Uncasted : List)
+            {
+                auto Enemy = (AFortPlayerControllerAthena*)Uncasted;
 
-        if (!IsValidEnemy(AI, Enemy))
-            continue;
+                if (!IsValidEnemy(AI, Enemy))
+                    continue;
 
-        auto EnemyPawn = Enemy->HasMyFortPawn() && Enemy->MyFortPawn ? Enemy->MyFortPawn : Enemy->Pawn;
-        const double Dist = Loc.GetDistanceTo(EnemyPawn->K2_GetActorLocation());
+                auto EnemyPawn = Enemy->Pawn;
+                const double Dist = Loc.GetDistanceTo(EnemyPawn->K2_GetActorLocation());
 
-        if (Dist >= BestDist)
-            continue;
+                if (Dist >= BestDist)
+                    continue;
 
-        // Distance based spotting: far targets are noticed less reliably
-        // (stands in for visibility/sound cues on versions without cheap
-        // trace support).
-        const float SpotChance = Dist < 4000.0 ? 1.f : (float)(1.0 - (Dist / AI.Skill.DetectionRange) * 0.6);
+                // Distance based spotting: far targets are noticed less
+                // reliably (stands in for visibility/sound cues).
+                const float SpotChance = Dist < 4000.0 ? 1.f : (float)(1.0 - (Dist / AI.Skill.DetectionRange) * 0.6);
 
-        if (!PlayerAIRandChance(SpotChance))
-            continue;
+                if (!PlayerAIRandChance(SpotChance))
+                    continue;
 
-        BestDist = Dist;
-        Best = Enemy;
-    }
+                BestDist = Dist;
+                Best = Enemy;
+            }
+        };
+
+    ScanList(World.GameMode->AlivePlayers);
+
+    if (World.GameMode->HasAliveBots())
+        ScanList(World.GameMode->AliveBots);
 
     return Best;
 }
@@ -1553,6 +2099,21 @@ static double PlayerAIPreferredCombatRange(EPlayerAIWeaponRole Role)
     case EPlayerAIWeaponRole::LongRange: return 9000.0;
     case EPlayerAIWeaponRole::Explosive: return 3500.0;
     default: return 2500.0;
+    }
+}
+
+// Maximum distance at which simulated shots may apply damage - shots are
+// not real tracer fire (see the TODO in CombatBehavior::Tick), so damage is
+// limited to distances where being hit feels plausible.
+static double PlayerAIMaxDamageRange(EPlayerAIWeaponRole Role)
+{
+    switch (Role)
+    {
+    case EPlayerAIWeaponRole::CloseRange: return 1400.0;   // ~14m
+    case EPlayerAIWeaponRole::LongRange: return 14000.0;   // ~140m
+    case EPlayerAIWeaponRole::MediumRange: return 8000.0;  // ~80m
+    case EPlayerAIWeaponRole::Explosive: return 6000.0;
+    default: return 4000.0;
     }
 }
 
@@ -1675,7 +2236,7 @@ void CombatBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSnap
             break;
         }
 
-        auto EnemyPawn = AI.CombatTarget->HasMyFortPawn() && AI.CombatTarget->MyFortPawn ? AI.CombatTarget->MyFortPawn : AI.CombatTarget->Pawn;
+        auto EnemyPawn = AI.CombatTarget->Pawn;
 
         if (!EnemyPawn)
             break;
@@ -1758,6 +2319,15 @@ void CombatBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSnap
         AI.CombatState = EPlayerAICombatState::Healing;
         NavigationBehavior::ClearMoveTarget(AI);
 
+        // Hold the healing item in hand while healing so it reads correctly
+        // to nearby players.
+        if (!AI.bHealingItemEquipped)
+        {
+            AI.bHealingItemEquipped = true;
+            const bool bShieldPreview = Pawn->GetShield() < 50.f && AI.ShieldItemCount > 0;
+            InventoryBehavior::EquipHealingItem(AI, bShieldPreview);
+        }
+
         if (Now >= AI.ActionEndTime)
         {
             const float Shield = Pawn->GetShield();
@@ -1790,6 +2360,11 @@ void CombatBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSnap
                 ReplicationBehavior::PushHealthShieldUpdate(Pawn);
                 AIDebugLogger::Verbose("Combat", "%s healed (%s)", AI.Entity.DisplayName.c_str(), bShield ? "shield" : "health");
             }
+
+            // Put the weapon back in hand.
+            AI.bHealingItemEquipped = false;
+            AI.EquippedRole = EPlayerAIWeaponRole::None; // force the re-equip
+            InventoryBehavior::RefreshAndEquipBest(AI, false);
 
             AI.SetState(AI.CombatTarget ? EPlayerAIState::EngagingEnemy : EPlayerAIState::SearchingForLoot, "healing done");
         }
@@ -1861,15 +2436,41 @@ void CombatBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSnap
 
 void CombatBehavior::Tick(PlayerAIController& AI, float Now, float DeltaSeconds, FPlayerAIWorldSnapshot& World)
 {
+    // Release held native jumps (runs every tick for every AI; a jump left
+    // pressed makes the pawn bunny-hop forever).
+    if (AI.JumpStopTime > 0.f && Now >= AI.JumpStopTime)
+    {
+        AI.JumpStopTime = 0.f;
+
+        if (auto JumpPawn = AI.GetPawn())
+            JumpPawn->StopJumping();
+    }
+
     if (AI.GetState() != EPlayerAIState::EngagingEnemy)
+    {
+        // Never leave a trigger held or aim pitch applied outside combat.
+        if (AI.bNativeFiring)
+            NativePlayerAIBackend::StopFire(AI);
+
+        auto IdlePawn = AI.GetPawn();
+
+        if (IdlePawn && IdlePawn->HasRemoteViewPitch() && IdlePawn->RemoteViewPitch != 0)
+            IdlePawn->RemoteViewPitch = 0;
+
         return;
+    }
 
     auto Pawn = AI.GetPawn();
 
     if (!Pawn || !IsValidEnemy(AI, AI.CombatTarget))
-        return;
+    {
+        if (AI.Entity.bNativeBacked && AI.bNativeFiring)
+            NativePlayerAIBackend::StopFire(AI);
 
-    auto EnemyPawn = AI.CombatTarget->HasMyFortPawn() && AI.CombatTarget->MyFortPawn ? AI.CombatTarget->MyFortPawn : AI.CombatTarget->Pawn;
+        return;
+    }
+
+    auto EnemyPawn = AI.CombatTarget->Pawn;
 
     if (!EnemyPawn)
         return;
@@ -1887,12 +2488,121 @@ void CombatBehavior::Tick(PlayerAIController& AI, float Now, float DeltaSeconds,
         FRotator FaceRot{};
         FaceRot.Yaw = atan2(Dir.Y, Dir.X) * PLAYERAI_RAD_TO_DEG;
         Pawn->K2_SetActorRotation(FaceRot, false);
+
+        if (!AI.Entity.bNativeBacked && AI.Entity.PC)
+            AI.Entity.PC->SetControlRotation(FaceRot);
+    }
+
+    // Replicated aim pitch so the AI visibly looks up/down at its target.
+    if (Pawn->HasRemoteViewPitch())
+    {
+        FVector FlatTo = EnemyLoc - Loc;
+        const double Flat2D = sqrt(FlatTo.X * FlatTo.X + FlatTo.Y * FlatTo.Y);
+        double PitchDeg = atan2((double)EnemyLoc.Z - ((double)Loc.Z + 60.0), Flat2D > 1.0 ? Flat2D : 1.0) * PLAYERAI_RAD_TO_DEG;
+
+        if (PitchDeg < 0.0)
+            PitchDeg += 360.0;
+
+        Pawn->RemoteViewPitch = (uint8)(PitchDeg * 256.0 / 360.0);
+    }
+
+    // Native backend: aim with skill-based error and pull the REAL trigger.
+    // Bullets, damage, kill feed and kill credit are all the engine's own -
+    // no simulated damage is applied at all.
+    if (AI.Entity.bNativeBacked)
+    {
+        if (Now < AI.ReactionReadyTime)
+            return;
+
+        if (Dist > AI.Skill.EngageRange)
+        {
+            NativePlayerAIBackend::StopFire(AI);
+            return;
+        }
+
+        FVector AimPoint = EnemyLoc;
+        const float AimError = (1.f - AI.Skill.AimAccuracy) * (float)(60.0 + Dist * 0.035);
+        AimPoint.X += PlayerAIRandRange(-AimError, AimError);
+        AimPoint.Y += PlayerAIRandRange(-AimError, AimError);
+        AimPoint.Z += PlayerAIRandRange(-AimError * 0.5f, AimError * 0.75f);
+        NativePlayerAIBackend::SetFocalPoint(AI, AimPoint);
+
+        if (Now >= AI.NextShotTime)
+        {
+            if (AI.bNativeFiring)
+            {
+                // End the burst, breathe, repeat.
+                NativePlayerAIBackend::StopFire(AI);
+                AI.NextShotTime = Now + PlayerAIFireInterval(AI.EquippedRole) * PlayerAIRandRange(0.8f, 1.5f);
+            }
+            else
+            {
+                NativePlayerAIBackend::StartFire(AI);
+                AI.NextShotTime = Now + PlayerAIRandRange(0.25f, 0.9f);
+            }
+        }
+        return;
+    }
+
+    // ---- Simulated backend fire ------------------------------------------
+    // Release the previous trigger tap and evaluate the real-fire probe:
+    // when trigger fire consumes ammo, the engine's bullets are real - and
+    // simulated damage turns itself off for the session.
+    if (AI.bNativeFiring && Now >= AI.FireTapEndTime)
+    {
+        NativePlayerAIBackend::StopFire(AI);
+
+        if (GRealFireWorks == -1 && AI.ProbeAmmoAtTap >= 0)
+        {
+            const int AmmoNow = PlayerAIGetEquippedLoadedAmmo(AI);
+
+            if (AmmoNow >= 0 && AmmoNow < AI.ProbeAmmoAtTap)
+            {
+                GRealFireWorks = 1;
+                AIDebugLogger::Log("Combat", "real weapon fire works on this version - simulated damage disabled");
+            }
+            else if (++GRealFireProbes >= 6)
+            {
+                GRealFireWorks = 0;
+                AIDebugLogger::MissingFeature("RealWeaponFireForPlayerAI",
+                    "trigger fire is cosmetic on this version - simulated damage stays authoritative");
+            }
+
+            AI.ProbeAmmoAtTap = -1;
+        }
+    }
+
+    // Ability-fire probe: did the last ability shot consume real ammo?
+    if (GRealFireWorks == 0 && GAbilityFireWorks == -1 && AI.ProbeAmmoAtTap >= 0 && !AI.bNativeFiring)
+    {
+        const int AmmoNow = PlayerAIGetEquippedLoadedAmmo(AI);
+
+        if (AmmoNow >= 0 && AmmoNow < AI.ProbeAmmoAtTap)
+        {
+            GAbilityFireWorks = 1;
+            AIDebugLogger::Log("Combat", "ability weapon fire works on this version - simulated damage disabled");
+        }
+        else if (++GAbilityFireProbes >= 6)
+        {
+            GAbilityFireWorks = 0;
+            AIDebugLogger::MissingFeature("AbilityWeaponFireForPlayerAI",
+                "ability fire is cosmetic on this version - simulated damage stays authoritative");
+        }
+
+        AI.ProbeAmmoAtTap = -1;
     }
 
     if (Now < AI.ReactionReadyTime || Now < AI.NextShotTime)
         return;
 
     if (Dist > AI.Skill.EngageRange)
+        return;
+
+    // Shots only apply damage at plausible weapon ranges; outside them the
+    // AI keeps closing the distance instead of hitting from nowhere.
+    const double MaxDamageRange = PlayerAIMaxDamageRange(AI.EquippedRole);
+
+    if (Dist > MaxDamageRange)
         return;
 
     if (AI.MagazineRemaining <= 0)
@@ -1902,16 +2612,45 @@ void CombatBehavior::Tick(PlayerAIController& AI, float Now, float DeltaSeconds,
         return;
     }
 
-    // Simulated shot with skill based accuracy: distance and randomness
-    // keep the aim honest (never perfect outside the Testing profile).
+    // Shot cadence with skill based accuracy: distance and randomness keep
+    // the aim honest (never perfect outside the Testing profile).
     AI.NextShotTime = Now + PlayerAIFireInterval(AI.EquippedRole) * PlayerAIRandRange(0.9f, 1.35f);
     AI.MagazineRemaining--;
+
+    if (GRealFireWorks != 0)
+    {
+        // Pull the real trigger for this shot (muzzle flash / audio /
+        // possibly real bullets - detected by the ammo probe above).
+        if (GRealFireWorks == -1)
+            AI.ProbeAmmoAtTap = PlayerAIGetEquippedLoadedAmmo(AI);
+
+        NativePlayerAIBackend::StartFire(AI);
+        AI.FireTapEndTime = Now + 0.12f;
+
+        // Real bullets carry the damage on versions where they work.
+        if (GRealFireWorks == 1)
+            return;
+    }
+    else if (GAbilityFireWorks != 0)
+    {
+        // Trigger fire is dead here: fire the weapon's primary ability
+        // server-side instead (real bullets, sound, tracers and native
+        // damage/kill credit where the ability path works).
+        if (GAbilityFireWorks == -1 && AI.ProbeAmmoAtTap < 0)
+            AI.ProbeAmmoAtTap = PlayerAIGetEquippedLoadedAmmo(AI);
+
+        VersionFeatureAdapter::TryFireEquippedWeapon(AI.Entity.PC, Pawn);
+
+        // Real bullets carry the damage on versions where they work.
+        if (GAbilityFireWorks == 1)
+            return;
+    }
 
     float HitChance = AI.Skill.AimAccuracy;
 
     if (AI.Skill.Profile != EPlayerAISkillProfile::Testing)
     {
-        const float DistFactor = (float)(Dist / AI.Skill.EngageRange); // 0 close .. 1 far
+        const float DistFactor = (float)(Dist / MaxDamageRange); // 0 close .. 1 far
         HitChance *= 1.15f - 0.65f * DistFactor;
 
         if (HitChance > 0.95f)
@@ -1922,6 +2661,10 @@ void CombatBehavior::Tick(PlayerAIController& AI, float Now, float DeltaSeconds,
         return; // simulated miss
 
     float Damage = PlayerAIWeaponDamage(AI.EquippedRole);
+
+    // Distance falloff: far hits chip instead of melting.
+    if (AI.Skill.Profile != EPlayerAISkillProfile::Testing)
+        Damage *= (float)(1.0 - 0.45 * (Dist / MaxDamageRange));
 
     if (PlayerAIRandChance(0.12f))
         Damage *= 1.6f; // occasional headshot
@@ -1946,7 +2689,7 @@ bool DamageBehavior::ApplyWeaponDamage(PlayerAIController& Attacker, AFortPlayer
     if (!VictimPC)
         return false;
 
-    auto VictimPawn = VictimPC->HasMyFortPawn() && VictimPC->MyFortPawn ? VictimPC->MyFortPawn : VictimPC->Pawn;
+    auto VictimPawn = VictimPC->Pawn; // AController base property - safe for any controller kind
 
     if (!VictimPawn || VictimPawn->GetHealth() <= 0.f)
         return false;
@@ -1957,9 +2700,10 @@ bool DamageBehavior::ApplyWeaponDamage(PlayerAIController& Attacker, AFortPlayer
         VictimAI->LastDamagerPC = Attacker.Entity.PC;
         VictimAI->LastDamageTime = VersionFeatureAdapter::GetTimeSeconds();
 
-        // Fight back when idle/looting.
+        // Fight back when idle/looting - never while mid-drop.
         if (VictimAI->GetState() != EPlayerAIState::EngagingEnemy &&
             VictimAI->GetState() != EPlayerAIState::Retreating &&
+            !PlayerAIIsAirState(VictimAI->GetState()) &&
             VictimAI->IsAlive() && Attacker.Entity.PC)
         {
             VictimAI->CombatTarget = Attacker.Entity.PC;
@@ -2126,20 +2870,28 @@ VictoryConditionBehavior::FAliveCounts VictoryConditionBehavior::UpdateAliveCoun
 
     if (World.GameMode)
     {
-        for (auto& Uncasted : World.GameMode->AlivePlayers)
-        {
-            auto PC = (AFortPlayerControllerAthena*)Uncasted;
+        auto CountList = [&](TArray<AActor*>& List)
+            {
+                for (auto& Uncasted : List)
+                {
+                    auto PC = (AFortPlayerControllerAthena*)Uncasted;
 
-            if (!PC)
-                continue;
+                    if (!PC)
+                        continue;
 
-            Counts.TotalAlivePlayers++;
+                    Counts.TotalAlivePlayers++;
 
-            if (PlayerAIManager::IsPlayerAI(PC))
-                Counts.AlivePlayerAIs++;
-            else
-                Counts.AliveRealPlayers++;
-        }
+                    if (PlayerAIManager::IsPlayerAI(PC))
+                        Counts.AlivePlayerAIs++;
+                    else
+                        Counts.AliveRealPlayers++;
+                }
+            };
+
+        CountList(World.GameMode->AlivePlayers);
+
+        if (World.GameMode->HasAliveBots())
+            CountList(World.GameMode->AliveBots);
     }
 
     LastCounts = Counts;

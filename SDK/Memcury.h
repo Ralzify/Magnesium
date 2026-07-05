@@ -737,9 +737,10 @@ namespace Memcury
             {
                 __m256i t = _mm256_set1_epi8((char)startingByte);
 
-                for (; i < (sizeOfImage - s) - ((sizeOfImage - s) % 32); i += 32)
+                // Bound so the inner compare (scanBytes[i + q + j], q<32, j<s) never reads past .text.
+                for (; i + 32 + s < sizeOfImage; i += 32)
                 {
-                    auto bytes = _mm256_load_si256((const __m256i*)(scanBytes + i));
+                    auto bytes = _mm256_loadu_si256((const __m256i*)(scanBytes + i));
                     int offset = _mm256_movemask_epi8(_mm256_cmpeq_epi8(bytes, t));
 
                     if (offset == 0)
@@ -773,9 +774,9 @@ namespace Memcury
             {
                 __m128i t = _mm_set1_epi8((char)startingByte);
 
-                for (; i < (sizeOfImage - s) - ((sizeOfImage - s) % 16); i += 16)
+                for (; i + 16 + s < sizeOfImage; i += 16)
                 {
-                    auto bytes = _mm_load_si128((const __m128i*)(scanBytes + i));
+                    auto bytes = _mm_loadu_si128((const __m128i*)(scanBytes + i));
                     int offset = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, t));
 
                     if (offset == 0)
@@ -841,9 +842,9 @@ namespace Memcury
             // scan only text section
             DWORD i = 0;
 
-            for (; i < textSection.GetSectionSize() - (textSection.GetSectionSize() % 16); i += 16)
+            for (i = 16; i + 48 < textSection.GetSectionSize(); i += 16) // bounded + unaligned (32.11 .text tail safety)
             {
-                auto bytes = _mm_load_si128((const __m128i*)(scanBytes + i));
+                auto bytes = _mm_loadu_si128((const __m128i*)(scanBytes + i));
                 __m128i masked = _mm_and_si128(bytes, s);
                 int offset = _mm_movemask_epi8(_mm_cmpeq_epi8(masked, t));
 
@@ -942,9 +943,9 @@ namespace Memcury
             { 
                 __m256i t = _mm256_set1_epi8((char)0x8d);
                 // scan only text section
-                for (; i < textSection.GetSectionSize() - (textSection.GetSectionSize() % 32); i += 32)
+                for (i = 32; i + 64 < textSection.GetSectionSize(); i += 32) // start at 32 (avoid i+q-1 underflow), leave tail margin
                 {
-                    auto bytes = _mm256_load_si256((const __m256i*)(scanBytes + i));
+                    auto bytes = _mm256_loadu_si256((const __m256i*)(scanBytes + i));
                     int offset = _mm256_movemask_epi8(_mm256_cmpeq_epi8(bytes, t));
 
                     if (offset == 0)
@@ -1031,9 +1032,9 @@ namespace Memcury
             {
                 __m128i t = _mm_set1_epi8((char)0x8d);
                 // scan only text section
-                for (; i < textSection.GetSectionSize() - (textSection.GetSectionSize() % 16); i += 16)
+                for (i = 16; i + 48 < textSection.GetSectionSize(); i += 16) // start at 16 (avoid i+q-1 underflow), leave tail margin
                 {
-                    auto bytes = _mm_load_si128((const __m128i*)(scanBytes + i));
+                    auto bytes = _mm_loadu_si128((const __m128i*)(scanBytes + i));
                     int offset = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, t));
 
                     if (offset == 0)

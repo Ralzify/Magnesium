@@ -629,6 +629,7 @@ namespace SDK
 		DEFINE_FUNC(SetLifeSpan, void);
 		DEFINE_FUNC(K2_AttachToComponent, void);
 		DEFINE_FUNC(SetActorHiddenInGame, void);
+		DEFINE_FUNC(SetActorScale3D, void);
 
 		bool HasAuthority() const
 		{
@@ -966,7 +967,7 @@ namespace SDK
 		{
 			auto Engine = UEngine::GetEngine();
 
-			if (!Engine->GameViewport)
+			if (!Engine || !Engine->GameViewport)
 				return nullptr;
 
 			return (UWorld*)Engine->GameViewport->World;

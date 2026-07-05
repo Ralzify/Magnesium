@@ -184,8 +184,14 @@ public:
         if (PlayerState)
         {
             FString PSName = PlayerState->GetPlayerName();
-            if (PSName.Data && PSName.NumElements)
-                return std::string(PSName.ToString().begin(), PSName.ToString().end());
+            // Bounds-check the FString and convert ONCE: taking begin()/end()
+            // from two separate ToString() temporaries is undefined behavior
+            // and threw length_error on some player states.
+            if (PSName.Data && PSName.NumElements > 0 && PSName.NumElements < 512)
+            {
+                auto Converted = PSName.ToString();
+                return std::string(Converted.begin(), Converted.end());
+            }
         }
 
         return "Unknown";
