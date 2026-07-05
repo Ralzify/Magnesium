@@ -123,3 +123,9 @@ inline std::vector<uint64_t> NullFuncs = {};
 inline std::vector<uint64_t> RetTrueFuncs = {};
 
 void FindNullsAndRetTrues();
+
+// Runs every finder once and logs which sigs resolved (magnesium_debug.log has
+// the full address list; misses/crashes also go to the console). Run this when
+// bringing up a new version so a dead sig shows up by name instead of as a
+// silent 0 or a crash somewhere down the boot.
+void ValidateFinders();

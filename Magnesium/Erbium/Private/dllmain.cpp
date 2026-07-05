@@ -225,6 +225,12 @@ void Main()
         Utils::Patch<uint8_t>(GameSessionPatch, 0x85);
     SDK::DbgLog("Main: cp8 (GameSessionPatch=%p)\n", (void*)GameSessionPatch);
 
+    // Resolve + log every finder before any hook consumes them, so a new
+    // version (e.g. 31.41) reports its dead sigs by name up front. Results are
+    // cached, so the hooks below reuse them for free.
+    ValidateFinders();
+    SDK::DbgLog("Main: cp8b (ValidateFinders done)\n");
+
     MH_Initialize();
     SDK::DbgLog("Main: cp9 (MH_Initialize done, installing %zu hooks)\n", _HookFuncs.size());
 

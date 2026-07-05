@@ -3514,3 +3514,168 @@ void FindNullsAndRetTrues()
         // ue5.1+ i think, they inlined the VFT call
     }
 }
+
+struct FFinderCheck
+{
+    const char* Name;
+    uint64_t (*Func)();
+    bool bVftIndex = false; // result is a vtable index, not an address
+};
+
+// A finder whose string ref / sig no longer exists can walk off a null pointer
+// (e.g. the (sRef - i) loops). SEH turns that into a CRASHED log line instead
+// of killing the boot. Kept in its own function: __try can't share a frame
+// with C++ objects that need unwinding.
+static uint64_t CallFinderGuarded(uint64_t (*Func)(), bool* bCrashed)
+{
+    __try
+    {
+        return Func();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        *bCrashed = true;
+        return 0;
+    }
+}
+
+void ValidateFinders()
+{
+    // Every finder in Finders.h; names match the Find*() to fix when one misses.
+    static const FFinderCheck Checks[] = {
+        { "GIsClient", FindGIsClient },
+        { "GIsServer", FindGIsServer },
+        { "GetNetMode", FindGetNetMode },
+        { "GetWorldContext", FindGetWorldContext },
+        { "CreateNetDriver", FindCreateNetDriver },
+        { "CreateNetDriverWorldContext", FindCreateNetDriverWorldContext },
+        { "InitListen", FindInitListen },
+        { "SetWorld", FindSetWorld },
+        { "TickFlush", FindTickFlush },
+        { "ServerReplicateActors", FindServerReplicateActors },
+        { "SendRequestNow", FindSendRequestNow },
+        { "GetMaxTickRate", FindGetMaxTickRate },
+        { "GiveAbility", FindGiveAbility },
+        { "ConstructAbilitySpec", FindConstructAbilitySpec },
+        { "InternalTryActivateAbility", FindInternalTryActivateAbility },
+        { "ApplyCharacterCustomization", FindApplyCharacterCustomization },
+        { "HandlePostSafeZonePhaseChanged", FindHandlePostSafeZonePhaseChanged },
+        { "SpawnLoot", FindSpawnLoot },
+        { "FinishedTargetSpline", FindFinishedTargetSpline },
+        { "PickTeam", FindPickTeam },
+        { "CantBuild", FindCantBuild },
+        { "ReplaceBuildingActor", FindReplaceBuildingActor },
+        { "KickPlayer", FindKickPlayer },
+        { "EncryptionPatch", FindEncryptionPatch },
+        { "RemoveInventoryItem", FindRemoveInventoryItem },
+        { "RemoveInventoryStateValue", FindRemoveInventoryStateValue },
+        { "SetInventoryStateValue", FindSetInventoryStateValue },
+        { "OnRep_ZiplineState", FindOnRep_ZiplineState },
+        { "GiveAbilityAndActivateOnce", FindGiveAbilityAndActivateOnce },
+        { "GameSessionPatch", FindGameSessionPatch },
+        { "RemoveFromAlivePlayers", FindRemoveFromAlivePlayers },
+        { "StartAircraftPhase", FindStartAircraftPhase },
+        { "SetPickupItems", FindSetPickupItems },
+        { "CallPreReplication", FindCallPreReplication },
+        { "SendClientAdjustment", FindSendClientAdjustment },
+        { "SetChannelActor", FindSetChannelActor },
+        { "SetChannelActorForDestroy", FindSetChannelActorForDestroy },
+        { "CreateChannel", FindCreateChannel },
+        { "ReplicateActor", FindReplicateActor },
+        { "CloseActorChannel", FindCloseActorChannel },
+        { "ClientHasInitializedLevelFor", FindClientHasInitializedLevelFor },
+        { "StartBecomingDormant", FindStartBecomingDormant },
+        { "FlushDormancy", FindFlushDormancy },
+        { "IsNetRelevantForVft", [] { auto v = FindIsNetRelevantForVft(); return v > 0 ? (uint64_t)v : 0ull; }, true },
+        { "SendDestructionInfo", FindSendDestructionInfo },
+        { "EnterAircraft", FindEnterAircraft },
+        { "ClearAbility", FindClearAbility },
+        { "GetPlayerViewPoint", FindGetPlayerViewPoint },
+        { "OnItemInstanceAddedVft", [] { return (uint64_t)FindOnItemInstanceAddedVft(); }, true },
+        { "GetNamePool", FindGetNamePool },
+        { "IsNetReady", FindIsNetReady },
+        { "SpawnInitialSafeZone", FindSpawnInitialSafeZone },
+        { "UpdateSafeZonesPhase", FindUpdateSafeZonesPhase },
+        { "UpdateIrisReplicationViews", FindUpdateIrisReplicationViews },
+        { "PreSendUpdate", FindPreSendUpdate },
+        { "HandleMatchHasStarted", FindHandleMatchHasStarted },
+        { "InitializeBuildingActor", FindInitializeBuildingActor },
+        { "PostInitializeSpawnedBuildingActor", FindPostInitializeSpawnedBuildingActor },
+        { "InitializeFlightPath", FindInitializeFlightPath },
+        { "Reset", FindReset },
+        { "NotifyGameMemberAdded", FindNotifyGameMemberAdded },
+        { "SetGamePhase", FindSetGamePhase },
+        { "PayBuildableClassPlacementCost", FindPayBuildableClassPlacementCost },
+        { "CanAffordToPlaceBuildableClass", FindCanAffordToPlaceBuildableClass },
+        { "CanPlaceBuildableClassInStructuralGrid", FindCanPlaceBuildableClassInStructuralGrid },
+        { "LoadPlayset", [] { return (uint64_t)FindLoadPlayset(); } },
+        { "SpawnDecoVft", [] { return (uint64_t)FindSpawnDecoVft(); }, true },
+        { "ShouldAllowServerSpawnDecoVft", [] { return (uint64_t)FindShouldAllowServerSpawnDecoVft(); }, true },
+        { "SetState", FindSetState },
+        { "MinigameSettingsBuilding__BeginPlay", FindMinigameSettingsBuilding__BeginPlay },
+        { "PickSupplyDropLocation", FindPickSupplyDropLocation },
+        { "SetPickupTarget", FindSetPickupTarget },
+        { "InitializePlayerGameplayAbilities", FindInitializePlayerGameplayAbilities },
+        { "ListenCall", FindListenCall },
+        { "QueueStatEvent", FindQueueStatEvent },
+        { "FinishWorldInitialization", FindFinishWorldInitialization },
+        { "SetIsDoorOpen", FindSetIsDoorOpen },
+        { "ActivatePhase", FindActivatePhase },
+        { "SelectAndSetupMyBuildingLevel", FindSelectAndSetupMyBuildingLevel },
+    };
+
+    const int NumChecks = (int)(sizeof(Checks) / sizeof(Checks[0]));
+    int Found = 0, Missing = 0, Crashed = 0;
+
+    SDK::DbgLog("=== ValidateFinders: FN %.2f, %d finders ===\n", VersionInfo.FortniteVersion, NumChecks);
+
+    for (auto& Check : Checks)
+    {
+        bool bCrashed = false;
+        uint64_t Result = CallFinderGuarded(Check.Func, &bCrashed);
+
+        if (bCrashed)
+        {
+            Crashed++;
+            printf("[Finders] Find%s CRASHED while scanning — its sig/string ref is wrong for this version\n", Check.Name);
+            SDK::DbgLog("[Finders] %-40s CRASHED\n", Check.Name);
+        }
+        else if (!Result)
+        {
+            Missing++;
+            printf("[Finders] Find%s NOT FOUND — needs a sig for this version (Erbium/Private/Finders.cpp)\n", Check.Name);
+            SDK::DbgLog("[Finders] %-40s NOT FOUND\n", Check.Name);
+        }
+        else
+        {
+            Found++;
+            if (Check.bVftIndex)
+                SDK::DbgLog("[Finders] %-40s = vft index %llu\n", Check.Name, Result);
+            else
+                SDK::DbgLog("[Finders] %-40s = 0x%llX (RVA 0x%llX)\n", Check.Name, Result, Result - ImageBase);
+        }
+    }
+
+    // FindNullsAndRetTrues has already run by this point; a 0 entry means a
+    // pattern missed and that patch will silently be skipped.
+    for (int i = 0; i < (int)NullFuncs.size(); i++)
+        if (!NullFuncs[i])
+        {
+            printf("[Finders] NullFuncs[%d] pattern missed for this version (FindNullsAndRetTrues)\n", i);
+            SDK::DbgLog("[Finders] NullFuncs[%d] NOT FOUND\n", i);
+        }
+    for (int i = 0; i < (int)RetTrueFuncs.size(); i++)
+        if (!RetTrueFuncs[i])
+        {
+            printf("[Finders] RetTrueFuncs[%d] pattern missed for this version (FindNullsAndRetTrues)\n", i);
+            SDK::DbgLog("[Finders] RetTrueFuncs[%d] NOT FOUND\n", i);
+        }
+
+    if (Missing || Crashed)
+        printf("[Finders] %d/%d offsets resolved on FN %.2f (%d missing, %d crashed). Full list in magnesium_debug.log. A missing offset only matters if this version's code path actually uses it.\n",
+            Found, NumChecks, VersionInfo.FortniteVersion, Missing, Crashed);
+    else
+        printf("[Finders] all %d offsets resolved.\n", Found);
+
+    SDK::DbgLog("=== ValidateFinders done: %d found, %d missing, %d crashed ===\n", Found, Missing, Crashed);
+}
