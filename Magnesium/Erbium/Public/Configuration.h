@@ -61,6 +61,11 @@ struct FConfiguration
     static inline auto bLateGame = true;
     static inline auto LateGameZone = 4; // starting zone
     static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
+
+    static inline auto bCustomSafeZone = false;
+    static inline auto CustomSafeZoneCenter = FVector(0.f, 0.f, 0.f);
+    static inline auto CustomSafeZoneRadius = 100000.f;
+
     static inline auto bGliderRedeploy = false;
     static inline auto bEnableCheats = true;
 	static inline auto bMovingBus = true;

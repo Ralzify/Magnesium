@@ -379,6 +379,12 @@ AFortSafeZoneIndicator* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Setu
 
 				PhaseInfo->Center = StormCircles[(int)i].Center;
 
+				if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+				{
+					PhaseInfo->Center = FConfiguration::CustomSafeZoneCenter;
+					PhaseInfo->Radius = FConfiguration::CustomSafeZoneRadius;
+				}
+
 				Array.Add(*PhaseInfo, FFortSafeZonePhaseInfo::Size());
 				free(PhaseInfo);
 
@@ -543,6 +549,10 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 			}
 
 			FVector Loc = StormCircles[FConfiguration::LateGameZone + 2].Center;
+
+			if (FConfiguration::bCustomSafeZone)
+				Loc = FConfiguration::CustomSafeZoneCenter;
+
 			Loc.Z = 25000.f;
 
 			if (FConfiguration::bMovingBus)

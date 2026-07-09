@@ -2202,6 +2202,24 @@ void GUI::Init()
                     ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);
 
                     LabeledSliderInt("Starting Zone", "##starting-zone", &FConfiguration::LateGameZone, 1, 7, Width);
+
+                    ImGui::Checkbox("Custom Safe Zone", &FConfiguration::bCustomSafeZone);
+
+                    if (FConfiguration::bCustomSafeZone)
+                    {
+                        float cx = (float)FConfiguration::CustomSafeZoneCenter.X;
+                        float cy = (float)FConfiguration::CustomSafeZoneCenter.Y;
+                        float cz = (float)FConfiguration::CustomSafeZoneCenter.Z;
+
+                        ImGui::SetNextItemWidth(Width);
+                        if (ImGui::InputFloat("Center X", &cx)) FConfiguration::CustomSafeZoneCenter.X = cx;
+                        ImGui::SetNextItemWidth(Width);
+                        if (ImGui::InputFloat("Center Y", &cy)) FConfiguration::CustomSafeZoneCenter.Y = cy;
+                        ImGui::SetNextItemWidth(Width);
+                        if (ImGui::InputFloat("Center Z", &cz)) FConfiguration::CustomSafeZoneCenter.Z = cz;
+
+                        LabeledSliderFloat("Radius", "##custom-sz-radius", &FConfiguration::CustomSafeZoneRadius, 1000.f, 250000.f, "%.0f", Width);
+                    }
                 }
             }
 

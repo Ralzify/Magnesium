@@ -1501,7 +1501,12 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
             GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + Durations[FConfiguration::LateGameZone];
     }
 
-    if (FConfiguration::bLateGame && (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
+    if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+    {
+        GameMode->SafeZoneIndicator->NextCenter = FConfiguration::CustomSafeZoneCenter;
+        GameMode->SafeZoneIndicator->LastCenter = FConfiguration::CustomSafeZoneCenter;
+    }
+    else if (FConfiguration::bLateGame && (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
     {
         GameMode->SafeZoneIndicator->NextCenter = SafeZoneLoc;
         GameMode->SafeZoneIndicator->LastCenter = SafeZoneLoc;
@@ -1687,6 +1692,9 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             Loc = GameMode->SafeZoneLocations.Get(FConfiguration::LateGameZone + (VersionInfo.FortniteVersion >= 24 ? 3 : 0) - 1, FVector::Size());
         }
 
+        if (FConfiguration::bCustomSafeZone)
+            SafeZoneLoc = Loc = FConfiguration::CustomSafeZoneCenter;
+
         if (FConfiguration::bMovingBus)
         {
             bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
@@ -1868,6 +1876,12 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
 
                 if (GameMode->SafeZoneLocations.GetData() && GameMode->SafeZoneLocations.Num() > i)
                     PhaseInfo->Center = GameMode->SafeZoneLocations.Get((int)i, FVector::Size());
+
+                if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+                {
+                    PhaseInfo->Center = FConfiguration::CustomSafeZoneCenter;
+                    PhaseInfo->Radius = FConfiguration::CustomSafeZoneRadius;
+                }
 
                 Array.Add(*PhaseInfo, FFortSafeZonePhaseInfo::Size());
                 free(PhaseInfo);
