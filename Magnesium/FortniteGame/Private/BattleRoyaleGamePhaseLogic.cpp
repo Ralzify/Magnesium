@@ -4,6 +4,24 @@
 #include "../../Erbium/Public/GUI.h"
 
 uint64_t SetGamePhase_ = 0;
+
+UFortGameStateComponent_BattleRoyaleGamePhaseLogic* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed()
+{
+	static UFortGameStateComponent_BattleRoyaleGamePhaseLogic* s_cached = nullptr;
+	if (s_cached)
+		return s_cached;
+	for (int i = 0; i < TUObjectArray::Num(); i++)
+	{
+		auto Obj = TUObjectArray::GetObjectByIndex(i);
+		if (Obj && !Obj->IsDefaultObject() && Obj->IsA<UFortGameStateComponent_BattleRoyaleGamePhaseLogic>())
+		{
+			s_cached = (UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)Obj;
+			break;
+		}
+	}
+	return s_cached;
+}
+
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetGamePhase(EAthenaGamePhase GamePhase)
 {
 	auto SetGamePhaseInternal = (void(*)(UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, EAthenaGamePhase)) SetGamePhase_;

@@ -1352,15 +1352,23 @@ void SendClientMoveAdjustments(UNetDriver* Driver)
 	}
 }
 
+// Exposed to the 32.11 watchdog (Misc.cpp) so a heartbeat can confirm replication is
+// actually flushing every frame, not just the game thread ticking. Incremented every call.
+volatile long g_tickFlushCounter = 0;
+
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
 	static int _tf = 0;
+	_InterlockedIncrement(&g_tickFlushCounter);
 	bool _lg = VersionInfo.FortniteVersion >= 32.00 && _tf < 4;
 	if (_lg) SDK::DbgLog("[TickFlush] #%d ENTER Driver=%p\n", _tf, (void*)Driver);
 
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
-		auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
+		// 32.11: ::Get mis-resolves (returns null though the component exists); use the direct lookup.
+		auto GamePhaseLogic = VersionInfo.FortniteVersion >= 32.00
+			? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed()
+			: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
 		if (_lg) SDK::DbgLog("[TickFlush] #%d GamePhaseLogic=%p\n", _tf, (void*)GamePhaseLogic);
 		if (GamePhaseLogic)
 			GamePhaseLogic->Tick();

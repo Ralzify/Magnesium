@@ -504,8 +504,14 @@ const std::unordered_map<std::string, std::string> Misc::ObjectNames = {
 	{ "gas", "/Game/Athena/Items/Weapons/Prototype/PetrolPump/BGA_Petrol_Pickup.BGA_Petrol_Pickup_C" },
 };
 
-int Misc::GetNetMode() 
+int Misc::GetNetMode()
 {
+	// 32.11 runs as a LISTEN server (the injecting client is also the host player). Returning
+	// NM_ListenServer(2) — not NM_DedicatedServer(1) — makes the engine create the local host
+	// player so the client actually enters the world instead of sitting on "Setting up the
+	// server" forever, while still being != NM_Client(3) so the Iris-worker null-deref stays fixed.
+	if (VersionInfo.FortniteVersion >= 32.00)
+		return 2;
 	return 1;
 }
 
@@ -521,6 +527,7 @@ bool Listen(); // fwd decl — defined below; driven from GetMaxTickRate on 32.1
 
 static volatile long g_frameCounter = 0;
 static DWORD g_gameThreadId = 0;
+extern volatile long g_tickFlushCounter; // NetDriver.cpp — replication flushes; confirms the net tick is alive
 
 // Watchdog: writes directly to its own file (own fflush) since the game thread that flushes the shared
 // debug buffer is the one that hangs. Logs a heartbeat + the RIP where the game thread is stuck.
@@ -541,7 +548,7 @@ static void WatchdogThread()
 		Sleep(500);
 		long cur = g_frameCounter;
 		long delta = cur - last; last = cur;
-		if ((hb++ % 4) == 0) WDLog("[WD] hb frame=%ld delta=%ld\n", cur, delta);
+		if ((hb++ % 4) == 0) WDLog("[WD] hb frame=%ld delta=%ld tickflush=%ld\n", cur, delta, g_tickFlushCounter);
 		if (delta <= 2 && g_gameThreadId && !reported) // <= ~4 FPS = effectively frozen (crawl)
 		{
 			if (++stuck >= 3) // ~1.5s of crawling
@@ -945,6 +952,33 @@ char GetTickableTickType_FN32()
 	return 2; // ETickableTickType::Never — matches Remix (disables client-side tickables on the server)
 }
 
+// Better-Remix CreateAndConfigureNavigationSystem: configure the Athena nav-system config so the server
+// actually builds nav data (stdout shows nav creation failing) instead of retrying. Offsets from the
+// UAthenaNavSystemConfig SDK layout; class not present in Magnesium so set by raw offset.
+void (*CreateAndConfigureNavigationSystem_OG)(void* ModuleConfig, void* World);
+void CreateAndConfigureNavigationSystem_FN32(void* ModuleConfig, void* World)
+{
+	if (ModuleConfig)
+	{
+		*(uint8_t*)((char*)ModuleConfig + 0x70) |= 0x40;  // bPrioritizeNavigationAroundSpawners = true
+		*(uint8_t*)((char*)ModuleConfig + 0x50) |= 0x04;  // bAutoSpawnMissingNavData = true
+		*(uint8_t*)((char*)ModuleConfig + 0x58) |= 0x01;  // bAllowAutoRebuild = true
+		*(uint8_t*)((char*)ModuleConfig + 0x71) &= ~0x01; // bSupportRuntimeNavmeshDisabling = false
+	}
+	CreateAndConfigureNavigationSystem_OG(ModuleConfig, World);
+}
+
+// Better-Remix RegisterToLivingWorldManager: installed as a COMPLETE REPLACEMENT (never calls the
+// original). Actors registering to the LivingWorldManager are what make its per-frame world tick
+// crawl (stdout: "FortWorldManager ...[TickActor] took 204.65ms!"). By no-oping the registration the
+// manager stays idle and the server holds full tickrate. Better-Remix additionally hand-spawns Clyde
+// vehicles here; that path needs Ch5S4 vehicle SDK types Magnesium lacks, so it's skipped — the map
+// just has no living-world vehicles, which is fine for a basic BR server.
+void RegisterToLivingWorldManager_FN32(void* IFace, void* Actor)
+{
+	// intentionally empty — skip LivingWorldManager registration entirely
+}
+
 void Ohio(ABuildingProp_LockDevice* _this, AFortPlayerControllerAthena* ControllerInstigator)
 {
 	printf("Called[LockProp: %s]\n", _this->Name.ToString().c_str());
@@ -1179,9 +1213,8 @@ void Misc::Hook()
 			if (*(uint32_t*)adfu == 0x245C8948) // verify "48 89 5C 24" prologue (build matches Remix CL)
 			{
 				AttemptDeriveFromURL = adfu;
-				// NOTE: Remix also hooks InternalGetNetMode (+0x16562A4), but Remix is a dedicated-server
-				// build; forcing EVERY net-mode query to DedicatedServer breaks the injected client's
-				// menu world. AttemptDeriveFromURL alone forces it only where there's no net driver yet.
+				// InternalGetNetMode (+0x16562A4) is ALSO hooked below for 32.11 — the Iris replication
+				// worker calls it directly and crashes if it sees NM_Client. See the B2 block.
 			}
 			else
 				SDK::DbgLog("  [Misc] netmode 32.11 RVA mismatch (prologue %08X) — build differs from Remix CL\n", *(uint32_t*)adfu);
@@ -1198,6 +1231,17 @@ void Misc::Hook()
 		SDK::DbgLog("  [Misc] A ADFU=%p pre-Hook/PatchAllNetModes\n", (void*)AttemptDeriveFromURL);
 		Utils::Hook(AttemptDeriveFromURL, GetNetMode);
 		PatchAllNetModes(AttemptDeriveFromURL); // Remix uses this on 32.11; needed for consistent netmode
+		if (VersionInfo.FortniteVersion >= 32.00)
+		{
+			// 32.11: the Iris replication worker calls UWorld::GetNetMode (+0x16562A4) DIRECTLY. Because
+			// this process is FortniteClient.exe the real world netmode is NM_Client (3), so that worker
+			// takes a client-only branch and null-derefs (crash on a bg thread right after the Iris
+			// FortTeamPrivateInfo group setup — disasm: sub_15A17D8 does `if (GetNetMode()==3 && ...) ->
+			// [[..+0x48]+0xf0]+0x134`). AttemptDeriveFromURL alone is NOT enough; Better-Remix forces this
+			// one to NM_DedicatedServer too. Server-only path (fine for a joinable server).
+			Utils::Hook(Memcury::PE::GetModuleBase() + 0x16562A4, GetNetMode);
+			SDK::DbgLog("  [Misc] B2 InternalGetNetMode (+0x16562A4) forced to server netmode\n");
+		}
 		SDK::DbgLog("  [Misc] B netmode hook+patch done\n");
 
 		if (VersionInfo.FortniteVersion >= 32.00)
@@ -1207,7 +1251,9 @@ void Misc::Hook()
 			auto base = Memcury::PE::GetModuleBase();
 			Utils::Hook(base + 0x19F7AFC, Test2, Test2OG); // RegisterTickFunction
 			Utils::Hook(base + 0x4139B6C, GetTickableTickType_FN32); // GetTickableTickType -> Never
-			SDK::DbgLog("  [Misc] B3 RegisterTickFunction + GetTickableTickType hooks installed (Test2OG=%p)\n", (void*)Test2OG);
+			Utils::Hook(base + 0xA7EAB6C, CreateAndConfigureNavigationSystem_FN32, CreateAndConfigureNavigationSystem_OG); // nav config
+			Utils::Hook(base + 0xB4E282C, RegisterToLivingWorldManager_FN32); // no-op LivingWorldManager registration (kills 204ms FortWorldManager tick)
+			SDK::DbgLog("  [Misc] B3 tick+nav+livingworld hooks installed (Test2OG=%p NavOG=%p)\n", (void*)Test2OG, (void*)CreateAndConfigureNavigationSystem_OG);
 			CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)WatchdogThread, nullptr, 0, nullptr); // pinpoint hang
 			SDK::DbgLog("  [Misc] B3b watchdog thread started\n");
 		}

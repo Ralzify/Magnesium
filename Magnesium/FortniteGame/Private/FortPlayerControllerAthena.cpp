@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cctype>
 #include <limits>
+#include <functional>
 
 void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena* PlayerController, FVector& Loc, FRotator& Rot)
 {
@@ -3283,6 +3284,65 @@ static const UClass* FindActorClassByCommandArg(const std::string& ClassArg)
 	return nullptr;
 }
 
+// Resolves an item command argument (full path, object name, or short id) to its item definition.
+static const UFortItemDefinition* FindItemDefinitionByCommandArg(const std::string& ItemArg)
+{
+	if (ItemArg.empty())
+		return nullptr;
+
+	auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(ItemArg.begin(), ItemArg.end()));
+
+	if (!ItemDefinition)
+		ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(ItemArg.c_str());
+
+	if (!ItemDefinition)
+	{
+		auto ShortNames = Misc::ItemNames.find(ItemArg.c_str());
+
+		if (ShortNames != Misc::ItemNames.end())
+		{
+			std::string Value = ShortNames->second;
+
+			if (Value == "logic_grappler") // stupid icl
+			{
+				if (VersionInfo.FortniteVersion >= 12.50)
+					Value = "WID_Hook_Gun_Spytech_VR_Ore_T03";
+				else if (VersionInfo.FortniteVersion >= 7.10 && VersionInfo.FortniteVersion < 12.50)
+					Value = "WID_Hook_Gun_Slide";
+				else
+					Value = "WID_Hook_Gun_VR_Ore_T03";
+			}
+
+			ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(Value.c_str());
+
+			if (!ItemDefinition && Value.find('/') != std::string::npos)
+			{
+				if (auto Item = StaticLoadObject(UEAllocatedWString(Value.begin(), Value.end()).c_str(), UFortItemDefinition::StaticClass()))
+					ItemDefinition = Item->Cast<UFortItemDefinition>();
+			}
+		}
+	}
+
+	return ItemDefinition;
+}
+
+// Zeroes gravity/velocity on a spawned pickup so it floats where it was spawned instead of falling.
+static void DisablePickupGravity(AFortPickupAthena* Pickup)
+{
+	if (!Pickup || !Pickup->HasMovementComponent())
+		return;
+
+	auto MovementComponent = Pickup->MovementComponent;
+
+	if (!MovementComponent)
+		return;
+
+	SetReflectedProperty<float>(MovementComponent, "ProjectileGravityScale", 0.f);
+	SetReflectedProperty<FVector>(MovementComponent, "Velocity", FVector());
+	SetReflectedProperty<float>(MovementComponent, "InitialSpeed", 0.f);
+	SetReflectedProperty<float>(MovementComponent, "MaxSpeed", 0.f);
+}
+
 static const UClass* GetDefaultNukeProjectileClass()
 {
 	static const UClass* DefaultNukeProjectileClass = nullptr;
@@ -4452,7 +4512,7 @@ cheat godall - Toggles god mode for all players
 cheat speed <scale> - Sets the player's movement speed
 cheat timeofday <hour> - Sets the time of day (0-23)
 cheat pausetimeofday - Pauses/Unpauses the time of day
-cheat spawnbot <count> <weapon> <s[size]> - Spawns a player bot at your location (WIP)
+cheat spawnbot <count> <weapon> <s[size]> [X Y Z] - Spawns a player bot at your or a specified location (WIP)
 cheat tpbot - Teleports the player bot to your location
 cheat tpall - Teleports all real players around your location
 cheat botemote - Plays the 'Accolades' emote to the player bot
@@ -4472,7 +4532,7 @@ cheat giveall - Gives you all ammo, mats, and traps
 cheat givetraps - Gives you all available traps
 cheat giveammo - Gives you 999 of every ammo type
 cheat givemats - Gives you 500 of each material
-cheat spawnpickup <WID/path> <Count = 1> - Spawns a pickup at your player's location
+cheat spawnpickup <WID/path> <Count = 1> [X Y Z] - Spawns a pickup at your player's or specified location
 cheat clearinventory - Clears your inventory of all items that are droppable
 cheat spawn <class/path> <s[size]> <h[meters]> - Spawns an actor at your location
 cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
@@ -5736,6 +5796,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				int Count = 1;
 				std::string WeaponArg = "";
 				float BotScale = 1.f;
+				bool HasLocation = false;
+				FVector SpawnLocation{};
 
 				for (size_t ArgIndex = 1; ArgIndex < args.size(); ArgIndex++)
 				{
@@ -5752,6 +5814,24 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					{
 						PlayerController->ClientMessage(FString(L"Invalid bot size. Use s0.5 for half size or s2 for 2x size."), FName(), 1.f);
 						return;
+					}
+
+					if (!HasLocation && ArgIndex + 2 < args.size())
+					{
+						float X = 0.f;
+						float Y = 0.f;
+						float Z = 0.f;
+
+						std::string YArg = std::string(args[ArgIndex + 1].c_str());
+						std::string ZArg = std::string(args[ArgIndex + 2].c_str());
+
+						if (TryParseCommandFloat(CurrentArg, X) && TryParseCommandFloat(YArg, Y) && TryParseCommandFloat(ZArg, Z))
+						{
+							SpawnLocation = FVector(X, Y, Z);
+							HasLocation = true;
+							ArgIndex += 2;
+							continue;
+						}
 					}
 
 					int ParsedCount = 0;
@@ -5774,7 +5854,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						continue;
 					}
 
-					PlayerController->ClientMessage(FString(L"Invalid spawnbot argument. Use count, weapon, or s0.5/s2 size."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Invalid spawnbot argument. Use count, weapon, s0.5/s2 size, or X Y Z location."), FName(), 1.f);
 					return;
 				}
 
@@ -5783,6 +5863,9 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					auto Transform = PlayerController->Pawn->GetTransform();
 					auto BotScaleVector = FVector(BotScale, BotScale, BotScale);
 					Transform.Scale3D = BotScaleVector;
+
+					if (HasLocation)
+						Transform.Translation = SpawnLocation;
 
 					auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 					auto GameState = GameMode->GameState;
@@ -6035,6 +6118,9 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					}
 
 					auto Message = L"Spawned a player bot! (s" + FormatCommandFloatForMessage(BotScale) +
+						(HasLocation
+							? L" @ " + FormatCommandFloatForMessage((float)SpawnLocation.X) + L" " + FormatCommandFloatForMessage((float)SpawnLocation.Y) + L" " + FormatCommandFloatForMessage((float)SpawnLocation.Z)
+							: std::wstring()) +
 						L")";
 					CallerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
 				}
@@ -6940,38 +7026,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					return;
 				}
 
-				auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(args[1].begin(), args[1].end()));
-
-				if (!ItemDefinition)
-					ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(args[1].c_str());
-
-				if (!ItemDefinition)
-				{
-					auto ShortNames = Misc::ItemNames.find(args[1].c_str());
-
-					if (ShortNames != Misc::ItemNames.end())
-					{
-						std::string Value = ShortNames->second;
-
-						if (Value == "logic_grappler") // stupid icl
-						{
-							if (VersionInfo.FortniteVersion >= 12.50)
-								Value = "WID_Hook_Gun_Spytech_VR_Ore_T03";
-							else if (VersionInfo.FortniteVersion >= 7.10 && VersionInfo.FortniteVersion < 12.50)
-								Value = "WID_Hook_Gun_Slide";
-							else
-								Value = "WID_Hook_Gun_VR_Ore_T03";
-						}
-
-						ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(Value.c_str());
-
-						if (!ItemDefinition && Value.find('/') != std::string::npos)
-						{
-							auto Item = StaticLoadObject(UEAllocatedWString(Value.begin(), Value.end()).c_str(), UFortItemDefinition::StaticClass());
-							ItemDefinition = Item->Cast<UFortItemDefinition>();
-						}
-					}
-				}
+				auto ItemDefinition = FindItemDefinitionByCommandArg(args[1].c_str());
 
 				if (!ItemDefinition)
 					return PlayerController->ClientMessage(FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"), FName(), 1);
@@ -7020,29 +7075,107 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 			}
 			else if (command == "spawnpickup")
 			{
-				if (args.size() != 2 && args.size() != 3)
+				auto SpawnPickupArgsStart = originalCommand.find(' ');
+
+				if (SpawnPickupArgsStart == std::string::npos)
 				{
-					PlayerController->ClientMessage(FString(L"Wrong number of arguments!"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat spawnpickup <WID/path> [count] [X Y Z]"), FName(), 1.f);
 					return;
 				}
 
-				auto ItemDefinition = FindObject<UFortItemDefinition>(UEAllocatedWString(args[1].begin(), args[1].end()));
-				if (!ItemDefinition)
-					ItemDefinition = TUObjectArray::FindObject<UFortItemDefinition>(args[1].c_str());
+				auto SpawnPickupArgs = TrimPlayerCommandString(originalCommand.substr(SpawnPickupArgsStart + 1).c_str());
+				auto SpawnPickupTokens = SplitPlayerCommandArgs(SpawnPickupArgs);
+
+				if (SpawnPickupTokens.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat spawnpickup <WID/path> [count] [X Y Z]"), FName(), 1.f);
+					return;
+				}
+
+				auto ItemArg = SpawnPickupTokens[0];
+				auto ItemDefinition = FindItemDefinitionByCommandArg(ItemArg);
 
 				if (!ItemDefinition)
 					return PlayerController->ClientMessage(FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"), FName(), 1);
 
-				long Count = 1;
+				auto Pawn = PlayerController->Pawn;
 
-				if (args.size() == 3)
-					Count = strtol(args[2].c_str(), nullptr, 10);
-
-				if (PlayerController->Pawn)
+				if (!Pawn)
 				{
-					AFortInventory::SpawnPickup(PlayerController->Pawn->K2_GetActorLocation(), ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetTossed(), EFortPickupSpawnSource::GetUnset(), PlayerController->Pawn);
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				long Count = 1;
+				bool HasLocation = false;
+				FVector SpawnLocation{};
+
+				if (SpawnPickupTokens.size() == 2)
+				{
+					int ParsedCount = 0;
+
+					if (!TryParseCommandInt(SpawnPickupTokens[1], ParsedCount))
+					{
+						PlayerController->ClientMessage(FString(L"Usage: cheat spawnpickup <WID/path> [count] [X Y Z]"), FName(), 1.f);
+						return;
+					}
+
+					Count = ParsedCount;
+				}
+				else if (SpawnPickupTokens.size() == 4 || SpawnPickupTokens.size() == 5)
+				{
+					size_t LocationStartIndex = 1;
+
+					if (SpawnPickupTokens.size() == 5)
+					{
+						int ParsedCount = 0;
+
+						if (!TryParseCommandInt(SpawnPickupTokens[1], ParsedCount))
+						{
+							PlayerController->ClientMessage(FString(L"Usage: cheat spawnpickup <WID/path> [count] [X Y Z]"), FName(), 1.f);
+							return;
+						}
+
+						Count = ParsedCount;
+						LocationStartIndex = 2;
+					}
+
+					float X = 0.f;
+					float Y = 0.f;
+					float Z = 0.f;
+
+					if (!TryParseCommandFloat(SpawnPickupTokens[LocationStartIndex], X) ||
+						!TryParseCommandFloat(SpawnPickupTokens[LocationStartIndex + 1], Y) ||
+						!TryParseCommandFloat(SpawnPickupTokens[LocationStartIndex + 2], Z))
+					{
+						PlayerController->ClientMessage(FString(L"Usage: cheat spawnpickup <WID/path> [count] [X Y Z]"), FName(), 1.f);
+						return;
+					}
+
+					SpawnLocation = FVector(X, Y, Z);
+					HasLocation = true;
+				}
+				else if (SpawnPickupTokens.size() > 5)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat spawnpickup <WID/path> [count] [X Y Z]"), FName(), 1.f);
+					return;
+				}
+				else if (SpawnPickupTokens.size() != 1)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat spawnpickup <WID/path> [count] [X Y Z]"), FName(), 1.f);
+					return;
+				}
+
+				if (!HasLocation)
+					SpawnLocation = Pawn->K2_GetActorLocation();
+
+				if (auto SpawnedPickup = AFortInventory::SpawnPickup(SpawnLocation, ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetTossed(), EFortPickupSpawnSource::GetUnset(), Pawn))
+				{
+					DisablePickupGravity(SpawnedPickup);
 					PlayerController->ClientMessage(FString(L"Spawned pickup!"), FName(), 1.f);
 				}
+				else
+					PlayerController->ClientMessage(FString(L"Failed to spawn pickup!"), FName(), 1.f);
 			}
 			else if (command == "getloc" || command == "a" || command == "getlocation")
 			{
@@ -8511,94 +8644,1040 @@ void AFortPlayerControllerAthena::ServerCreativeSetFlightSprint(UObject* Context
 	PlayerController->OnRep_IsFlightSprinting();
 }
 
-void AFortPlayerControllerAthena::AddActorsToIndicatedList(UObject* Context, FFrame& Stack)
+static size_t GetNativeFunctionParamCount(FFrame& Stack)
 {
-	AFortPlayerControllerAthena* InstigatingController;
-	bool bAddAsUnique;
-	bool bAllowOwningPlayer;
-	bool bReplaceExistingEntry;
-	bool bRefreshExistingEntry;
+	auto Function = Stack.GetCurrentNativeFunction();
+	if (!Function)
+		Function = Stack.Node;
 
-	Stack.StepCompiledIn(&InstigatingController);
-	auto& IndicatedActors = Stack.StepCompiledInRef<TArray<AActor*>>();
-	auto& IndicatedActorData = Stack.StepCompiledInRef<FIndicatedActorData>();
-	Stack.StepCompiledIn(&bAddAsUnique);
-	Stack.StepCompiledIn(&bAllowOwningPlayer);
-	Stack.StepCompiledIn(&bReplaceExistingEntry);
-	Stack.StepCompiledIn(&bRefreshExistingEntry);
-	Stack.IncrementCode();
+	return Function ? Function->GetParamsNamed().NameOffsetMap.size() : 0;
+}
 
-	printf("AddActorsToIndicatedList\n");
+static int32 GetStructPropertyOffset(const SDK::UStruct* Struct, const char* PropertyName)
+{
+	if (!Struct)
+		return -1;
 
-	/*if (!InstigatingController || !InstigatingController->IsA(AFortPlayerControllerAthena::StaticClass()))
+	auto Prop = Struct->GetProperty(PropertyName);
+	return Prop ? SDK::DecryptPropOffset(GetFromOffset<uint32>(Prop, Offsets::Offset_Internal)) : -1;
+}
+
+static int32 GetObjectPropertyElementSize(const UObject* Object, const char* PropertyName)
+{
+	if (!Object)
+		return 0;
+
+	auto Prop = Object->GetProperty(PropertyName);
+	return Prop ? GetFromOffset<uint32>(Prop, Offsets::ElementSize) : 0;
+}
+
+static int32 FindEntriesOffsetFromListStructs(int32 ExpectedListSize, const char* PreferredStructName, const char* FallbackStructName)
+{
+	const SDK::UStruct* Candidates[2] =
 	{
-		printf("AddActorsToIndicatedList: InstigatingController is INVALID!\n");
+		SDK::FindStruct(PreferredStructName),
+		SDK::FindStruct(FallbackStructName)
+	};
+
+	int32 FallbackOffset = -1;
+
+	for (auto Struct : Candidates)
+	{
+		const int32 EntriesOffset = GetStructPropertyOffset(Struct, "Entries");
+		if (EntriesOffset == -1)
+			continue;
+
+		if (FallbackOffset == -1)
+			FallbackOffset = EntriesOffset;
+
+		if (ExpectedListSize <= 0 || Struct->GetPropertiesSize() == ExpectedListSize)
+			return EntriesOffset;
+	}
+
+	return FallbackOffset;
+}
+
+static int32 GetIndicatedEntriesOffset(UFortIndicatedActorManagementComponent* Component)
+{
+	static int32 EntriesOffset = -2;
+
+	if (EntriesOffset == -2)
+		EntriesOffset = FindEntriesOffsetFromListStructs(GetObjectPropertyElementSize(Component, "IndicatedActorList"), "IndicatedActorInfoArray", "IndicatedActorList");
+
+	return EntriesOffset;
+}
+
+static int32 GetStenciledEntriesOffset(UFortIndicatedActorManagementComponent* Component)
+{
+	static int32 EntriesOffset = -2;
+
+	if (EntriesOffset == -2)
+		EntriesOffset = FindEntriesOffsetFromListStructs(GetObjectPropertyElementSize(Component, "StenciledActorList"), "StenciledActorInfoArray", "StenciledActorList");
+
+	return EntriesOffset;
+}
+
+static TArray<FIndicatedActorInfoEntry>* GetIndicatedEntries(UFortIndicatedActorManagementComponent* Component, FIndicatedActorList& List)
+{
+	const int32 EntriesOffset = GetIndicatedEntriesOffset(Component);
+	return EntriesOffset != -1 ? &GetFromOffset<TArray<FIndicatedActorInfoEntry>>(&List, EntriesOffset) : nullptr;
+}
+
+static TArray<FStenciledActorInfoEntry>* GetStenciledEntries(UFortIndicatedActorManagementComponent* Component, FStenciledActorList& List)
+{
+	const int32 EntriesOffset = GetStenciledEntriesOffset(Component);
+	return EntriesOffset != -1 ? &GetFromOffset<TArray<FStenciledActorInfoEntry>>(&List, EntriesOffset) : nullptr;
+}
+
+static bool CanUseIndicatedActorInfoEntry()
+{
+	return FIndicatedActorData::StaticStruct()
+		&& FIndicatedActorInfoEntry::StaticStruct()
+		&& FIndicatedActorInfoEntry::HasActor()
+		&& FIndicatedActorInfoEntry::HasStartTime()
+		&& FIndicatedActorInfoEntry::HasEndTime()
+		&& FIndicatedActorInfoEntry::HasData();
+}
+
+static bool CanUseStenciledActorInfoEntry()
+{
+	return FStenciledActorData::StaticStruct()
+		&& FStenciledActorInfoEntry::StaticStruct()
+		&& FStenciledActorInfoEntry::HasActor()
+		&& FStenciledActorInfoEntry::HasStartTime()
+		&& FStenciledActorInfoEntry::HasEndTime()
+		&& FStenciledActorInfoEntry::HasData();
+}
+
+static UFortIndicatedActorManagementComponent* GetIndicatedActorManagementComponent(AFortPlayerControllerAthena* PC)
+{
+	if (!PC || !PC->HasIndicatedActorManagementComponent())
+		return nullptr;
+
+	auto Component = PC->IndicatedActorManagementComponent;
+	return Component && Component->HasIndicatedActorList() ? Component : nullptr;
+}
+
+static UFortIndicatedActorManagementComponent* GetStenciledActorManagementComponent(AFortPlayerControllerAthena* PC)
+{
+	if (!PC || !PC->HasIndicatedActorManagementComponent())
+		return nullptr;
+
+	auto Component = PC->IndicatedActorManagementComponent;
+	return Component && Component->HasStenciledActorList() ? Component : nullptr;
+}
+
+static void ClearReflectedFString(void* StructData, int32 StructStorageSize, int32 StringOffset)
+{
+	if (StringOffset < 0 || StringOffset + (int32)sizeof(FString) > StructStorageSize)
+		return;
+
+	memset((uint8*)StructData + StringOffset, 0, sizeof(FString));
+}
+
+static void CopyReflectedFStringIfReadable(void* DestStructData, const void* SourceStructData, int32 StructStorageSize, int32 StringOffset)
+{
+	if (StringOffset < 0 || StringOffset + (int32)sizeof(FString) > StructStorageSize)
+		return;
+
+	auto& Dest = *(FString*)((uint8*)DestStructData + StringOffset);
+	const auto& Source = *(const FString*)((const uint8*)SourceStructData + StringOffset);
+	const int32 CharCount = Source.Num();
+
+	if (CharCount <= 0 || CharCount > 256 || !Source.CStr() || !SDK::MemReadable(Source.CStr(), CharCount * sizeof(wchar_t)))
+	{
+		ClearReflectedFString(DestStructData, StructStorageSize, StringOffset);
 		return;
 	}
 
-	AFortPlayerPawnAthena* Pawn = InstigatingController->MyFortPawn;
+	FString Copy;
+	for (int32 i = 0; i < CharCount; i++)
+		Copy.Add(Source.CStr()[i]);
 
-	if (!Pawn)
+	Dest = Copy;
+}
+
+static void CopyIndicatedData(FIndicatedActorData& Dest, const FIndicatedActorData& Source)
+{
+	if (!FIndicatedActorData::StaticStruct())
 		return;
 
-	for (AActor* IndicatedActor : IndicatedActors)
+	const int32 CopySize = std::min<int32>(FIndicatedActorData::Size(), sizeof(FIndicatedActorData));
+	if (CopySize <= 0)
+		return;
+
+	memcpy(&Dest, &Source, CopySize);
+
+	if (FIndicatedActorData::HasGroupIdentifier())
+		CopyReflectedFStringIfReadable(&Dest, &Source, sizeof(FIndicatedActorData), FIndicatedActorData::GroupIdentifier__Offset);
+}
+
+static void CopyStenciledData(FStenciledActorData& Dest, const FStenciledActorData& Source)
+{
+	if (!FStenciledActorData::StaticStruct())
+		return;
+
+	const int32 CopySize = std::min<int32>(FStenciledActorData::Size(), sizeof(FStenciledActorData));
+	if (CopySize <= 0)
+		return;
+
+	memcpy(&Dest, &Source, CopySize);
+
+	if (FStenciledActorData::HasGroupIdentifier())
+		CopyReflectedFStringIfReadable(&Dest, &Source, sizeof(FStenciledActorData), FStenciledActorData::GroupIdentifier__Offset);
+}
+
+static float GetIndicatedDuration(const FIndicatedActorData& Data)
+{
+	return FIndicatedActorData::HasDuration() ? Data.Duration : 10.f;
+}
+
+static float GetStenciledDuration(const FStenciledActorData& Data)
+{
+	return FStenciledActorData::HasDuration() ? Data.Duration : 10.f;
+}
+
+static bool ShouldShareIndicatedWithSquad(const FIndicatedActorData& Data)
+{
+	return FIndicatedActorData::HasShareActorWith() && Data.ShareActorWith != 0;
+}
+
+static bool ShouldShareStenciledWithSquad(const FStenciledActorData& Data)
+{
+	return FStenciledActorData::HasShareActorWith() && Data.ShareActorWith != 0;
+}
+
+static AFortPlayerControllerAthena* GetActorFortController(AActor* Actor)
+{
+	if (!Actor || !SDK::MemReadable(Actor, sizeof(void*)))
+		return nullptr;
+
+	if (auto PC = Actor->Cast<AFortPlayerControllerAthena>())
+		return PC;
+
+	if (auto Pawn = Actor->Cast<AFortPlayerPawnAthena>())
+		return Pawn->Controller ? Pawn->Controller->Cast<AFortPlayerControllerAthena>() : nullptr;
+
+	if (auto PlayerState = Actor->Cast<AFortPlayerStateAthena>())
+		return PlayerState->GetOwner() ? PlayerState->GetOwner()->Cast<AFortPlayerControllerAthena>() : nullptr;
+
+	// Owner can be a stale/poisoned pointer (e.g. 0xffffffffffffffff) that is non-null yet
+	// unreadable, so validate it before dereferencing rather than trusting the null check.
+	auto Owner = Actor->Owner;
+	if (Owner && SDK::MemReadable(Owner, sizeof(void*)))
 	{
-		if (!IndicatedActor) 
+		if (auto PC = Owner->Cast<AFortPlayerControllerAthena>())
+			return PC;
+
+		if (auto PlayerState = Owner->Cast<AFortPlayerStateAthena>())
+			return PlayerState->GetOwner() ? PlayerState->GetOwner()->Cast<AFortPlayerControllerAthena>() : nullptr;
+	}
+
+	return nullptr;
+}
+
+// AFortPlayerState::PlayerTeam points at a UObject (AFortTeamInfo), not a fixed-layout struct.
+// Its TeamMembers array sits at a build-specific reflected offset (0x228 on 13.40), so resolve
+// it dynamically instead of assuming offset 0 - reading offset 0 lands on the UObject header and
+// yields a garbage count/pointers, which is the source of the ForEachSquadController crash.
+static int32 GetTeamMembersOffset(UObject* TeamInfo)
+{
+	static int32 Offset = -2;
+
+	if (Offset < 0 && TeamInfo)
+	{
+		const int32 Found = (int32)TeamInfo->GetOffset("TeamMembers");
+		if (Found >= 0)
+			Offset = Found;
+	}
+
+	return Offset;
+}
+
+static void ForEachSquadController(AFortPlayerControllerAthena* InstigatingController, const std::function<void(AFortPlayerControllerAthena*)>& Visitor)
+{
+	if (!InstigatingController || !InstigatingController->PlayerState)
+		return;
+
+	auto PlayerState = InstigatingController->PlayerState->Cast<AFortPlayerStateAthena>();
+	if (!PlayerState || !PlayerState->HasPlayerTeam())
+		return;
+
+	auto TeamInfo = (UObject*)PlayerState->PlayerTeam;
+	if (!TeamInfo || !SDK::MemReadable(TeamInfo, sizeof(void*)))
+		return;
+
+	const int32 TeamMembersOffset = GetTeamMembersOffset(TeamInfo);
+	if (TeamMembersOffset < 0)
+		return;
+
+	auto& TeamMembers = GetFromOffset<TArray<AActor*>>(TeamInfo, TeamMembersOffset);
+	const int32 MemberCount = TeamMembers.Num();
+	if (MemberCount <= 0 || MemberCount > 1024)
+		return;
+
+	for (int32 i = 0; i < MemberCount; i++)
+	{
+		auto TeamMember = TeamMembers[i];
+		if (!TeamMember || !SDK::MemReadable(TeamMember, sizeof(void*)))
 			continue;
 
-		printf("Indicate the frickin %s\n", IndicatedActor->Name.ToString().c_str());
+		// TeamMembers may hold AController* (13.40+) or AFortPlayerStateAthena* depending on the
+		// build; GetActorFortController resolves either kind to the owning controller.
+		auto TeamMemberController = GetActorFortController(TeamMember);
 
-		if (Pawn == IndicatedActor && !bAllowOwningPlayer)
+		if (!TeamMemberController || TeamMemberController == InstigatingController)
 			continue;
 
-		float TimeSeconds = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+		Visitor(TeamMemberController);
+	}
+}
 
-		FIndicatedActorInfoEntry ActorInfoEntry{};
-		ActorInfoEntry.Actor = IndicatedActor;
-		ActorInfoEntry.StartTime = TimeSeconds;
-		ActorInfoEntry.EndTime = TimeSeconds + IndicatedActorData.Duration;
-		ActorInfoEntry.Data = IndicatedActorData;
+static void AddIndicatedEntry(AFortPlayerControllerAthena* PC, const FIndicatedActorInfoEntry& NewEntry, bool bAddAsUnique)
+{
+	if (!CanUseIndicatedActorInfoEntry())
+		return;
 
-		auto AddToComponent = [&](AFortPlayerControllerAthena* PC) 
+	auto Component = GetIndicatedActorManagementComponent(PC);
+	if (!Component)
+		return;
+
+	auto& List = Component->IndicatedActorList;
+	auto Entries = GetIndicatedEntries(Component, List);
+	if (!Entries)
+		return;
+
+	const int32 EntrySize = FIndicatedActorInfoEntry::Size();
+	if (EntrySize <= 0)
+		return;
+
+	if (bAddAsUnique)
+	{
+		for (int32 i = 0; i < Entries->Num(); i++)
 		{
-			if (PC && PC->IndicatedActorManagementComponent) 
-			{
-				auto& List = PC->IndicatedActorManagementComponent->IndicatedActorList;
+			auto& Existing = Entries->Get(i, EntrySize);
 
-				try 
-				{
-					List.Entries.Add(ActorInfoEntry);
-					List.MarkArrayDirty();
-				}
-				catch (...) 
-				{
-					printf("Failed to add entry to %s\n", PC->Name.ToString().c_str());
-				}
-			}
-		};
+			if (Existing.Actor != NewEntry.Actor)
+				continue;
 
-		AddToComponent(InstigatingController);
-
-		AFortPlayerStateAthena* PlayerState = InstigatingController->PlayerState;
-
-		if (PlayerState && PlayerState->PlayerTeam)
-		{
-			for (AFortPlayerStateAthena* TeamMember : PlayerState->PlayerTeam->TeamMembers)
-			{
-				if (!TeamMember)
-					continue;
-
-				AFortPlayerControllerAthena* TeamMemberAthena = (AFortPlayerControllerAthena*)TeamMember->GetOwner();
-
-				if (!TeamMemberAthena || TeamMemberAthena == InstigatingController || TeamMemberAthena == IndicatedActor)
-					continue;
-
-				AddToComponent(TeamMemberAthena);
-			}
+			Existing.StartTime = NewEntry.StartTime;
+			Existing.EndTime = NewEntry.EndTime;
+			CopyIndicatedData(Existing.Data, NewEntry.Data);
+			List.MarkItemDirty(Existing);
+			return;
 		}
 	}
 
-	// IndicatedActors.Free();*/
+	auto& Added = Entries->Add(NewEntry, EntrySize);
+	Added.ReplicationID = -1;
+	Added.ReplicationKey = -1;
+	Added.MostRecentArrayReplicationKey = -1;
+	CopyIndicatedData(Added.Data, NewEntry.Data);
+	List.MarkItemDirty(Added);
+}
+
+static void AddStenciledEntry(AFortPlayerControllerAthena* PC, const FStenciledActorInfoEntry& NewEntry, bool bAddAsUnique)
+{
+	if (!CanUseStenciledActorInfoEntry())
+		return;
+
+	auto Component = GetStenciledActorManagementComponent(PC);
+	if (!Component)
+		return;
+
+	auto& List = Component->StenciledActorList;
+	auto Entries = GetStenciledEntries(Component, List);
+	if (!Entries)
+		return;
+
+	const int32 EntrySize = FStenciledActorInfoEntry::Size();
+	if (EntrySize <= 0)
+		return;
+
+	if (bAddAsUnique)
+	{
+		for (int32 i = 0; i < Entries->Num(); i++)
+		{
+			auto& Existing = Entries->Get(i, EntrySize);
+
+			if (Existing.Actor != NewEntry.Actor)
+				continue;
+
+			Existing.StartTime = NewEntry.StartTime;
+			Existing.EndTime = NewEntry.EndTime;
+			CopyStenciledData(Existing.Data, NewEntry.Data);
+			List.MarkItemDirty(Existing);
+			return;
+		}
+	}
+
+	auto& Added = Entries->Add(NewEntry, EntrySize);
+	Added.ReplicationID = -1;
+	Added.ReplicationKey = -1;
+	Added.MostRecentArrayReplicationKey = -1;
+	CopyStenciledData(Added.Data, NewEntry.Data);
+	List.MarkItemDirty(Added);
+}
+
+static void MarkActorsIndicated(AFortPlayerControllerAthena* InstigatingController, const TArray<AActor*>& IndicatedActors, const FIndicatedActorData& Data, bool bAddAsUnique, bool bAllowOwningPlayer)
+{
+	if (!InstigatingController || !CanUseIndicatedActorInfoEntry())
+		return;
+
+	float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+	const bool bShareWithSquad = ShouldShareIndicatedWithSquad(Data);
+	const int32 EntrySize = FIndicatedActorInfoEntry::Size();
+
+	for (int32 i = 0; i < IndicatedActors.Num(); i++)
+	{
+		auto IndicatedActor = IndicatedActors[i];
+
+		if (!IndicatedActor)
+			continue;
+
+		if (IndicatedActor == InstigatingController->MyFortPawn && !bAllowOwningPlayer)
+			continue;
+
+		auto EntryMemory = malloc(EntrySize);
+		if (!EntryMemory)
+			continue;
+
+		memset(EntryMemory, 0, EntrySize);
+		auto Entry = (FIndicatedActorInfoEntry*)EntryMemory;
+		Entry->Actor = IndicatedActor;
+		Entry->StartTime = TimeSeconds;
+		Entry->EndTime = TimeSeconds + GetIndicatedDuration(Data);
+		CopyIndicatedData(Entry->Data, Data);
+
+		AddIndicatedEntry(InstigatingController, *Entry, bAddAsUnique);
+
+		if (bAllowOwningPlayer)
+		{
+			auto OwningController = GetActorFortController(IndicatedActor);
+			if (OwningController && OwningController != InstigatingController)
+				AddIndicatedEntry(OwningController, *Entry, bAddAsUnique);
+		}
+
+		if (bShareWithSquad)
+		{
+			ForEachSquadController(InstigatingController, [&](AFortPlayerControllerAthena* TeamMemberController)
+			{
+				if (TeamMemberController->MyFortPawn != IndicatedActor)
+					AddIndicatedEntry(TeamMemberController, *Entry, bAddAsUnique);
+			});
+		}
+
+		free(EntryMemory);
+	}
+}
+
+static void MarkActorsStenciled(AFortPlayerControllerAthena* InstigatingController, const TArray<AActor*>& StenciledActors, const FStenciledActorData& Data, bool bAddAsUnique)
+{
+	if (!InstigatingController || !CanUseStenciledActorInfoEntry())
+		return;
+
+	float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+	const bool bShareWithSquad = ShouldShareStenciledWithSquad(Data);
+	const int32 EntrySize = FStenciledActorInfoEntry::Size();
+
+	for (int32 i = 0; i < StenciledActors.Num(); i++)
+	{
+		auto StenciledActor = StenciledActors[i];
+
+		if (!StenciledActor || StenciledActor == InstigatingController->MyFortPawn)
+			continue;
+
+		auto EntryMemory = malloc(EntrySize);
+		if (!EntryMemory)
+			continue;
+
+		memset(EntryMemory, 0, EntrySize);
+		auto Entry = (FStenciledActorInfoEntry*)EntryMemory;
+		Entry->Actor = StenciledActor;
+		Entry->StartTime = TimeSeconds;
+		Entry->EndTime = TimeSeconds + GetStenciledDuration(Data);
+		CopyStenciledData(Entry->Data, Data);
+
+		AddStenciledEntry(InstigatingController, *Entry, bAddAsUnique);
+
+		auto OwningController = GetActorFortController(StenciledActor);
+		if (OwningController && OwningController != InstigatingController)
+			AddStenciledEntry(OwningController, *Entry, bAddAsUnique);
+
+		if (bShareWithSquad)
+		{
+			ForEachSquadController(InstigatingController, [&](AFortPlayerControllerAthena* TeamMemberController)
+			{
+				if (TeamMemberController->MyFortPawn != StenciledActor)
+					AddStenciledEntry(TeamMemberController, *Entry, bAddAsUnique);
+			});
+		}
+
+		free(EntryMemory);
+	}
+}
+
+// Shakedown reveal: when a player interrogates a downed enemy, expose that enemy's surviving
+// squadmates (their pawns) as indicated actors to the interrogator and, via the share flag, the
+// interrogator's whole squad. Reuses the same version-independent marking as the ping system.
+void AFortPlayerControllerAthena::RevealInterrogatedTeam(AFortPlayerControllerAthena* Interrogator, AActor* DBNOPlayer)
+{
+	if (!Interrogator || !DBNOPlayer || !CanUseIndicatedActorInfoEntry())
+		return;
+
+	auto DBNOController = GetActorFortController(DBNOPlayer);
+	if (!DBNOController)
+		return;
+
+	// Collect the downed player's living squadmates' pawns (ForEachSquadController already skips
+	// the downed player itself and resolves each member to its controller across builds).
+	TArray<AActor*> Revealed{};
+	ForEachSquadController(DBNOController, [&](AFortPlayerControllerAthena* TeamMemberController)
+	{
+		auto Pawn = TeamMemberController->MyFortPawn;
+		if (Pawn && SDK::MemReadable(Pawn, sizeof(void*)))
+			Revealed.Add((AActor*)Pawn);
+	});
+
+	if (Revealed.Num() <= 0)
+		return;
+
+	FIndicatedActorData Data{};
+	if (FIndicatedActorData::HasDuration())
+		Data.Duration = 12.f;
+	if (FIndicatedActorData::HasShareActorWith())
+		Data.ShareActorWith = 1; // non-None -> share the reveal with the interrogator's squad
+
+	MarkActorsIndicated(Interrogator, Revealed, Data, true /*bAddAsUnique*/, false /*bAllowOwningPlayer*/);
+
+	Revealed.Free();
+}
+
+static bool ActorMatchesIndicatedFilter(AActor* Actor, const FIndicatedActorDataWithFilter& FilterData)
+{
+	if (!Actor || !FIndicatedActorDataWithFilter::HasIndicatedActorTags())
+		return Actor != nullptr;
+
+	auto& RequiredTags = FilterData.IndicatedActorTags;
+	if (RequiredTags.GameplayTags.Num() == 0 && RequiredTags.ParentTags.Num() == 0)
+		return true;
+
+	FGameplayTagContainer ActorTags{};
+	bool bHasActorTags = false;
+
+	if (auto Pawn = Actor->Cast<AFortPlayerPawnAthena>())
+	{
+		ActorTags = Pawn->GameplayTags;
+		bHasActorTags = true;
+	}
+	else if (auto Interface = (IGameplayTagAssetInterface*)Actor->GetInterface(IGameplayTagAssetInterface::StaticClass()))
+	{
+		auto GetOwnedGameplayTags = (void(*)(IGameplayTagAssetInterface*, FGameplayTagContainer*))Interface->Vft[0x2];
+		GetOwnedGameplayTags(Interface, &ActorTags);
+		bHasActorTags = true;
+	}
+
+	bool bMatches = bHasActorTags && ActorTags.HasAll(RequiredTags);
+
+	if (bHasActorTags && !Actor->IsA<AFortPlayerPawnAthena>())
+	{
+		ActorTags.GameplayTags.Free();
+		ActorTags.ParentTags.Free();
+	}
+
+	return bMatches;
+}
+
+static bool SphereOverlapActorsForIndicatedFilter(AFortPlayerControllerAthena* InstigatingController, const FIndicatedActorDataWithFilter& FilterData, TArray<AActor*>& Actors)
+{
+	if (!InstigatingController || !FIndicatedActorDataWithFilter::HasOverlapRadius() || FilterData.OverlapRadius <= 0.f)
+		return false;
+
+	static UFunction* SphereOverlapActorsFn = nullptr;
+	static bool bCheckedSphereOverlapActorsFn = false;
+
+	if (!bCheckedSphereOverlapActorsFn)
+	{
+		bCheckedSphereOverlapActorsFn = true;
+		SphereOverlapActorsFn = UKismetSystemLibrary::GetDefaultObj()->GetFunction("SphereOverlapActors");
+	}
+
+	if (!SphereOverlapActorsFn)
+		return false;
+
+	auto Origin = InstigatingController->MyFortPawn ? InstigatingController->MyFortPawn->K2_GetActorLocation() : InstigatingController->K2_GetActorLocation();
+	TArray<AActor*> IgnoredActors{};
+	auto ObjectTypes = FIndicatedActorDataWithFilter::HasObjectTypes() ? FilterData.ObjectTypes : TArray<uint8>{};
+	auto ActorClassFilter = FIndicatedActorDataWithFilter::HasActorClassFilter() ? FilterData.ActorClassFilter : nullptr;
+
+	return UKismetSystemLibrary::GetDefaultObj()->Call<bool>(SphereOverlapActorsFn, (UObject*)InstigatingController, Origin, FilterData.OverlapRadius, ObjectTypes, ActorClassFilter, IgnoredActors, &Actors);
+}
+
+static TArray<AActor*> FindActorsInFilterRadius(AFortPlayerControllerAthena* InstigatingController, const FIndicatedActorDataWithFilter& FilterData)
+{
+	TArray<AActor*> FilteredActors;
+	TArray<AActor*> OverlappedActors;
+
+	if (!SphereOverlapActorsForIndicatedFilter(InstigatingController, FilterData, OverlappedActors))
+		return FilteredActors;
+
+	for (int32 i = 0; i < OverlappedActors.Num(); i++)
+	{
+		auto Actor = OverlappedActors[i];
+		if (ActorMatchesIndicatedFilter(Actor, FilterData))
+			FilteredActors.Add(Actor);
+	}
+
+	OverlappedActors.Free();
+	return FilteredActors;
+}
+
+static void RemoveIndicatedEntries(AFortPlayerControllerAthena* PC, AActor* Actor, const FString& GroupIdentifier, bool bMatchByGroup)
+{
+	if (bMatchByGroup || !Actor || !CanUseIndicatedActorInfoEntry())
+		return;
+
+	auto Component = GetIndicatedActorManagementComponent(PC);
+	if (!Component)
+		return;
+
+	auto& List = Component->IndicatedActorList;
+	auto Entries = GetIndicatedEntries(Component, List);
+	if (!Entries)
+		return;
+
+	const int32 EntrySize = FIndicatedActorInfoEntry::Size();
+	if (EntrySize <= 0)
+		return;
+
+	bool bRemovedAny = false;
+
+	for (int32 i = Entries->Num() - 1; i >= 0; i--)
+	{
+		auto& Entry = Entries->Get(i, EntrySize);
+		if (Entry.Actor != Actor)
+			continue;
+
+		Entries->Remove(i, EntrySize);
+		bRemovedAny = true;
+	}
+
+	if (bRemovedAny)
+		List.MarkArrayDirty();
+}
+
+static void RemoveStenciledEntries(AFortPlayerControllerAthena* PC, AActor* Actor, const FString& GroupIdentifier, bool bMatchByGroup)
+{
+	if (bMatchByGroup || !Actor || !CanUseStenciledActorInfoEntry())
+		return;
+
+	auto Component = GetStenciledActorManagementComponent(PC);
+	if (!Component)
+		return;
+
+	auto& List = Component->StenciledActorList;
+	auto Entries = GetStenciledEntries(Component, List);
+	if (!Entries)
+		return;
+
+	const int32 EntrySize = FStenciledActorInfoEntry::Size();
+	if (EntrySize <= 0)
+		return;
+
+	bool bRemovedAny = false;
+
+	for (int32 i = Entries->Num() - 1; i >= 0; i--)
+	{
+		auto& Entry = Entries->Get(i, EntrySize);
+		if (Entry.Actor != Actor)
+			continue;
+
+		Entries->Remove(i, EntrySize);
+		bRemovedAny = true;
+	}
+
+	if (bRemovedAny)
+		List.MarkArrayDirty();
+}
+
+static void RemoveIndicatedEntriesWithSquad(AFortPlayerControllerAthena* InstigatingController, AActor* Actor, const FString& GroupIdentifier, bool bMatchByGroup, bool bIncludeSquad)
+{
+	if (!InstigatingController)
+		return;
+
+	RemoveIndicatedEntries(InstigatingController, Actor, GroupIdentifier, bMatchByGroup);
+
+	if (!bIncludeSquad)
+		return;
+
+	ForEachSquadController(InstigatingController, [&](AFortPlayerControllerAthena* TeamMemberController)
+	{
+		RemoveIndicatedEntries(TeamMemberController, Actor, GroupIdentifier, bMatchByGroup);
+	});
+}
+
+static void RemoveStenciledEntriesWithSquad(AFortPlayerControllerAthena* InstigatingController, AActor* Actor, const FString& GroupIdentifier, bool bMatchByGroup, bool bIncludeSquad)
+{
+	if (!InstigatingController)
+		return;
+
+	RemoveStenciledEntries(InstigatingController, Actor, GroupIdentifier, bMatchByGroup);
+
+	if (!bIncludeSquad)
+		return;
+
+	ForEachSquadController(InstigatingController, [&](AFortPlayerControllerAthena* TeamMemberController)
+	{
+		RemoveStenciledEntries(TeamMemberController, Actor, GroupIdentifier, bMatchByGroup);
+	});
+}
+
+static AFortPlayerControllerAthena* GetIndicatedComponentController(UObject* Component)
+{
+	auto ActorComponent = Component ? Component->Cast<UActorComponent>() : nullptr;
+	auto Owner = ActorComponent ? ActorComponent->GetOwner() : nullptr;
+	return Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+}
+
+void AFortPlayerControllerAthena::AddActorsToIndicatedList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	TArray<AActor*> IndicatedActors;
+	FIndicatedActorData IndicatedActorData{};
+	bool bAddAsUnique = false;
+	bool bAllowOwningPlayer = false;
+	bool bIgnored = false;
+	auto ParamCount = GetNativeFunctionParamCount(Stack);
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&IndicatedActors);
+	Stack.StepCompiledIn(&IndicatedActorData);
+	Stack.StepCompiledIn(&bAddAsUnique);
+	Stack.StepCompiledIn(&bAllowOwningPlayer);
+	if (ParamCount > 5)
+		Stack.StepCompiledIn(&bIgnored);
+	if (ParamCount > 6)
+		Stack.StepCompiledIn(&bIgnored);
+
+	MarkActorsIndicated(InstigatingController, IndicatedActors, IndicatedActorData, bAddAsUnique, bAllowOwningPlayer);
+
+	if (AddActorsToIndicatedListOG)
+		return AddActorsToIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::AddActorsToStenciledList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	TArray<AActor*> StenciledActors;
+	FStenciledActorData StenciledActorData{};
+	bool bAddAsUnique = false;
+	bool bIgnored = false;
+	auto ParamCount = GetNativeFunctionParamCount(Stack);
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&StenciledActors);
+	Stack.StepCompiledIn(&StenciledActorData);
+	Stack.StepCompiledIn(&bAddAsUnique);
+	if (ParamCount > 4)
+		Stack.StepCompiledIn(&bIgnored);
+	if (ParamCount > 5)
+		Stack.StepCompiledIn(&bIgnored);
+
+	MarkActorsStenciled(InstigatingController, StenciledActors, StenciledActorData, bAddAsUnique);
+
+	if (AddActorsToStenciledListOG)
+		return AddActorsToStenciledListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::AddActorsInRadiusToIndicatedList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	TArray<FIndicatedActorDataWithFilter> FilterDatas;
+	bool bAddAsUnique = false;
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&FilterDatas);
+	Stack.StepCompiledIn(&bAddAsUnique);
+
+	if (InstigatingController)
+	{
+		for (int32 i = 0; i < FilterDatas.Num(); i++)
+		{
+			auto& FilterData = FilterDatas.Get(i, FIndicatedActorDataWithFilter::Size());
+			auto Actors = FindActorsInFilterRadius(InstigatingController, FilterData);
+
+			if (Actors.Num() > 0)
+				MarkActorsIndicated(InstigatingController, Actors, FilterData.IndicatedData, bAddAsUnique, true);
+
+			Actors.Free();
+		}
+	}
+
+	if (AddActorsInRadiusToIndicatedListOG)
+		return AddActorsInRadiusToIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::AddActorsInRadiusToStenciledList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	TArray<FIndicatedActorDataWithFilter> FilterDatas;
+	bool bAddAsUnique = false;
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&FilterDatas);
+	Stack.StepCompiledIn(&bAddAsUnique);
+
+	if (InstigatingController)
+	{
+		for (int32 i = 0; i < FilterDatas.Num(); i++)
+		{
+			auto& FilterData = FilterDatas.Get(i, FIndicatedActorDataWithFilter::Size());
+			auto Actors = FindActorsInFilterRadius(InstigatingController, FilterData);
+
+			if (Actors.Num() > 0)
+				MarkActorsStenciled(InstigatingController, Actors, FilterData.StenciledData, bAddAsUnique);
+
+			Actors.Free();
+		}
+	}
+
+	if (AddActorsInRadiusToStenciledListOG)
+		return AddActorsInRadiusToStenciledListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::RemoveActorFromIndicatedList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	AActor* IndicatedActor = nullptr;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&IndicatedActor);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	if (IndicatedActor)
+		RemoveIndicatedEntriesWithSquad(InstigatingController, IndicatedActor, FString(), false, bIncludeSquad);
+
+	if (RemoveActorFromIndicatedListOG)
+		return RemoveActorFromIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::RemoveActorFromStenciledList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	AActor* StenciledActor = nullptr;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&StenciledActor);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	if (StenciledActor)
+		RemoveStenciledEntriesWithSquad(InstigatingController, StenciledActor, FString(), false, bIncludeSquad);
+
+	if (RemoveActorFromStenciledListOG)
+		return RemoveActorFromStenciledListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::RemoveGroupFromIndicatedList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	FString GroupIdentifier;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&GroupIdentifier);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	RemoveIndicatedEntriesWithSquad(InstigatingController, nullptr, GroupIdentifier, true, bIncludeSquad);
+
+	if (RemoveGroupFromIndicatedListOG)
+		return RemoveGroupFromIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::RemoveGroupFromStenciledList(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* InstigatingController = nullptr;
+	FString GroupIdentifier;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&InstigatingController);
+	Stack.StepCompiledIn(&GroupIdentifier);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	RemoveStenciledEntriesWithSquad(InstigatingController, nullptr, GroupIdentifier, true, bIncludeSquad);
+
+	if (RemoveGroupFromStenciledListOG)
+		return RemoveGroupFromStenciledListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::ComponentAddActorsToIndicatedList(UObject* Context, FFrame& Stack)
+{
+	auto& IndicatedActors = Stack.StepCompiledInRef<TArray<AActor*>>();
+	FIndicatedActorData Data{};
+	bool bAddAsUnique = false;
+	bool bAllowOwningPlayer = false;
+	bool bIgnored = false;
+	auto ParamCount = GetNativeFunctionParamCount(Stack);
+
+	Stack.StepCompiledIn(&Data);
+	Stack.StepCompiledIn(&bAddAsUnique);
+	Stack.StepCompiledIn(&bAllowOwningPlayer);
+	if (ParamCount > 4)
+		Stack.StepCompiledIn(&bIgnored);
+	if (ParamCount > 5)
+		Stack.StepCompiledIn(&bIgnored);
+
+	MarkActorsIndicated(GetIndicatedComponentController(Context), IndicatedActors, Data, bAddAsUnique, bAllowOwningPlayer);
+
+	if (ComponentAddActorsToIndicatedListOG)
+		return ComponentAddActorsToIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::ComponentAddActorsToStenciledList(UObject* Context, FFrame& Stack)
+{
+	auto& StenciledActors = Stack.StepCompiledInRef<TArray<AActor*>>();
+	FStenciledActorData Data{};
+	bool bAddAsUnique = false;
+	bool bIgnored = false;
+	auto ParamCount = GetNativeFunctionParamCount(Stack);
+
+	Stack.StepCompiledIn(&Data);
+	Stack.StepCompiledIn(&bAddAsUnique);
+	if (ParamCount > 3)
+		Stack.StepCompiledIn(&bIgnored);
+	if (ParamCount > 4)
+		Stack.StepCompiledIn(&bIgnored);
+
+	MarkActorsStenciled(GetIndicatedComponentController(Context), StenciledActors, Data, bAddAsUnique);
+
+	if (ComponentAddActorsToStenciledListOG)
+		return ComponentAddActorsToStenciledListOG(Context, Stack);
+}
+
+// Chapter 3+ (above v21) routes flare-gun style radius reveals through the component rather than
+// the FortIndicatedActorManagementLibrary, so the component radius entrypoints must be hooked too
+// or nothing gets marked. Controller comes from the component owner (no InstigatingController param).
+void AFortPlayerControllerAthena::ComponentAddActorsInRadiusToIndicatedList(UObject* Context, FFrame& Stack)
+{
+	auto& FilterDatas = Stack.StepCompiledInRef<TArray<FIndicatedActorDataWithFilter>>();
+	bool bAddAsUnique = false;
+	bool bIgnored = false;
+	auto ParamCount = GetNativeFunctionParamCount(Stack);
+
+	Stack.StepCompiledIn(&bAddAsUnique);
+	if (ParamCount > 2)
+		Stack.StepCompiledIn(&bIgnored);
+	if (ParamCount > 3)
+		Stack.StepCompiledIn(&bIgnored);
+
+	auto InstigatingController = GetIndicatedComponentController(Context);
+	if (InstigatingController)
+	{
+		for (int32 i = 0; i < FilterDatas.Num(); i++)
+		{
+			auto& FilterData = FilterDatas.Get(i, FIndicatedActorDataWithFilter::Size());
+			auto Actors = FindActorsInFilterRadius(InstigatingController, FilterData);
+
+			if (Actors.Num() > 0)
+				MarkActorsIndicated(InstigatingController, Actors, FilterData.IndicatedData, bAddAsUnique, true);
+
+			Actors.Free();
+		}
+	}
+
+	if (ComponentAddActorsInRadiusToIndicatedListOG)
+		return ComponentAddActorsInRadiusToIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::ComponentAddActorsInRadiusToStenciledList(UObject* Context, FFrame& Stack)
+{
+	auto& FilterDatas = Stack.StepCompiledInRef<TArray<FIndicatedActorDataWithFilter>>();
+	bool bAddAsUnique = false;
+	bool bIgnored = false;
+	auto ParamCount = GetNativeFunctionParamCount(Stack);
+
+	Stack.StepCompiledIn(&bAddAsUnique);
+	if (ParamCount > 2)
+		Stack.StepCompiledIn(&bIgnored);
+	if (ParamCount > 3)
+		Stack.StepCompiledIn(&bIgnored);
+
+	auto InstigatingController = GetIndicatedComponentController(Context);
+	if (InstigatingController)
+	{
+		for (int32 i = 0; i < FilterDatas.Num(); i++)
+		{
+			auto& FilterData = FilterDatas.Get(i, FIndicatedActorDataWithFilter::Size());
+			auto Actors = FindActorsInFilterRadius(InstigatingController, FilterData);
+
+			if (Actors.Num() > 0)
+				MarkActorsStenciled(InstigatingController, Actors, FilterData.StenciledData, bAddAsUnique);
+
+			Actors.Free();
+		}
+	}
+
+	if (ComponentAddActorsInRadiusToStenciledListOG)
+		return ComponentAddActorsInRadiusToStenciledListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::ComponentRemoveActorFromIndicatedList(UObject* Context, FFrame& Stack)
+{
+	AActor* IndicatedActor = nullptr;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&IndicatedActor);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	if (IndicatedActor)
+		RemoveIndicatedEntriesWithSquad(GetIndicatedComponentController(Context), IndicatedActor, FString(), false, bIncludeSquad);
+
+	if (ComponentRemoveActorFromIndicatedListOG)
+		return ComponentRemoveActorFromIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::ComponentRemoveActorFromStenciledList(UObject* Context, FFrame& Stack)
+{
+	AActor* StenciledActor = nullptr;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&StenciledActor);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	if (StenciledActor)
+		RemoveStenciledEntriesWithSquad(GetIndicatedComponentController(Context), StenciledActor, FString(), false, bIncludeSquad);
+
+	if (ComponentRemoveActorFromStenciledListOG)
+		return ComponentRemoveActorFromStenciledListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::ComponentRemoveGroupFromIndicatedList(UObject* Context, FFrame& Stack)
+{
+	FString GroupIdentifier;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&GroupIdentifier);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	RemoveIndicatedEntriesWithSquad(GetIndicatedComponentController(Context), nullptr, GroupIdentifier, true, bIncludeSquad);
+
+	if (ComponentRemoveGroupFromIndicatedListOG)
+		return ComponentRemoveGroupFromIndicatedListOG(Context, Stack);
+}
+
+void AFortPlayerControllerAthena::ComponentRemoveGroupFromStenciledList(UObject* Context, FFrame& Stack)
+{
+	FString GroupIdentifier;
+	bool bIncludeSquad = false;
+
+	Stack.StepCompiledIn(&GroupIdentifier);
+	Stack.StepCompiledIn(&bIncludeSquad);
+
+	RemoveStenciledEntriesWithSquad(GetIndicatedComponentController(Context), nullptr, GroupIdentifier, true, bIncludeSquad);
+
+	if (ComponentRemoveGroupFromStenciledListOG)
+		return ComponentRemoveGroupFromStenciledListOG(Context, Stack);
 }
 
 void AFortPlayerControllerAthena::ServerAwardVehicleTrickPoints_(UObject* Context, FFrame& Stack)
@@ -8874,7 +9953,31 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	auto DefaultIndicatedActorLibrary = DefaultObjImpl("FortIndicatedActorManagementLibrary");
 
 	if (DefaultIndicatedActorLibrary)
-		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("AddActorsToIndicatedList"), AddActorsToIndicatedList);
+	{
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("AddActorsToIndicatedList"), AddActorsToIndicatedList, AddActorsToIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("AddActorsToStenciledList"), AddActorsToStenciledList, AddActorsToStenciledListOG);
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("AddActorsInRadiusToIndicatedList"), AddActorsInRadiusToIndicatedList, AddActorsInRadiusToIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("AddActorsInRadiusToStenciledList"), AddActorsInRadiusToStenciledList, AddActorsInRadiusToStenciledListOG);
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("RemoveActorFromIndicatedList"), RemoveActorFromIndicatedList, RemoveActorFromIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("RemoveActorFromStenciledList"), RemoveActorFromStenciledList, RemoveActorFromStenciledListOG);
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("RemoveGroupFromIndicatedList"), RemoveGroupFromIndicatedList, RemoveGroupFromIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorLibrary->GetFunction("RemoveGroupFromStenciledList"), RemoveGroupFromStenciledList, RemoveGroupFromStenciledListOG);
+	}
+
+	auto DefaultIndicatedActorComponent = DefaultObjImpl("FortControllerComponent_IndicatedActorManagement");
+
+	if (DefaultIndicatedActorComponent)
+	{
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("AddActorsToIndicatedList"), ComponentAddActorsToIndicatedList, ComponentAddActorsToIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("AddActorsToStenciledList"), ComponentAddActorsToStenciledList, ComponentAddActorsToStenciledListOG);
+		// Radius variants only exist on newer builds (Ch3+); ExecHook no-ops when the function is absent.
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("AddActorsInRadiusToIndicatedList"), ComponentAddActorsInRadiusToIndicatedList, ComponentAddActorsInRadiusToIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("AddActorsInRadiusToStenciledList"), ComponentAddActorsInRadiusToStenciledList, ComponentAddActorsInRadiusToStenciledListOG);
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("RemoveActorFromIndicatedList"), ComponentRemoveActorFromIndicatedList, ComponentRemoveActorFromIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("RemoveActorFromStenciledList"), ComponentRemoveActorFromStenciledList, ComponentRemoveActorFromStenciledListOG);
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("RemoveGroupFromIndicatedList"), ComponentRemoveGroupFromIndicatedList, ComponentRemoveGroupFromIndicatedListOG);
+		Utils::ExecHook(DefaultIndicatedActorComponent->GetFunction("RemoveGroupFromStenciledList"), ComponentRemoveGroupFromStenciledList, ComponentRemoveGroupFromStenciledListOG);
+	}
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerOnMaterialSelection"), ServerOnMaterialSelection);
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerPlaySquadQuickChatMessage"), ServerPlaySquadQuickChatMessage);

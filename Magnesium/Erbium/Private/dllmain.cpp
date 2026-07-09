@@ -204,6 +204,15 @@ void Main()
 
     FindNullsAndRetTrues();
 
+    // Resolve + log every finder before any hook consumes them, so a new
+    // version (e.g. 31.41) reports its dead sigs by name up front. Cached
+    // results are reused by the hooks below for free. Must run BEFORE the
+    // Null/RetTrue patch loops: those overwrite function prologues, and
+    // uncached finders (e.g. KickPlayer) re-scan and falsely report misses
+    // once their target's bytes have been patched.
+    ValidateFinders();
+    SDK::DbgLog("Main: cp6b (ValidateFinders done)\n");
+
     for (auto& NullFunc : NullFuncs)
         if (NullFunc != 0)
         {
@@ -224,12 +233,6 @@ void Main()
     if (GameSessionPatch)
         Utils::Patch<uint8_t>(GameSessionPatch, 0x85);
     SDK::DbgLog("Main: cp8 (GameSessionPatch=%p)\n", (void*)GameSessionPatch);
-
-    // Resolve + log every finder before any hook consumes them, so a new
-    // version (e.g. 31.41) reports its dead sigs by name up front. Results are
-    // cached, so the hooks below reuse them for free.
-    ValidateFinders();
-    SDK::DbgLog("Main: cp8b (ValidateFinders done)\n");
 
     MH_Initialize();
     SDK::DbgLog("Main: cp9 (MH_Initialize done, installing %zu hooks)\n", _HookFuncs.size());
@@ -263,11 +266,15 @@ void Main()
 
     srand((uint32_t)time(0));
 
-    if (UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Num() > 0)
+    // 32.11 runs as a LISTEN server (netmode forced to NM_ListenServer): KEEP the local player so the
+    // injecting client is the host — it travels into the terrain and gets a PlayerController, which the
+    // match needs (ReadyPlayers>=1) to start. Removing it (the dedicated-server model used pre-32) leaves
+    // 0 PlayerControllers -> match never starts -> client stuck on "Setting up the server".
+    if (VersionInfo.FortniteVersion < 32.00 && UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Num() > 0)
     {
         UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Remove(0);
     }
-    SDK::DbgLog("Main: cp14 (LocalPlayers handled)\n");
+    SDK::DbgLog("Main: cp14 (LocalPlayers handled, kept=%d)\n", (int)(VersionInfo.FortniteVersion >= 32.00));
 
     const wchar_t* terrainOpen = L"open Athena_Terrain";
 

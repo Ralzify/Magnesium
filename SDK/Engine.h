@@ -1002,6 +1002,7 @@ namespace SDK
 		DEFINE_STATIC_FUNC(GetObjectFromPrimaryAssetId, UObject*);
 		DEFINE_STATIC_FUNC(K2_SetTimer, void);
 		DEFINE_STATIC_FUNC(LaunchURL, FString);
+		DEFINE_STATIC_FUNC(SphereOverlapActors, bool);
 
 		/*static void ExecuteConsoleCommand(FString Command)
 		{

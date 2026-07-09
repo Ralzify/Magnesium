@@ -2,6 +2,7 @@
 #include "pch.h"
 #include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
+#include "../PlayerAI/Public/PlayerAIFaultGuard.h"
 
 uint64_t FindGIsClient()
 {
@@ -1912,6 +1913,9 @@ uint64 FindReplicateActor()
         {
             auto sRef = Memcury::Scanner::FindStringRef(L"STAT_NetReplicateActorTime").Get();
 
+            if (!sRef) // 32.11: string ref not found -> guard the backward scan from a null read
+                return ReplicateActor = 0;
+
             for (int i = 0; i < 2000; i++)
             {
                 if (*(uint8_t*)(sRef - i) == 0x40 && *(uint8_t*)(sRef - i + 1) == 0x55)
@@ -3522,18 +3526,40 @@ struct FFinderCheck
     bool bVftIndex = false; // result is a vtable index, not an address
 };
 
+// One line of the offset report; flushed per call so the file survives a
+// crash later in the boot.
+static void ReportLine(FILE* File, const char* Fmt, ...)
+{
+    if (!File)
+        return;
+    va_list Args;
+    va_start(Args, Fmt);
+    vfprintf(File, Fmt, Args);
+    va_end(Args);
+    fflush(File);
+}
+
 // A finder whose string ref / sig no longer exists can walk off a null pointer
 // (e.g. the (sRef - i) loops). SEH turns that into a CRASHED log line instead
 // of killing the boot. Kept in its own function: __try can't share a frame
 // with C++ objects that need unwinding.
+//
+// The crash reporter is a *vectored* handler that runs before this frame
+// __except and would terminate the process first. Raising the PlayerAI fault
+// guard depth for the duration of the call makes it return
+// EXCEPTION_CONTINUE_SEARCH so this frame handler actually gets the fault.
 static uint64_t CallFinderGuarded(uint64_t (*Func)(), bool* bCrashed)
 {
+    GPlayerAIGuardedNativeCallDepth++;
     __try
     {
-        return Func();
+        uint64_t Result = Func();
+        GPlayerAIGuardedNativeCallDepth--;
+        return Result;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
+        GPlayerAIGuardedNativeCallDepth--;
         *bCrashed = true;
         return 0;
     }
@@ -3627,7 +3653,15 @@ void ValidateFinders()
     const int NumChecks = (int)(sizeof(Checks) / sizeof(Checks[0]));
     int Found = 0, Missing = 0, Crashed = 0;
 
+    // Dedicated report file in the game's working directory (next to
+    // magnesium_debug.log), rewritten every boot.
+    FILE* Report = nullptr;
+    fopen_s(&Report, "magnesium_offsets.log", "w");
+
     SDK::DbgLog("=== ValidateFinders: FN %.2f, %d finders ===\n", VersionInfo.FortniteVersion, NumChecks);
+    ReportLine(Report, "Magnesium offset report - FN %.2f, ImageBase 0x%llX, %d finders\n", VersionInfo.FortniteVersion, (uint64_t)ImageBase, NumChecks);
+    ReportLine(Report, "A missing offset only matters if this version's code path actually uses it.\n");
+    ReportLine(Report, "Names map 1:1 to Find*() in Erbium/Private/Finders.cpp.\n\n");
 
     for (auto& Check : Checks)
     {
@@ -3638,44 +3672,60 @@ void ValidateFinders()
         {
             Crashed++;
             printf("[Finders] Find%s CRASHED while scanning — its sig/string ref is wrong for this version\n", Check.Name);
-            SDK::DbgLog("[Finders] %-40s CRASHED\n", Check.Name);
+            ReportLine(Report, "%-40s CRASHED (sig/string ref walks bad memory)\n", Check.Name);
         }
         else if (!Result)
         {
             Missing++;
             printf("[Finders] Find%s NOT FOUND — needs a sig for this version (Erbium/Private/Finders.cpp)\n", Check.Name);
-            SDK::DbgLog("[Finders] %-40s NOT FOUND\n", Check.Name);
+            ReportLine(Report, "%-40s NOT FOUND\n", Check.Name);
         }
         else
         {
             Found++;
             if (Check.bVftIndex)
-                SDK::DbgLog("[Finders] %-40s = vft index %llu\n", Check.Name, Result);
+                ReportLine(Report, "%-40s = vft index %llu\n", Check.Name, Result);
             else
-                SDK::DbgLog("[Finders] %-40s = 0x%llX (RVA 0x%llX)\n", Check.Name, Result, Result - ImageBase);
+                ReportLine(Report, "%-40s = 0x%llX (RVA 0x%llX)\n", Check.Name, Result, Result - ImageBase);
         }
     }
 
     // FindNullsAndRetTrues has already run by this point; a 0 entry means a
     // pattern missed and that patch will silently be skipped.
+    ReportLine(Report, "\n");
+    char Label[64];
     for (int i = 0; i < (int)NullFuncs.size(); i++)
-        if (!NullFuncs[i])
+    {
+        sprintf_s(Label, "NullFuncs[%d]", i);
+        if (NullFuncs[i])
+            ReportLine(Report, "%-40s = 0x%llX (RVA 0x%llX)\n", Label, NullFuncs[i], NullFuncs[i] - ImageBase);
+        else
         {
             printf("[Finders] NullFuncs[%d] pattern missed for this version (FindNullsAndRetTrues)\n", i);
-            SDK::DbgLog("[Finders] NullFuncs[%d] NOT FOUND\n", i);
+            ReportLine(Report, "%-40s NOT FOUND\n", Label);
         }
+    }
     for (int i = 0; i < (int)RetTrueFuncs.size(); i++)
-        if (!RetTrueFuncs[i])
+    {
+        sprintf_s(Label, "RetTrueFuncs[%d]", i);
+        if (RetTrueFuncs[i])
+            ReportLine(Report, "%-40s = 0x%llX (RVA 0x%llX)\n", Label, RetTrueFuncs[i], RetTrueFuncs[i] - ImageBase);
+        else
         {
             printf("[Finders] RetTrueFuncs[%d] pattern missed for this version (FindNullsAndRetTrues)\n", i);
-            SDK::DbgLog("[Finders] RetTrueFuncs[%d] NOT FOUND\n", i);
+            ReportLine(Report, "%-40s NOT FOUND\n", Label);
         }
+    }
+
+    ReportLine(Report, "\n%d/%d resolved, %d missing, %d crashed\n", Found, NumChecks, Missing, Crashed);
+    if (Report)
+        fclose(Report);
 
     if (Missing || Crashed)
-        printf("[Finders] %d/%d offsets resolved on FN %.2f (%d missing, %d crashed). Full list in magnesium_debug.log. A missing offset only matters if this version's code path actually uses it.\n",
+        printf("[Finders] %d/%d offsets resolved on FN %.2f (%d missing, %d crashed). Full report: magnesium_offsets.log. A missing offset only matters if this version's code path actually uses it.\n",
             Found, NumChecks, VersionInfo.FortniteVersion, Missing, Crashed);
     else
-        printf("[Finders] all %d offsets resolved.\n", Found);
+        printf("[Finders] all %d offsets resolved — full report in magnesium_offsets.log.\n", Found);
 
     SDK::DbgLog("=== ValidateFinders done: %d found, %d missing, %d crashed ===\n", Found, Missing, Crashed);
 }

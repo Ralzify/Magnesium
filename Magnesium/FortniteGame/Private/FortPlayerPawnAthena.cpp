@@ -655,6 +655,27 @@ void AFortPlayerPawnAthena::ServerThrowCarriedPlayer_(UObject* Context, FFrame& 
 	Pawn->LocalThrowCarriedPlayer();
 }
 
+void AFortPlayerPawnAthena::ServerInterrogateDBNOPlayer_(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerPawnAthena* InDBNOHoistee = nullptr;
+
+	Stack.StepCompiledIn(&InDBNOHoistee);
+	Stack.IncrementCode();
+	auto Pawn = (AFortPlayerPawnAthena*)Context;
+
+	// Preserve native interrogation behavior (flags/animation/cue) before doing the reveal.
+	callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerInterrogateDBNOPlayer, InDBNOHoistee);
+
+	if (!Pawn || !InDBNOHoistee)
+		return;
+
+	auto Interrogator = Pawn->Controller ? Pawn->Controller->Cast<AFortPlayerControllerAthena>() : nullptr;
+	if (!Interrogator)
+		return;
+
+	AFortPlayerControllerAthena::RevealInterrogatedTeam(Interrogator, (AActor*)InDBNOHoistee);
+}
+
 void AFortPlayerPawnAthena::PostLoadHook()
 {
 	SDK::DbgLog("  [PPA] 0 pre-finds\n");
@@ -696,5 +717,9 @@ void AFortPlayerPawnAthena::PostLoadHook()
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerReviveFromDBNO"), ServerReviveFromDBNO_, ServerReviveFromDBNO_OG);
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerThrowCarriedPlayer"), ServerThrowCarriedPlayer_, ServerThrowCarriedPlayer_OG);
+
+	// Shakedown - only present on builds that shipped DBNO interrogation, so guard the lookup.
+	if (auto ServerInterrogateFn = GetDefaultObj()->GetFunction("ServerInterrogateDBNOPlayer"))
+		Utils::ExecHook(ServerInterrogateFn, ServerInterrogateDBNOPlayer_, ServerInterrogateDBNOPlayer_OG);
 	SDK::DbgLog("  [PPA] 6 PostLoadHook complete\n");
 }

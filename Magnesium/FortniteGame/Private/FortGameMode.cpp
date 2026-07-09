@@ -2453,25 +2453,88 @@ void PlayerCanRestart(UObject* Context, FFrame& Stack, bool* Ret)
 // 32.11: AGameMode::ReadyToStartMatch is a pure-native call, so Magnesium's ExecHook never fires and the
 // match is never configured. Hook it by direct RVA (Remix approach): configure playlist/warmup once, then
 // defer the actual readiness decision to the original.
+// Per-line-flushed logger (survives a game-thread hang, unlike buffered DbgLog) — used to pinpoint
+// exactly where ReadyToStartMatch_Direct dies on 32.11.
+static void RtsmLog(const char* fmt, ...)
+{
+    FILE* f = nullptr;
+    fopen_s(&f, "G:\\Fortnite Builds\\32.11\\FortniteGame\\Binaries\\Win64\\rtsm.log", "a");
+    if (!f) return;
+    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    fflush(f); fclose(f);
+}
+
 bool (*ReadyToStartMatch_DirectOG)(AFortGameModeAthena*) = nullptr;
 bool ReadyToStartMatch_Direct(AFortGameModeAthena* GameMode)
 {
+    static int s_call = 0;
+    int call = ++s_call;
+    if (call <= 20) RtsmLog("[RTSM #%d] enter GM=%p\n", call, (void*)GameMode);
+
+    if (!GameMode || !GameMode->GameState)
+        return false;
+    auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+
     static bool s_setup = false;
     if (!s_setup)
     {
         s_setup = true;
-        auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-        // 32.11: Magnesium's default (Playlist_DefaultSolo) doesn't exist on this build; use the BlastBerry
-        // playlist Remix uses so SetupPlaylist actually resolves a valid playlist + GamePhaseLogic.
         FConfiguration::Playlist = L"/BlastBerry/Playlists/Playlist_SunflowerSolo.Playlist_SunflowerSolo";
-        SDK::DbgLog("[GameMode] ReadyToStartMatch_Direct FIRST FIRE (GM=%p GS=%p)\n", (void*)GameMode, (void*)GameState);
         if (GameMode->HasWarmupRequiredPlayerCount())
             GameMode->WarmupRequiredPlayerCount = 1;
         SetupPlaylist(GameMode, GameState);
-        auto _pl = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-        SDK::DbgLog("[GameMode] ReadyToStartMatch_Direct: SetupPlaylist done; Playlist=%p\n", (void*)_pl);
+        RtsmLog("[RTSM] SetupPlaylist done\n");
     }
-    return ReadyToStartMatch_DirectOG(GameMode);
+
+    if (!GameMode->bWorldIsReady)
+    {
+        if (!(GameState->HasMapInfo() && GameState->MapInfo))
+            return false; // MapInfo actor not spawned yet
+
+        // 32.11: ::Get mis-resolves (returns null though the component exists on the game state, confirmed
+        // by object-array enum). Use the direct cached lookup instead.
+        auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed();
+        if (!GamePhaseLogic)
+            return false;
+        RtsmLog("[RTSM] GetFixed GamePhaseLogic=%p — setting up match\n", (void*)GamePhaseLogic);
+
+        // FindInitializeFlightPath misses on 32.11 -> Better-Remix RVA base+0x9101F80.
+        auto InitializeFlightPath = (void(*)(AFortAthenaMapInfo*, AFortGameStateAthena*, UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, bool, double, float, float))
+            (VersionInfo.FortniteVersion >= 32.00 ? Memcury::PE::GetModuleBase() + 0x9101F80 : FindInitializeFlightPath());
+        RtsmLog("[RTSM] pre-InitFlightPath (%p)\n", (void*)InitializeFlightPath);
+        if (InitializeFlightPath)
+            InitializeFlightPath(GameState->MapInfo, GameState, GamePhaseLogic, false, 0.f, 0.f, 360.f);
+        RtsmLog("[RTSM] post-InitFlightPath, pre-GenerateStormCircles\n");
+        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GenerateStormCircles(GameState->MapInfo);
+        RtsmLog("[RTSM] post-GenerateStormCircles\n");
+
+        auto Playlist = GameState->HasCurrentPlaylistInfo() ? GameState->CurrentPlaylistInfo.BasePlaylist : GameState->CurrentPlaylistData;
+        if (Playlist && Playlist->HasbSkipWarmup())
+            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bSkipWarmup = Playlist->bSkipWarmup;
+        if (Playlist && Playlist->HasbSkipAircraft())
+            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bSkipAircraft = Playlist->bSkipAircraft;
+
+        GameMode->bWorldIsReady = true;
+        RtsmLog("[RTSM] bWorldIsReady=true set\n");
+    }
+
+    static auto WaitingToStart = FName(L"WaitingToStart");
+    if (call <= 20) RtsmLog("[RTSM #%d] pre-GetAll PlayerControllers\n", call);
+    int ReadyPlayers = 0;
+    TArray<AFortPlayerControllerAthena*> PlayerList;
+    Utils::GetAll<AFortPlayerControllerAthena>(PlayerList);
+    if (call <= 20) RtsmLog("[RTSM #%d] GetAll done, num=%d\n", call, PlayerList.Num());
+    for (auto& PC : PlayerList)
+        if (PC && PC->PlayerState && !PC->PlayerState->bIsSpectator && PC->bReadyToStartMatch)
+            ReadyPlayers++;
+    PlayerList.Free();
+
+    bool ready = GameMode->bWorldIsReady
+        && GameMode->MatchState == WaitingToStart
+        && ReadyPlayers >= (GameMode->HasWarmupRequiredPlayerCount() ? GameMode->WarmupRequiredPlayerCount : 1);
+
+    if (call <= 20) RtsmLog("[RTSM #%d] worldReady=%d ReadyPlayers=%d ret=%d\n", call, GameMode->bWorldIsReady, ReadyPlayers, ready);
+    return ready;
 }
 
 void AFortGameMode::Hook()

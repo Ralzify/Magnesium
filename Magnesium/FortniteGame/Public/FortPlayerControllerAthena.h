@@ -286,11 +286,36 @@ struct FIndicatedActorData
 {
     USCRIPTSTRUCT_COMMON_MEMBERS(FIndicatedActorData);
 
-    uint8_t Padding[0x150];
+    uint8_t Padding[0x300];
+    DEFINE_STRUCT_PROP(GroupIdentifier, FString);
     DEFINE_STRUCT_PROP(Duration, float);
+    DEFINE_STRUCT_PROP(ShareActorWith, uint8);
 };
 
-struct FIndicatedActorInfoEntry
+struct FStenciledActorData
+{
+    USCRIPTSTRUCT_COMMON_MEMBERS(FStenciledActorData);
+
+    uint8_t Padding[0x300];
+    DEFINE_STRUCT_PROP(GroupIdentifier, FString);
+    DEFINE_STRUCT_PROP(Duration, float);
+    DEFINE_STRUCT_PROP(ShareActorWith, uint8);
+};
+
+struct FIndicatedActorDataWithFilter
+{
+    USCRIPTSTRUCT_COMMON_MEMBERS(FIndicatedActorDataWithFilter);
+
+    uint8_t Padding[0x400];
+    DEFINE_STRUCT_PROP(IndicatedData, FIndicatedActorData);
+    DEFINE_STRUCT_PROP(StenciledData, FStenciledActorData);
+    DEFINE_STRUCT_PROP(OverlapRadius, float);
+    DEFINE_STRUCT_PROP(ObjectTypes, TArray<uint8>);
+    DEFINE_STRUCT_PROP(ActorClassFilter, UClass*);
+    DEFINE_STRUCT_PROP(IndicatedActorTags, FGameplayTagContainer);
+};
+
+struct FIndicatedActorInfoEntry : public SDK::FFastArraySerializerItem
 {
     USCRIPTSTRUCT_COMMON_MEMBERS(FIndicatedActorInfoEntry);
 
@@ -300,11 +325,28 @@ struct FIndicatedActorInfoEntry
     DEFINE_STRUCT_PROP(Data, FIndicatedActorData);
 };
 
+struct FStenciledActorInfoEntry : public SDK::FFastArraySerializerItem
+{
+    USCRIPTSTRUCT_COMMON_MEMBERS(FStenciledActorInfoEntry);
+
+    DEFINE_STRUCT_PROP(Actor, AActor*);
+    DEFINE_STRUCT_PROP(StartTime, float);
+    DEFINE_STRUCT_PROP(EndTime, float);
+    DEFINE_STRUCT_PROP(Data, FStenciledActorData);
+};
+
 struct FIndicatedActorList : public SDK::FFastArraySerializer
 {
     USCRIPTSTRUCT_COMMON_MEMBERS(FIndicatedActorList);
 
     DEFINE_STRUCT_PROP(Entries, TArray<FIndicatedActorInfoEntry>);
+};
+
+struct FStenciledActorList : public SDK::FFastArraySerializer
+{
+    USCRIPTSTRUCT_COMMON_MEMBERS(FStenciledActorList);
+
+    DEFINE_STRUCT_PROP(Entries, TArray<FStenciledActorInfoEntry>);
 };
 
 class UFortIndicatedActorManagementComponent : public UActorComponent
@@ -313,6 +355,7 @@ public:
     UCLASS_COMMON_MEMBERS(UFortIndicatedActorManagementComponent);
 
     DEFINE_PROP(IndicatedActorList, FIndicatedActorList);
+    DEFINE_PROP(StenciledActorList, FStenciledActorList);
 };
 
 class AController : public AActor
@@ -486,7 +529,24 @@ public:
     DefUHookOg(ServerLoadingScreenDropped_);
     static void ServerCreativeSetFlightSpeedIndex(UObject*, FFrame&);
     static void ServerCreativeSetFlightSprint(UObject*, FFrame&);
-    static void AddActorsToIndicatedList(UObject*, FFrame&);
+    DefUHookOg(AddActorsToIndicatedList);
+    DefUHookOg(AddActorsToStenciledList);
+    DefUHookOg(AddActorsInRadiusToIndicatedList);
+    DefUHookOg(AddActorsInRadiusToStenciledList);
+    DefUHookOg(RemoveActorFromIndicatedList);
+    DefUHookOg(RemoveActorFromStenciledList);
+    DefUHookOg(RemoveGroupFromIndicatedList);
+    DefUHookOg(RemoveGroupFromStenciledList);
+    DefUHookOg(ComponentAddActorsToIndicatedList);
+    DefUHookOg(ComponentAddActorsToStenciledList);
+    DefUHookOg(ComponentAddActorsInRadiusToIndicatedList);
+    DefUHookOg(ComponentAddActorsInRadiusToStenciledList);
+    DefUHookOg(ComponentRemoveActorFromIndicatedList);
+    DefUHookOg(ComponentRemoveActorFromStenciledList);
+    DefUHookOg(ComponentRemoveGroupFromIndicatedList);
+    DefUHookOg(ComponentRemoveGroupFromStenciledList);
+    // Shakedown: reveal a downed player's surviving squad to the interrogator (and their squad).
+    static void RevealInterrogatedTeam(AFortPlayerControllerAthena* Interrogator, AActor* DBNOPlayer);
     DefUHookOg(ServerAwardVehicleTrickPoints_);
     static void ServerOnMaterialSelection(UObject*, FFrame&);
     static void ServerPlaySquadQuickChatMessage(UObject*, FFrame&);

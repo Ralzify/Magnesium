@@ -170,6 +170,7 @@ public:
     DEFINE_FUNC(ServerChoosePart, void);
     DEFINE_FUNC(ServerThrowCarriedPlayer, void);
     DEFINE_FUNC(LocalThrowCarriedPlayer, void);
+    DEFINE_FUNC(ServerInterrogateDBNOPlayer, void);
     DEFINE_FUNC(GetVehicleActor, AActor*);
 
     DefUHookOg(ServerHandlePickup_);
@@ -186,6 +187,7 @@ public:
     DefHookOg(void, EndSkydiving, AFortPlayerPawnAthena*);
     DefUHookOg(ServerReviveFromDBNO_);
     DefUHookOg(ServerThrowCarriedPlayer_);
+    DefUHookOg(ServerInterrogateDBNOPlayer_);
 
     InitPostLoadHooks;
 };
