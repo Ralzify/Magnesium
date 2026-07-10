@@ -155,6 +155,19 @@ void ABuildingSMActor::OnDamageServer(ABuildingSMActor* Actor, float Damage, FGa
 
 uint32 SpawnDecoVft = 0;
 uint32 ShouldAllowServerSpawnDecoVft = 0;
+static std::unordered_map<UClass*, UFortDecoItemDefinition*> SavedTrapDefinitions;
+
+void ABuildingSMActor::RegisterTrapDefinition(UClass* TrapClass, UFortDecoItemDefinition* ItemDefinition)
+{
+	if (TrapClass && ItemDefinition)
+		SavedTrapDefinitions[TrapClass] = ItemDefinition;
+}
+
+UFortDecoItemDefinition* ABuildingSMActor::GetTrapDefinition(UClass* TrapClass)
+{
+	auto Match = SavedTrapDefinitions.find(TrapClass);
+	return Match == SavedTrapDefinitions.end() ? nullptr : Match->second;
+}
 
 static bool ResolveDecoToolPlayer(AFortDecoTool* DecoTool, AFortPlayerPawnAthena*& Pawn, AFortPlayerControllerAthena*& PlayerController, AFortPlayerStateAthena*& PlayerState)
 {
@@ -222,7 +235,8 @@ static int GetAttachedBuildingActorCount(ABuildingSMActor* AttachedActor)
 	return AttachedActor->AttachedBuildingActors.Num();
 }
 
-static bool ApplyTrapTeamToNewAttachments(ABuildingSMActor* AttachedActor, AFortPlayerStateAthena* PlayerState, int PreviousAttachedActorCount)
+static bool ApplyTrapTeamToNewAttachments(ABuildingSMActor* AttachedActor, AFortPlayerStateAthena* PlayerState,
+	int PreviousAttachedActorCount, UFortDecoItemDefinition* ItemDefinition = nullptr)
 {
 	if (!AttachedActor || !AttachedActor->HasAttachedBuildingActors())
 		return false;
@@ -234,9 +248,123 @@ static bool ApplyTrapTeamToNewAttachments(ABuildingSMActor* AttachedActor, AFort
 	{
 		auto AttachedBuildingActor = AttachedBuildingActors.Get(i);
 		bApplied = ApplyTrapTeam(AttachedBuildingActor, PlayerState) || bApplied;
+		if (AttachedBuildingActor && ItemDefinition)
+			ABuildingSMActor::RegisterTrapDefinition(AttachedBuildingActor->Class, ItemDefinition);
 	}
 
 	return bApplied;
+}
+
+static UFortDecoItemDefinition* ResolvePlacedDecoDefinition(AFortDecoTool* Tool, uint8 AttachmentType)
+{
+	if (!Tool)
+		return nullptr;
+	UObject* Selected = Tool->ItemDefinition;
+	if (auto ContextTool = Tool->Cast<AFortDecoTool_ContextTrap>())
+	{
+		auto ContextDefinition = ContextTool->ContextTrapItemDefinition;
+		if (!ContextDefinition || !SDK::MemReadable(ContextDefinition, sizeof(void*)))
+			return nullptr;
+		switch (AttachmentType)
+		{
+		case 0: case 6: Selected = ContextDefinition->FloorTrap; break;
+		case 2: case 7: Selected = ContextDefinition->CeilingTrap; break;
+		case 1: Selected = ContextDefinition->WallTrap; break;
+		case 8: Selected = ContextDefinition->StairTrap; break;
+		default: return nullptr;
+		}
+	}
+	if (!Selected || !SDK::MemReadable(Selected, 0x40) || !Selected->Class ||
+		!SDK::MemReadable(Selected->Class, 0x40) || !Selected->IsA<UFortDecoItemDefinition>())
+		return nullptr;
+	return static_cast<UFortDecoItemDefinition*>(Selected);
+}
+
+ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVector& SavedLocation, const FRotator& SavedRotation,
+	ABuildingSMActor* AttachedActor, uint8 AttachmentType, AFortPlayerControllerAthena* PlayerController, const wchar_t* ItemDefinitionPath)
+{
+	if (!TrapClass || !AttachedActor || !PlayerController || !PlayerController->PlayerState || !SpawnDecoVft)
+		return nullptr;
+
+	UObject* SavedItemObject = ItemDefinitionPath && *ItemDefinitionPath
+		? (UObject*)SDK::StaticFindObject(ItemDefinitionPath, UObject::StaticClass()) : nullptr;
+	UFortDecoItemDefinition* ItemDefinition = SavedItemObject && SavedItemObject->IsA<UFortDecoItemDefinition>()
+		? (UFortDecoItemDefinition*)SavedItemObject : nullptr;
+	if (!ItemDefinition)
+		ItemDefinition = GetTrapDefinition(TrapClass);
+	if (!SavedItemObject)
+		SavedItemObject = ItemDefinition;
+	// Item definitions are UObjects, not actors; UGameplayStatics::GetAllActorsOfClass
+	// will always return an empty list for them. Search the loaded object registry.
+	for (int Index = 0; !ItemDefinition && Index < TUObjectArray::Num(); ++Index)
+	{
+		auto Object = TUObjectArray::GetObjectByIndex(Index);
+		auto Definition = Object && Object->IsA<UFortDecoItemDefinition>() ? (UFortDecoItemDefinition*)Object : nullptr;
+		if (Definition && Definition->BlueprintClass.Get() == TrapClass)
+		{
+			ItemDefinition = Definition;
+			break;
+		}
+	}
+	auto TrapToolClass = FindClass("FortTrapTool");
+	if (!TrapToolClass)
+		return nullptr;
+
+	auto Tool = UWorld::SpawnActor<AFortDecoTool>(TrapToolClass, FVector{}, FRotator{}, PlayerController);
+	if (!Tool)
+		return nullptr;
+
+	// SpawnDeco receives the concrete trap class and supporting build directly. The
+	// item definition improves parity when available, but is not required by legacy
+	// versions and must not prevent old saves from restoring their attachment.
+	Tool->ItemDefinition = SavedItemObject;
+	Tool->Owner = PlayerController->MyFortPawn ? (AActor*)PlayerController->MyFortPawn : (AActor*)PlayerController;
+	Tool->Instigator = PlayerController->MyFortPawn;
+
+	FVector Location = SavedLocation;
+	FRotator Rotation = SavedRotation;
+	ABuildingSMActor* Trap = nullptr;
+	if (VersionInfo.FortniteVersion < 18)
+	{
+		// Legacy SpawnDeco vtable layouts are not stable enough for a direct native call.
+		// Let ProcessEvent marshal the version's real signature, then obtain the child
+		// that Fortnite appended to the supporting build.
+		if (SavedItemObject && SavedItemObject->IsA<UFortItemDefinition>() && PlayerController->WorldInventory)
+		{
+			// The original legacy placement event verifies inventory and consumes one
+			// trap. Supply that transient placement item so restore follows the same path.
+			PlayerController->WorldInventory->GiveItem((UFortItemDefinition*)SavedItemObject, 1);
+			const int PreviousCount = GetAttachedBuildingActorCount(AttachedActor);
+			Tool->ServerSpawnDeco(Location, Rotation, AttachedActor, AttachmentType);
+			if (AttachedActor->HasAttachedBuildingActors() && AttachedActor->AttachedBuildingActors.Num() > PreviousCount)
+				Trap = AttachedActor->AttachedBuildingActors.Get(PreviousCount);
+		}
+	}
+	else if (VersionInfo.FortniteVersion >= 27)
+	{
+		auto SpawnDeco = (ABuildingSMActor * (*)(AFortDecoTool*, TSubclassOf<ABuildingSMActor>&, FVector&, FRotator&, ABuildingSMActor*, uint8_t, int))Tool->Vft[SpawnDecoVft];
+		TSubclassOf<ABuildingSMActor> TrapSubclass;
+		TrapSubclass.ClassPtr = TrapClass;
+		if (SpawnDeco)
+			Trap = SpawnDeco(Tool, TrapSubclass, Location, Rotation, AttachedActor, AttachmentType, 0);
+	}
+	else
+	{
+		auto SpawnDeco = (ABuildingSMActor * (*)(AFortDecoTool*, UClass*, FVector&, FRotator&, ABuildingSMActor*, uint8_t, int))Tool->Vft[SpawnDecoVft];
+		if (SpawnDeco)
+			Trap = SpawnDeco(Tool, TrapClass, Location, Rotation, AttachedActor, AttachmentType, 0);
+	}
+
+	if (!Trap || !SDK::MemReadable(Trap, 0x40) || !Trap->Class || !SDK::MemReadable(Trap->Class, 0x40))
+	{
+		Tool->K2_DestroyActor();
+		return nullptr;
+	}
+	ApplyTrapTeam(Trap, static_cast<AFortPlayerStateAthena*>(PlayerController->PlayerState));
+	if (ItemDefinition)
+		RegisterTrapDefinition(TrapClass, ItemDefinition);
+	Tool->K2_DestroyActor();
+	return Trap;
 }
 
 void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
@@ -307,6 +435,7 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 		}
 
 		ApplyTrapTeam(NewTrap, PlayerState);
+		ABuildingSMActor::RegisterTrapDefinition(NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(), ItemDefinition);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
 
 		auto Resource = UFortKismetLibrary::GetDefaultObj()->K2_GetResourceItemDefinition(AttachedActor->ResourceType);
@@ -334,7 +463,8 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 	{
 		auto PreviousAttachedActorCount = GetAttachedBuildingActorCount(AttachedActor);
 		callOG(DecoTool, Stack.GetCurrentNativeFunction(), ServerSpawnDeco, Location, Rotation, AttachedActor, InBuildingAttachmentType);
-		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
+		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount,
+			ResolvePlacedDecoDefinition(DecoTool, InBuildingAttachmentType));
 	}
 }
 
@@ -401,6 +531,7 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 		}
 
 		ApplyTrapTeam(NewTrap, PlayerState);
+		ABuildingSMActor::RegisterTrapDefinition(NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(), ItemDefinition);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
 
 		auto Resource = UFortKismetLibrary::GetDefaultObj()->K2_GetResourceItemDefinition(AttachedActor->ResourceType);
@@ -428,7 +559,8 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 	{
 		auto PreviousAttachedActorCount = GetAttachedBuildingActorCount(AttachedActor);
 		ServerSpawnDeco_ImplementationOG(Context, Stack);
-		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
+		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount,
+			ResolvePlacedDecoDefinition(DecoTool, InBuildingAttachmentType));
 	}
 }
 
@@ -468,6 +600,8 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 	Stack.IncrementCode();
 
 	auto Tool = (AFortDecoTool*)Context;
+	if (!Tool)
+		return;
 
 	auto Pawn = (AFortPlayerPawnAthena*)Tool->Owner;
 	if (!Pawn)
@@ -485,6 +619,8 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 
 
 	if (auto ContextTrapTool = Tool->Cast<AFortDecoTool_ContextTrap>()) {
+		if (!ContextTrapTool->ContextTrapItemDefinition || !SDK::MemReadable(ContextTrapTool->ContextTrapItemDefinition, sizeof(void*)))
+			return;
 		switch ((int)InBuildingAttachmentType) {
 		case 0:
 		case 6:
@@ -502,6 +638,10 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 			break;
 		}
 	}
+	if (!ItemDefinition || !SDK::MemReadable(ItemDefinition, 0x40) ||
+		!ItemDefinition->Class || !SDK::MemReadable(ItemDefinition->Class, 0x40) ||
+		!ItemDefinition->IsA<UFortDecoItemDefinition>())
+		return;
 
 	TArray<const UObject*> AutoCreateAttachmentBuildingShapes;
 	for (auto& AutoCreateAttachmentBuildingShape : ItemDefinition->AutoCreateAttachmentBuildingShapes)
@@ -509,7 +649,13 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 		AutoCreateAttachmentBuildingShapes.Add(AutoCreateAttachmentBuildingShape);
 	}
 
-	auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+	auto World = UWorld::GetWorld();
+	auto GameState = World ? (AFortGameStateAthena*)World->GameState : nullptr;
+	if (!GameState)
+	{
+		AutoCreateAttachmentBuildingShapes.Free();
+		return;
+	}
 	auto bIgnoreCanAffordCheck = UFortKismetLibrary::DoesItemDefinitionHaveGameplayTag(ItemDefinition, FGameplayTag(FName(L"Trap.ExtraPiece.Cost.Ignore")));
 	TSubclassOf<AActor> BuildingClass{};
 	EFortResourceType ResourceType = PlayerController->CurrentResourceType;
@@ -522,6 +668,8 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 	{
 		for (auto& Class : GameState->AllPlayerBuildableClasses)
 		{
+			if (!Class || !Class->GetDefaultObj())
+				continue;
 			auto Default = (ABuildingSMActor*)Class->GetDefaultObj();
 
 			UObject* EditModePatternData = nullptr;
@@ -531,8 +679,8 @@ void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& S
 			else
 			{
 				auto ClassData = Default->GetClassData();
-
-				EditModePatternData = ClassData->EditModePatternData;
+				if (ClassData)
+					EditModePatternData = ClassData->EditModePatternData;
 			}
 
 			if (Default->ResourceType == ResourceType && Default->BuildingType == BuildingType && EditModePatternData == Shape)
@@ -625,12 +773,10 @@ _out:
 	}
 	else*/
 	Building = UWorld::SpawnActorUnfinished<ABuildingSMActor>(BuildingClass, BuildingLocation, BuildingRotation, PlayerController);
-
-	Building->InitializeKismetSpawnedBuildingActor(Building, PlayerController, true, nullptr, false);
-	UWorld::FinishSpawnActor(Building, BuildingLocation, BuildingRotation);
-
 	if (!Building)
 		return;
+	Building->InitializeKismetSpawnedBuildingActor(Building, PlayerController, true, nullptr, false);
+	UWorld::FinishSpawnActor(Building, BuildingLocation, BuildingRotation);
 
 	Building->bPlayerPlaced = true;
 
@@ -648,8 +794,8 @@ _out:
 	if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
 	{
 		auto PayBuildableClassPlacementCost = (int(*)(AFortPlayerControllerAthena*, FBuildingClassData)) PayBuildableClassPlacementCost_;
-
-		PayBuildableClassPlacementCost(PlayerController, BuildingClassData);
+		if (PayBuildableClassPlacementCost)
+			PayBuildableClassPlacementCost(PlayerController, BuildingClassData);
 	}
 
 	/*Building->Team = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->TeamIndex;
@@ -679,10 +825,10 @@ void ABuildingSMActor::PostLoadHook()
 		SDK::DbgLog("  [BSM] 0e FP#3 done GSCD=%p\n", (void*)GetSparseClassData_);
 	}
 	SDK::DbgLog("  [BSM] 1 sparse-class-data done\n");
+	SpawnDecoVft = FindSpawnDecoVft();
+	SDK::DbgLog("  [BSM] 2 SpawnDecoVft=%p\n", (void*)SpawnDecoVft);
 	if (VersionInfo.FortniteVersion >= 18)
 	{
-		SpawnDecoVft = FindSpawnDecoVft();
-		SDK::DbgLog("  [BSM] 2 SpawnDecoVft=%p\n", (void*)SpawnDecoVft);
 		ShouldAllowServerSpawnDecoVft = FindShouldAllowServerSpawnDecoVft();
 		SDK::DbgLog("  [BSM] 3 ShouldAllowServerSpawnDecoVft=%p\n", (void*)ShouldAllowServerSpawnDecoVft);
 	}

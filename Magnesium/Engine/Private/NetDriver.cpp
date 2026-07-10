@@ -1080,11 +1080,20 @@ static void SyncStormState(AFortGameMode* GameMode)
 		{
 			FVector SafeZoneCenter{};
 			float SafeZoneRadius = 0.f;
+			const bool bNativeInZone = GameMode->IsInCurrentSafeZone(PawnLocation, false);
 
 			if (TryGetSafeZoneCircle(GameMode->SafeZoneIndicator, SafeZoneCenter, SafeZoneRadius))
-				bInZone = IsLocationInsideSafeZoneCircle(PawnLocation, SafeZoneCenter, SafeZoneRadius);
+			{
+				const bool bReconstructedInZone = IsLocationInsideSafeZoneCircle(PawnLocation, SafeZoneCenter, SafeZoneRadius);
+
+				// Older indicators do not update every replicated center/radius field at the
+				// same point in a phase transition.  The reconstructed circle is needed when
+				// the native check fails on these builds, but disagreement must never cause
+				// server-authored damage to a pawn that the game still considers safe.
+				bInZone = bNativeInZone || bReconstructedInZone;
+			}
 			else
-				bInZone = GameMode->IsInCurrentSafeZone(PawnLocation, false);
+				bInZone = bNativeInZone;
 		}
 		else
 		{
@@ -1139,27 +1148,14 @@ static void SyncStormState(AFortGameMode* GameMode)
 			continue;
 		}
 
-		if (!bHasStormEffect)
-		{
-			FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
-			Context.Instigator = Player;
-			Context.Causer = Pawn;
-			Context.AddSourceObject(Pawn);
-
-			StormEffectHandle = AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(StormEffectClass, (float)StormPhase, Context);
-			bHasStormEffect = StormEffectHandle.Handle != 0;
-		}
-
+		// GE_OutsideSafeZoneDamage has its own periodic execution. Applying it here
+		// while also using the lower-season fallback below produces two independent
+		// damage ticks, and the gameplay effect can execute immediately on contact.
+		// Keep one authoritative one-second timer for these builds instead.
 		if (bHasStormEffect)
-		{
-			SetSafeZoneAppliedGameplayEffectHandle(Pawn, &StormEffectHandle);
+			RemoveStormEffect(AbilitySystemComponent, StormEffectClass);
 
-			AbilitySystemComponent->SetActiveGameplayEffectLevel(StormEffectHandle, StormPhase);
-			AbilitySystemComponent->UpdateActiveGameplayEffectSetByCallerMagnitude(StormEffectHandle,
-				FGameplayTag(FName(L"SetByCaller.StormCampingDamage")), StormDamage);
-			AbilitySystemComponent->UpdateActiveGameplayEffectSetByCallerMagnitude(StormEffectHandle,
-				FGameplayTag(FName(L"SetByCaller.StormShieldDamage")), StormDamage);
-		}
+		SetSafeZoneAppliedGameplayEffectHandle(Pawn, nullptr);
 
 		ApplyLowerSeasonStormDamage(Player, Pawn, TimeSeconds, AbilitySystemComponent, StormDamage);
 	}

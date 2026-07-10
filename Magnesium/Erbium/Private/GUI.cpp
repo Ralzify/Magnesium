@@ -20,6 +20,8 @@
 #include <Windows.h>
 #include <Shellapi.h>
 #include <chrono>
+#include <algorithm>
+#include <unordered_set>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -389,6 +391,352 @@ auto WindowWidth = 800;
 auto WindowHeight = 600;
 
 inline std::vector<std::pair<AFortPlayerControllerAthena*, UNetConnection*>> AllControllers;
+
+namespace TrickshotManager
+{
+    namespace fs = std::filesystem;
+
+    inline fs::path GetDirectory()
+    {
+        char Path[MAX_PATH]{};
+        if (FAILED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, Path)))
+            return {};
+
+        fs::path Directory = fs::path(Path) / "Magnesium" / "trickshots";
+        std::error_code Error;
+        fs::create_directories(Directory, Error);
+        return Error ? fs::path{} : Directory;
+    }
+
+    inline std::string SanitizeName(const char* Name)
+    {
+        std::string Result = Name ? Name : "";
+        Result.erase(Result.begin(), std::find_if(Result.begin(), Result.end(), [](unsigned char Character) { return !std::isspace(Character); }));
+        Result.erase(std::find_if(Result.rbegin(), Result.rend(), [](unsigned char Character) { return !std::isspace(Character); }).base(), Result.end());
+
+        for (auto& Character : Result)
+        {
+            if (Character == '<' || Character == '>' || Character == ':' || Character == '"' || Character == '/' ||
+                Character == '\\' || Character == '|' || Character == '?' || Character == '*')
+                Character = '_';
+        }
+
+        return Result;
+    }
+
+    inline std::string GetCurrentMapPath()
+    {
+        auto World = UWorld::GetWorld();
+        return World ? FStringToStdString(UKismetSystemLibrary::GetPathName(World)) : "";
+    }
+
+    inline AFortPlayerControllerAthena* GetHostController()
+    {
+        auto World = UWorld::GetWorld();
+        auto Driver = World ? static_cast<UNetDriver*>(World->NetDriver) : nullptr;
+        if (!Driver)
+            return nullptr;
+
+        for (auto Connection : Driver->ClientConnections)
+        {
+            if (Connection && Connection->PlayerController)
+                return static_cast<AFortPlayerControllerAthena*>(Connection->PlayerController);
+        }
+        return nullptr;
+    }
+
+    inline uint8 GuessAttachmentType(const std::string& ClassPath)
+    {
+        std::string Lower = ClassPath;
+        std::transform(Lower.begin(), Lower.end(), Lower.begin(), [](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
+        if (Lower.find("wall") != std::string::npos)
+            return 1;
+        if (Lower.find("ceiling") != std::string::npos)
+            return 2;
+        if (Lower.find("stair") != std::string::npos)
+            return 8;
+        return 0;
+    }
+
+    inline std::vector<std::string> GetSavedNames()
+    {
+        std::vector<std::string> Names;
+        auto Directory = GetDirectory();
+        if (Directory.empty())
+            return Names;
+
+        std::error_code Error;
+        for (const auto& Entry : fs::directory_iterator(Directory, Error))
+        {
+            if (Entry.is_regular_file() && Entry.path().extension() == ".json")
+                Names.push_back(Entry.path().stem().string());
+        }
+        std::sort(Names.begin(), Names.end());
+        return Names;
+    }
+
+    inline bool Delete(const std::string& Name, std::string& Message)
+    {
+        const auto Directory = GetDirectory();
+        if (Name.empty() || Directory.empty())
+        {
+            Message = "Select a saved trickshot to delete.";
+            return false;
+        }
+
+        std::error_code Error;
+        const bool Removed = fs::remove(Directory / (Name + ".json"), Error);
+        Message = Removed && !Error ? "Deleted " + Name + "." : "Could not delete the selected trickshot.";
+        return Removed && !Error;
+    }
+
+    inline bool OpenDirectory(std::string& Message)
+    {
+        const auto Directory = GetDirectory();
+        if (Directory.empty())
+        {
+            Message = "Could not open the trickshot folder.";
+            return false;
+        }
+
+        const auto Result = ShellExecuteA(nullptr, "open", Directory.string().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        const bool Opened = reinterpret_cast<INT_PTR>(Result) > 32;
+        if (!Opened)
+            Message = "Could not open the trickshot folder.";
+        return Opened;
+    }
+
+    inline bool Save(const char* Name, std::string& Message)
+    {
+        const std::string SafeName = SanitizeName(Name);
+        const auto Directory = GetDirectory();
+        if (SafeName.empty() || Directory.empty() || !UWorld::GetWorld())
+        {
+            Message = SafeName.empty() ? "Enter a trickshot name." : "Unable to access the trickshot folder or world.";
+            return false;
+        }
+
+        nlohmann::json Root;
+        Root["version"] = 1;
+        Root["name"] = SafeName;
+        Root["map"] = GetCurrentMapPath();
+        Root["builds"] = nlohmann::json::array();
+
+        TArray<ABuildingSMActor*> Builds;
+        Utils::GetAll<ABuildingSMActor>(Builds);
+        std::vector<ABuildingSMActor*> SavedBuilds;
+
+        // Traps and other decos are represented as actors attached to a supporting
+        // build. Trickshot files intentionally persist structural player builds only.
+        std::unordered_set<ABuildingSMActor*> AttachedActors;
+        for (auto Build : Builds)
+        {
+            if (!Build || !Build->HasAttachedBuildingActors())
+                continue;
+            for (auto Attached : Build->AttachedBuildingActors)
+                if (Attached)
+                    AttachedActors.insert(Attached);
+        }
+        for (auto Build : Builds)
+        {
+            if (!Build || !Build->bPlayerPlaced || Build->bDestroyed || AttachedActors.contains(Build))
+                continue;
+
+            SavedBuilds.push_back(Build);
+        }
+
+        for (auto Build : SavedBuilds)
+        {
+
+            const FVector Location = Build->K2_GetActorLocation();
+            const FRotator Rotation = Build->K2_GetActorRotation();
+            const std::string ClassPath = FStringToStdString(UKismetSystemLibrary::GetPathName(Build->Class));
+            Root["builds"].push_back({
+                { "class", ClassPath },
+                { "location", { Location.X, Location.Y, Location.Z } },
+                { "rotation", { Rotation.Pitch, Rotation.Yaw, Rotation.Roll } },
+                { "level", Build->CurrentBuildingLevel },
+                { "parent", -1 }
+            });
+        }
+        Builds.Free();
+
+        std::ofstream File(Directory / (SafeName + ".json"), std::ios::trunc);
+        if (!File)
+        {
+            Message = "Could not create the trickshot file.";
+            return false;
+        }
+        File << Root.dump(4);
+        Message = "Saved " + std::to_string(Root["builds"].size()) + " player builds.";
+        return true;
+    }
+
+    inline bool Load(const std::string& Name, std::string& Message)
+    {
+        const auto Directory = GetDirectory();
+        auto Controller = GetHostController();
+        if (Name.empty() || Directory.empty() || !Controller)
+        {
+            Message = Name.empty() ? "Select a saved trickshot." : "A connected player is required to load builds.";
+            return false;
+        }
+
+        try
+        {
+            std::ifstream File(Directory / (Name + ".json"));
+            nlohmann::json Root;
+            if (!File || !(File >> Root) || !Root.contains("builds") || !Root["builds"].is_array())
+            {
+                Message = "The selected trickshot file is invalid.";
+                return false;
+            }
+
+            if (Root.value("map", "") != GetCurrentMapPath())
+            {
+                Message = "This trickshot was saved on a different map.";
+                return false;
+            }
+
+            struct PendingBuild { UClass* Class; FVector Location; FRotator Rotation; int Level; int Parent; uint8 AttachmentType; std::string ItemDefinition; };
+            std::vector<PendingBuild> Pending;
+            for (const auto& SavedBuild : Root["builds"])
+            {
+                // Backward compatibility: silently ignore traps/decos from earlier
+                // experimental save files. Only structural builds are restored.
+                if (SavedBuild.value("parent", -1) >= 0)
+                    continue;
+                const auto ClassPath = SavedBuild.at("class").get<std::string>();
+                // Player building classes are already resident while their map is active. Do not use
+                // StaticLoadObject here: its native signature varies by Fortnite version and can fault
+                // on versions where the SDK's resolved loader does not match the running executable.
+                UEAllocatedWString WideClassPath(ClassPath.begin(), ClassPath.end());
+                UClass* Class = (UClass*)SDK::StaticFindObject(WideClassPath.c_str(), UClass::StaticClass());
+                const auto& L = SavedBuild.at("location");
+                const auto& R = SavedBuild.at("rotation");
+                if (L.size() != 3 || R.size() != 3)
+                    throw std::runtime_error("invalid building data");
+                if (Class && (!Class->GetDefaultObj() || !Class->GetDefaultObj()->IsA(ABuildingSMActor::StaticClass())))
+                    Class = nullptr;
+                Pending.push_back({ Class, FVector(L[0].get<double>(), L[1].get<double>(), L[2].get<double>()),
+                    FRotator(R[0].get<double>(), R[1].get<double>(), R[2].get<double>()), SavedBuild.value("level", 0),
+                    SavedBuild.value("parent", -1), SavedBuild.value("attachmentType", GuessAttachmentType(ClassPath)),
+                    SavedBuild.value("itemDefinition", "") });
+            }
+
+            TArray<ABuildingSMActor*> ExistingBuilds;
+            Utils::GetAll<ABuildingSMActor>(ExistingBuilds);
+            for (auto Build : ExistingBuilds)
+                if (Build && Build->bPlayerPlaced)
+                    Build->SilentDie(true);
+            ExistingBuilds.Free();
+
+            int Loaded = 0;
+            int Skipped = 0;
+            std::vector<ABuildingSMActor*> SpawnedBuilds(Pending.size(), nullptr);
+
+            auto ApplyOwnership = [&](ABuildingSMActor* Build)
+            {
+                if (!Build)
+                    return;
+                Build->bPlayerPlaced = true;
+                if (Controller->PlayerState)
+                {
+                    auto PlayerState = static_cast<AFortPlayerStateAthena*>(Controller->PlayerState);
+                    if (PlayerState->HasTeamIndex())
+                        Build->Team = PlayerState->TeamIndex;
+                    if (Build->HasTeamIndex())
+                        Build->TeamIndex = Build->Team;
+                    if (Build->HasOwnerPersistentID() && PlayerState->HasWorldPlayerId())
+                        Build->OwnerPersistentID = PlayerState->WorldPlayerId;
+                    if (PlayerState->HasTeamIndex())
+                        Build->SetTeam(PlayerState->TeamIndex);
+                }
+                Build->ForceNetUpdate();
+            };
+
+            // Structural supports must exist before Fortnite's native trap placement path runs.
+            for (int Index = 0; Index < Pending.size(); ++Index)
+            {
+                const auto& SavedBuild = Pending[Index];
+                if (SavedBuild.Parent >= 0)
+                    continue;
+                if (!SavedBuild.Class)
+                {
+                    ++Skipped;
+                    continue;
+                }
+                auto Build = UWorld::SpawnActorUnfinished<ABuildingSMActor>(SavedBuild.Class, SavedBuild.Location, SavedBuild.Rotation, Controller);
+                if (Build)
+                {
+                    Build->InitializeKismetSpawnedBuildingActor(Build, Controller, true, nullptr, false);
+                    UWorld::FinishSpawnActor(Build, SavedBuild.Location, SavedBuild.Rotation);
+                }
+                if (!Build)
+                {
+                    ++Skipped;
+                    continue;
+                }
+                int BuildingLevel = SavedBuild.Level;
+                Build->CurrentBuildingLevel = BuildingLevel;
+                Build->OnRep_CurrentBuildingLevel();
+                ApplyOwnership(Build);
+                SpawnedBuilds[Index] = Build;
+                ++Loaded;
+            }
+
+            for (int Index = 0; Index < Pending.size(); ++Index)
+            {
+                const auto& SavedBuild = Pending[Index];
+                if (SavedBuild.Parent < 0)
+                    continue;
+                if (!SavedBuild.Class || SavedBuild.Parent >= SpawnedBuilds.size() || !SpawnedBuilds[SavedBuild.Parent])
+                {
+                    ++Skipped;
+                    continue;
+                }
+                UEAllocatedWString ItemDefinitionPath(SavedBuild.ItemDefinition.begin(), SavedBuild.ItemDefinition.end());
+                auto Trap = ABuildingSMActor::SpawnSavedTrap(SavedBuild.Class, SavedBuild.Location, SavedBuild.Rotation,
+                    SpawnedBuilds[SavedBuild.Parent], SavedBuild.AttachmentType, Controller,
+                    SavedBuild.ItemDefinition.empty() ? nullptr : ItemDefinitionPath.c_str());
+                if (!Trap)
+                {
+                    ++Skipped;
+                    continue;
+                }
+                ApplyOwnership(Trap);
+                SpawnedBuilds[Index] = Trap;
+                ++Loaded;
+            }
+
+            // Preserve the supporting-build relationship used by traps. This lets ownership,
+            // destruction, and replication continue to follow the restored parent build.
+            for (int Index = 0; Index < Pending.size(); ++Index)
+            {
+                const int ParentIndex = Pending[Index].Parent;
+                if (ParentIndex < 0 || ParentIndex >= SpawnedBuilds.size() || !SpawnedBuilds[Index] || !SpawnedBuilds[ParentIndex])
+                    continue;
+                if (SpawnedBuilds[ParentIndex]->HasAttachedBuildingActors())
+                {
+                    bool AlreadyAttached = false;
+                    for (auto Attached : SpawnedBuilds[ParentIndex]->AttachedBuildingActors)
+                        AlreadyAttached = AlreadyAttached || Attached == SpawnedBuilds[Index];
+                    if (!AlreadyAttached)
+                        SpawnedBuilds[ParentIndex]->AttachedBuildingActors.Add(SpawnedBuilds[Index]);
+                }
+            }
+            Message = "Loaded " + std::to_string(Loaded) + " player builds.";
+            if (Skipped > 0)
+                Message += " Skipped " + std::to_string(Skipped) + " unavailable actors.";
+            return true;
+        }
+        catch (const std::exception& Error)
+        {
+            Message = std::string("Failed to load trickshot: ") + Error.what();
+            return false;
+        }
+    }
+}
 
 void GUI::Init()
 {
@@ -2804,6 +3152,77 @@ void GUI::Init()
                     }
                 }
             }
+
+            EndSectionBody();
+
+            SectionHeader("Trickshot Presets", SectionWidth);
+            BeginSectionBody();
+
+            static char TrickshotName[128]{};
+            static std::vector<std::string> SavedTrickshots;
+            static int SelectedTrickshot = -1;
+            static std::string TrickshotMessage;
+            static bool InitializedTrickshotList = false;
+
+            if (!InitializedTrickshotList)
+            {
+                SavedTrickshots = TrickshotManager::GetSavedNames();
+                InitializedTrickshotList = true;
+            }
+
+            ImGui::SetNextItemWidth(Width);
+            ImGui::InputTextWithHint("##trickshot-name", "Trickshot Name", TrickshotName, IM_ARRAYSIZE(TrickshotName));
+
+            ImGui::SetNextItemWidth(Width);
+            const char* Preview = SelectedTrickshot >= 0 && SelectedTrickshot < SavedTrickshots.size()
+                ? SavedTrickshots[SelectedTrickshot].c_str() : "Select Saved Trickshot";
+            if (ImGui::BeginCombo("##saved-trickshots", Preview))
+            {
+                for (int Index = 0; Index < SavedTrickshots.size(); ++Index)
+                {
+                    const bool Selected = Index == SelectedTrickshot;
+                    if (ImGui::Selectable(SavedTrickshots[Index].c_str(), Selected))
+                        SelectedTrickshot = Index;
+                    if (Selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            const float ButtonWidth = (Width - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            if (ImGui::Button("Save", ImVec2(ButtonWidth, Height)))
+            {
+                if (TrickshotManager::Save(TrickshotName, TrickshotMessage))
+                {
+                    const std::string SavedName = TrickshotManager::SanitizeName(TrickshotName);
+                    SavedTrickshots = TrickshotManager::GetSavedNames();
+                    auto It = std::find(SavedTrickshots.begin(), SavedTrickshots.end(), SavedName);
+                    SelectedTrickshot = It == SavedTrickshots.end() ? -1 : static_cast<int>(std::distance(SavedTrickshots.begin(), It));
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Load", ImVec2(ButtonWidth, Height)))
+            {
+                TrickshotManager::Load(SelectedTrickshot >= 0 && SelectedTrickshot < SavedTrickshots.size()
+                    ? SavedTrickshots[SelectedTrickshot] : "", TrickshotMessage);
+            }
+
+            if (ImGui::Button("Delete", ImVec2(ButtonWidth, Height)))
+            {
+                const std::string SelectedName = SelectedTrickshot >= 0 && SelectedTrickshot < SavedTrickshots.size()
+                    ? SavedTrickshots[SelectedTrickshot] : "";
+                if (TrickshotManager::Delete(SelectedName, TrickshotMessage))
+                {
+                    SavedTrickshots = TrickshotManager::GetSavedNames();
+                    SelectedTrickshot = SavedTrickshots.empty() ? -1 : (std::min)(SelectedTrickshot, static_cast<int>(SavedTrickshots.size()) - 1);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Open Folder", ImVec2(ButtonWidth, Height)))
+                TrickshotManager::OpenDirectory(TrickshotMessage);
+
+            if (!TrickshotMessage.empty())
+                ImGui::TextWrapped("%s", TrickshotMessage.c_str());
 
             EndSectionBody();
 

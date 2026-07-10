@@ -4,6 +4,9 @@
 #include "GameplayTagContainer.h"
 #include "../../Engine/Public/CurveTable.h"
 
+class AFortPlayerControllerAthena;
+class UFortDecoItemDefinition;
+
 enum class EFortResourceType : uint8
 {
     Wood = 0,
@@ -140,6 +143,12 @@ public:
     DEFINE_STATIC_FUNC(K2_SpawnBuildingActor, ABuildingSMActor*);
     DEFINE_FUNC(AttachBuildingActorToMe, void);
     DEFINE_FUNC(OnRep_EditingPlayer, void);
+
+    static ABuildingSMActor* SpawnSavedTrap(UClass* TrapClass, const FVector& Location, const FRotator& Rotation,
+        ABuildingSMActor* AttachedActor, uint8 AttachmentType, AFortPlayerControllerAthena* PlayerController,
+        const wchar_t* ItemDefinitionPath = nullptr);
+    static void RegisterTrapDefinition(UClass* TrapClass, UFortDecoItemDefinition* ItemDefinition);
+    static UFortDecoItemDefinition* GetTrapDefinition(UClass* TrapClass);
 
     DefHookOg(void, OnDamageServer, ABuildingSMActor*, float, FGameplayTagContainer, FVector, __int64, AActor*, AActor*, __int64);
     DefUHookOg(ServerSpawnDeco_Implementation);
