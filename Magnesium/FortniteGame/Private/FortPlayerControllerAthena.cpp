@@ -230,7 +230,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-	
+
     auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
 
 	if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn") && VersionInfo.FortniteVersion == 27.11)
@@ -749,6 +749,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		else
 			for (auto& AbilitySet : AFortGameMode::AbilitySets)
 				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+
+		if (PlayerController->PlayerState)
+		{
+			if (auto KillScore = PlayerController->PlayerState->GetKillScore())
+				PlayerController->ServerModifyStat("AthenaKills", PlayerController->PlayerState->HasKillScore() ? PlayerController->PlayerState->KillScore : PlayerController->PlayerState->Kills, EStatMod::Set, true);
+		}
 	}
 	else if (FConfiguration::bLateGame && (!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
 	{
@@ -2011,6 +2017,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			KillerPlayerState->ClientReportKill(t);
 			if (KillerPlayerState->HasTeamKillScore())
 				KillerPlayerState->ClientReportTeamKill(KillerPlayerState->TeamKillScore);
+
+			KillerPlayerController->ServerModifyStat("AthenaKills", KillerPlayerState->HasKillScore() ? KillerPlayerState->KillScore : KillerPlayerState->Kills, EStatMod::Set, true);
 
 			for (auto& Damager : PlayerController->Pawn->Damagers)
 			{
@@ -6708,6 +6716,23 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				{
 					PlayerController->Pawn->LaunchCharacterJump(FVector(X, Y, Z), false, nullptr, true);
 					PlayerController->ClientMessage(FString(L"Launched player!"), FName(), 1.f);
+				}
+			}
+			else if (command == "velocity" || command == "v")
+			{
+				if (args.size() < 2)
+				{
+					PlayerController->ClientMessage(FString(L"Please provide a velocity vector."), FName(), 1.f);
+					return;
+				}
+
+				FVector CurrentVelocity = PlayerController->Pawn->CharacterMovement->Velocity;
+				float VelocityMultiplier = std::stof(std::string(args[1]));
+
+				if (PlayerController->Pawn && PlayerController->Pawn->CharacterMovement)
+				{
+					PlayerController->Pawn->CharacterMovement->Velocity = FVector(CurrentVelocity * VelocityMultiplier);
+					PlayerController->ClientMessage(FString(L"Set player velocity!"), FName(), 1.f);
 				}
 			}
 			else if (command == "savewaypoint" || command == "s")

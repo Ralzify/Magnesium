@@ -360,7 +360,16 @@ public:
 
 class AController : public AActor
 {
+public:
     UCLASS_COMMON_MEMBERS(AController);
+};
+
+enum class EStatMod
+{
+    Delta,
+    Set,
+    Maximum,
+    EStatMod_MAX
 };
 
 inline const UCurveTable* GameData = nullptr;
@@ -498,6 +507,7 @@ public:
     DEFINE_FUNC(ServerApplyOverrideWrapToItem, UAthenaItemWrapDefinition*);
     DEFINE_FUNC(ServerApplyOverrideWrapToVehicle, void);
     DEFINE_FUNC(ClientSendConfirmationMessage, FText);
+    DEFINE_FUNC(ServerModifyStat, void);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);

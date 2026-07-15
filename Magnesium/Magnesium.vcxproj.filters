@@ -246,6 +246,12 @@
     <ClInclude Include="stb_image.h">
       <Filter>ImGui</Filter>
     </ClInclude>
+    <ClInclude Include="stb_image_write.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="bcdec.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
     <ClInclude Include="SplashImage.h">
       <Filter>Magnesium\Hex</Filter>
     </ClInclude>
@@ -257,6 +263,9 @@
     </ClInclude>
     <ClInclude Include="FortniteGame\Public\FortControllerComponent_VictoryCrowns.h">
       <Filter>FortniteGame\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Engine\Public\Texture.h">
+      <Filter>Engine\Public</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

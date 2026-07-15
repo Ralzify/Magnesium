@@ -172,6 +172,7 @@
     <ClInclude Include="Engine\Public\DataTable.h" />
     <ClInclude Include="Engine\Public\DataTableFunctionLibrary.h" />
     <ClInclude Include="Engine\Public\NetDriver.h" />
+    <ClInclude Include="Engine\Public\Texture.h" />
     <ClInclude Include="Erbium\Plugins\CrashReporter\Public\CrashReporter.h" />
     <ClInclude Include="Erbium\Public\Calendar.h" />
     <ClInclude Include="Erbium\Public\Configuration.h" />
@@ -254,6 +255,8 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="SplashImage.h" />
     <ClInclude Include="stb_image.h" />
+    <ClInclude Include="stb_image_write.h" />
+    <ClInclude Include="bcdec.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Engine\Private\AbilitySystemComponent.cpp" />

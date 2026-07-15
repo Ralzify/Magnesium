@@ -120,6 +120,11 @@ public:
 	static inline int SelectedMap = static_cast<int>(Map::Faceoff);
     static void Init();
 
+    // Drains the Custom Safe Zone minimap load request (UE asset loading is
+    // game-thread-only). Called from the UNetDriver::TickFlush hooks; a single
+    // atomic read when idle. Defined in GUI.cpp (SafeZoneMap::GameThreadTick).
+    static void SafeZoneMapGameTick();
+
     static bool IsArenaPlaylist()
     {
         return GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TiltedZW) || GUI::SelectedPlaylist == static_cast<int>(Playlist::RetracWater);

@@ -1163,6 +1163,8 @@ static void SyncStormState(AFortGameMode* GameMode)
 
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
+	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
 		auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
@@ -1238,6 +1240,8 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 uint64_t ServerReplicateActors_;
 void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
+	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+
 	// Universal PlayerAI system (separate from the bot command and native AI).
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
 
@@ -1354,6 +1358,8 @@ volatile long g_tickFlushCounter = 0;
 
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
+	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+
 	static int _tf = 0;
 	_InterlockedIncrement(&g_tickFlushCounter);
 	bool _lg = VersionInfo.FortniteVersion >= 32.00 && _tf < 4;

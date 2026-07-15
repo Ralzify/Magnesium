@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <tlhelp32.h>
 #include "../Public/Configuration.h"
+#include "../Public/GUI.h"
 #include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
@@ -617,6 +618,12 @@ static void WatchdogThread()
 
 float Misc::GetMaxTickRate(UEngine* Engine, float DeltaTime, bool bAllowFrameRateSmoothing)
 {
+	// Drain the Custom Safe Zone minimap load request here rather than only in
+	// TickFlush: GetMaxTickRate runs on the game thread every frame from engine
+	// init, so the load also works while the user is still in the pre-launch
+	// GUI (TickFlush only starts once the server is listening).
+	GUI::SafeZoneMapGameTick();
+
 	if (VersionInfo.FortniteVersion >= 32.00)
 	{
 		g_gameThreadId = GetCurrentThreadId();

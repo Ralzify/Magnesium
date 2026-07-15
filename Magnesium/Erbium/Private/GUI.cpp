@@ -14,9 +14,11 @@
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
 #include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
+#include "../../Engine/Public/Texture.h"
 #include <sstream>
 #include <fstream>
 #include <string>
+#include <atomic>
 #include <Windows.h>
 #include <Shellapi.h>
 #include <chrono>
@@ -25,6 +27,13 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#pragma warning(push)
+#pragma warning(disable: 4996) // stb_image_write uses sprintf in the HDR path
+#include "stb_image_write.h"
+#pragma warning(pop)
+#define BCDEC_IMPLEMENTATION
+#include "bcdec.h"
 #include "EmbeddedImage.h"
 #include "Icon.h" // ATLAS logo (ported menu branding)
 
@@ -104,6 +113,739 @@ bool LoadTextureFromMemory(const unsigned char* buffer, int buffer_size, ID3D11D
     stbi_image_free(image_data);
 
     return true;
+}
+
+// Upload an already-decoded RGBA8 buffer to a texture on our device. Sibling of
+// LoadTextureFromMemory minus the stb decode; used for extracted map pixels.
+bool CreateTextureFromRGBA8(const unsigned char* rgba, int width, int height, ID3D11Device* d3dDevice, ID3D11ShaderResourceView** out_srv)
+{
+    if (!rgba || width <= 0 || height <= 0 || !d3dDevice)
+        return false;
+
+    D3D11_TEXTURE2D_DESC desc;
+    ZeroMemory(&desc, sizeof(desc));
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 0; // full mip chain, GPU-generated (smooth downscale to ~260px)
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    desc.CPUAccessFlags = 0;
+
+    ID3D11Texture2D* pTexture = NULL;
+    d3dDevice->CreateTexture2D(&desc, NULL, &pTexture);
+    if (pTexture == NULL)
+        return false;
+
+    ID3D11DeviceContext* ctx = NULL;
+    d3dDevice->GetImmediateContext(&ctx);
+    ctx->UpdateSubresource(pTexture, 0, NULL, rgba, width * 4, 0);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
+    ZeroMemory(&srvDesc, sizeof(srvDesc));
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = (UINT)-1;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    d3dDevice->CreateShaderResourceView(pTexture, &srvDesc, out_srv);
+    if (*out_srv)
+        ctx->GenerateMips(*out_srv);
+    if (ctx)
+        ctx->Release();
+    pTexture->Release();
+    return true;
+}
+
+// ============================================================================
+//  Custom Safe Zone interactive map editor support.
+//  The GUI runs on its own standalone D3D11 device with no bridge into the game
+//  renderer, so the in-game minimap UTexture2D can't be handed to ImGui directly.
+//  We best-effort read its mip0 pixels out of CPU memory, decode to RGBA8, and
+//  upload to *our* device (dumping a PNG next to the DLL for reuse).
+// ============================================================================
+namespace SafeZoneMap
+{
+    // Half-extent of the Athena/Apollo world map in UE units (cm). Corner samples
+    // were ~+/-135345 on both axes; treat the map as a symmetric square.
+
+    auto Chapter1 = VersionInfo.FortniteVersion < 11.00 || std::floor(VersionInfo.FortniteVersion) == 27;
+	auto Chapter2 = VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 19.00;
+	auto Chapter3 = VersionInfo.FortniteVersion >= 19.00 && VersionInfo.FortniteVersion < 23.00;
+	auto Chapter4 = VersionInfo.FortniteVersion >= 23.00 && VersionInfo.FortniteVersion < 27.00;
+	auto Chapter5 = VersionInfo.FortniteVersion >= 28.00;
+
+    constexpr float kWorldExtent = 135345.f; // make this chapter-dependant, currently set at the chapter2 & chapter3 value, need to update for chapter1 & chapter4
+
+    static inline float Clamp(float v, float lo, float hi)
+    {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    // Canvas-local pixel (origin top-left, y down) -> UE world (cm).
+    // World X is the vertical axis (top = +, bottom = -), flipped vs screen-y.
+    // World Y is the horizontal axis (left = -, right = +).
+    static inline void PixelToWorld(float lx, float ly, float side, float& worldX, float& worldY)
+    {
+        worldY = kWorldExtent * (2.f * lx / side - 1.f);
+        worldX = kWorldExtent * (1.f - 2.f * ly / side);
+    }
+
+    // UE world (cm) -> canvas-local pixel (add the canvas rect-min for screen pos).
+    static inline void WorldToPixel(float worldX, float worldY, float side, float& lx, float& ly)
+    {
+        lx = (side * 0.5f) * (1.f + worldY / kWorldExtent);
+        ly = (side * 0.5f) * (1.f - worldX / kWorldExtent);
+    }
+
+    static inline float RadiusToPixels(float radiusCm, float side) { return radiusCm * (side / (2.f * kWorldExtent)); }
+    static inline float PixelsToRadius(float radiusPx, float side) { return radiusPx * (2.f * kWorldExtent / side); }
+
+    // Shade the part of rect [rmin,rmax] that lies OUTSIDE the circle (c, radius)
+    // as an angular fan of quads from the circle edge out to the rect boundary.
+    static void FillOutsideCircle(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
+                                  const ImVec2& c, float radius, ImU32 col)
+    {
+        const int N = 96;
+        const float TwoPi = 6.28318530718f;
+        auto rayToRect = [&](float dx, float dy) -> float
+        {
+            float t = 1e30f, tt;
+            if (dx >  1e-6f) { tt = (rmax.x - c.x) / dx; if (tt < t) t = tt; }
+            else if (dx < -1e-6f) { tt = (rmin.x - c.x) / dx; if (tt < t) t = tt; }
+            if (dy >  1e-6f) { tt = (rmax.y - c.y) / dy; if (tt < t) t = tt; }
+            else if (dy < -1e-6f) { tt = (rmin.y - c.y) / dy; if (tt < t) t = tt; }
+            return t < 0.f ? 0.f : t;
+        };
+        for (int i = 0; i < N; ++i)
+        {
+            float a0 = (float)i / N * TwoPi, a1 = (float)(i + 1) / N * TwoPi;
+            float c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
+            float t0 = rayToRect(c0, s0), t1 = rayToRect(c1, s1);
+            float r0 = radius < t0 ? radius : t0;  // clamp so we never overshoot the rect
+            float r1 = radius < t1 ? radius : t1;
+            ImVec2 in0(c.x + c0 * r0, c.y + s0 * r0), in1(c.x + c1 * r1, c.y + s1 * r1);
+            ImVec2 out0(c.x + c0 * t0, c.y + s0 * t0), out1(c.x + c1 * t1, c.y + s1 * t1);
+            dl->AddQuadFilled(in0, in1, out1, out0, col);
+        }
+    }
+
+    // Manual override for tuning on a specific engine version (0 = auto-detect).
+    static uint32_t g_PlatformDataOffsetOverride = 0;
+
+    // Stable low EPixelFormat values (append-only in UE, so identical across the
+    // whole version range). Minimaps are PF_DXT1; PF_B8G8R8A8 covers uncompressed.
+    enum : int32 { PF_B8G8R8A8 = 2, PF_DXT1 = 5, PF_DXT3 = 6, PF_DXT5 = 7 };
+
+    static bool IsKnownFormat(int32 f) { return f == PF_B8G8R8A8 || f == PF_DXT1 || f == PF_DXT3 || f == PF_DXT5; }
+    static size_t FormatBytes(int32 f, int w, int h)
+    {
+        const size_t px = (size_t)w * h;
+        if (f == PF_B8G8R8A8) return px * 4; // 32bpp uncompressed
+        if (f == PF_DXT1)     return px / 2; // BC1: 8 bytes / 16 px
+        return px;                            // BC2/BC3: 16 bytes / 16 px
+    }
+
+    // True only if every byte of [p, p+bytes) is committed and readable.
+    static bool IsReadable(const void* p, size_t bytes)
+    {
+        if (!p || bytes == 0) return false;
+        const uintptr_t start = (uintptr_t)p;
+        if (start < 0x10000) return false;               // null / low reserved region
+        if (start + bytes < start) return false;         // address-space wraparound => bogus ptr
+        if (start > 0x7FFFFFFFFFFFull) return false;      // above x64 user address space
+        MEMORY_BASIC_INFORMATION mbi{};
+        const uint8_t* cur = (const uint8_t*)p;
+        const uint8_t* end = cur + bytes;
+        while (cur < end)
+        {
+            if (VirtualQuery(cur, &mbi, sizeof(mbi)) == 0) return false;
+            if (mbi.State != MEM_COMMIT) return false;
+            if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || mbi.Protect == 0) return false;
+            cur = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+        }
+        return true;
+    }
+
+    // Bytes of the committed region from p to the end of its VirtualQuery block.
+    // Restricted to MEM_PRIVATE: texture pixel buffers are FMemory::Malloc heap
+    // allocations. MEM_IMAGE (the EXE) and MEM_MAPPED (pak files) regions also
+    // pass a plain "readable" test and previously produced garbage textures
+    // (2MB of program code decoded as DXT1 == colored static; see 10.40/27.11).
+    static size_t RegionSize(const void* p)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!p || (uintptr_t)p < 0x10000 || VirtualQuery(p, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT) return 0;
+        if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || mbi.Protect == 0) return 0;
+        if (mbi.Type != MEM_PRIVATE) return 0; // heap only: reject EXE image / mapped-file pointers
+        size_t before = (const uint8_t*)p - (const uint8_t*)mbi.BaseAddress;
+        return mbi.RegionSize > before ? (size_t)(mbi.RegionSize - before) : 0;
+    }
+
+    static bool IsPow2Dim(int32 v) { return v >= 64 && v <= 16384 && (v & (v - 1)) == 0; }
+
+    // Reject "pixel data" pointers whose first 8 bytes are a code/vtable pointer
+    // into a loaded module - the classic false positive (async-IO handles, linker
+    // objects stored inside FByteBulkData) that decodes as colored static.
+    static bool StartsWithImagePointer(const uint8_t* p)
+    {
+        if (!IsReadable(p, 8)) return false;
+        const uint8_t* q = *(const uint8_t* const*)p;
+        if (!q || (uintptr_t)q < 0x10000 || ((uintptr_t)q & 7)) return false;
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(q, &mbi, sizeof(mbi)) == 0) return false;
+        return mbi.Type == MEM_IMAGE;
+    }
+
+    struct FPlatformData
+    {
+        const uint8_t* Ptr = nullptr;
+        int32 SizeX = 0, SizeY = 0, PixelFormat = 0;
+        uint32_t FoundAtOffset = 0;
+    };
+
+    // Scan the UTexture2D object for the non-reflected PlatformData pointer by
+    // recognising FTexturePlatformData's header: {int32 SizeX, int32 SizeY,
+    // uint32 PackedData/NumSlices, EPixelFormat PixelFormat}. Reading PixelFormat
+    // from +0x0C (not a "first small int" probe, which grabs PackedData) both
+    // validates the candidate and gives the correct format to decode.
+    static bool DetectPlatformData(const void* tex, FPlatformData& out)
+    {
+        if (!IsReadable(tex, 0x220)) return false;
+        const uint8_t* base = (const uint8_t*)tex;
+
+        FPlatformData fallback; bool haveFallback = false;
+
+        auto consider = [&](const uint8_t* P, uint32_t off) -> bool
+        {
+            if (!IsReadable(P, 0x20) || ((uintptr_t)P & 7)) return false;
+            int32 sx = *(const int32*)(P + 0x0);
+            int32 sy = *(const int32*)(P + 0x4);
+            if (!IsPow2Dim(sx) || !IsPow2Dim(sy)) return false;
+            // PixelFormat is at +0x0C (after two dims + PackedData); a couple of
+            // older layouts keep it at +0x08. Take whichever is a known format.
+            int32 pf0c = *(const int32*)(P + 0x0C);
+            int32 pf08 = *(const int32*)(P + 0x08);
+            int32 pf = IsKnownFormat(pf0c) ? pf0c : (IsKnownFormat(pf08) ? pf08 : 0);
+            if (pf != 0) // strong match: real FTexturePlatformData with a known format
+            {
+                out.Ptr = P; out.SizeX = sx; out.SizeY = sy; out.PixelFormat = pf; out.FoundAtOffset = off;
+                SDK::DbgLog("[SafeZoneMap] PlatformData @0x%X ptr=%p %dx%d PixelFormat=%d\n",
+                    off, (const void*)P, sx, sy, pf);
+                return true;
+            }
+            if (!haveFallback) { fallback = { P, sx, sy, 0, off }; haveFallback = true; }
+            return false;
+        };
+
+        uint32_t start = g_PlatformDataOffsetOverride ? g_PlatformDataOffsetOverride : 0x10;
+        uint32_t stop  = g_PlatformDataOffsetOverride ? g_PlatformDataOffsetOverride : 0x200;
+        for (uint32_t off = start; off <= stop; off += 8)
+        {
+            const uint8_t* P = *(const uint8_t* const*)(base + off);
+            if (consider(P, off)) return true;
+            if (IsReadable(P, 8)) // UE5 pointer-to-pointer (PrivatePlatformData) variant
+            {
+                const uint8_t* Q = *(const uint8_t* const*)P;
+                if (consider(Q, off)) return true;
+            }
+        }
+        if (haveFallback) // no known-format match; fall back to first pow2 candidate
+        {
+            out = fallback;
+            SDK::DbgLog("[SafeZoneMap] PlatformData (weak) @0x%X ptr=%p %dx%d (no known format)\n",
+                out.FoundAtOffset, (const void*)out.Ptr, out.SizeX, out.SizeY);
+            return true;
+        }
+        SDK::DbgLog("[SafeZoneMap] PlatformData not found in texture object\n");
+        return false;
+    }
+
+    // From detected platform data, find mip0's resident pixel bytes (a pointer to
+    // a committed region large enough for neededBytes).
+    static const uint8_t* FindMip0Bytes(const FPlatformData& pd, size_t neededBytes)
+    {
+        for (uint32_t moff = 0x0C; moff <= 0x80; moff += 4) // the mips TArray {Data,Num,Max}
+        {
+            const uint8_t* arrAt = pd.Ptr + moff;
+            if (!IsReadable(arrAt, 16)) continue;
+            const uint8_t* data = *(const uint8_t* const*)(arrAt);
+            int32 num = *(const int32*)(arrAt + 8);
+            int32 max = *(const int32*)(arrAt + 12);
+            if (num < 1 || num > 20 || max < num || !IsReadable(data, 8)) continue;
+
+            // Element may be inline (FTexture2DMipMap) or a pointer (TIndirectArray).
+            const uint8_t* mip0 = data;
+            const uint8_t* asPtr = *(const uint8_t* const*)data;
+            if (IsReadable(asPtr, 0x40))
+            {
+                int32 maybeSize = *(const int32*)asPtr;
+                if (maybeSize == pd.SizeX || maybeSize == pd.SizeY) mip0 = asPtr;
+            }
+            if (!IsReadable(mip0, 0x60)) continue;
+
+            for (uint32_t boff = 0x0; boff <= 0x50; boff += 8) // the bulk-data pointer
+            {
+                const uint8_t* cand = *(const uint8_t* const*)(mip0 + boff);
+                if (RegionSize(cand) >= neededBytes && !StartsWithImagePointer(cand))
+                {
+                    SDK::DbgLog("[SafeZoneMap] mip0 bytes @mip+0x%X ptr=%p (need %zu, mips@pd+0x%X num=%d)\n",
+                        boff, (const void*)cand, neededBytes, moff, num);
+                    return cand;
+                }
+            }
+        }
+        SDK::DbgLog("[SafeZoneMap] mip0 resident bytes not found (need %zu)\n", neededBytes);
+        return nullptr;
+    }
+
+    // Best-effort: extract the given minimap texture into an RGBA8 buffer.
+    static bool ExtractToRGBA(const void* tex, std::vector<unsigned char>& rgba, int& outW, int& outH)
+    {
+        FPlatformData pd;
+        if (!DetectPlatformData(tex, pd)) return false;
+
+        const int w = pd.SizeX, h = pd.SizeY;
+        const size_t pixels = (size_t)w * h;
+
+        int fmt = pd.PixelFormat;
+        const uint8_t* src = nullptr;
+
+        // Known format -> look for exactly the mip that size (no size-guessing,
+        // which is what previously decoded BC1 bytes as raw RGBA -> garbled).
+        if (IsKnownFormat(fmt))
+            src = FindMip0Bytes(pd, FormatBytes(fmt, w, h));
+
+        if (!src) // unknown format or not found: probe by descending size class
+        {
+            const struct { int f; size_t need; } probes[] = {
+                { PF_B8G8R8A8, pixels * 4 },
+                { PF_DXT5,     pixels     },
+                { PF_DXT1,     pixels / 2 },
+            };
+            for (auto& pr : probes)
+            {
+                const uint8_t* p = FindMip0Bytes(pd, pr.need);
+                if (p) { src = p; fmt = pr.f; break; }
+            }
+            if (!src) return false;
+        }
+
+        rgba.assign(pixels * 4, 0);
+
+        auto decodeBlocks = [&](int blockBytes, void(*dec)(const void*, void*, int))
+        {
+            const int bw = (w + 3) / 4, bh = (h + 3) / 4;
+            const uint8_t* bp = src;
+            for (int by = 0; by < bh; ++by)
+                for (int bx = 0; bx < bw; ++bx, bp += blockBytes)
+                {
+                    unsigned char block[64]; // 4x4 RGBA
+                    dec(bp, block, 4 * 4);
+                    for (int py = 0; py < 4; ++py)
+                    {
+                        int y = by * 4 + py; if (y >= h) break;
+                        for (int px = 0; px < 4; ++px)
+                        {
+                            int x = bx * 4 + px; if (x >= w) break;
+                            unsigned char* d = &rgba[((size_t)y * w + x) * 4];
+                            unsigned char* s = &block[(py * 4 + px) * 4];
+                            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+                        }
+                    }
+                }
+        };
+
+        if (fmt == PF_B8G8R8A8)
+        {
+            for (size_t i = 0; i < pixels; ++i)
+            {
+                const uint8_t* s = src + i * 4;
+                unsigned char* d = &rgba[i * 4];
+                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3]; // BGRA -> RGBA
+            }
+        }
+        else if (fmt == PF_DXT1)                 { decodeBlocks(BCDEC_BC1_BLOCK_SIZE, bcdec_bc1); }
+        else if (fmt == PF_DXT3)                 { decodeBlocks(BCDEC_BC2_BLOCK_SIZE, bcdec_bc2); }
+        else if (fmt == PF_DXT5)                 { decodeBlocks(BCDEC_BC3_BLOCK_SIZE, bcdec_bc3); }
+        else return false;
+
+        outW = w; outH = h;
+        SDK::DbgLog("[SafeZoneMap] extracted %dx%d fmt=%d ok\n", w, h, fmt);
+        return true;
+    }
+
+    // SEH guard: chasing unknown cross-version texture layouts can dereference a
+    // bad pointer (e.g. the Rufus minimaps on 27.x). Catch the access violation
+    // and fall back to the numeric editor instead of crashing the GUI thread.
+    static bool ExtractToRGBA_Guarded(const void* tex, std::vector<unsigned char>& rgba, int& outW, int& outH)
+    {
+        __try
+        {
+            return ExtractToRGBA(tex, rgba, outW, outH);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            SDK::DbgLog("[SafeZoneMap] extraction faulted (SEH); skipping image\n");
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Game-thread load bridge. UE's loader (StaticLoadObject) is game-thread-
+    // only: calling it from the GUI thread is what faulted on e.g. 17.30/27.x.
+    // The GUI thread only POSTS a request; UNetDriver::TickFlush (game thread)
+    // drains it, loads + extracts the pixels, and the GUI picks them up on a
+    // later Acquire retry (the editor already re-polls every ~3s).
+    // ------------------------------------------------------------------------
+    enum class LoadState : int { Idle = 0, Requested, Ready, Failed, Consumed };
+    static std::atomic<int> g_LoadState{ (int)LoadState::Idle };
+    static std::vector<unsigned char> g_LoadedRGBA; // written under Requested, read under Ready
+    static int g_LoadedW = 0, g_LoadedH = 0;
+
+    static const UTexture2D* StaticLoadMinimapSEH(const wchar_t* path, const UClass* texClass)
+    {
+        __try
+        {
+            return (const UTexture2D*)SDK::StaticLoadObject(path, texClass);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            SDK::DbgLog("[SafeZoneMap] StaticLoadObject(%ls) faulted (SEH)\n", path);
+            return nullptr;
+        }
+    }
+
+    static int MinimapPathsForVersion(const wchar_t** out, int cap); // fwd
+    static const UTexture2D* FindLoadedMinimapTexture(const wchar_t** paths, int np); // fwd
+
+    // Called from the TickFlush hooks every server tick; a single atomic read
+    // unless a request is actually pending.
+    static void GameThreadTick()
+    {
+        if (g_LoadState.load(std::memory_order_acquire) != (int)LoadState::Requested)
+            return;
+
+        const wchar_t* paths[4];
+        const int np = MinimapPathsForVersion(paths, 4);
+        const UClass* texClass = UTexture2D::StaticClass();
+        const UTexture2D* tex = nullptr;
+        if (np && texClass && SDK::Offsets::StaticLoadObject)
+            for (int i = 0; i < np && !tex; ++i)
+            {
+                tex = StaticLoadMinimapSEH(paths[i], texClass);
+                SDK::DbgLog("[SafeZoneMap] game-thread StaticLoadObject(%ls) = %p\n", paths[i], (const void*)tex);
+            }
+        if (!tex) // the load may have registered it under a different outer/mount
+            tex = FindLoadedMinimapTexture(paths, np);
+
+        int w = 0, h = 0;
+        if (tex && ExtractToRGBA_Guarded(tex, g_LoadedRGBA, w, h))
+        {
+            g_LoadedW = w; g_LoadedH = h;
+            g_LoadState.store((int)LoadState::Ready, std::memory_order_release);
+            return;
+        }
+        g_LoadedRGBA.clear();
+        g_LoadState.store((int)LoadState::Failed, std::memory_order_release);
+        SDK::DbgLog("[SafeZoneMap] game-thread minimap load failed\n");
+    }
+
+    // Candidate minimap object paths for the current engine version (find-only,
+    // first hit wins). Paths are the full Package.ObjectName form. Some versions
+    // ship the asset under more than one mount, so we list fallbacks.
+    static int MinimapPathsForVersion(const wchar_t** out, int cap)
+    {
+        const float v = VersionInfo.FortniteVersion;
+        int n = 0;
+        auto add = [&](const wchar_t* p) { if (n < cap) out[n++] = p; };
+
+        if (v < 11.00f)
+            add(L"/Game/Athena/HUD/MiniMap/MiniMapAthena.MiniMapAthena");
+        else if (v >= 13.00f && v < 14.00f) // C2S3 uses a season-specific texture
+        {
+            add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap_S13_7.Apollo_Terrain_Minimap_S13_7");
+            // Base asset fallback. NOTE: on some C2 builds the base texture is a
+            // blanked placeholder (season art superseded it), so this mainly serves
+            // to make Maps\Apollo_Terrain_Minimap.png a usable bundled fallback.
+            add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap.Apollo_Terrain_Minimap");
+        }
+        else if (v == 27.00f)
+        {
+            add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_01.Capture_Iteration_Discovered_Rufus_01");
+            add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_01.Capture_Iteration_Discovered_Rufus_01");
+        }
+        else if (v == 27.10f)
+        {
+            add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_03.Capture_Iteration_Discovered_Rufus_03");
+            add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_03.Capture_Iteration_Discovered_Rufus_03");
+        }
+        else if (v == 27.11f)
+        {
+            add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_04.Capture_Iteration_Discovered_Rufus_04");
+            add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_04.Capture_Iteration_Discovered_Rufus_04");
+        }
+        else if ((v >= 11.00f && v < 27.00f) || v >= 28.00f)
+            add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap.Apollo_Terrain_Minimap");
+
+        return n;
+    }
+
+    // Directory containing Magnesium.dll (not the host exe).
+    static std::wstring ModuleDirW()
+    {
+        wchar_t buf[MAX_PATH] = {};
+        DWORD n = GetModuleFileNameW(GetModuleHandleW(L"Magnesium.dll"), buf, MAX_PATH);
+        std::wstring path(buf, n);
+        size_t slash = path.find_last_of(L"\\/");
+        return (slash == std::wstring::npos) ? L"." : path.substr(0, slash);
+    }
+
+    // Cache PNG next to Magnesium.dll, keyed by the EXACT version: Apollo seasons
+    // reuse one object path but ship different art, so a coarser key would serve
+    // one season's map for another.
+    static std::wstring CachePathW()
+    {
+        wchar_t name[64];
+        swprintf(name, 64, L"\\Magnesium_SafeZoneMap_%.2f.png", (double)VersionInfo.FortniteVersion);
+        return ModuleDirW() + name;
+    }
+
+    static std::string WideToUtf8(const std::wstring& w)
+    {
+        if (w.empty()) return {};
+        int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+        std::string s(len, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), len, nullptr, nullptr);
+        return s;
+    }
+
+    // Scan the global object array for a loaded UTexture2D whose leaf name matches
+    // one of the candidate paths' object names. Finds the texture regardless of its
+    // outer/mount path (StaticFindObject needs the exact path, which varies), so it
+    // succeeds where the hard-coded paths miss - as long as the texture is resident.
+    // Rufus (ch1 remix) weekly map textures are matched by PREFIX: the resident
+    // weekly index rarely matches the hard-coded one (e.g. 27.11 keeps Rufus_03
+    // loaded, not Rufus_04), and any week's art is close enough for zone placement.
+    static const UTexture2D* FindLoadedMinimapTexture(const wchar_t** paths, int np)
+    {
+        const UClass* texClass = UTexture2D::StaticClass();
+        if (!texClass) return nullptr;
+
+        // Exact-name candidates (fast FName compare) + prefix candidates (string).
+        FName want[4]; int nn = 0;
+        std::string prefixes[4]; int npre = 0;
+        for (int i = 0; i < np; ++i)
+        {
+            const wchar_t* dot = wcsrchr(paths[i], L'.');
+            std::wstring wleaf(dot ? dot + 1 : paths[i]);
+            std::string nleaf(wleaf.begin(), wleaf.end()); // leaf names are ASCII
+
+            // "..._Rufus_04" -> prefix "Capture_Iteration_Discovered_Rufus_"
+            const std::string rufusTag = "_Rufus_";
+            size_t rp = nleaf.rfind(rufusTag);
+            if (rp != std::string::npos && npre < 4)
+            {
+                std::string pre = nleaf.substr(0, rp + rufusTag.size());
+                bool dup = false;
+                for (int k = 0; k < npre; ++k) if (prefixes[k] == pre) { dup = true; break; }
+                if (!dup) prefixes[npre++] = pre;
+            }
+            if (nn < 4)
+            {
+                UEAllocatedString s = nleaf.c_str();
+                UEAllocatedWString ws(s.begin(), s.end());
+                want[nn++] = FName(ws);
+            }
+        }
+
+        const UTexture2D* prefixHit = nullptr; // exact name wins over prefix match
+        const int32 total = SDK::TUObjectArray::Num();
+        for (int32 i = 0; i < total; ++i)
+        {
+            const UObject* obj = SDK::TUObjectArray::GetObjectByIndex(i);
+            if (!obj) continue;
+            bool hit = false;
+            for (int k = 0; k < nn; ++k) if (obj->Name == want[k]) { hit = true; break; }
+            if (hit)
+            {
+                if (obj->Class && obj->IsA(texClass))
+                {
+                    SDK::DbgLog("[SafeZoneMap] object-array scan found minimap texture @%p\n", (const void*)obj);
+                    return (const UTexture2D*)obj;
+                }
+                continue;
+            }
+            if (npre == 0 || prefixHit) continue;
+            if (!obj->Class || !obj->IsA(texClass)) continue; // ToString allocates; textures only
+            std::string nm = obj->Name.ToString().c_str();
+            for (int k = 0; k < npre; ++k)
+            {
+                if (nm.compare(0, prefixes[k].size(), prefixes[k]) != 0) continue;
+                SDK::DbgLog("[SafeZoneMap] object-array scan prefix-matched '%s' @%p\n", nm.c_str(), (const void*)obj);
+                prefixHit = (const UTexture2D*)obj;
+                break;
+            }
+        }
+        return prefixHit;
+    }
+
+    // One-shot diagnostic: report how many textures are resident and any with a
+    // map-like name, so we can tell "wrong path" from "texture simply not loaded".
+    static void DiagnosticLogTextures()
+    {
+        const UClass* texClass = UTexture2D::StaticClass();
+        if (!texClass) { SDK::DbgLog("[SafeZoneMap] diag: no UTexture2D class\n"); return; }
+
+        const int32 total = SDK::TUObjectArray::Num();
+        int texCount = 0, logged = 0;
+        for (int32 i = 0; i < total; ++i)
+        {
+            const UObject* obj = SDK::TUObjectArray::GetObjectByIndex(i);
+            if (!obj || !obj->Class || !obj->IsA(texClass)) continue;
+            ++texCount;
+            if (logged >= 24) continue;
+            std::string nm = obj->Name.ToString().c_str();
+            if (nm.find("inimap") != std::string::npos || nm.find("errain") != std::string::npos ||
+                nm.find("iscover") != std::string::npos || nm.find("apture") != std::string::npos ||
+                nm.find("_Map") != std::string::npos || nm.find("Rufus") != std::string::npos)
+            {
+                SDK::DbgLog("[SafeZoneMap] diag: loaded texture '%s'\n", nm.c_str());
+                ++logged;
+            }
+        }
+        SDK::DbgLog("[SafeZoneMap] diag: %d UTexture2D resident, %d map-like\n", texCount, logged);
+    }
+
+    // Read a PNG file from disk and upload it to a texture.
+    static bool LoadPngFile(const std::wstring& file, ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
+    {
+        std::ifstream f(file.c_str(), std::ios::binary);
+        if (!f) return false;
+        std::vector<char> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (data.empty()) return false;
+        if (LoadTextureFromMemory((unsigned char*)data.data(), (int)data.size(), dev, outSrv, outW, outH))
+        {
+            SDK::DbgLog("[SafeZoneMap] loaded PNG %ls (%d bytes)\n", file.c_str(), (int)data.size());
+            return true;
+        }
+        return false;
+    }
+
+    // User-supplied minimap PNGs (e.g. exported from FModel) in a "Maps" folder next
+    // to the DLL. Server processes don't keep the base minimap texture resident, so
+    // for most versions this is the real source. Checked most-specific first:
+    //   Maps\<version>.png   (e.g. Maps\17.30.png) - exact per-version override
+    //   Maps\<leaf>.png      (e.g. Maps\Apollo_Terrain_Minimap.png) - per-asset default
+    static bool LoadBundledMinimap(const wchar_t** paths, int np, ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
+    {
+        const std::wstring dir = ModuleDirW();
+        wchar_t vname[64];
+        swprintf(vname, 64, L"\\Maps\\%.2f.png", (double)VersionInfo.FortniteVersion);
+        if (LoadPngFile(dir + vname, dev, outSrv, outW, outH)) return true;
+        SDK::DbgLog("[SafeZoneMap] no bundled PNG at %ls%ls\n", dir.c_str(), vname);
+
+        for (int i = 0; i < np; ++i)
+        {
+            const wchar_t* dot = wcsrchr(paths[i], L'.');
+            std::wstring leaf(dot ? dot + 1 : paths[i]);
+            const std::wstring file = dir + L"\\Maps\\" + leaf + L".png";
+            if (LoadPngFile(file, dev, outSrv, outW, outH)) return true;
+            SDK::DbgLog("[SafeZoneMap] no bundled PNG at %ls\n", file.c_str());
+        }
+        return false;
+    }
+
+    // Try live extraction (and dump a PNG), else user-bundled PNGs, else cache.
+    static bool Acquire(ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
+    {
+        const wchar_t* paths[4];
+        const int np = MinimapPathsForVersion(paths, 4);
+        if (np == 0)
+        {
+            SDK::DbgLog("[SafeZoneMap] no known minimap path for FN %.2f\n", VersionInfo.FortniteVersion);
+            return false;
+        }
+        const std::wstring cacheW = CachePathW();
+
+        // 1) Live extraction from the loaded UTexture2D. Use StaticFindObject
+        // (find-only): FindObject<>() falls back to StaticLoadObject when the asset
+        // isn't already loaded, and that native loader faults on some versions
+        // (e.g. 17.30 / 27.x). If the minimap isn't resident we just skip the image.
+        const UClass* texClass = UTexture2D::StaticClass();
+        const UTexture2D* tex = nullptr;
+        if (texClass)
+            for (int i = 0; i < np && !tex; ++i)
+            {
+                tex = (const UTexture2D*)SDK::StaticFindObject(paths[i], texClass);
+                SDK::DbgLog("[SafeZoneMap] StaticFindObject(%ls) = %p\n", paths[i], (const void*)tex);
+            }
+        if (!tex) // exact path missed; scan the object array by leaf name
+        {
+            tex = FindLoadedMinimapTexture(paths, np);
+            static bool s_Diag = false;
+            if (!tex && !s_Diag) { s_Diag = true; DiagnosticLogTextures(); }
+        }
+        if (tex)
+        {
+            std::vector<unsigned char> rgba; int w = 0, h = 0;
+            if (ExtractToRGBA_Guarded(tex, rgba, w, h) && CreateTextureFromRGBA8(rgba.data(), w, h, dev, outSrv))
+            {
+                *outW = w; *outH = h;
+                const std::string cacheU8 = WideToUtf8(cacheW);
+                if (stbi_write_png(cacheU8.c_str(), w, h, 4, rgba.data(), w * 4))
+                    SDK::DbgLog("[SafeZoneMap] dumped cache PNG -> %s\n", cacheU8.c_str());
+                return true;
+            }
+        }
+        else
+        {
+            SDK::DbgLog("[SafeZoneMap] FindObject(minimap) returned null\n");
+        }
+
+        // 2) Pixels produced by the game-thread load bridge (see GameThreadTick):
+        // a previous Acquire posted a request, TickFlush loaded + extracted it.
+        if (g_LoadState.load(std::memory_order_acquire) == (int)LoadState::Ready)
+        {
+            const bool ok = CreateTextureFromRGBA8(g_LoadedRGBA.data(), g_LoadedW, g_LoadedH, dev, outSrv);
+            if (ok)
+            {
+                *outW = g_LoadedW; *outH = g_LoadedH;
+                const std::string cacheU8 = WideToUtf8(cacheW);
+                if (stbi_write_png(cacheU8.c_str(), g_LoadedW, g_LoadedH, 4, g_LoadedRGBA.data(), g_LoadedW * 4))
+                    SDK::DbgLog("[SafeZoneMap] dumped cache PNG -> %s\n", cacheU8.c_str());
+            }
+            g_LoadedRGBA.clear(); g_LoadedRGBA.shrink_to_fit();
+            g_LoadState.store((int)LoadState::Consumed, std::memory_order_release);
+            if (ok) return true;
+        }
+
+        // 3) User-provided PNGs in Maps\ (FModel exports) - optional per-version
+        // overrides for art the live path can't produce.
+        if (LoadBundledMinimap(paths, np, dev, outSrv, outW, outH))
+            return true;
+
+        // 4) A PNG previously dumped by a successful live extraction.
+        if (LoadPngFile(cacheW, dev, outSrv, outW, outH))
+            return true;
+
+        // 5) Nothing resident and no PNG on disk: ask the game thread to load the
+        // asset properly (loading is game-thread-only; doing it here faulted on
+        // 17.30/27.x). One request per session; the ~3s Acquire retry polls state.
+        int expected = (int)LoadState::Idle;
+        if (g_LoadState.compare_exchange_strong(expected, (int)LoadState::Requested, std::memory_order_acq_rel))
+            SDK::DbgLog("[SafeZoneMap] posted game-thread load request\n");
+
+        SDK::DbgLog("[SafeZoneMap] acquire failed; numeric fallback in use\n");
+        return false;
+    }
+}
+
+void GUI::SafeZoneMapGameTick()
+{
+    SafeZoneMap::GameThreadTick();
 }
 
 void Hyperlink(const char* label, const char* url)
@@ -2545,28 +3287,98 @@ void GUI::Init()
                 {
                     if (VersionInfo.FortniteVersion > 2.50)
                         ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
+
                     ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
                     ImGui::Checkbox("Use Versionized Lategame Loadouts", &FConfiguration::bUseVersionizedLoadout);
                     ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);
-
-                    LabeledSliderInt("Starting Zone", "##starting-zone", &FConfiguration::LateGameZone, 1, 7, Width);
-
                     ImGui::Checkbox("Custom Safe Zone", &FConfiguration::bCustomSafeZone);
 
-                    if (FConfiguration::bCustomSafeZone)
+                    if (!FConfiguration::bCustomSafeZone)
+                        LabeledSliderInt("Starting Zone", "##starting-zone", &FConfiguration::LateGameZone, 1, 7, Width);
+                    else
                     {
+                        // Interactive minimap: click to place the zone center, drag
+                        // out to set the radius. The numeric inputs below stay live as
+                        // a fine-tune and as a fallback if the map image is unavailable.
+                        static ID3D11ShaderResourceView* s_MapSRV = nullptr;
+                        static int s_MapW = 0, s_MapH = 0;
+                        static int s_RetryIn = 0;
+                        if (!s_MapSRV) // retry until the minimap texture becomes resident
+                        {
+                            if (s_RetryIn <= 0)
+                            {
+                                SafeZoneMap::Acquire(g_pd3dDevice, &s_MapSRV, &s_MapW, &s_MapH);
+                                s_RetryIn = 180; // ~3s between attempts
+                            }
+                            else --s_RetryIn;
+                        }
+
+                        const float E = SafeZoneMap::kWorldExtent;
+
+                        if (s_MapSRV)
+                        {
+                            const float S = Width * 1.8f; // square canvas
+                            const ImVec2 origin = ImGui::GetCursorScreenPos();
+                            ImGui::Image((void*)s_MapSRV, ImVec2(S, S));
+                            ImGui::SetCursorScreenPos(origin); // overlay input on the same rect
+                            ImGui::InvisibleButton("##mapcanvas", ImVec2(S, S));
+                            const ImVec2 r0 = ImGui::GetItemRectMin();
+
+                            // Press => set center; drag => set radius from that center.
+                            if (ImGui::IsItemActivated())
+                            {
+                                const ImVec2 m = ImGui::GetIO().MousePos;
+                                float wx, wy;
+                                SafeZoneMap::PixelToWorld(m.x - r0.x, m.y - r0.y, S, wx, wy);
+                                FConfiguration::CustomSafeZoneCenter.X = SafeZoneMap::Clamp(wx, -E, E);
+                                FConfiguration::CustomSafeZoneCenter.Y = SafeZoneMap::Clamp(wy, -E, E);
+                            }
+                            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                            {
+                                float lx, ly;
+                                SafeZoneMap::WorldToPixel((float)FConfiguration::CustomSafeZoneCenter.X,
+                                                          (float)FConfiguration::CustomSafeZoneCenter.Y, S, lx, ly);
+                                const ImVec2 m = ImGui::GetIO().MousePos;
+                                const float dx = m.x - (r0.x + lx), dy = m.y - (r0.y + ly);
+                                const float dpx = sqrtf(dx * dx + dy * dy);
+                                FConfiguration::CustomSafeZoneRadius =
+                                    SafeZoneMap::Clamp(SafeZoneMap::PixelsToRadius(dpx, S), 500.f, 100000.f);
+                            }
+
+                            // Overlay the stored center + radius every frame (also when idle).
+                            ImDrawList* dl = ImGui::GetWindowDrawList();
+                            float lx, ly;
+                            SafeZoneMap::WorldToPixel((float)FConfiguration::CustomSafeZoneCenter.X,
+                                                      (float)FConfiguration::CustomSafeZoneCenter.Y, S, lx, ly);
+                            const ImVec2 c(r0.x + lx, r0.y + ly);
+                            const float rpx = SafeZoneMap::RadiusToPixels(FConfiguration::CustomSafeZoneRadius, S);
+                            // Storm shading: everything outside the safe circle is purple (~0.5 alpha).
+                            SafeZoneMap::FillOutsideCircle(dl, r0, ImVec2(r0.x + S, r0.y + S), c, rpx, IM_COL32(140, 40, 200, 128));
+                            dl->AddCircleFilled(c, rpx, IM_COL32(90, 160, 255, 40), 96);
+                            dl->AddCircle(c, rpx, IM_COL32(130, 200, 255, 230), 96, 2.f);
+                            // Center marker (dot).
+                            dl->AddCircleFilled(c, 4.f, IM_COL32(255, 255, 255, 235));
+                            dl->AddCircle(c, 4.f, IM_COL32(20, 30, 60, 200), 0, 1.5f);
+
+                            ImGui::Spacing();
+                        }
+                        else
+                        {
+                            ImGui::TextDisabled("Map image unavailable - set coordinates manually.");
+                        }
+
+                        // Numeric readout + fine-tune (always available).
                         float cx = (float)FConfiguration::CustomSafeZoneCenter.X;
                         float cy = (float)FConfiguration::CustomSafeZoneCenter.Y;
-                        float cz = (float)FConfiguration::CustomSafeZoneCenter.Z;
 
                         ImGui::SetNextItemWidth(Width);
                         if (ImGui::InputFloat("Center X", &cx)) FConfiguration::CustomSafeZoneCenter.X = cx;
                         ImGui::SetNextItemWidth(Width);
                         if (ImGui::InputFloat("Center Y", &cy)) FConfiguration::CustomSafeZoneCenter.Y = cy;
-                        ImGui::SetNextItemWidth(Width);
-                        if (ImGui::InputFloat("Center Z", &cz)) FConfiguration::CustomSafeZoneCenter.Z = cz;
 
-                        LabeledSliderFloat("Radius", "##custom-sz-radius", &FConfiguration::CustomSafeZoneRadius, 1000.f, 250000.f, "%.0f", Width);
+                        float RadiusMeters = FConfiguration::CustomSafeZoneRadius / 100.f;
+                        if (LabeledSliderFloat("Radius", "##custom-sz-radius", &RadiusMeters, 5.f, 1000.f, "%.0f m", Width))
+                            FConfiguration::CustomSafeZoneRadius = RadiusMeters * 100.f;
                     }
                 }
             }
