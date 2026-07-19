@@ -102,6 +102,9 @@
     <ClInclude Include="FortniteGame\Public\BuildingFoundation.h">
       <Filter>FortniteGame\Public</Filter>
     </ClInclude>
+    <ClInclude Include="FortniteGame\Public\FortAthenaSpawningPolicyManager.h">
+      <Filter>FortniteGame\Public</Filter>
+    </ClInclude>
     <ClInclude Include="FortniteGame\Public\FortGameMode.h">
       <Filter>FortniteGame\Public</Filter>
     </ClInclude>

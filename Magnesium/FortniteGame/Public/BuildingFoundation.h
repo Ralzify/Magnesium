@@ -39,12 +39,15 @@ public:
     DEFINE_PROP(DynamicFoundationType, uint8);
     DEFINE_PROP(LevelToStream, FName);
     DEFINE_BITFIELD_PROP(bServerStreamedInLevel);
+    DEFINE_BITFIELD_PROP(bFoundationEnabled);
 
     DEFINE_FUNC(OnRep_DynamicFoundationRepData, void);
     //DEFINE_FUNC(SetDynamicFoundationTransform, void);
     DEFINE_FUNC(SetDynamicFoundationEnabled, void);
     DEFINE_FUNC(OnRep_ServerStreamedInLevel, void);
     DEFINE_FUNC(OnRep_LevelToStream, void);
+    DEFINE_FUNC(OnRep_FoundationEnabledState, void);
+    DEFINE_FUNC(OnRep_FoundationEnabled, void);
 
     static void SetDynamicFoundationEnabled_(UObject*, FFrame&);
     static void SetDynamicFoundationTransform_(UObject*, FFrame&);

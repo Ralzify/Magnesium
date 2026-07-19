@@ -43,6 +43,33 @@ public:
 };
 
 uint64_t SetPickupTarget_ = 0;
+
+static bool CompletePickupWithoutSpline(AFortPlayerPawnAthena* Pawn, AFortPickupAthena* Pickup)
+{
+	if (!Pawn || !Pickup || !Pickup->PrimaryPickupItemEntry.ItemDefinition)
+		return false;
+
+	auto PlayerController = Pawn->Controller
+		? Pawn->Controller->Cast<AFortPlayerControllerAthena>()
+		: nullptr;
+	if (!PlayerController || !PlayerController->WorldInventory)
+		return false;
+
+	// Some early builds do not match the FinishedTargetSpline finder. Without
+	// that hook, the visual pickup starts but InternalPickup is never reached.
+	// Complete it immediately on the server and retire the world actor.
+	Pickup->bPickedUp = true;
+	Pickup->OnRep_bPickedUp();
+	PlayerController->InternalPickup(&Pickup->PrimaryPickupItemEntry);
+	Pickup->SetLifeSpan(0.01f);
+
+	SDK::DbgLog("[Pickup] immediate completion fallback item=%p count=%d FN=%.2f\n",
+		(void*)Pickup->PrimaryPickupItemEntry.ItemDefinition,
+		Pickup->PrimaryPickupItemEntry.Count,
+		VersionInfo.FortniteVersion);
+	return true;
+}
+
 void AFortPlayerPawnAthena::ServerHandlePickup_(UObject* Context, FFrame& Stack)
 {
 	AFortPickupAthena* Pickup;
@@ -57,6 +84,12 @@ void AFortPlayerPawnAthena::ServerHandlePickup_(UObject* Context, FFrame& Stack)
 	auto Pawn = (AFortPlayerPawnAthena*)Context;
 	if (!Pawn || !Pickup || Pickup->bPickedUp)
 		return;
+
+	if (!FinishedTargetSplineOG || !SetPickupTarget_)
+	{
+		CompletePickupWithoutSpline(Pawn, Pickup);
+		return;
+	}
 
 	/*Pickup->SetLifeSpan(5.f);
 	if (FFortPickupLocationData::HasbPlayPickupSound())
@@ -115,6 +148,12 @@ void AFortPlayerPawnAthena::ServerHandlePickupInfo(UObject* Context, FFrame& Sta
 	if (!Pawn || !Pickup || Pickup->bPickedUp)
 		return;
 
+	if (!FinishedTargetSplineOG || !SetPickupTarget_)
+	{
+		CompletePickupWithoutSpline(Pawn, Pickup);
+		return;
+	}
+
 	if (bUseRequestedSwap && Pawn->CurrentWeapon && AFortInventory::IsPrimaryQuickbar(((AFortWeapon*)Pawn->CurrentWeapon)->WeaponData) && AFortInventory::IsPrimaryQuickbar(Pickup->PrimaryPickupItemEntry.ItemDefinition))
 	{
 		auto PlayerController = (AFortPlayerControllerAthena*)Pawn->Controller;
@@ -161,6 +200,13 @@ void AFortPlayerPawnAthena::ServerHandlePickupWithRequestedSwap(UObject* Context
 
 	if (!Pawn || !Pickup || Pickup->bPickedUp)
 		return;
+
+	if (!FinishedTargetSplineOG || !SetPickupTarget_)
+	{
+		CompletePickupWithoutSpline(Pawn, Pickup);
+		return;
+	}
+
 	auto PlayerController = (AFortPlayerControllerAthena*)Pawn->Controller;
 
 	PlayerController->bTryPickupSwap = true;
@@ -319,8 +365,6 @@ void AFortPlayerPawnAthena::OnCapsuleBeginOverlap_(UObject* Context, FFrame& Sta
 	Stack.StepCompiledIn(&bFromSweep);
 	Stack.StepCompiledIn(&SweepResult);
 	Stack.IncrementCode();
-
-	printf("OnCapsuleBeginOverlap: %s", OtherActor->Name.ToString().c_str());
 
 	auto Pawn = (AFortPlayerPawnAthena*)Context;
 
@@ -696,8 +740,12 @@ void AFortPlayerPawnAthena::PostLoadHook()
 	SDK::DbgLog("  [PPA] 1b pickup-info exechooks done, pre-FindFinishedTargetSpline\n");
 	auto _fts = FindFinishedTargetSpline();
 	SDK::DbgLog("  [PPA] 2 FindFinishedTargetSpline=%p\n", (void*)_fts);
-	Utils::Hook(_fts, FinishedTargetSpline, FinishedTargetSplineOG);
-	SDK::DbgLog("  [PPA] 2b spline hook done\n");
+	if (_fts)
+		Utils::Hook(_fts, FinishedTargetSpline, FinishedTargetSplineOG);
+	if (FinishedTargetSplineOG)
+		SDK::DbgLog("  [PPA] 2b spline hook done\n");
+	else
+		SDK::DbgLog("  [PPA] 2b spline unavailable; immediate pickup completion enabled\n");
 	Utils::ExecHook(GetDefaultObj()->GetFunction("OnCapsuleBeginOverlap"), OnCapsuleBeginOverlap_, OnCapsuleBeginOverlap_OG);
 	SDK::DbgLog("  [PPA] 3 spline+overlap hooks done\n");
 

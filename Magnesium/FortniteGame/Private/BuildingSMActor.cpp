@@ -431,7 +431,7 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 		{
 			auto SpawnDeco = (ABuildingSMActor * (*)(AFortDecoTool*, UClass*, FVector&, FRotator&, ABuildingSMActor*, uint8_t, int)) DecoTool->Vft[SpawnDecoVft];
 
-			NewTrap = SpawnDecoVft ? SpawnDeco(DecoTool, ItemDefinition->BlueprintClass.Get(), Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
+			NewTrap = SpawnDecoVft && SpawnDeco ? SpawnDeco(DecoTool, ItemDefinition->BlueprintClass.Get(), Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
 		}
 
 		ApplyTrapTeam(NewTrap, PlayerState);
@@ -527,7 +527,7 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 		{
 			auto SpawnDeco = (ABuildingSMActor * (*)(AFortDecoTool*, UClass*, FVector&, FRotator&, ABuildingSMActor*, uint8_t, int)) DecoTool->Vft[SpawnDecoVft];
 
-			NewTrap = SpawnDecoVft ? SpawnDeco(DecoTool, ItemDefinition->BlueprintClass.Get(), Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
+			NewTrap = SpawnDecoVft && SpawnDeco ? SpawnDeco(DecoTool, ItemDefinition->BlueprintClass.Get(), Location, Rotation, AttachedActor, InBuildingAttachmentType, 0) : nullptr;
 		}
 
 		ApplyTrapTeam(NewTrap, PlayerState);
@@ -825,12 +825,21 @@ void ABuildingSMActor::PostLoadHook()
 		SDK::DbgLog("  [BSM] 0e FP#3 done GSCD=%p\n", (void*)GetSparseClassData_);
 	}
 	SDK::DbgLog("  [BSM] 1 sparse-class-data done\n");
-	SpawnDecoVft = FindSpawnDecoVft();
-	SDK::DbgLog("  [BSM] 2 SpawnDecoVft=%p\n", (void*)SpawnDecoVft);
 	if (VersionInfo.FortniteVersion >= 18)
 	{
+		SpawnDecoVft = FindSpawnDecoVft();
+		SDK::DbgLog("  [BSM] 2 SpawnDecoVft=%p\n", (void*)SpawnDecoVft);
 		ShouldAllowServerSpawnDecoVft = FindShouldAllowServerSpawnDecoVft();
 		SDK::DbgLog("  [BSM] 3 ShouldAllowServerSpawnDecoVft=%p\n", (void*)ShouldAllowServerSpawnDecoVft);
+	}
+	else
+	{
+		// The native SpawnDeco vtable path does not exist on the early
+		// ServerSpawnDeco implementation. Match Erbium's version gate instead
+		// of running the unsupported finder during UE 4.16 startup.
+		SpawnDecoVft = 0;
+		ShouldAllowServerSpawnDecoVft = 0;
+		SDK::DbgLog("  [BSM] 2 legacy deco path; native vtable lookup skipped\n");
 	}
 
 	auto OnDamageServerAddr = FindFunctionCall(L"OnDamageServer", VersionInfo.EngineVersion == 4.16 ? std::vector<uint8_t>{ 0x4C, 0x89, 0x4C } : VersionInfo.EngineVersion == 4.19 || VersionInfo.EngineVersion >= 4.27 ? std::vector<uint8_t>{ 0x48, 0x8B, 0xC4 } : std::vector<uint8_t>{ 0x40, 0x55 });

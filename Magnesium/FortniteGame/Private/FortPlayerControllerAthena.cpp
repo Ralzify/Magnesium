@@ -209,6 +209,29 @@ static bool TryGetConfiguredRespawnLocation(AFortGameMode* GameMode, FVector& Ou
 	return false;
 }
 
+static const UFortItemDefinition* GetDefaultAthenaPickaxe()
+{
+	// Do not negatively cache this lookup: on some builds the asset is not present
+	// in the object array until Athena content has finished loading.
+	static const UFortItemDefinition* DefaultPickaxe = nullptr;
+
+	if (!DefaultPickaxe)
+		DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
+
+	return DefaultPickaxe;
+}
+
+static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory)
+{
+	if (!Inventory)
+		return nullptr;
+
+	return Inventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
+		{
+			return Entry.ItemDefinition && Entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>();
+		}, FFortItemEntry::Size());
+}
+
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
 void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, FFrame& Stack)
@@ -693,21 +716,17 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			PlayerController->WorldInventory->GiveItem(PlayerController->CustomizationLoadout.Pickaxe->WeaponDefinition);
 		else if (HasCosmeticLoadoutPC || HasCustomizationLoadout) // fix ur backend gng
 		{
-			static auto DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
-
-			PlayerController->WorldInventory->GiveItem(DefaultPickaxe);
+			PlayerController->WorldInventory->GiveItem(GetDefaultAthenaPickaxe());
 		}
 		
 		if (GameMode->StartingItems.Num() == 0)
 		{
-			static auto DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
 			static auto WallBuild = FindObject<UFortItemDefinition>(L"/Game/Items/Weapons/BuildingTools/BuildingItemData_Wall.BuildingItemData_Wall");
 			static auto FloorBuild = FindObject<UFortItemDefinition>(L"/Game/Items/Weapons/BuildingTools/BuildingItemData_Floor.BuildingItemData_Floor");
 			static auto StairBuild = FindObject<UFortItemDefinition>(L"/Game/Items/Weapons/BuildingTools/BuildingItemData_Stair_W.BuildingItemData_Stair_W");
 			static auto ConeBuild = FindObject<UFortItemDefinition>(L"/Game/Items/Weapons/BuildingTools/BuildingItemData_RoofS.BuildingItemData_RoofS");
 			static auto EditTool = FindObject<UFortItemDefinition>(L"/Game/Items/Weapons/BuildingTools/EditTool.EditTool");
 
-			PlayerController->WorldInventory->GiveItem(DefaultPickaxe);
 			PlayerController->WorldInventory->GiveItem(WallBuild);
 			PlayerController->WorldInventory->GiveItem(FloorBuild);
 			PlayerController->WorldInventory->GiveItem(StairBuild);
@@ -719,18 +738,32 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			{
 				auto& StartingItem = GameMode->StartingItems.Get(i, FItemAndCount::Size());
 
-				if (StartingItem.Count && (!SmartItemDefClass || !StartingItem.Item->IsA(SmartItemDefClass)))
+				if (StartingItem.Item && StartingItem.Count && (!SmartItemDefClass || !StartingItem.Item->IsA(SmartItemDefClass)))
 					PlayerController->WorldInventory->GiveItem(StartingItem.Item, StartingItem.Count);
 			}
 
+		auto pickaxeEntry = FindHarvestingToolEntry(PlayerController->WorldInventory);
 
-		auto pickaxeEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& entry)
-			{ return entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>(); }, FFortItemEntry::Size());
+		// Early builds can have StartingItems without a harvesting tool and do not
+		// expose either cosmetic-loadout property. Always guarantee one pickaxe.
+		if (!pickaxeEntry)
+		{
+			auto DefaultPickaxe = GetDefaultAthenaPickaxe();
+			auto PickaxeItem = PlayerController->WorldInventory->GiveItem(DefaultPickaxe);
+			pickaxeEntry = FindHarvestingToolEntry(PlayerController->WorldInventory);
 
-		if (pickaxeEntry && VersionInfo.FortniteVersion > 3)
+			SDK::DbgLog("[Possession] Default pickaxe fallback: Def=%p Item=%p Entry=%p FN=%.2f\n",
+				(void*)DefaultPickaxe, (void*)PickaxeItem, (void*)pickaxeEntry, VersionInfo.FortniteVersion);
+		}
+
+		if (pickaxeEntry)
 		{
 			PlayerController->ServerExecuteInventoryItem(pickaxeEntry->ItemGuid);
-			PlayerController->ClientEquipItem(pickaxeEntry->ItemGuid, true);
+
+			if (VersionInfo.FortniteVersion > 3)
+				PlayerController->ClientEquipItem(pickaxeEntry->ItemGuid, true);
+			else if (PlayerController->QuickBars)
+				PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
 		}
 
 		UFortKismetLibrary::UpdatePlayerCustomCharacterPartsVisualization(PlayerController->PlayerState);
@@ -750,11 +783,6 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			for (auto& AbilitySet : AFortGameMode::AbilitySets)
 				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
-		if (PlayerController->PlayerState)
-		{
-			if (auto KillScore = PlayerController->PlayerState->GetKillScore())
-				PlayerController->ServerModifyStat("AthenaKills", PlayerController->PlayerState->HasKillScore() ? PlayerController->PlayerState->KillScore : PlayerController->PlayerState->Kills, EStatMod::Set, true);
-		}
 	}
 	else if (FConfiguration::bLateGame && (!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
 	{
@@ -2018,8 +2046,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (KillerPlayerState->HasTeamKillScore())
 				KillerPlayerState->ClientReportTeamKill(KillerPlayerState->TeamKillScore);
 
-			KillerPlayerController->ServerModifyStat("AthenaKills", KillerPlayerState->HasKillScore() ? KillerPlayerState->KillScore : KillerPlayerState->Kills, EStatMod::Set, true);
-
 			for (auto& Damager : PlayerController->Pawn->Damagers)
 			{
 				if (Damager.DamageCauser != KillerPlayerController && Damager.DamageCauser->IsA<AFortPlayerControllerAthena>())
@@ -2696,7 +2722,8 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 				//Interface->GetOwnedGameplayTags(&TargetTags);
 			}
 
-			GetQuestManager(1)->SendStatEvent(this, EFortQuestObjectiveStatEvent::GetCollect(), Count, true, (UObject*)PickupEntry->ItemDefinition, TargetTags);
+			if (auto QuestManager = GetQuestManager(1))
+				QuestManager->SendStatEvent(this, EFortQuestObjectiveStatEvent::GetCollect(), Count, true, (UObject*)PickupEntry->ItemDefinition, TargetTags);
 
 			TargetTags.GameplayTags.Free();
 			TargetTags.ParentTags.Free();
@@ -2768,7 +2795,7 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 		auto itemEntry = WorldInventory->Inventory.ReplicatedEntries.Search([PickupEntry, MaxStack](FFortItemEntry& entry)
 			{ return entry.ItemDefinition == PickupEntry->ItemDefinition && entry.Count < MaxStack; }, FFortItemEntry::Size());
 
-		if (item)
+		if (item && *item)
 		{
 			bool bFound = false;
 			/*for (int i = 0; i < itemEntry->StateValues.Num(); i++)

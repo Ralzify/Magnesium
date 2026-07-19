@@ -20,7 +20,13 @@ public:
 
     static int GetNetMode();
     DefHookOg(void*, SendRequestNow, void*, void*, int);
+    static bool InstallPreStartSafeZoneTick();
+    static void ActivateServerGetMaxTickRate();
+    DefHookOg(float, SafeZoneTickGetMaxTickRate, UEngine*, float, bool);
     DefHookOg(float, GetMaxTickRate, UEngine*, float, bool);
+    static inline bool bSafeZoneTickHookInstalled = false;
+    static inline uint64 SafeZoneTickHookTarget = 0;
+    static inline std::atomic<bool> bServerGetMaxTickRateActive{ false };
     static uint32 CheckCheckpointHeartBeat();
     DefHookOg(void, ApplyHomebaseEffectsOnPlayerSetup, __int64*, __int64, __int64, __int64, UObject*, char, unsigned __int8);
     static void InitClient();

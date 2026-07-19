@@ -30,26 +30,6 @@ void ShowFoundation(const ABuildingFoundation* Foundation)
 {
     if (!Foundation) return;
 
-    /*Foundation->StreamingData.BoundingBox = Foundation->StreamingBoundingBox;
-    Foundation->StreamingData.FoundationLocation = Foundation->GetTransform().Translation;
-    Foundation->SetDynamicFoundationEnabled(true);*/
-    //Foundation->SetDynamicFoundationTransform(Foundation->GetTransform());
-
-    if (Foundation->HasDynamicFoundationType())
-        Foundation->DynamicFoundationType = 0;
-    if (Foundation->HasbServerStreamedInLevel())
-    {
-        Foundation->bServerStreamedInLevel = true;
-        Foundation->OnRep_ServerStreamedInLevel();
-    }
-    if (Foundation->HasDynamicFoundationRepData())
-    {
-        Foundation->DynamicFoundationRepData.EnabledState = 1;
-        Foundation->OnRep_DynamicFoundationRepData();
-    }
-    if (Foundation->HasFoundationEnabledState())
-        Foundation->FoundationEnabledState = 1;
-
     Foundation->SetDynamicFoundationEnabled(true);
 }
 
@@ -260,6 +240,11 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     auto GameMode = Context->Cast<AFortGameMode>();
 
     auto GameState = GameMode->GameState;
+    if (!GameState)
+    {
+        *Ret = false;
+        return;
+    }
 
     static bool setup = false;
     if (GameMode->HasWarmupRequiredPlayerCount() ? GameMode->WarmupRequiredPlayerCount != 1 : !setup)
@@ -499,11 +484,13 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             {
                 auto& PlaylistTag = Playlist->GameplayTagContainer.GameplayTags.Get(i, FGameplayTag::Size());
 
-                if (PlaylistTag.TagName.ToString() == "Athena.Playlist.SpecialEvent")
+                const auto PlaylistTagName = PlaylistTag.TagName.ToString();
+                if (PlaylistTagName == "Athena.Playlist.SpecialEvent" ||
+                    PlaylistTagName == "Athena.Playlist.Concert")
                 {
                     bEvent = true;
                     if (VersionInfo.FortniteVersion == 7.30)
-                        ShowFoundation(FindObject<ABuildingFoundation>("/Game/Athena/Apollo/Maps/Athena_POI_Foundations.Athena_POI_Foundations.PersistentLevel.PleasentParkFestivus"));
+                        ShowFoundation(FindObject<ABuildingFoundation>("/Game/Athena/Maps/Athena_POI_Foundations.Athena_POI_Foundations.PersistentLevel.PleasentParkFestivus"));
 
                     break;
                 }
@@ -521,7 +508,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         }
 
         if (VersionInfo.FortniteVersion == 7.30 && !bEvent)
-            ShowFoundation(FindObject<ABuildingFoundation>("/Game/Athena/Apollo/Maps/Athena_POI_Foundations.Athena_POI_Foundations.PersistentLevel.PleasentParkDefault"));
+            ShowFoundation(FindObject<ABuildingFoundation>("/Game/Athena/Maps/Athena_POI_Foundations.Athena_POI_Foundations.PersistentLevel.PleasentParkDefault"));
 
 
         if (VersionInfo.FortniteVersion == 17.50)
@@ -597,13 +584,16 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
         }
 
-        auto AIDirectorClass = GameMode->HasWarmupRequiredPlayerCount() ? FindClass("AthenaAIDirector") : FindObject<UClass>("/Game/AIDirector/AIDirector_Fortnite.AIDirector_Fortnite_C");
-        if (!AIDirectorClass)
-            AIDirectorClass = FindClass("FortAIDirector");
+        if (!GameMode->AIDirector)
+        {
+            auto AIDirectorClass = GameMode->HasWarmupRequiredPlayerCount() ? FindClass("AthenaAIDirector") : FindObject<UClass>("/Game/AIDirector/AIDirector_Fortnite.AIDirector_Fortnite_C");
+            if (!AIDirectorClass)
+                AIDirectorClass = FindClass("FortAIDirector");
 
-        GameMode->AIDirector = UWorld::SpawnActor(AIDirectorClass, FVector{}, GameMode);
-        if (GameMode->AIDirector)
-            GameMode->AIDirector->Call(GameMode->AIDirector->GetFunction("Activate"));
+            GameMode->AIDirector = UWorld::SpawnActor(AIDirectorClass, FVector{}, GameMode);
+            if (GameMode->AIDirector)
+                GameMode->AIDirector->Call(GameMode->AIDirector->GetFunction("Activate"));
+        }
 
         if (GameMode->HasServerBotManager())
         {
@@ -619,9 +609,23 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
         }
 
-        auto GoalManagerClass = GameMode->HasWarmupRequiredPlayerCount() ? FindClass("FortAIGoalManager") : FindObject<UClass>("/Game/AI/GoalSelection/AIGoalManager.AIGoalManager_C");
+        if (!GameMode->AIGoalManager)
+        {
+            auto GoalManagerClass = GameMode->HasWarmupRequiredPlayerCount() ? FindClass("FortAIGoalManager") : FindObject<UClass>("/Game/AI/GoalSelection/AIGoalManager.AIGoalManager_C");
+            GameMode->AIGoalManager = UWorld::SpawnActor(GoalManagerClass, FVector{}, GameMode);
+        }
 
-        GameMode->AIGoalManager = UWorld::SpawnActor(GoalManagerClass, FVector{}, GameMode);
+        if (GameMode->HasSpawningPolicyManager() && !GameMode->SpawningPolicyManager)
+        {
+            auto SpawningPolicyManager = UWorld::SpawnActor<AFortAthenaSpawningPolicyManager>(
+                AFortAthenaSpawningPolicyManager::StaticClass(), {});
+            if (SpawningPolicyManager)
+            {
+                GameMode->SpawningPolicyManager = SpawningPolicyManager;
+                SpawningPolicyManager->GameStateAthena = GameState;
+                SpawningPolicyManager->GameModeAthena = GameMode;
+            }
+        }
 
         auto MissionManagerClass = GameMode->HasWarmupRequiredPlayerCount() ? nullptr : FindObject<UClass>("/Game/Blueprints/MissionManager.MissionManager_C");
 
@@ -682,17 +686,20 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         TArray<AFortAthenaMapInfo*> AllMapInfos;
         Utils::GetAll<AFortAthenaMapInfo>(AllMapInfos);
 
-        if (AllMapInfos.Num() > 0 && !GameState->MapInfo)
+        // HasMapInfo() must guard the property read. A missing reflected property
+        // is represented by offset -1, so reading MapInfo unconditionally would
+        // dereference one byte before GameState and crash during world startup.
+        const bool bMapInfoPending =
+            AllMapInfos.Num() > 0 && GameState->HasMapInfo() && !GameState->MapInfo;
+        AllMapInfos.Free();
+        if (bMapInfoPending)
         {
             *Ret = false;
             return;
         }
-        AllMapInfos.Free();
 
         if ((VersionInfo.FortniteVersion >= 3.5 && VersionInfo.FortniteVersion <= 4.0))
             SetupPlaylist(GameMode, GameState);
-        else if (VersionInfo.EngineVersion >= 4.22 && VersionInfo.EngineVersion < 4.26)
-            GameState->OnRep_CurrentPlaylistInfo();
 
         if (VersionInfo.FortniteVersion >= 25.20 && GameState->HasMapInfo() && GameState->MapInfo)
         {
@@ -721,7 +728,9 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             {
                 auto& PlaylistTag = Playlist->GameplayTagContainer.GameplayTags.Get(i, FGameplayTag::Size());
 
-                if (PlaylistTag.TagName.ToString() == "Athena.Playlist.SpecialEvent")
+                const auto PlaylistTagName = PlaylistTag.TagName.ToString();
+                if (PlaylistTagName == "Athena.Playlist.SpecialEvent" ||
+                    PlaylistTagName == "Athena.Playlist.Concert")
                 {
                     for (auto& Event : Events::EventsArray)
                     {
@@ -1381,6 +1390,65 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
 }
 
 
+static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source)
+{
+    if (!GameMode || !GameMode->SafeZoneIndicator ||
+        !FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone)
+        return;
+
+    auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+    if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
+        GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+
+    AFortSafeZoneIndicator* Indicator = GameMode->SafeZoneIndicator;
+    FVector Center = FConfiguration::CustomSafeZoneCenter;
+    float Radius = FConfiguration::CustomSafeZoneRadius;
+
+    // Old native storm code interpolates Last/Previous -> Next, while newer
+    // versions also replicate NextNext (and sometimes a separate current
+    // Radius). Keep every representation on the chosen circle so a generated
+    // phase cannot pull the visible zone away during a transition.
+    if (Indicator->HasLastCenter()) Indicator->LastCenter = Center;
+    if (Indicator->HasPreviousCenter()) Indicator->PreviousCenter = Center;
+    if (Indicator->HasNextCenter()) Indicator->NextCenter = Center;
+    if (Indicator->HasNextNextCenter()) Indicator->NextNextCenter = Center;
+    if (Indicator->HasLastRadius()) Indicator->LastRadius = Radius;
+    if (Indicator->HasPreviousRadius()) Indicator->PreviousRadius = Radius;
+    if (Indicator->HasNextRadius()) Indicator->NextRadius = Radius;
+    if (Indicator->HasNextNextRadius()) Indicator->NextNextRadius = Radius;
+    if (Indicator->HasRadius()) Indicator->Radius = Radius;
+
+    if (Indicator->HasFutureReplicator() && Indicator->FutureReplicator)
+    {
+        if (Indicator->FutureReplicator->HasNextNextCenter())
+            Indicator->FutureReplicator->NextNextCenter = Center;
+        if (Indicator->FutureReplicator->HasNextNextRadius())
+            Indicator->FutureReplicator->NextNextRadius = Radius;
+    }
+
+    // If this build exposes its phase array, update it as well. This makes the
+    // override persistent instead of having to repair every later transition.
+    if (Indicator->HasSafeZonePhases())
+    {
+        auto& SafeZonePhases = Indicator->SafeZonePhases;
+        const int phaseCount = SafeZonePhases.IsValid() ? SafeZonePhases.Num() : 0;
+        for (int i = 0; i < phaseCount && i < 100; ++i)
+        {
+            auto& Phase = SafeZonePhases.Get(i, FFortSafeZonePhaseInfo::Size());
+            Phase.Center = Center;
+            Phase.Radius = Radius;
+        }
+    }
+
+    Indicator->ForceNetUpdate();
+
+    const int phase = Indicator->HasCurrentPhase() ? Indicator->CurrentPhase : -1;
+    SDK::DbgLog(
+        "[SafeZoneMap] active custom zone source=%s phase=%d center=(%.1f, %.1f, %.1f) radius=%.1f\n",
+        source ? source : "unknown", phase,
+        Center.X, Center.Y, Center.Z, Radius);
+}
+
 void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int NewSafeZonePhase_Inp)
 {
     if (!GameMode->SafeZoneIndicator)
@@ -1391,7 +1459,7 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
 
     float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(GameState);
 
-    if (VersionInfo.FortniteVersion >= 21.50)
+    if (VersionInfo.FortniteVersion >= 21.10)
     {
         if (HandlePostSafeZonePhaseChangedOG)
             HandlePostSafeZonePhaseChangedOG(GameMode, NewSafeZonePhase_Inp);
@@ -1473,6 +1541,16 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
 
     HandlePostSafeZonePhaseChangedOG(GameMode, NewSafeZonePhase_Inp);
 
+    // 6.x and other old native-zone builds fast-forward through the phases
+    // below. Apply the custom circle before those branches return.
+    if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+        ApplyCustomSafeZoneState(GameMode, "native-phase-change");
+    else if (FConfiguration::bLateGame && (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
+    {
+        GameMode->SafeZoneIndicator->NextCenter = SafeZoneLoc;
+        GameMode->SafeZoneIndicator->LastCenter = SafeZoneLoc;
+    }
+
     /*if (FConfiguration::bLateGame && GameMode->SafeZonePhase > FConfiguration::LateGameZone)
     {
         auto newIdx = GameMode->SafeZonePhase - FConfiguration::LateGameZone + 1;
@@ -1499,17 +1577,6 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
             GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = 676767.f;
         if (VersionInfo.FortniteVersion >= 13)
             GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + Durations[FConfiguration::LateGameZone];
-    }
-
-    if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
-    {
-        GameMode->SafeZoneIndicator->NextCenter = FConfiguration::CustomSafeZoneCenter;
-        GameMode->SafeZoneIndicator->LastCenter = FConfiguration::CustomSafeZoneCenter;
-    }
-    else if (FConfiguration::bLateGame && (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
-    {
-        GameMode->SafeZoneIndicator->NextCenter = SafeZoneLoc;
-        GameMode->SafeZoneIndicator->LastCenter = SafeZoneLoc;
     }
 
     if (NewSafeZonePhase > (FConfiguration::bLateGame ? FConfiguration::LateGameZone : 1))
@@ -1624,9 +1691,11 @@ uint8_t AFortGameMode::PickTeam(AFortGameMode* GameMode, uint8_t PreferredTeam, 
 
 bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
 {
-    auto Ret = StartAircraftPhaseOG(GameMode, a2);
-
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+    if (FConfiguration::bCustomSafeZone && GameState && GameState->HasMapInfo())
+        GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+
+    auto Ret = StartAircraftPhaseOG(GameMode, a2);
     
     auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
     if constexpr (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)
@@ -1840,6 +1909,8 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
 
         if (SafeZoneIndicator)
         {
+            if (FConfiguration::bCustomSafeZone && GameState->HasMapInfo())
+                GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
             FFortSafeZoneDefinition& SafeZoneDefinition = GameState->MapInfo->SafeZoneDefinition;
             float SafeZoneCount = SafeZoneDefinition.Count.Evaluate();
 
@@ -1881,6 +1952,10 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
                 {
                     PhaseInfo->Center = FConfiguration::CustomSafeZoneCenter;
                     PhaseInfo->Radius = FConfiguration::CustomSafeZoneRadius;
+                    if (i == 0.f)
+                        SDK::DbgLog("[SafeZoneMap] applying custom zone center=(%.1f, %.1f, %.1f) radius=%.1f\n",
+                            PhaseInfo->Center.X, PhaseInfo->Center.Y, PhaseInfo->Center.Z,
+                            PhaseInfo->Radius);
                 }
 
                 Array.Add(*PhaseInfo, FFortSafeZonePhaseInfo::Size());
@@ -1923,6 +1998,13 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
         }
 
         auto& PhaseInfo = Array.Get(NewSafeZonePhase, FFortSafeZonePhaseInfo::Size());
+        if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+        {
+            if (GameState->HasMapInfo() && GameState->MapInfo)
+                GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+            PhaseInfo.Center = FConfiguration::CustomSafeZoneCenter;
+            PhaseInfo.Radius = FConfiguration::CustomSafeZoneRadius;
+        }
 
         GameMode->SafeZoneIndicator->NextCenter = PhaseInfo.Center;
         GameMode->SafeZoneIndicator->NextRadius = PhaseInfo.Radius;
@@ -1957,6 +2039,9 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
         GameMode->SafeZoneIndicator->OnSafeZoneStateChange(2, false);
         if (GameMode->SafeZoneIndicator->HasSafezoneStateChangedDelegate())
             GameMode->SafeZoneIndicator->SafezoneStateChangedDelegate.Process(GameMode->SafeZoneIndicator, 2);
+
+        if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+            ApplyCustomSafeZoneState(GameMode, "managed-phase-start");
 
         if (!bInitial)
             for (auto& UncastedPlayer : GameMode->AlivePlayers)
@@ -2056,6 +2141,9 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
     SDK::DbgLog("[GameMode] FinishWorldInitialization entered (this=%p GameState=%p) pre-OG\n", (void*)_this, (void*)GameState);
     FinishWorldInitializationOG(_this, WorldManager);
     SDK::DbgLog("[GameMode] FinishWorldInitialization post-OG\n");
+
+    if (GameState && VersionInfo.EngineVersion >= 4.22 && VersionInfo.EngineVersion < 4.26)
+        GameState->OnRep_CurrentPlaylistInfo();
 
 
     auto AddToTierData = [&](const UDataTable* Table, TArray<FFortLootTierData*>& TempArr)
@@ -2264,6 +2352,12 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
                 }
             }
         }
+
+    if (_this->HasOnPlaylistLootTablesAppliedDelegate())
+    {
+        *(bool*)(__int64(&_this->OnPlaylistLootTablesAppliedDelegate) + 0x10) = true;
+        _this->OnPlaylistLootTablesAppliedDelegate.Process();
+    }
 
     UFortLootPackage::SpawnFloorLootForContainer(FindObject<UClass>(L"/Game/Athena/Environments/Blueprints/Tiered_Athena_FloorLoot_Warmup.Tiered_Athena_FloorLoot_Warmup_C"));
     UFortLootPackage::SpawnFloorLootForContainer(FindObject<UClass>(L"/Game/Athena/Environments/Blueprints/Tiered_Athena_FloorLoot_01.Tiered_Athena_FloorLoot_01_C"));
@@ -2589,7 +2683,7 @@ void AFortGameMode::PostLoadHook()
     }
     Utils::ExecHook(AFortGameModeAthena::GetDefaultObj()->GetFunction("OnAircraftExitedDropZone"), OnAircraftExitedDropZone_, OnAircraftExitedDropZone_OG);
 
-    if (VersionInfo.FortniteVersion >= 21.50)
+    if (VersionInfo.FortniteVersion >= 21.10)
     {
         if (VersionInfo.FortniteVersion < 25.20)
         {

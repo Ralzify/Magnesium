@@ -6,6 +6,7 @@
 #include "FortInventory.h"
 #include "FortPlayerPawnAthena.h"
 #include "FortPlayerControllerAthena.h"
+#include "FortAthenaSpawningPolicyManager.h"
 
 enum class EEvaluateCurveTableResult : uint8
 {
@@ -62,6 +63,8 @@ public:
     DEFINE_PROP(bEnableReplicationGraph, bool);
     DEFINE_PROP(bAllowSpectateAfterDeath, bool);
     DEFINE_PROP(ServerBotManager, UObject*);
+    DEFINE_PROP(SpawningPolicyManager, AFortAthenaSpawningPolicyManager*);
+    DEFINE_PROP(OnPlaylistLootTablesAppliedDelegate, TMulticastInlineDelegate<void()>);
 
     DEFINE_FUNC(SpawnDefaultPawnAtTransform, AFortPlayerPawnAthena*);
     DEFINE_FUNC(RestartPlayer, void);

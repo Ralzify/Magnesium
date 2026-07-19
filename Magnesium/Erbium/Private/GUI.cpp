@@ -11,6 +11,7 @@
 #include "../Public/Misc.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
+#include "../../FortniteGame/Public/GameplayTagContainer.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
 #include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
@@ -23,6 +24,7 @@
 #include <Shellapi.h>
 #include <chrono>
 #include <algorithm>
+#include <cfloat>
 #include <unordered_set>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -164,49 +166,203 @@ bool CreateTextureFromRGBA8(const unsigned char* rgba, int width, int height, ID
 //  The GUI runs on its own standalone D3D11 device with no bridge into the game
 //  renderer, so the in-game minimap UTexture2D can't be handed to ImGui directly.
 //  We best-effort read its mip0 pixels out of CPU memory, decode to RGBA8, and
-//  upload to *our* device (dumping a PNG next to the DLL for reuse).
+//  upload to *our* device (caching a PNG in Local AppData for reuse).
 // ============================================================================
 namespace SafeZoneMap
 {
-    // Half-extent of the Athena/Apollo world map in UE units (cm). Corner samples
-    // were ~+/-135345 on both axes; treat the map as a symmetric square.
-
-    auto Chapter1 = VersionInfo.FortniteVersion < 11.00 || std::floor(VersionInfo.FortniteVersion) == 27;
-	auto Chapter2 = VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 19.00;
-	auto Chapter3 = VersionInfo.FortniteVersion >= 19.00 && VersionInfo.FortniteVersion < 23.00;
-	auto Chapter4 = VersionInfo.FortniteVersion >= 23.00 && VersionInfo.FortniteVersion < 27.00;
-	auto Chapter5 = VersionInfo.FortniteVersion >= 28.00;
-
-    constexpr float kWorldExtent = 135345.f; // make this chapter-dependant, currently set at the chapter2 & chapter3 value, need to update for chapter1 & chapter4
-
     static inline float Clamp(float v, float lo, float hi)
     {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
-    // Canvas-local pixel (origin top-left, y down) -> UE world (cm).
-    // World X is the vertical axis (top = +, bottom = -), flipped vs screen-y.
-    // World Y is the horizontal axis (left = -, right = +).
-    static inline void PixelToWorld(float lx, float ly, float side, float& worldX, float& worldY)
+    struct MapTransform
     {
-        worldY = kWorldExtent * (2.f * lx / side - 1.f);
-        worldX = kWorldExtent * (1.f - 2.f * ly / side);
+        float CenterX = 0.f;
+        float CenterY = 0.f;
+        // World-space vectors from the map center to the right and bottom
+        // edges. Keeping the complete basis supports non-square captures and
+        // authoritative runtime sampling without hard-coding map dimensions.
+        float AxisUX = 0.f;
+        float AxisUY = 135345.f;
+        float AxisVX = -135345.f;
+        float AxisVY = 0.f;
+    };
+
+    // MapInfo is owned by the game thread while the editor is rendered on the GUI
+    // thread. A small sequence lock publishes a coherent snapshot without ever
+    // handing an Unreal object to the GUI thread.
+    static std::atomic<uint32_t> g_TransformSequence{ 0 };
+    static std::atomic<float> g_MapCenterX{ 0.f };
+    static std::atomic<float> g_MapCenterY{ 0.f };
+    static std::atomic<float> g_MapAxisUX{ 0.f };
+    static std::atomic<float> g_MapAxisUY{ 135345.f };
+    static std::atomic<float> g_MapAxisVX{ -135345.f };
+    static std::atomic<float> g_MapAxisVY{ 0.f };
+
+    // A map click can happen in the frontend before the Athena map manager
+    // exists. Keep the image-space selection as the source of truth so the
+    // game thread can reproject it when the exact match transform arrives.
+    static std::atomic<float> g_SelectedU{ 0.5f };
+    static std::atomic<float> g_SelectedV{ 0.5f };
+    static std::atomic<bool> g_HasNormalizedSelection{ false };
+
+    static bool UsesLegacyAthenaCapture()
+    {
+        // The original Chapter 1 terrain uses one stable minimap capture from
+        // the early releases through 10.40. Season OG has its own Rufus
+        // projection and is resolved by the runtime map manager instead.
+        return VersionInfo.FortniteVersion < 11.00f;
+    }
+
+    static MapTransform DefaultTransformForVersion()
+    {
+        // Used before AFortAthenaMapInfo is ready and as a guarded fallback.
+        // Fortnite's native 10.40 world-to-map converter resolves the shared
+        // Chapter 1 capture to this center and half-span. This includes the
+        // image border outside the ten labeled grid cells.
+        const float v = VersionInfo.FortniteVersion;
+        if (UsesLegacyAthenaCapture())
+            return { 32000.f, -25744.f, 0.f, 129760.4f, -129760.4f, 0.f };
+
+        const float extent = (v >= 27.00f && v < 28.00f) ? 125000.f : 135345.f;
+        // Athena's world plane uses X for map north/south and Y for east/west:
+        // at zero map yaw, image-right is world +Y and image-bottom is world -X.
+        // Runtime data replaces this provisional transform in-match.
+        return { 0.f, 0.f, 0.f, extent, -extent, 0.f };
+    }
+
+    static inline float AxisULength(const MapTransform& map)
+    {
+        return sqrtf(map.AxisUX * map.AxisUX + map.AxisUY * map.AxisUY);
+    }
+
+    static inline float AxisVLength(const MapTransform& map)
+    {
+        return sqrtf(map.AxisVX * map.AxisVX + map.AxisVY * map.AxisVY);
+    }
+
+    static MapTransform GetTransform()
+    {
+        for (int attempt = 0; attempt < 4; ++attempt)
+        {
+            const uint32_t before = g_TransformSequence.load(std::memory_order_acquire);
+            if (before == 0)
+                return DefaultTransformForVersion();
+            if (before & 1)
+                continue;
+
+            MapTransform result{
+                g_MapCenterX.load(std::memory_order_relaxed),
+                g_MapCenterY.load(std::memory_order_relaxed),
+                g_MapAxisUX.load(std::memory_order_relaxed),
+                g_MapAxisUY.load(std::memory_order_relaxed),
+                g_MapAxisVX.load(std::memory_order_relaxed),
+                g_MapAxisVY.load(std::memory_order_relaxed)
+            };
+            if (before == g_TransformSequence.load(std::memory_order_acquire))
+                return result;
+        }
+        return DefaultTransformForVersion();
+    }
+
+    static void PublishTransform(const MapTransform& value)
+    {
+        g_TransformSequence.fetch_add(1, std::memory_order_acq_rel); // writer active (odd)
+        g_MapCenterX.store(value.CenterX, std::memory_order_relaxed);
+        g_MapCenterY.store(value.CenterY, std::memory_order_relaxed);
+        g_MapAxisUX.store(value.AxisUX, std::memory_order_relaxed);
+        g_MapAxisUY.store(value.AxisUY, std::memory_order_relaxed);
+        g_MapAxisVX.store(value.AxisVX, std::memory_order_relaxed);
+        g_MapAxisVY.store(value.AxisVY, std::memory_order_relaxed);
+        g_TransformSequence.fetch_add(1, std::memory_order_release); // snapshot ready (even)
+    }
+
+    static void RememberSelection(float u, float v)
+    {
+        g_SelectedU.store(Clamp(u, 0.f, 1.f), std::memory_order_relaxed);
+        g_SelectedV.store(Clamp(v, 0.f, 1.f), std::memory_order_relaxed);
+        g_HasNormalizedSelection.store(true, std::memory_order_release);
+    }
+
+    static void ForgetNormalizedSelection()
+    {
+        g_HasNormalizedSelection.store(false, std::memory_order_release);
+    }
+
+    // Always display the complete capture. FortWorldSettings::PvPMapWorldWidth
+    // is the playable rectangle, while the cooked minimap commonly includes
+    // additional capture space around it. Cropping a fixed number of texels and
+    // then stretching the playable width over the result changes the scale.
+    // The runtime transform below derives the complete capture size from
+    // MapWorldScale and the map manager's logical layer size instead.
+    static void GetImageUVs(ImVec2& uv0, ImVec2& uv1)
+    {
+        uv0 = ImVec2(0.f, 0.f);
+        uv1 = ImVec2(1.f, 1.f);
+    }
+
+    // Canvas-local pixel (origin top-left, y down) -> UE world (cm), using the
+    // full map basis supplied by WorldSettings or Fortnite's map manager.
+    static inline void PixelToWorld(float lx, float ly, float side, const MapTransform& map,
+                                    float& worldX, float& worldY)
+    {
+        const float su = 2.f * lx / side - 1.f;
+        const float sv = 2.f * ly / side - 1.f;
+        worldX = map.CenterX + map.AxisUX * su + map.AxisVX * sv;
+        worldY = map.CenterY + map.AxisUY * su + map.AxisVY * sv;
     }
 
     // UE world (cm) -> canvas-local pixel (add the canvas rect-min for screen pos).
-    static inline void WorldToPixel(float worldX, float worldY, float side, float& lx, float& ly)
+    static inline void WorldToPixel(float worldX, float worldY, float side, const MapTransform& map,
+                                    float& lx, float& ly)
     {
-        lx = (side * 0.5f) * (1.f + worldY / kWorldExtent);
-        ly = (side * 0.5f) * (1.f - worldX / kWorldExtent);
+        const float dx = worldX - map.CenterX;
+        const float dy = worldY - map.CenterY;
+        const float det = map.AxisUX * map.AxisVY - map.AxisVX * map.AxisUY;
+        if (fabsf(det) < 1e-6f)
+        {
+            lx = ly = side * 0.5f;
+            return;
+        }
+        const float su = (dx * map.AxisVY - map.AxisVX * dy) / det;
+        const float sv = (map.AxisUX * dy - dx * map.AxisUY) / det;
+        lx = side * 0.5f * (1.f + su);
+        ly = side * 0.5f * (1.f + sv);
     }
 
-    static inline float RadiusToPixels(float radiusCm, float side) { return radiusCm * (side / (2.f * kWorldExtent)); }
-    static inline float PixelsToRadius(float radiusPx, float side) { return radiusPx * (2.f * kWorldExtent / side); }
+    static inline ImVec2 RadiusToPixelAxes(float radiusCm, float side, const MapTransform& map)
+    {
+        const float extentU = AxisULength(map);
+        const float extentV = AxisVLength(map);
+        return ImVec2(radiusCm * side / (2.f * extentU),
+                      radiusCm * side / (2.f * extentV));
+    }
 
-    // Shade the part of rect [rmin,rmax] that lies OUTSIDE the circle (c, radius)
-    // as an angular fan of quads from the circle edge out to the rect boundary.
-    static void FillOutsideCircle(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
-                                  const ImVec2& c, float radius, ImU32 col)
+    static void ReprojectRememberedSelection(const MapTransform& map)
+    {
+        if (!g_HasNormalizedSelection.load(std::memory_order_acquire))
+            return;
+
+        const float u = g_SelectedU.load(std::memory_order_relaxed);
+        const float v = g_SelectedV.load(std::memory_order_relaxed);
+        float worldX, worldY;
+        PixelToWorld(u, v, 1.f, map, worldX, worldY);
+        FConfiguration::CustomSafeZoneCenter.X = worldX;
+        FConfiguration::CustomSafeZoneCenter.Y = worldY;
+
+        // Radius is an actual gameplay distance, not an image coordinate. The
+        // frontend uses a provisional map span while the match is loading. If
+        // the drag endpoint is reprojected with the later runtime span, a 240 m
+        // circle can silently become a 550 m circle. Reproject only the center;
+        // preserve the exact distance selected by the user.
+        SDK::DbgLog("[SafeZoneMap] reprojected selection uv=(%.5f, %.5f) to world=(%.1f, %.1f), radius-preserved=%.1f\n",
+            u, v, worldX, worldY, FConfiguration::CustomSafeZoneRadius);
+    }
+
+    // Shade the part of rect [rmin,rmax] outside a world-space circle. It may
+    // project as an ellipse when the runtime map bounds are not perfectly square.
+    static void FillOutsideEllipse(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
+                                   const ImVec2& c, const ImVec2& radius, ImU32 col)
     {
         const int N = 96;
         const float TwoPi = 6.28318530718f;
@@ -224,8 +380,10 @@ namespace SafeZoneMap
             float a0 = (float)i / N * TwoPi, a1 = (float)(i + 1) / N * TwoPi;
             float c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
             float t0 = rayToRect(c0, s0), t1 = rayToRect(c1, s1);
-            float r0 = radius < t0 ? radius : t0;  // clamp so we never overshoot the rect
-            float r1 = radius < t1 ? radius : t1;
+            const float e0 = 1.f / sqrtf((c0 * c0) / (radius.x * radius.x) + (s0 * s0) / (radius.y * radius.y));
+            const float e1 = 1.f / sqrtf((c1 * c1) / (radius.x * radius.x) + (s1 * s1) / (radius.y * radius.y));
+            float r0 = e0 < t0 ? e0 : t0;  // clamp so we never overshoot the rect
+            float r1 = e1 < t1 ? e1 : t1;
             ImVec2 in0(c.x + c0 * r0, c.y + s0 * r0), in1(c.x + c1 * r1, c.y + s1 * r1);
             ImVec2 out0(c.x + c0 * t0, c.y + s0 * t0), out1(c.x + c1 * t1, c.y + s1 * t1);
             dl->AddQuadFilled(in0, in1, out1, out0, col);
@@ -235,17 +393,31 @@ namespace SafeZoneMap
     // Manual override for tuning on a specific engine version (0 = auto-detect).
     static uint32_t g_PlatformDataOffsetOverride = 0;
 
-    // Stable low EPixelFormat values (append-only in UE, so identical across the
-    // whole version range). Minimaps are PF_DXT1; PF_B8G8R8A8 covers uncompressed.
-    enum : int32 { PF_B8G8R8A8 = 2, PF_DXT1 = 5, PF_DXT3 = 6, PF_DXT5 = 7 };
+    // EPixelFormat is append-only across the supported UE4 builds. Chapter 2
+    // minimaps can be BC7; treating its 16-byte blocks as same-sized BC3 is what
+    // produced the vertical multicolour corruption on 17.30.
+    enum : int32
+    {
+        PF_B8G8R8A8 = 2,
+        PF_DXT1 = 5,
+        PF_DXT3 = 6,
+        PF_DXT5 = 7,
+        PF_R8G8B8A8 = 37,
+        PF_BC7 = 56
+    };
 
-    static bool IsKnownFormat(int32 f) { return f == PF_B8G8R8A8 || f == PF_DXT1 || f == PF_DXT3 || f == PF_DXT5; }
+    static bool IsKnownFormat(int32 f)
+    {
+        return f == PF_B8G8R8A8 || f == PF_DXT1 || f == PF_DXT3 ||
+            f == PF_DXT5 || f == PF_R8G8B8A8 || f == PF_BC7;
+    }
     static size_t FormatBytes(int32 f, int w, int h)
     {
         const size_t px = (size_t)w * h;
-        if (f == PF_B8G8R8A8) return px * 4; // 32bpp uncompressed
+        if (f == PF_B8G8R8A8 || f == PF_R8G8B8A8)
+            return px * 4; // 32bpp uncompressed
         if (f == PF_DXT1)     return px / 2; // BC1: 8 bytes / 16 px
-        return px;                            // BC2/BC3: 16 bytes / 16 px
+        return px;                            // BC2/BC3/BC7: 16 bytes / 16 px
     }
 
     // True only if every byte of [p, p+bytes) is committed and readable.
@@ -336,7 +508,16 @@ namespace SafeZoneMap
                     off, (const void*)P, sx, sy, pf);
                 return true;
             }
-            if (!haveFallback) { fallback = { P, sx, sy, 0, off }; haveFallback = true; }
+            if (!haveFallback)
+            {
+                fallback = { P, sx, sy, 0, off };
+                haveFallback = true;
+                SDK::DbgLog(
+                    "[SafeZoneMap] PlatformData candidate @0x%X ptr=%p %dx%d header pf08=%d pf0c=%d pf10=%d pf14=%d\n",
+                    off, (const void*)P, sx, sy, pf08, pf0c,
+                    *(const int32*)(P + 0x10),
+                    *(const int32*)(P + 0x14));
+            }
             return false;
         };
 
@@ -365,6 +546,29 @@ namespace SafeZoneMap
 
     // From detected platform data, find mip0's resident pixel bytes (a pointer to
     // a committed region large enough for neededBytes).
+    static bool LooksLikeMip(const uint8_t* mip, int32 sizeX, int32 sizeY)
+    {
+        if (!IsReadable(mip, 0xA0)) return false;
+
+        // FTexture2DMipMap starts with FByteBulkData, whose size varies heavily
+        // between UE4/UE5 builds. Validate it by finding its trailing dimensions
+        // instead of assuming the dimensions are at byte zero.
+        for (uint32_t off = 0; off <= 0x90; off += 4)
+        {
+            const int32 x = *(const int32*)(mip + off);
+            const int32 y = *(const int32*)(mip + off + 4);
+            if (x == sizeX && y == sizeY) return true;
+        }
+        // Some cooked layouts keep mip dimensions as uint16 values.
+        for (uint32_t off = 0; off <= 0x94; off += 2)
+        {
+            const uint16_t x = *(const uint16_t*)(mip + off);
+            const uint16_t y = *(const uint16_t*)(mip + off + 2);
+            if (x == sizeX && y == sizeY) return true;
+        }
+        return false;
+    }
+
     static const uint8_t* FindMip0Bytes(const FPlatformData& pd, size_t neededBytes)
     {
         for (uint32_t moff = 0x0C; moff <= 0x80; moff += 4) // the mips TArray {Data,Num,Max}
@@ -379,14 +583,12 @@ namespace SafeZoneMap
             // Element may be inline (FTexture2DMipMap) or a pointer (TIndirectArray).
             const uint8_t* mip0 = data;
             const uint8_t* asPtr = *(const uint8_t* const*)data;
-            if (IsReadable(asPtr, 0x40))
-            {
-                int32 maybeSize = *(const int32*)asPtr;
-                if (maybeSize == pd.SizeX || maybeSize == pd.SizeY) mip0 = asPtr;
-            }
-            if (!IsReadable(mip0, 0x60)) continue;
+            if (LooksLikeMip(asPtr, pd.SizeX, pd.SizeY))
+                mip0 = asPtr;
+            else if (!LooksLikeMip(mip0, pd.SizeX, pd.SizeY))
+                continue;
 
-            for (uint32_t boff = 0x0; boff <= 0x50; boff += 8) // the bulk-data pointer
+            for (uint32_t boff = 0x0; boff <= 0x80; boff += 8) // the bulk-data pointer
             {
                 const uint8_t* cand = *(const uint8_t* const*)(mip0 + boff);
                 if (RegionSize(cand) >= neededBytes && !StartsWithImagePointer(cand))
@@ -467,9 +669,14 @@ namespace SafeZoneMap
                 d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3]; // BGRA -> RGBA
             }
         }
-        else if (fmt == PF_DXT1)                 { decodeBlocks(BCDEC_BC1_BLOCK_SIZE, bcdec_bc1); }
-        else if (fmt == PF_DXT3)                 { decodeBlocks(BCDEC_BC2_BLOCK_SIZE, bcdec_bc2); }
-        else if (fmt == PF_DXT5)                 { decodeBlocks(BCDEC_BC3_BLOCK_SIZE, bcdec_bc3); }
+        else if (fmt == PF_R8G8B8A8)
+        {
+            memcpy(rgba.data(), src, pixels * 4);
+        }
+        else if (fmt == PF_DXT1) { decodeBlocks(BCDEC_BC1_BLOCK_SIZE, bcdec_bc1); }
+        else if (fmt == PF_DXT3) { decodeBlocks(BCDEC_BC2_BLOCK_SIZE, bcdec_bc2); }
+        else if (fmt == PF_DXT5) { decodeBlocks(BCDEC_BC3_BLOCK_SIZE, bcdec_bc3); }
+        else if (fmt == PF_BC7)  { decodeBlocks(BCDEC_BC7_BLOCK_SIZE, bcdec_bc7); }
         else return false;
 
         outW = w; outH = h;
@@ -502,6 +709,7 @@ namespace SafeZoneMap
     // ------------------------------------------------------------------------
     enum class LoadState : int { Idle = 0, Requested, Ready, Failed, Consumed };
     static std::atomic<int> g_LoadState{ (int)LoadState::Idle };
+    static std::atomic<int> g_LoadAttempts{ 0 };
     static std::vector<unsigned char> g_LoadedRGBA; // written under Requested, read under Ready
     static int g_LoadedW = 0, g_LoadedH = 0;
 
@@ -520,16 +728,1486 @@ namespace SafeZoneMap
 
     static int MinimapPathsForVersion(const wchar_t** out, int cap); // fwd
     static const UTexture2D* FindLoadedMinimapTexture(const wchar_t** paths, int np); // fwd
+    static constexpr int kMaxMinimapPaths = 12;
 
-    // Called from the TickFlush hooks every server tick; a single atomic read
-    // unless a request is actually pending.
-    static void GameThreadTick()
+    struct MapPoint
     {
-        if (g_LoadState.load(std::memory_order_acquire) != (int)LoadState::Requested)
+        double U = 0.0;
+        double V = 0.0;
+    };
+
+    static bool ReadMapPoint(const uint8_t* buffer, size_t bufferSize,
+                             uint32_t offset, MapPoint& out)
+    {
+        if (!buffer)
+            return false;
+
+        if (VersionInfo.FortniteVersion >= 20.00f)
+        {
+            if ((size_t)offset + sizeof(double) * 2 > bufferSize)
+                return false;
+            out.U = *(const double*)(buffer + offset);
+            out.V = *(const double*)(buffer + offset + sizeof(double));
+        }
+        else
+        {
+            if ((size_t)offset + sizeof(float) * 2 > bufferSize)
+                return false;
+            out.U = *(const float*)(buffer + offset);
+            out.V = *(const float*)(buffer + offset + sizeof(float));
+        }
+        return std::isfinite(out.U) && std::isfinite(out.V);
+    }
+
+    static bool CallWorldToMapUnsafe(const UObject* manager, UFunction* function,
+                                     const FVector& worldLocation, MapPoint& out)
+    {
+        if (!manager || !function)
+            return false;
+
+        auto params = function->GetParamsNamed();
+        size_t bufferSize = VersionInfo.FortniteVersion >= 32.00f
+            ? 0x1000
+            : (size_t)(params.Size > 0 ? params.Size : 0x100);
+        if (bufferSize < 0x100)
+            bufferSize = 0x100;
+        if (bufferSize > 0x10000)
+            return false;
+
+        for (auto& param : params.NameOffsetMap)
+        {
+            if (param.Offset > 0x10000)
+                return false;
+            const size_t required = (size_t)param.Offset + 0x20;
+            if (required > bufferSize)
+                bufferSize = required;
+        }
+        if (bufferSize > 0x10000)
+            return false;
+
+        std::vector<uint8_t> buffer(bufferSize, 0);
+        bool wroteInput = false;
+        uint32_t returnOffset = UINT32_MAX;
+        uint32_t namedOutputOffset = UINT32_MAX;
+        uint32_t flaggedOutputOffset = UINT32_MAX;
+
+        for (auto& param : params.NameOffsetMap)
+        {
+            const bool isWorldInput =
+                param.Name == "WorldLocation" ||
+                param.Name == "InWorldLocation" ||
+                param.Name.find("WorldLocation") != UEAllocatedString::npos;
+            if (isWorldInput && !wroteInput)
+            {
+                const size_t vectorSize = (size_t)FVector::Size();
+                if ((size_t)param.Offset + vectorSize > buffer.size())
+                    return false;
+                memcpy(buffer.data() + param.Offset, &worldLocation, vectorSize);
+                wroteInput = true;
+                continue;
+            }
+
+            // The native helper scales its result by this caller-supplied widget
+            // size. Zero produces (0,0) for every world position, which made the
+            // calibration silently fall back to the approximate version bounds.
+            // A size of one makes the result a normalized texture coordinate.
+            if (param.Name == "InMapSize" || param.Name == "MapSize")
+            {
+                if ((size_t)param.Offset + sizeof(float) > buffer.size())
+                    return false;
+                *(float*)(buffer.data() + param.Offset) = 1.0f;
+                continue;
+            }
+
+            if (param.Name == "ReturnValue")
+                returnOffset = param.Offset;
+            else if (param.Name.find("MapLocation") != UEAllocatedString::npos)
+                namedOutputOffset = param.Offset;
+            else if ((param.PropertyFlags & 0x100) != 0 ||
+                     (param.PropertyFlags & 0x400) != 0)
+                flaggedOutputOffset = param.Offset;
+        }
+        if (!wroteInput)
+            return false;
+
+        manager->ProcessEvent(function, buffer.data());
+
+        if (returnOffset != UINT32_MAX &&
+            ReadMapPoint(buffer.data(), buffer.size(), returnOffset, out))
+            return true;
+        if (namedOutputOffset != UINT32_MAX &&
+            ReadMapPoint(buffer.data(), buffer.size(), namedOutputOffset, out))
+            return true;
+        return flaggedOutputOffset != UINT32_MAX &&
+            ReadMapPoint(buffer.data(), buffer.size(), flaggedOutputOffset, out);
+    }
+
+    static bool CallWorldToMap(const UObject* manager, UFunction* function,
+                               const FVector& worldLocation, MapPoint& out)
+    {
+        __try
+        {
+            return CallWorldToMapUnsafe(manager, function, worldLocation, out);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            SDK::DbgLog("[SafeZoneMap] BPWorldLocationToMapLocation faulted (SEH)\n");
+            return false;
+        }
+    }
+
+    static bool ReadMapCenterUnsafe(const AFortAthenaMapInfo* mapInfo, FVector& out)
+    {
+        out = mapInfo->GetMapCenter();
+        return std::isfinite(out.X) && std::isfinite(out.Y) &&
+            fabs(out.X) < 1000000.0 && fabs(out.Y) < 1000000.0;
+    }
+
+    static bool ReadMapCenter(const AFortAthenaMapInfo* mapInfo, FVector& out)
+    {
+        __try
+        {
+            return mapInfo && ReadMapCenterUnsafe(mapInfo, out);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            SDK::DbgLog("[SafeZoneMap] GetMapCenter faulted (SEH)\n");
+            return false;
+        }
+    }
+
+    static int ReadMapLayerSizeUnsafe(const UObject* preferredManager)
+    {
+        auto readFrom = [](const UObject* object) -> int
+        {
+            if (!object || !object->Class)
+                return 0;
+            const uint32_t offset = object->GetOffset("MapLayerSize");
+            if (offset == UINT32_MAX)
+                return 0;
+            const int value = GetFromOffset<int>(object, offset);
+            return value >= 64 && value <= 8192 ? value : 0;
+        };
+
+        int result = readFrom(preferredManager);
+        if (result)
+            return result;
+
+        // Older Athena versions create this Blueprint manager lazily (and
+        // dedicated servers may never create an instance). Its CDO still holds
+        // the cooked logical layer size for the currently loaded game version.
+        const UObject* blueprintDefault = FindObject<UObject>(
+            L"/Game/UI/IngameMap/UIMapManager.Default__UIMapManager_C");
+        result = readFrom(blueprintDefault);
+        if (result)
+            return result;
+
+        const UClass* managerClass = FindClass("FortInGameMapManager");
+        if (managerClass)
+            result = readFrom(managerClass->GetDefaultObj());
+        return result;
+    }
+
+    static float ReadSceneCaptureWidthFromManagerUnsafe(
+        const UObject* manager, const UObject*& captureClassOut,
+        const UObject*& captureComponentOut)
+    {
+        captureClassOut = nullptr;
+        captureComponentOut = nullptr;
+        if (!manager || !manager->Class)
+            return 0.f;
+
+        const UObject* captureActor = nullptr;
+        const uint32_t liveCaptureOffset = manager->GetOffset("SceneCapture");
+        if (liveCaptureOffset != UINT32_MAX)
+        {
+            const UObject* candidate =
+                GetFromOffset<UObject*>(manager, liveCaptureOffset);
+            if (candidate && candidate->Class)
+                captureActor = candidate;
+        }
+
+        const uint32_t captureClassOffset =
+            manager->GetOffset("SceneCaptureClass");
+        if (captureClassOffset != UINT32_MAX)
+        {
+            const UClass* captureClass =
+                GetFromOffset<UClass*>(manager, captureClassOffset);
+            if (captureClass)
+            {
+                captureClassOut = captureClass;
+                if (!captureActor)
+                    captureActor = captureClass->GetDefaultObj();
+            }
+        }
+        if (!captureActor || !captureActor->Class)
+            return 0.f;
+
+        const uint32_t componentOffset =
+            captureActor->GetOffset("CaptureComponent2D");
+        if (componentOffset == UINT32_MAX)
+            return 0.f;
+        const UObject* component =
+            GetFromOffset<UObject*>(captureActor, componentOffset);
+        if (!component || !component->Class)
+            return 0.f;
+        captureComponentOut = component;
+
+        const uint32_t orthoWidthOffset = component->GetOffset("OrthoWidth");
+        if (orthoWidthOffset == UINT32_MAX)
+            return 0.f;
+        const float width = GetFromOffset<float>(component, orthoWidthOffset);
+        return std::isfinite(width) && width >= 50000.f &&
+            width <= 1000000.f ? width : 0.f;
+    }
+
+    static float ReadSceneCaptureWidthUnsafe(
+        const UObject* preferredManager, const UObject*& managerOut,
+        const UObject*& captureClassOut, const UObject*& captureComponentOut)
+    {
+        managerOut = nullptr;
+        captureClassOut = nullptr;
+        captureComponentOut = nullptr;
+
+        const UObject* candidates[3]{
+            preferredManager,
+            FindObject<UObject>(
+                L"/Game/UI/IngameMap/UIMapManager.Default__UIMapManager_C"),
+            nullptr
+        };
+        const UClass* managerClass = FindClass("FortInGameMapManager");
+        if (managerClass)
+            candidates[2] = managerClass->GetDefaultObj();
+
+        for (const UObject* candidate : candidates)
+        {
+            if (!candidate || !candidate->Class)
+                continue;
+            const UObject* captureClass = nullptr;
+            const UObject* captureComponent = nullptr;
+            const float width = ReadSceneCaptureWidthFromManagerUnsafe(
+                candidate, captureClass, captureComponent);
+            if (width > 0.f)
+            {
+                managerOut = candidate;
+                captureClassOut = captureClass;
+                captureComponentOut = captureComponent;
+                return width;
+            }
+        }
+        return 0.f;
+    }
+
+    static bool ReadAthenaMapBrushSizeUnsafe(const UObject* settings,
+                                             float& width, float& height,
+                                             const UObject*& resource)
+    {
+        width = height = 0.f;
+        resource = nullptr;
+        if (!settings || !settings->Class)
+            return false;
+
+        const uint32_t brushOffset = settings->GetOffset("AthenaMapImage");
+        const UStruct* brushStruct =
+            FindObject<UStruct>(L"/Script/SlateCore.SlateBrush");
+        if (brushOffset == UINT32_MAX || !brushStruct)
+            return false;
+
+        const uint32_t imageSizeOffset = brushStruct->GetOffset("ImageSize");
+        if (imageSizeOffset == UINT32_MAX)
+            return false;
+
+        // Slate's image size remains a pair of floats even on UE5 versions
+        // where gameplay FVector2D changed to doubles.
+        const uint8_t* brush = (const uint8_t*)settings + brushOffset;
+        width = *(const float*)(brush + imageSizeOffset);
+        height = *(const float*)(brush + imageSizeOffset + sizeof(float));
+
+        const uint32_t resourceOffset = brushStruct->GetOffset("ResourceObject");
+        if (resourceOffset != UINT32_MAX)
+            resource = *(UObject* const*)(brush + resourceOffset);
+
+        return std::isfinite(width) && std::isfinite(height) &&
+            width >= 64.f && width <= 8192.f &&
+            height >= 64.f && height <= 8192.f;
+    }
+
+    static bool ReadWorldSettingsTransformUnsafe(UWorld* world,
+                                                  const UObject* preferredManager,
+                                                  MapTransform& out,
+                                                  const UObject*& settingsOut)
+    {
+        settingsOut = nullptr;
+        if (!world || !world->HasPersistentLevel() || !world->PersistentLevel ||
+            !world->PersistentLevel->Class)
+            return false;
+
+        UObject* level = world->PersistentLevel;
+        const uint32_t worldSettingsOffset = level->GetOffset("WorldSettings");
+        if (worldSettingsOffset == UINT32_MAX)
+            return false;
+
+        UObject* settings = GetFromOffset<UObject*>(level, worldSettingsOffset);
+        if (!settings || !settings->Class)
+            return false;
+
+        const uint32_t centerOffset = settings->GetOffset("PvPMapWorldCenter");
+        if (centerOffset == UINT32_MAX)
+            return false;
+
+        const uint8_t* centerBytes = (const uint8_t*)settings + centerOffset;
+        double centerX = 0.0;
+        double centerY = 0.0;
+        if (VersionInfo.FortniteVersion >= 20.00f)
+        {
+            centerX = *(const double*)(centerBytes + 0);
+            centerY = *(const double*)(centerBytes + 8);
+        }
+        else
+        {
+            centerX = *(const float*)(centerBytes + 0);
+            centerY = *(const float*)(centerBytes + 4);
+        }
+        if (!std::isfinite(centerX) || !std::isfinite(centerY) ||
+            fabs(centerX) > 1000000.0 || fabs(centerY) > 1000000.0)
+            return false;
+
+        MapTransform result = DefaultTransformForVersion();
+        // Original Athena reports the gameplay origin here (0,0), while the
+        // 2048 minimap capture itself is offset. Keep the capture center
+        // recovered from Fortnite's native converter for that map family.
+        if (!UsesLegacyAthenaCapture() ||
+            fabs(centerX) > 1.0 || fabs(centerY) > 1.0)
+        {
+            result.CenterX = (float)centerX;
+            result.CenterY = (float)centerY;
+        }
+
+        float extentU = AxisULength(result);
+        float extentV = AxisVLength(result);
+        float width = 0.f;
+        float height = 0.f;
+        float mapWorldScale = 0.f;
+        const uint32_t widthOffset = settings->GetOffset("PvPMapWorldWidth");
+        const uint32_t heightOffset = settings->GetOffset("PvPMapWorldHeight");
+        const uint32_t scaleOffset = settings->GetOffset("MapWorldScale");
+        if (widthOffset != UINT32_MAX)
+            width = GetFromOffset<float>(settings, widthOffset);
+        if (heightOffset != UINT32_MAX)
+            height = GetFromOffset<float>(settings, heightOffset);
+        if (scaleOffset != UINT32_MAX)
+            mapWorldScale = GetFromOffset<float>(settings, scaleOffset);
+        const bool validWidth =
+            std::isfinite(width) && width >= 50000.f && width <= 1000000.f;
+        const bool validHeight =
+            std::isfinite(height) && height >= 50000.f && height <= 1000000.f;
+        if (validWidth)
+            extentU = width * 0.5f;
+        if (validHeight)
+            extentV = height * 0.5f;
+
+        float brushWidth = 0.f;
+        float brushHeight = 0.f;
+        const UObject* brushResource = nullptr;
+        const bool haveBrushSize =
+            ReadAthenaMapBrushSizeUnsafe(settings, brushWidth, brushHeight, brushResource);
+        const int mapLayerSize = ReadMapLayerSizeUnsafe(preferredManager);
+        const UObject* captureManager = nullptr;
+        const UObject* captureClass = nullptr;
+        const UObject* captureComponent = nullptr;
+        const float sceneCaptureWidth = ReadSceneCaptureWidthUnsafe(
+            preferredManager, captureManager, captureClass, captureComponent);
+
+        // MapWorldScale is centimeters per logical map-layer unit, not per
+        // source-texture pixel. Chapter 1 proves the distinction: its source
+        // image is 2048 px, while Fortnite converts locations on an 896-unit
+        // layer at 290 cm/unit (about 259.8 km total). Multiplying by 2048 made
+        // the editor's world span 2.285x too large and sent Season 7/8 zones
+        // into the ocean.
+        const float absoluteScale = fabsf(mapWorldScale);
+        bool usedFullCaptureScale = false;
+        if (std::isfinite(absoluteScale) &&
+            absoluteScale >= 0.01f && absoluteScale <= 10000.f)
+        {
+            const float logicalWidth = mapLayerSize
+                ? (float)mapLayerSize
+                : (haveBrushSize ? brushWidth : 0.f);
+            const float logicalHeight = mapLayerSize
+                ? (float)mapLayerSize
+                : (haveBrushSize ? brushHeight : 0.f);
+            const float scaledExtentU = absoluteScale * logicalWidth * 0.5f;
+            const float scaledExtentV = absoluteScale * logicalHeight * 0.5f;
+            if (scaledExtentU >= 25000.f && scaledExtentU <= 500000.f &&
+                scaledExtentV >= 25000.f && scaledExtentV <= 500000.f)
+            {
+                extentU = scaledExtentU;
+                extentV = scaledExtentV;
+                usedFullCaptureScale = true;
+            }
+        }
+
+        // Later managers may store the already-normalized world-to-map scale.
+        if (!usedFullCaptureScale &&
+            std::isfinite(mapWorldScale) && absoluteScale > 1e-9f)
+        {
+            const float scaleExtent = 0.5f / absoluteScale;
+            if (scaleExtent >= 25000.f && scaleExtent <= 500000.f)
+            {
+                if (!validWidth)
+                    extentU = scaleExtent;
+                if (!validHeight)
+                    extentV = scaleExtent;
+            }
+        }
+
+        // The orthographic capture width is useful only when the logical
+        // scale/layer pair is unavailable. A class-default capture can target a
+        // different render layer, so it must not override Fortnite's own
+        // MapWorldScale * MapLayerSize conversion.
+        if (!usedFullCaptureScale &&
+            sceneCaptureWidth >= 50000.f &&
+            sceneCaptureWidth <= 1000000.f)
+        {
+            extentU = sceneCaptureWidth * 0.5f;
+            extentV = sceneCaptureWidth * 0.5f;
+        }
+
+        // Read the capture orientation supplied by this map. At zero yaw the
+        // legacy Athena basis is image-right=world +Y, image-bottom=world -X.
+        float reportedMapYaw = 0.f;
+        const uint32_t rotationOffset = settings->GetOffset("MapRotation");
+        if (rotationOffset != UINT32_MAX)
+        {
+            const uint8_t* rotationBytes = (const uint8_t*)settings + rotationOffset;
+            const double candidateYaw = VersionInfo.FortniteVersion >= 20.00f
+                ? *(const double*)(rotationBytes + 8)
+                : *(const float*)(rotationBytes + 4);
+            if (std::isfinite(candidateYaw) && fabs(candidateYaw) <= 36000.0)
+                reportedMapYaw = (float)candidateYaw;
+        }
+
+        // Rotate the legacy Athena image basis in the world plane. Newer
+        // versions that expose BPWorldLocationToMapLocation are sampled
+        // natively below, so this is only their safe fallback.
+        const float yawRadians = reportedMapYaw * 0.01745329251994329577f;
+        const float cosYaw = cosf(yawRadians);
+        const float sinYaw = sinf(yawRadians);
+        result.AxisUX = -sinYaw * extentU;
+        result.AxisUY = cosYaw * extentU;
+        result.AxisVX = -cosYaw * extentV;
+        result.AxisVY = -sinYaw * extentV;
+
+        static const UObject* loggedSettings = nullptr;
+        static int loggedLayerSize = 0;
+        static float loggedScale = 0.f;
+        static float loggedSceneCaptureWidth = -1.f;
+        if (loggedSettings != settings || loggedLayerSize != mapLayerSize ||
+            fabsf(loggedScale - mapWorldScale) > 0.000001f ||
+            fabsf(loggedSceneCaptureWidth - sceneCaptureWidth) > 1.f)
+        {
+            SDK::DbgLog(
+                "[SafeZoneMap] WorldSettings map center=(%.1f, %.1f) capture=(%.1f, %.1f) playable=(%.1f, %.1f) layer=%d brush=(%.1f, %.1f) resource=%p sceneOrtho=%.1f captureManager=%p captureClass=%p captureComponent=%p projection=runtime-yaw yaw=%.2f scale=%.9f\n",
+                result.CenterX, result.CenterY, extentU * 2.f, extentV * 2.f,
+                width, height, mapLayerSize, brushWidth, brushHeight,
+                (const void*)brushResource, sceneCaptureWidth,
+                (const void*)captureManager, (const void*)captureClass,
+                (const void*)captureComponent, reportedMapYaw, mapWorldScale);
+            loggedSettings = settings;
+            loggedLayerSize = mapLayerSize;
+            loggedScale = mapWorldScale;
+            loggedSceneCaptureWidth = sceneCaptureWidth;
+        }
+        out = result;
+        settingsOut = settings;
+        return true;
+    }
+
+    static bool ReadWorldSettingsTransform(UWorld* world,
+                                           const UObject* preferredManager,
+                                           MapTransform& out,
+                                           const UObject*& settingsOut)
+    {
+        __try
+        {
+            return ReadWorldSettingsTransformUnsafe(
+                world, preferredManager, out, settingsOut);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            SDK::DbgLog("[SafeZoneMap] WorldSettings map transform faulted (SEH)\n");
+            settingsOut = nullptr;
+            return false;
+        }
+    }
+
+    struct PoiCalibrationAnchor
+    {
+        double RawU = 0.0;
+        double RawV = 0.0;
+        double WorldX = 0.0;
+        double WorldY = 0.0;
+        FName Tag;
+    };
+
+    struct PoiCalibrationPoint
+    {
+        double U = 0.0;
+        double V = 0.0;
+        double WorldX = 0.0;
+        double WorldY = 0.0;
+    };
+
+    struct PoiAffineFit
+    {
+        double X[3]{};
+        double Y[3]{};
+        double Rms = 0.0;
+        int Inliers = 0;
+    };
+
+    struct PoiPositionNormalization
+    {
+        const char* Name = nullptr;
+        double OffsetU = 0.0;
+        double OffsetV = 0.0;
+        double ScaleU = 1.0;
+        double ScaleV = 1.0;
+    };
+
+    static FName ReadGameplayTagName(const uint8_t* bytes)
+    {
+        FName result;
+        result.ComparisonIndex = *(const int32*)bytes;
+        if (VersionInfo.FortniteVersion < 20.00f)
+            result.Number = *(const int32*)(bytes + sizeof(int32));
+        return result;
+    }
+
+    static bool GameplayTagArrayContains(const TArray<FGameplayTag>& tags,
+                                         const FName& wanted)
+    {
+        const int count = tags.Num();
+        const int maximum = tags.Max();
+        const int tagSize = FGameplayTag::Size();
+        if (count <= 0 || count > 128 || maximum < count || maximum > 4096 ||
+            !tags.Data || !SDK::MemReadable(tags.Data, (size_t)count * tagSize))
+            return false;
+
+        for (int i = 0; i < count; ++i)
+        {
+            const uint8_t* tagBytes =
+                (const uint8_t*)tags.Data + (size_t)i * tagSize;
+            if (ReadGameplayTagName(tagBytes) == wanted)
+                return true;
+        }
+        return false;
+    }
+
+    static bool GameplayTagContainerContains(const FGameplayTagContainer* tags,
+                                             const FName& wanted)
+    {
+        if (!tags || !SDK::MemReadable(tags, sizeof(FGameplayTagContainer)))
+            return false;
+        return GameplayTagArrayContains(tags->GameplayTags, wanted) ||
+            GameplayTagArrayContains(tags->ParentTags, wanted);
+    }
+
+    static bool IsUsablePoiLocation(const FVector& location)
+    {
+        return std::isfinite(location.X) && std::isfinite(location.Y) &&
+            fabs(location.X) <= 1000000.0 &&
+            fabs(location.Y) <= 1000000.0 &&
+            // A retained NullRHI POI actor can have an uninitialized root at
+            // the world origin. No named Athena POI is actually centered there.
+            fabs(location.X) + fabs(location.Y) > 100.0;
+    }
+
+    static bool ReadPoiVolumeLocationUnsafe(AActor* volume, FVector& out)
+    {
+        if (!volume || !volume->Class)
+            return false;
+
+        // FortPoiVolume's actor/root transform is commonly zero on old
+        // dedicated NullRHI builds. The collision component still retains the
+        // cooked level transform used to define the POI footprint.
+        const uint32_t collisionOffset =
+            volume->GetOffset("PoiCollisionComp");
+        if (collisionOffset != UINT32_MAX)
+        {
+            UActorComponent* collision =
+                GetFromOffset<UActorComponent*>(volume, collisionOffset);
+            if (collision && collision->Class)
+            {
+                const FVector location =
+                    collision->K2_GetComponentToWorld().GetTranslation();
+                if (IsUsablePoiLocation(location))
+                {
+                    out = FVector(location.X, location.Y, location.Z);
+                    return true;
+                }
+            }
+        }
+
+        UActorComponent* root = volume->RootComponent;
+        if (root && root->Class)
+        {
+            const FVector location =
+                root->K2_GetComponentToWorld().GetTranslation();
+            if (IsUsablePoiLocation(location))
+            {
+                out = FVector(location.X, location.Y, location.Z);
+                return true;
+            }
+        }
+
+        const FVector actorLocation = volume->K2_GetActorLocation();
+        if (IsUsablePoiLocation(actorLocation))
+        {
+            out = FVector(
+                actorLocation.X, actorLocation.Y, actorLocation.Z);
+            return true;
+        }
+        return false;
+    }
+
+    static bool SolvePoi3x3(double matrix[3][3], const double rhs[3],
+                            double result[3])
+    {
+        double augmented[3][4]{
+            { matrix[0][0], matrix[0][1], matrix[0][2], rhs[0] },
+            { matrix[1][0], matrix[1][1], matrix[1][2], rhs[1] },
+            { matrix[2][0], matrix[2][1], matrix[2][2], rhs[2] }
+        };
+
+        for (int column = 0; column < 3; ++column)
+        {
+            int pivot = column;
+            for (int row = column + 1; row < 3; ++row)
+                if (fabs(augmented[row][column]) >
+                    fabs(augmented[pivot][column]))
+                    pivot = row;
+            if (fabs(augmented[pivot][column]) < 1e-12)
+                return false;
+            if (pivot != column)
+                for (int cell = column; cell < 4; ++cell)
+                    std::swap(augmented[pivot][cell],
+                              augmented[column][cell]);
+
+            const double divisor = augmented[column][column];
+            for (int cell = column; cell < 4; ++cell)
+                augmented[column][cell] /= divisor;
+            for (int row = 0; row < 3; ++row)
+            {
+                if (row == column)
+                    continue;
+                const double factor = augmented[row][column];
+                for (int cell = column; cell < 4; ++cell)
+                    augmented[row][cell] -= factor *
+                        augmented[column][cell];
+            }
+        }
+
+        result[0] = augmented[0][3];
+        result[1] = augmented[1][3];
+        result[2] = augmented[2][3];
+        return std::isfinite(result[0]) && std::isfinite(result[1]) &&
+            std::isfinite(result[2]);
+    }
+
+    static bool FitPoiAffine(const std::vector<PoiCalibrationPoint>& points,
+                             const std::vector<int>& indices,
+                             PoiAffineFit& out)
+    {
+        if (indices.size() < 3)
+            return false;
+
+        double normal[3][3]{};
+        double rhsX[3]{};
+        double rhsY[3]{};
+        for (int index : indices)
+        {
+            if (index < 0 || index >= (int)points.size())
+                return false;
+            const PoiCalibrationPoint& point = points[index];
+            const double basis[3]{ 1.0, point.U, point.V };
+            for (int row = 0; row < 3; ++row)
+            {
+                rhsX[row] += basis[row] * point.WorldX;
+                rhsY[row] += basis[row] * point.WorldY;
+                for (int column = 0; column < 3; ++column)
+                    normal[row][column] += basis[row] * basis[column];
+            }
+        }
+
+        double normalCopy[3][3];
+        memcpy(normalCopy, normal, sizeof(normal));
+        if (!SolvePoi3x3(normal, rhsX, out.X) ||
+            !SolvePoi3x3(normalCopy, rhsY, out.Y))
+            return false;
+
+        double squaredError = 0.0;
+        for (int index : indices)
+        {
+            const PoiCalibrationPoint& point = points[index];
+            const double predictedX =
+                out.X[0] + out.X[1] * point.U + out.X[2] * point.V;
+            const double predictedY =
+                out.Y[0] + out.Y[1] * point.U + out.Y[2] * point.V;
+            const double dx = predictedX - point.WorldX;
+            const double dy = predictedY - point.WorldY;
+            squaredError += dx * dx + dy * dy;
+        }
+        out.Rms = sqrt(squaredError / (double)indices.size());
+        out.Inliers = (int)indices.size();
+        return std::isfinite(out.Rms);
+    }
+
+    static bool FitRobustPoiAffine(
+        const std::vector<PoiCalibrationPoint>& points, PoiAffineFit& out)
+    {
+        const int count = (int)points.size();
+        if (count < 4)
+            return false;
+
+        constexpr double kInlierDistance = 15000.0;
+        constexpr double kInlierDistanceSquared =
+            kInlierDistance * kInlierDistance;
+        std::vector<int> bestInliers;
+        double bestSquaredError = DBL_MAX;
+
+        // A few old maps contain nested POI volumes whose actor origin is not
+        // the label center. Testing every three-anchor model prevents those
+        // volumes from pulling the complete map projection off target.
+        for (int first = 0; first < count - 2; ++first)
+        {
+            for (int second = first + 1; second < count - 1; ++second)
+            {
+                for (int third = second + 1; third < count; ++third)
+                {
+                    std::vector<int> seed{ first, second, third };
+                    PoiAffineFit candidate;
+                    if (!FitPoiAffine(points, seed, candidate))
+                        continue;
+
+                    std::vector<int> inliers;
+                    double squaredError = 0.0;
+                    for (int index = 0; index < count; ++index)
+                    {
+                        const PoiCalibrationPoint& point = points[index];
+                        const double dx =
+                            candidate.X[0] + candidate.X[1] * point.U +
+                            candidate.X[2] * point.V - point.WorldX;
+                        const double dy =
+                            candidate.Y[0] + candidate.Y[1] * point.U +
+                            candidate.Y[2] * point.V - point.WorldY;
+                        const double error = dx * dx + dy * dy;
+                        if (error <= kInlierDistanceSquared)
+                        {
+                            inliers.push_back(index);
+                            squaredError += error;
+                        }
+                    }
+
+                    if (inliers.size() > bestInliers.size() ||
+                        (inliers.size() == bestInliers.size() &&
+                         squaredError < bestSquaredError))
+                    {
+                        bestInliers = std::move(inliers);
+                        bestSquaredError = squaredError;
+                    }
+                }
+            }
+        }
+
+        const int minimumInliers = (std::max)(4, (count * 2 + 4) / 5);
+        if ((int)bestInliers.size() < minimumInliers)
+            return false;
+        return FitPoiAffine(points, bestInliers, out);
+    }
+
+    static bool BuildPoiTransformForNormalization(
+        const std::vector<PoiCalibrationAnchor>& anchors,
+        const PoiPositionNormalization& normalization,
+        MapTransform& transformOut, PoiAffineFit& fitOut,
+        double& coverageOut)
+    {
+        if (normalization.ScaleU <= 0.0 || normalization.ScaleV <= 0.0)
+            return false;
+
+        std::vector<PoiCalibrationPoint> points;
+        points.reserve(anchors.size());
+        int inside = 0;
+        double minU = DBL_MAX, minV = DBL_MAX;
+        double maxU = -DBL_MAX, maxV = -DBL_MAX;
+        for (const PoiCalibrationAnchor& anchor : anchors)
+        {
+            PoiCalibrationPoint point;
+            point.U = normalization.OffsetU +
+                anchor.RawU / normalization.ScaleU;
+            point.V = normalization.OffsetV +
+                anchor.RawV / normalization.ScaleV;
+            point.WorldX = anchor.WorldX;
+            point.WorldY = anchor.WorldY;
+            if (!std::isfinite(point.U) || !std::isfinite(point.V))
+                return false;
+            if (point.U >= -0.10 && point.U <= 1.10 &&
+                point.V >= -0.10 && point.V <= 1.10)
+                ++inside;
+            minU = (std::min)(minU, point.U);
+            minV = (std::min)(minV, point.V);
+            maxU = (std::max)(maxU, point.U);
+            maxV = (std::max)(maxV, point.V);
+            points.push_back(point);
+        }
+
+        if (inside < (std::max)(4, (int)anchors.size() * 3 / 4))
+            return false;
+        const double rangeU = maxU - minU;
+        const double rangeV = maxV - minV;
+        coverageOut = (std::min)(rangeU, rangeV);
+        if (!std::isfinite(coverageOut) || coverageOut < 0.15)
+            return false;
+
+        PoiAffineFit fit;
+        if (!FitRobustPoiAffine(points, fit))
+            return false;
+
+        MapTransform transform{
+            (float)(fit.X[0] + fit.X[1] * 0.5 + fit.X[2] * 0.5),
+            (float)(fit.Y[0] + fit.Y[1] * 0.5 + fit.Y[2] * 0.5),
+            (float)(fit.X[1] * 0.5),
+            (float)(fit.Y[1] * 0.5),
+            (float)(fit.X[2] * 0.5),
+            (float)(fit.Y[2] * 0.5)
+        };
+        const double extentU = AxisULength(transform);
+        const double extentV = AxisVLength(transform);
+        if (!std::isfinite(transform.CenterX) ||
+            !std::isfinite(transform.CenterY) ||
+            fabs(transform.CenterX) > 1000000.0 ||
+            fabs(transform.CenterY) > 1000000.0 ||
+            !std::isfinite(extentU) || !std::isfinite(extentV) ||
+            extentU < 25000.0 || extentU > 500000.0 ||
+            extentV < 25000.0 || extentV > 500000.0)
+            return false;
+
+        const double aspect = extentU / extentV;
+        const double orthogonality = fabs(
+            transform.AxisUX * transform.AxisVX +
+            transform.AxisUY * transform.AxisVY) / (extentU * extentV);
+        const double maximumRms =
+            (std::max)(5000.0, (std::min)(18000.0,
+                (std::min)(extentU, extentV) * 0.12));
+        if (aspect < 0.5 || aspect > 2.0 || orthogonality > 0.35 ||
+            fit.Rms > maximumRms)
+            return false;
+
+        transformOut = transform;
+        fitOut = fit;
+        return true;
+    }
+
+    static bool BuildPoiCalibrationUnsafe(UWorld* world,
+                                          const UObject* settings,
+                                          const UObject* preferredManager,
+                                          MapTransform& out)
+    {
+        if (!world || !settings || !settings->Class)
+            return false;
+
+        const UStruct* mapLocationStruct =
+            FindObject<UStruct>(L"/Script/FortniteGame.MapLocation");
+        const uint32_t mapLocationsOffset = settings->GetOffset("MapLocations");
+        if (!mapLocationStruct || mapLocationsOffset == UINT32_MAX)
+            return false;
+
+        const int elementSize = mapLocationStruct->GetPropertiesSize();
+        const uint32_t positionOffset =
+            mapLocationStruct->GetOffset("Position");
+        const uint32_t locationTagOffset =
+            mapLocationStruct->GetOffset("LocationTag");
+        const int vector2DSize =
+            VersionInfo.FortniteVersion >= 20.00f ? 16 : 8;
+        if (elementSize < 16 || elementSize > 4096 ||
+            positionOffset == UINT32_MAX ||
+            locationTagOffset == UINT32_MAX ||
+            (int)positionOffset + vector2DSize > elementSize ||
+            (int)locationTagOffset + FGameplayTag::Size() > elementSize)
+        {
+            static const UObject* loggedInvalidLayout = nullptr;
+            if (loggedInvalidLayout != settings)
+            {
+                SDK::DbgLog(
+                    "[SafeZoneMap] POI calibration unavailable: invalid MapLocation layout element=0x%x position=0x%x tag=0x%x\n",
+                    elementSize, positionOffset, locationTagOffset);
+                loggedInvalidLayout = settings;
+            }
+            return false;
+        }
+
+        const TArray<uint8_t>* mapLocations =
+            (const TArray<uint8_t>*)((const uint8_t*)settings +
+                                    mapLocationsOffset);
+        const int mapLocationCount = mapLocations->Num();
+        static const UObject* loggedMapArraySettings = nullptr;
+        static int loggedMapArrayCount = -1;
+        if (loggedMapArraySettings != settings ||
+            loggedMapArrayCount != mapLocationCount)
+        {
+            SDK::DbgLog(
+                "[SafeZoneMap] POI calibration MapLocations count=%d max=%d data=%p\n",
+                mapLocationCount, mapLocations->Max(),
+                (const void*)mapLocations->Data);
+            loggedMapArraySettings = settings;
+            loggedMapArrayCount = mapLocationCount;
+        }
+        if (mapLocationCount < 4 || mapLocationCount > 512 ||
+            mapLocations->Max() < mapLocationCount ||
+            mapLocations->Max() > 4096 || !mapLocations->Data ||
+            !SDK::MemReadable(mapLocations->Data,
+                (size_t)mapLocationCount * elementSize))
+            return false;
+
+        const UClass* poiVolumeClass = FindClass("FortPoiVolume");
+        if (!poiVolumeClass)
+            return false;
+        std::vector<AActor*> volumes;
+        TArray<AActor*> worldVolumes =
+            UGameplayStatics::GetAllActorsOfClass(world, poiVolumeClass);
+        if (worldVolumes.Num() > 0 && worldVolumes.Num() <= 2048 &&
+            worldVolumes.Data)
+        {
+            volumes.reserve(worldVolumes.Num());
+            for (int index = 0; index < worldVolumes.Num(); ++index)
+                if (worldVolumes[index])
+                    volumes.push_back(worldVolumes[index]);
+        }
+        worldVolumes.Free();
+
+        // NullRHI can omit FortPoiVolume actors from the world's actor lists
+        // even though FortPoiManager retains the authoritative POI pointers.
+        // Those tagged volume centers let old versions recover the exact
+        // texture-to-world affine transform without any season constants.
+        int managerVolumeCount = 0;
+        const UObject* poiManager = nullptr;
+        if (world->GameState && world->GameState->Class)
+        {
+            const uint32_t poiManagerOffset =
+                world->GameState->GetOffset("PoiManager");
+            if (poiManagerOffset != UINT32_MAX)
+                poiManager =
+                    GetFromOffset<UObject*>(world->GameState, poiManagerOffset);
+        }
+        if (poiManager && poiManager->Class)
+        {
+            const uint32_t allVolumesOffset =
+                poiManager->GetOffset("AllPoiVolumes");
+            if (allVolumesOffset != UINT32_MAX)
+            {
+                const TArray<AActor*>* managerVolumes =
+                    (const TArray<AActor*>*)((const uint8_t*)poiManager +
+                                             allVolumesOffset);
+                const int count = managerVolumes->Num();
+                if (count > 0 && count <= 2048 &&
+                    managerVolumes->Max() >= count &&
+                    managerVolumes->Max() <= 4096 &&
+                    managerVolumes->Data &&
+                    SDK::MemReadable(managerVolumes->Data,
+                        (size_t)count * sizeof(AActor*)))
+                {
+                    managerVolumeCount = count;
+                    volumes.reserve(volumes.size() + count);
+                    for (int index = 0; index < count; ++index)
+                    {
+                        AActor* volume = (*managerVolumes)[index];
+                        if (volume &&
+                            std::find(volumes.begin(), volumes.end(), volume) ==
+                                volumes.end())
+                            volumes.push_back(volume);
+                    }
+                }
+            }
+        }
+        const int volumeCount = (int)volumes.size();
+        static const UWorld* loggedVolumeWorld = nullptr;
+        static int loggedVolumeCount = -1;
+        if (loggedVolumeWorld != world || loggedVolumeCount != volumeCount)
+        {
+            SDK::DbgLog(
+                "[SafeZoneMap] POI calibration FortPoiVolume unique=%d manager=%d managerObject=%p\n",
+                volumeCount, managerVolumeCount, (const void*)poiManager);
+            loggedVolumeWorld = world;
+            loggedVolumeCount = volumeCount;
+        }
+        if (volumeCount < 4 || volumeCount > 2048)
+            return false;
+
+        std::vector<PoiCalibrationAnchor> anchors;
+        anchors.reserve((std::min)(mapLocationCount, 64));
+        for (int mapIndex = 0;
+             mapIndex < mapLocationCount && anchors.size() < 64;
+             ++mapIndex)
+        {
+            const uint8_t* entry =
+                (const uint8_t*)mapLocations->Data +
+                (size_t)mapIndex * elementSize;
+            MapPoint rawPosition;
+            if (!ReadMapPoint(entry, elementSize, positionOffset,
+                              rawPosition))
+                continue;
+            const FName locationTag =
+                ReadGameplayTagName(entry + locationTagOffset);
+            if (!locationTag.IsValid())
+                continue;
+
+            double sumX = 0.0;
+            double sumY = 0.0;
+            int matches = 0;
+            for (int volumeIndex = 0;
+                 volumeIndex < volumeCount && volumeIndex < 2048;
+                 ++volumeIndex)
+            {
+                AActor* volume = volumes[volumeIndex];
+                if (!volume || !volume->Class)
+                    continue;
+                const uint32_t tagsOffset =
+                    volume->GetOffset("LocationTags");
+                if (tagsOffset == UINT32_MAX)
+                    continue;
+                const FGameplayTagContainer* tags =
+                    (const FGameplayTagContainer*)((const uint8_t*)volume +
+                                                   tagsOffset);
+                if (!GameplayTagContainerContains(tags, locationTag))
+                    continue;
+
+                FVector location;
+                if (!ReadPoiVolumeLocationUnsafe(volume, location))
+                    continue;
+                sumX += location.X;
+                sumY += location.Y;
+                ++matches;
+            }
+
+            if (matches > 0)
+            {
+                PoiCalibrationAnchor anchor;
+                anchor.RawU = rawPosition.U;
+                anchor.RawV = rawPosition.V;
+                anchor.WorldX = sumX / matches;
+                anchor.WorldY = sumY / matches;
+                anchor.Tag = locationTag;
+                anchors.push_back(anchor);
+            }
+        }
+        static const UObject* loggedSettings = nullptr;
+        static int loggedAnchorCount = -1;
+        if (loggedSettings != settings ||
+            loggedAnchorCount != (int)anchors.size())
+        {
+            SDK::DbgLog(
+                "[SafeZoneMap] POI calibration metadata mapLocations=%d volumes=%d matched=%zu element=0x%x position=0x%x tag=0x%x\n",
+                mapLocationCount, volumeCount, anchors.size(), elementSize,
+                positionOffset, locationTagOffset);
+            for (size_t i = 0; i < anchors.size() && i < 32; ++i)
+            {
+                const UEAllocatedString tag = anchors[i].Tag.ToString();
+                SDK::DbgLog(
+                    "[SafeZoneMap]   POI %s raw=(%.4f, %.4f) world=(%.1f, %.1f)\n",
+                    tag.c_str(), anchors[i].RawU, anchors[i].RawV,
+                    anchors[i].WorldX, anchors[i].WorldY);
+            }
+            loggedSettings = settings;
+            loggedAnchorCount = (int)anchors.size();
+        }
+        if (anchors.size() < 4)
+            return false;
+
+        float brushWidth = 0.f;
+        float brushHeight = 0.f;
+        const UObject* brushResource = nullptr;
+        ReadAthenaMapBrushSizeUnsafe(settings, brushWidth, brushHeight,
+                                     brushResource);
+        const int mapLayerSize =
+            ReadMapLayerSizeUnsafe(preferredManager);
+
+        std::vector<PoiPositionNormalization> normalizations;
+        normalizations.push_back(
+            { "normalized", 0.0, 0.0, 1.0, 1.0 });
+        normalizations.push_back(
+            { "normalized-centered", 0.5, 0.5, 1.0, 1.0 });
+        if (mapLayerSize > 0)
+        {
+            normalizations.push_back(
+                { "map-layer", 0.0, 0.0,
+                  (double)mapLayerSize, (double)mapLayerSize });
+            normalizations.push_back(
+                { "map-layer-centered", 0.5, 0.5,
+                  (double)mapLayerSize, (double)mapLayerSize });
+        }
+        if (brushWidth >= 64.f && brushHeight >= 64.f &&
+            (!mapLayerSize ||
+             fabsf(brushWidth - mapLayerSize) > 1.f ||
+             fabsf(brushHeight - mapLayerSize) > 1.f))
+        {
+            normalizations.push_back(
+                { "brush-pixels", 0.0, 0.0,
+                  brushWidth, brushHeight });
+            normalizations.push_back(
+                { "brush-pixels-centered", 0.5, 0.5,
+                  brushWidth, brushHeight });
+        }
+
+        bool found = false;
+        MapTransform bestTransform;
+        PoiAffineFit bestFit;
+        const char* bestName = nullptr;
+        double bestCoverage = -1.0;
+        for (const PoiPositionNormalization& normalization :
+             normalizations)
+        {
+            MapTransform candidateTransform;
+            PoiAffineFit candidateFit;
+            double candidateCoverage = 0.0;
+            if (!BuildPoiTransformForNormalization(
+                    anchors, normalization, candidateTransform,
+                    candidateFit, candidateCoverage))
+                continue;
+
+            // Equivalent unit systems have the same residual. The one whose
+            // POIs cover more of [0,1] is the texture coordinate system, while
+            // dividing an already-logical coordinate by a larger source
+            // texture clusters every label near the middle.
+            if (!found || candidateFit.Inliers > bestFit.Inliers ||
+                (candidateFit.Inliers == bestFit.Inliers &&
+                 candidateFit.Rms < bestFit.Rms - 1.0) ||
+                (candidateFit.Inliers == bestFit.Inliers &&
+                 fabs(candidateFit.Rms - bestFit.Rms) <= 1.0 &&
+                 candidateCoverage > bestCoverage))
+            {
+                found = true;
+                bestTransform = candidateTransform;
+                bestFit = candidateFit;
+                bestName = normalization.Name;
+                bestCoverage = candidateCoverage;
+            }
+        }
+        if (!found)
+            return false;
+
+        SDK::DbgLog(
+            "[SafeZoneMap] POI-calibrated projection units=%s anchors=%d rms=%.1f coverage=%.3f center=(%.1f, %.1f) axisU=(%.1f, %.1f) axisV=(%.1f, %.1f)\n",
+            bestName ? bestName : "unknown", bestFit.Inliers, bestFit.Rms,
+            bestCoverage, bestTransform.CenterX, bestTransform.CenterY,
+            bestTransform.AxisUX, bestTransform.AxisUY,
+            bestTransform.AxisVX, bestTransform.AxisVY);
+        out = bestTransform;
+        return true;
+    }
+
+    static bool BuildPoiCalibration(UWorld* world,
+                                    const UObject* settings,
+                                    const UObject* preferredManager,
+                                    MapTransform& out)
+    {
+        static const UWorld* cachedWorld = nullptr;
+        static const UObject* cachedSettings = nullptr;
+        static MapTransform cachedTransform;
+        static bool haveCachedTransform = false;
+        if (haveCachedTransform && cachedWorld == world &&
+            cachedSettings == settings)
+        {
+            out = cachedTransform;
+            return true;
+        }
+
+        __try
+        {
+            if (!BuildPoiCalibrationUnsafe(
+                    world, settings, preferredManager, out))
+                return false;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            SDK::DbgLog("[SafeZoneMap] POI calibration faulted (SEH)\n");
+            return false;
+        }
+
+        cachedWorld = world;
+        cachedSettings = settings;
+        cachedTransform = out;
+        haveCachedTransform = true;
+        return true;
+    }
+
+    static MapTransform TransformFromMapInfoCenter(const FVector& center)
+    {
+        MapTransform out = DefaultTransformForVersion();
+        // GetMapCenter() is the gameplay origin on old Athena, not the center
+        // of the full minimap capture. Replacing the native capture offset with
+        // that (usually zero) value shifts every Chapter 1 selection.
+        if (!UsesLegacyAthenaCapture())
+        {
+            out.CenterX = (float)center.X;
+            out.CenterY = (float)center.Y;
+        }
+        return out;
+    }
+
+    static bool FinalizeSelectionForMapInfo(AFortAthenaMapInfo* mapInfo)
+    {
+        if (!mapInfo || !g_HasNormalizedSelection.load(std::memory_order_acquire))
+            return false;
+
+        FVector center;
+        if (!ReadMapCenter(mapInfo, center))
+        {
+            SDK::DbgLog("[SafeZoneMap] could not resolve MapInfo center before applying custom zone\n");
+            return false;
+        }
+
+        const MapTransform map = TransformFromMapInfoCenter(center);
+        PublishTransform(map);
+        ReprojectRememberedSelection(map);
+        SDK::DbgLog(
+            "[SafeZoneMap] finalized custom zone from MapInfo center=(%.1f, %.1f) axes=(%.1f, %.1f)\n",
+            map.CenterX, map.CenterY, AxisULength(map), AxisVLength(map));
+        return true;
+    }
+
+    static bool ReadRuntimeTransform(MapTransform& out, const UObject*& managerOut)
+    {
+        managerOut = nullptr;
+        UWorld* world = UWorld::GetWorld();
+        if (!world || !world->HasGameState() || !world->GameState)
+            return false;
+
+        // Do not query Athena-only reflected properties on the frontend/base
+        // GameState. DEFINE_PROP caches a missing property as offset -1 globally;
+        // doing that here before Athena_Terrain loads poisons later MapInfo reads.
+        AActor* gameStateObject = world->GameState;
+        const UClass* athenaGameStateClass = AFortGameStateAthena::StaticClass();
+        if (!athenaGameStateClass || !gameStateObject->Class ||
+            !gameStateObject->IsA(athenaGameStateClass))
+            return false;
+
+        AFortGameStateAthena* gameState = (AFortGameStateAthena*)gameStateObject;
+        if (!gameState->HasMapInfo() || !gameState->MapInfo)
+            return false;
+
+        AFortAthenaMapInfo* mapInfo = gameState->MapInfo;
+        const UClass* mapInfoClass = AFortAthenaMapInfo::StaticClass();
+        if (!mapInfoClass || !mapInfo->Class || !mapInfo->IsA(mapInfoClass))
+            return false;
+
+        FVector center;
+        if (!ReadMapCenter(mapInfo, center))
+            return false;
+
+        MapTransform fallbackTransform = TransformFromMapInfoCenter(center);
+        const UObject* fallbackSource = mapInfo;
+
+        // FortGameStateZone owns the map manager used by this match when one is
+        // created. Dedicated/NullRHI servers commonly leave it null, but reading
+        // this reflected pointer is more exact than a global object search.
+        const UObject* manager = nullptr;
+        const uint32_t uiMapManagerOffset = gameState->GetOffset("UIMapManager");
+        if (uiMapManagerOffset != UINT32_MAX)
+        {
+            const UObject* candidate =
+                GetFromOffset<UObject*>(gameState, uiMapManagerOffset);
+            if (candidate && candidate->Class && !candidate->IsDefaultObject())
+                manager = candidate;
+        }
+
+        // Some old clients do not publish UIMapManager on GameState. Prefer the
+        // current world's actor before reading map dimensions so MapLayerSize
+        // comes from the live version-specific manager whenever it exists.
+        const UClass* managerClass = FindClass("FortInGameMapManager");
+        if (managerClass && !manager)
+        {
+            TArray<AActor*> managers =
+                UGameplayStatics::GetAllActorsOfClass(world, managerClass);
+            manager = managers.Num() > 0 ? managers[0] : nullptr;
+            managers.Free();
+        }
+
+        MapTransform worldSettingsTransform;
+        const UObject* worldSettings = nullptr;
+        if (ReadWorldSettingsTransform(
+                world, manager, worldSettingsTransform, worldSettings))
+        {
+            // MapInfo belongs to this match and can carry a non-zero island
+            // origin. Original Athena is the exception: its gameplay origin is
+            // not the center of the full minimap capture.
+            if (!UsesLegacyAthenaCapture())
+            {
+                worldSettingsTransform.CenterX = (float)center.X;
+                worldSettingsTransform.CenterY = (float)center.Y;
+            }
+            fallbackTransform = worldSettingsTransform;
+            fallbackSource = worldSettings;
+
+            // Builds before BPWorldLocationToMapLocation exposed no callable
+            // world-to-map helper. Their WorldSettings map labels and POI
+            // volumes still share gameplay tags, though, so use those native
+            // anchor pairs to recover this season's exact texture projection.
+            MapTransform poiCalibratedTransform;
+            if (BuildPoiCalibration(
+                    world, worldSettings, manager, poiCalibratedTransform))
+            {
+                fallbackTransform = poiCalibratedTransform;
+                fallbackSource = worldSettings;
+            }
+        }
+        auto useFallbackTransform = [&]() -> bool
+        {
+            out = fallbackTransform;
+            managerOut = fallbackSource;
+            return true;
+        };
+
+        // Ask the current world's map manager for the same conversion its own
+        // widgets use. A global first-object lookup can return a frontend/CDO
+        // or a manager retained from the previous match, causing an otherwise
+        // correct selection to move later. GetAllActorsOfClass scopes the
+        // optional high-confidence sample to this UWorld.
+        if (!managerClass)
+            return useFallbackTransform();
+        if (!manager || !manager->Class)
+            return useFallbackTransform();
+        UFunction* function = manager->GetFunction("BPWorldLocationToMapLocation");
+        if (!function)
+            return useFallbackTransform();
+
+        static UFunction* loggedFunction = nullptr;
+        if (loggedFunction != function)
+        {
+            auto params = function->GetParamsNamed();
+            SDK::DbgLog("[SafeZoneMap] BPWorldLocationToMapLocation params size=0x%x count=%zu\n",
+                params.Size, params.NameOffsetMap.size());
+            for (auto& param : params.NameOffsetMap)
+                SDK::DbgLog("[SafeZoneMap]   param %s off=0x%x flags=0x%llx elem=0x%x\n",
+                    param.Name.c_str(), param.Offset,
+                    (unsigned long long)param.PropertyFlags, param.ElementSize);
+            loggedFunction = function;
+        }
+
+        constexpr double step = 10000.0;
+        MapPoint p0, px, py;
+        if (!CallWorldToMap(manager, function, center, p0) ||
+            !CallWorldToMap(manager, function,
+                FVector(center.X + step, center.Y, center.Z), px) ||
+            !CallWorldToMap(manager, function,
+                FVector(center.X, center.Y + step, center.Z), py))
+        {
+            static const UObject* loggedSampleFailure = nullptr;
+            if (loggedSampleFailure != manager)
+            {
+                SDK::DbgLog("[SafeZoneMap] authoritative map sampling failed for manager=%p\n",
+                    (const void*)manager);
+                loggedSampleFailure = manager;
+            }
+            return useFallbackTransform();
+        }
+
+        const double duDx = (px.U - p0.U) / step;
+        const double duDy = (py.U - p0.U) / step;
+        const double dvDx = (px.V - p0.V) / step;
+        const double dvDy = (py.V - p0.V) / step;
+        if (!std::isfinite(duDx) || !std::isfinite(duDy) ||
+            !std::isfinite(dvDx) || !std::isfinite(dvDy))
+            return useFallbackTransform();
+
+        const double det = duDx * dvDy - duDy * dvDx;
+        if (fabs(det) < 1e-15)
+            return useFallbackTransform();
+        const double targetU = 0.5 - p0.U;
+        const double targetV = 0.5 - p0.V;
+        const double centerDeltaX = (targetU * dvDy - duDy * targetV) / det;
+        const double centerDeltaY = (duDx * targetV - targetU * dvDx) / det;
+        const double captureCenterX = center.X + centerDeltaX;
+        const double captureCenterY = center.Y + centerDeltaY;
+        if (!std::isfinite(captureCenterX) || !std::isfinite(captureCenterY) ||
+            fabs(captureCenterX) > 1000000.0 || fabs(captureCenterY) > 1000000.0)
+            return useFallbackTransform();
+
+        // Invert the complete sampled world->map derivative. This preserves
+        // rotation, axis signs, non-square scale, and any season-specific map
+        // orientation. AxisU/V reach from center to an image edge, hence 0.5.
+        const double inv00 = dvDy / det;
+        const double inv01 = -duDy / det;
+        const double inv10 = -dvDx / det;
+        const double inv11 = duDx / det;
+        MapTransform candidate{
+            (float)captureCenterX, (float)captureCenterY,
+            (float)(0.5 * inv00), (float)(0.5 * inv10),
+            (float)(0.5 * inv01), (float)(0.5 * inv11)
+        };
+        const float extentU = AxisULength(candidate);
+        const float extentV = AxisVLength(candidate);
+        if (!std::isfinite(extentU) || !std::isfinite(extentV) ||
+            extentU < 25000.f || extentU > 500000.f ||
+            extentV < 25000.f || extentV > 500000.f)
+            return useFallbackTransform();
+        const float aspect = extentU / extentV;
+        if (aspect < 0.4f || aspect > 2.5f)
+            return useFallbackTransform();
+
+        SDK::DbgLog("[SafeZoneMap] normalized samples C=(%.6f, %.6f) X=(%.6f, %.6f) Y=(%.6f, %.6f)\n",
+            p0.U, p0.V, px.U, px.V, py.U, py.V);
+        out = candidate;
+        managerOut = manager;
+        return true;
+    }
+
+    static void RefreshRuntimeTransform()
+    {
+        static uint32_t ticks = 0;
+        static MapTransform last{};
+        static const UObject* lastManager = nullptr;
+        static bool haveLast = false;
+        ++ticks;
+        const uint32_t interval = haveLast ? 120 : 10;
+        if (ticks % interval != 1)
             return;
 
-        const wchar_t* paths[4];
-        const int np = MinimapPathsForVersion(paths, 4);
+        MapTransform current;
+        const UObject* manager = nullptr;
+        if (!ReadRuntimeTransform(current, manager)) return;
+        const bool changed = !haveLast || manager != lastManager ||
+            fabsf(current.CenterX - last.CenterX) > 1.f ||
+            fabsf(current.CenterY - last.CenterY) > 1.f ||
+            fabsf(current.AxisUX - last.AxisUX) > 1.f ||
+            fabsf(current.AxisUY - last.AxisUY) > 1.f ||
+            fabsf(current.AxisVX - last.AxisVX) > 1.f ||
+            fabsf(current.AxisVY - last.AxisVY) > 1.f;
+        if (!changed) return;
+
+        const bool fromMapInfo = manager &&
+            manager->IsA(AFortAthenaMapInfo::StaticClass());
+        PublishTransform(current);
+        ReprojectRememberedSelection(current);
+        last = current;
+        lastManager = manager;
+        haveLast = true;
+        SDK::DbgLog("[SafeZoneMap] %s map transform center=(%.1f, %.1f) axes=(%.1f, %.1f)\n",
+            fromMapInfo ? "MapInfo" : "authoritative",
+            current.CenterX, current.CenterY,
+            AxisULength(current), AxisVLength(current));
+    }
+
+    // Called from the pre-Start GetMaxTickRate pump and server tick hooks; a
+    // single atomic read unless a request is actually pending.
+    static void GameThreadTick()
+    {
+        RefreshRuntimeTransform();
+
+        if (g_LoadState.load(std::memory_order_acquire) != (int)LoadState::Requested)
+            return;
+        g_LoadAttempts.fetch_add(1, std::memory_order_relaxed);
+
+        const wchar_t* paths[kMaxMinimapPaths];
+        const int np = MinimapPathsForVersion(paths, kMaxMinimapPaths);
         const UClass* texClass = UTexture2D::StaticClass();
         const UTexture2D* tex = nullptr;
         if (np && texClass && SDK::Offsets::StaticLoadObject)
@@ -553,6 +2231,20 @@ namespace SafeZoneMap
         SDK::DbgLog("[SafeZoneMap] game-thread minimap load failed\n");
     }
 
+    static bool HasReadyPixels()
+    {
+        return g_LoadState.load(std::memory_order_acquire) == (int)LoadState::Ready;
+    }
+
+    static bool IsLoadingOrRetrying()
+    {
+        const int state = g_LoadState.load(std::memory_order_acquire);
+        if (state == (int)LoadState::Requested || state == (int)LoadState::Ready)
+            return true;
+        return (state == (int)LoadState::Idle || state == (int)LoadState::Failed) &&
+            g_LoadAttempts.load(std::memory_order_relaxed) < 3;
+    }
+
     // Candidate minimap object paths for the current engine version (find-only,
     // first hit wins). Paths are the full Package.ObjectName form. Some versions
     // ship the asset under more than one mount, so we list fallbacks.
@@ -572,23 +2264,27 @@ namespace SafeZoneMap
             // to make Maps\Apollo_Terrain_Minimap.png a usable bundled fallback.
             add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap.Apollo_Terrain_Minimap");
         }
-        else if (v == 27.00f)
+        else if (v >= 27.00f && v < 28.00f)
         {
-            add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_01.Capture_Iteration_Discovered_Rufus_01");
-            add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_01.Capture_Iteration_Discovered_Rufus_01");
-        }
-        else if (v == 27.10f)
-        {
+            // Chapter 1 OG shipped several weekly captures. Loaded-object lookup
+            // also accepts any Rufus index, so hotfix versions work too.
             add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_03.Capture_Iteration_Discovered_Rufus_03");
             add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_03.Capture_Iteration_Discovered_Rufus_03");
-        }
-        else if (v == 27.11f)
-        {
+            add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_01.Capture_Iteration_Discovered_Rufus_01");
+            add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_01.Capture_Iteration_Discovered_Rufus_01");
             add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_04.Capture_Iteration_Discovered_Rufus_04");
             add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_04.Capture_Iteration_Discovered_Rufus_04");
         }
-        else if ((v >= 11.00f && v < 27.00f) || v >= 28.00f)
+        else
+        {
+            // Apollo is intentionally retained as the broad fallback: many later
+            // island releases reuse this cooked UI asset path with updated art.
             add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap.Apollo_Terrain_Minimap");
+            add(L"/Game/Athena/Artemis/Maps/UI/Artemis_Terrain_Minimap.Artemis_Terrain_Minimap");
+            add(L"/Game/Athena/Asteria/Maps/UI/Asteria_Terrain_Minimap.Asteria_Terrain_Minimap");
+            add(L"/Game/Athena/Helios/Maps/UI/Helios_Terrain_Minimap.Helios_Terrain_Minimap");
+            add(L"/Game/Athena/Hermes/Maps/UI/Hermes_Terrain_Minimap.Hermes_Terrain_Minimap");
+        }
 
         return n;
     }
@@ -603,14 +2299,59 @@ namespace SafeZoneMap
         return (slash == std::wstring::npos) ? L"." : path.substr(0, slash);
     }
 
-    // Cache PNG next to Magnesium.dll, keyed by the EXACT version: Apollo seasons
-    // reuse one object path but ship different art, so a coarser key would serve
-    // one season's map for another.
-    static std::wstring CachePathW()
+    static std::wstring MapStorageDirW()
+    {
+        static const std::wstring directory = []()
+        {
+            wchar_t localAppData[MAX_PATH] = {};
+            std::wstring result;
+            if (SUCCEEDED(SHGetFolderPathW(
+                    nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT,
+                    localAppData)))
+            {
+                result = std::wstring(localAppData) + L"\\Magnesium\\Maps";
+            }
+            else
+            {
+                // Keep map support functional if the shell folder lookup fails.
+                result = ModuleDirW() + L"\\Maps";
+            }
+
+            std::error_code error;
+            std::filesystem::create_directories(result, error);
+            SDK::DbgLog("[SafeZoneMap] map storage -> %ls%s\n",
+                result.c_str(), error ? " (directory creation failed)" : "");
+            return result;
+        }();
+        return directory;
+    }
+
+    // Cache PNG keyed by the EXACT version: Apollo seasons reuse one object path
+    // but ship different art, so a coarser key would serve the wrong season.
+    static std::wstring CacheFileNameW()
     {
         wchar_t name[64];
-        swprintf(name, 64, L"\\Magnesium_SafeZoneMap_%.2f.png", (double)VersionInfo.FortniteVersion);
-        return ModuleDirW() + name;
+        // v3 invalidates Chapter 2+ caches created from the similarly named
+        // discoverability/fog mask. Keep Chapter 1's known-good cache intact.
+        if (VersionInfo.FortniteVersion >= 11.00f)
+            swprintf(name, 64, L"Magnesium_SafeZoneMap_v3_%.2f.png",
+                (double)VersionInfo.FortniteVersion);
+        else
+            swprintf(name, 64, L"Magnesium_SafeZoneMap_%.2f.png",
+                (double)VersionInfo.FortniteVersion);
+        return name;
+    }
+
+    static std::wstring CachePathW()
+    {
+        return MapStorageDirW() + L"\\" + CacheFileNameW();
+    }
+
+    // Read caches made by older Magnesium builds once, then copy them into the
+    // AppData folder. The original file is left untouched for safe migration.
+    static std::wstring LegacyCachePathW()
+    {
+        return ModuleDirW() + L"\\" + CacheFileNameW();
     }
 
     static std::string WideToUtf8(const std::wstring& w)
@@ -635,8 +2376,8 @@ namespace SafeZoneMap
         if (!texClass) return nullptr;
 
         // Exact-name candidates (fast FName compare) + prefix candidates (string).
-        FName want[4]; int nn = 0;
-        std::string prefixes[4]; int npre = 0;
+        FName want[kMaxMinimapPaths]; int nn = 0;
+        std::string prefixes[kMaxMinimapPaths]; int npre = 0;
         for (int i = 0; i < np; ++i)
         {
             const wchar_t* dot = wcsrchr(paths[i], L'.');
@@ -646,14 +2387,14 @@ namespace SafeZoneMap
             // "..._Rufus_04" -> prefix "Capture_Iteration_Discovered_Rufus_"
             const std::string rufusTag = "_Rufus_";
             size_t rp = nleaf.rfind(rufusTag);
-            if (rp != std::string::npos && npre < 4)
+            if (rp != std::string::npos && npre < kMaxMinimapPaths)
             {
                 std::string pre = nleaf.substr(0, rp + rufusTag.size());
                 bool dup = false;
                 for (int k = 0; k < npre; ++k) if (prefixes[k] == pre) { dup = true; break; }
                 if (!dup) prefixes[npre++] = pre;
             }
-            if (nn < 4)
+            if (nn < kMaxMinimapPaths)
             {
                 UEAllocatedString s = nleaf.c_str();
                 UEAllocatedWString ws(s.begin(), s.end());
@@ -662,34 +2403,93 @@ namespace SafeZoneMap
         }
 
         const UTexture2D* prefixHit = nullptr; // exact name wins over prefix match
+        const UTexture2D* exactHit = nullptr;
+        int exactHitIndex = kMaxMinimapPaths;
+        const UTexture2D* genericHit = nullptr;
+        int genericScore = 0;
         const int32 total = SDK::TUObjectArray::Num();
         for (int32 i = 0; i < total; ++i)
         {
             const UObject* obj = SDK::TUObjectArray::GetObjectByIndex(i);
             if (!obj) continue;
-            bool hit = false;
-            for (int k = 0; k < nn; ++k) if (obj->Name == want[k]) { hit = true; break; }
-            if (hit)
+            int hitIndex = -1;
+            for (int k = 0; k < nn; ++k) if (obj->Name == want[k]) { hitIndex = k; break; }
+            if (hitIndex >= 0)
             {
                 if (obj->Class && obj->IsA(texClass))
                 {
-                    SDK::DbgLog("[SafeZoneMap] object-array scan found minimap texture @%p\n", (const void*)obj);
-                    return (const UTexture2D*)obj;
+                    if (hitIndex == 0)
+                    {
+                        SDK::DbgLog("[SafeZoneMap] object-array scan exact minimap priority=0 @%p\n", (const void*)obj);
+                        return (const UTexture2D*)obj;
+                    }
+                    if (hitIndex < exactHitIndex)
+                    {
+                        exactHitIndex = hitIndex;
+                        exactHit = (const UTexture2D*)obj;
+                    }
                 }
                 continue;
             }
-            if (npre == 0 || prefixHit) continue;
             if (!obj->Class || !obj->IsA(texClass)) continue; // ToString allocates; textures only
             std::string nm = obj->Name.ToString().c_str();
-            for (int k = 0; k < npre; ++k)
+            std::string lowerName = nm;
+            std::transform(lowerName.begin(), lowerName.end(),
+                lowerName.begin(), [](unsigned char c)
+                {
+                    return (char)std::tolower(c);
+                });
+            if (!prefixHit)
             {
-                if (nm.compare(0, prefixes[k].size(), prefixes[k]) != 0) continue;
-                SDK::DbgLog("[SafeZoneMap] object-array scan prefix-matched '%s' @%p\n", nm.c_str(), (const void*)obj);
-                prefixHit = (const UTexture2D*)obj;
-                break;
+                for (int k = 0; k < npre; ++k)
+                {
+                    if (nm.compare(0, prefixes[k].size(), prefixes[k]) != 0) continue;
+                    SDK::DbgLog("[SafeZoneMap] object-array scan prefix-matched '%s' @%p\n", nm.c_str(), (const void*)obj);
+                    prefixHit = (const UTexture2D*)obj;
+                    break;
+                }
+            }
+
+            // Unknown versions still get a best-effort candidate. Score strong,
+            // full-island capture names and reject masks/icons/device textures.
+            int score = 0;
+            if (nm.find("Terrain_Minimap") != std::string::npos) score += 100;
+            if (nm.find("MiniMapAthena") != std::string::npos) score += 100;
+            if (nm.find("Capture_Iteration_Discovered") != std::string::npos) score += 90;
+            if (nm.find("Minimap") != std::string::npos || nm.find("MiniMap") != std::string::npos) score += 35;
+            if (nm.find("Terrain") != std::string::npos) score += 20;
+            // Auxiliary fog/discovery textures often retain the full
+            // "Terrain_Minimap" prefix. 17.30 even misspells its mask as
+            // "Discoverabilty", so reject the whole discover* family instead
+            // of matching one exact suffix.
+            if (lowerName.find("mask") != std::string::npos ||
+                lowerName.find("icon") != std::string::npos ||
+                lowerName.find("device") != std::string::npos ||
+                lowerName.find("discover") != std::string::npos ||
+                lowerName.find("fog") != std::string::npos)
+                score = -1000;
+            if (score > genericScore)
+            {
+                genericScore = score;
+                genericHit = (const UTexture2D*)obj;
             }
         }
-        return prefixHit;
+        if (exactHit)
+        {
+            SDK::DbgLog("[SafeZoneMap] object-array scan exact minimap priority=%d @%p\n",
+                exactHitIndex, (const void*)exactHit);
+            return exactHit;
+        }
+        if (prefixHit) return prefixHit;
+        if (genericHit && genericScore >= 70)
+        {
+            const std::string name = genericHit->Name.ToString().c_str();
+            SDK::DbgLog(
+                "[SafeZoneMap] object-array scan generic minimap '%s' score=%d @%p\n",
+                name.c_str(), genericScore, (const void*)genericHit);
+            return genericHit;
+        }
+        return nullptr;
     }
 
     // One-shot diagnostic: report how many textures are resident and any with a
@@ -734,26 +2534,34 @@ namespace SafeZoneMap
         return false;
     }
 
-    // User-supplied minimap PNGs (e.g. exported from FModel) in a "Maps" folder next
-    // to the DLL. Server processes don't keep the base minimap texture resident, so
-    // for most versions this is the real source. Checked most-specific first:
-    //   Maps\<version>.png   (e.g. Maps\17.30.png) - exact per-version override
-    //   Maps\<leaf>.png      (e.g. Maps\Apollo_Terrain_Minimap.png) - per-asset default
+    // User-supplied minimap PNGs (e.g. exported from FModel). AppData is checked
+    // first, while the old DLL-adjacent Maps folder remains a compatible fallback.
+    // Checked most-specific first:
+    //   <Maps>\<version>.png   (e.g. 17.30.png) - exact per-version override
+    //   <Maps>\<leaf>.png      (e.g. Apollo_Terrain_Minimap.png) - asset default
     static bool LoadBundledMinimap(const wchar_t** paths, int np, ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
     {
-        const std::wstring dir = ModuleDirW();
-        wchar_t vname[64];
-        swprintf(vname, 64, L"\\Maps\\%.2f.png", (double)VersionInfo.FortniteVersion);
-        if (LoadPngFile(dir + vname, dev, outSrv, outW, outH)) return true;
-        SDK::DbgLog("[SafeZoneMap] no bundled PNG at %ls%ls\n", dir.c_str(), vname);
+        const std::wstring directories[2]{
+            MapStorageDirW(),
+            ModuleDirW() + L"\\Maps"
+        };
 
-        for (int i = 0; i < np; ++i)
+        for (const std::wstring& dir : directories)
         {
-            const wchar_t* dot = wcsrchr(paths[i], L'.');
-            std::wstring leaf(dot ? dot + 1 : paths[i]);
-            const std::wstring file = dir + L"\\Maps\\" + leaf + L".png";
-            if (LoadPngFile(file, dev, outSrv, outW, outH)) return true;
-            SDK::DbgLog("[SafeZoneMap] no bundled PNG at %ls\n", file.c_str());
+            wchar_t vname[64];
+            swprintf(vname, 64, L"\\%.2f.png",
+                (double)VersionInfo.FortniteVersion);
+            if (LoadPngFile(dir + vname, dev, outSrv, outW, outH))
+                return true;
+
+            for (int i = 0; i < np; ++i)
+            {
+                const wchar_t* dot = wcsrchr(paths[i], L'.');
+                std::wstring leaf(dot ? dot + 1 : paths[i]);
+                const std::wstring file = dir + L"\\" + leaf + L".png";
+                if (LoadPngFile(file, dev, outSrv, outW, outH))
+                    return true;
+            }
         }
         return false;
     }
@@ -761,13 +2569,8 @@ namespace SafeZoneMap
     // Try live extraction (and dump a PNG), else user-bundled PNGs, else cache.
     static bool Acquire(ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
     {
-        const wchar_t* paths[4];
-        const int np = MinimapPathsForVersion(paths, 4);
-        if (np == 0)
-        {
-            SDK::DbgLog("[SafeZoneMap] no known minimap path for FN %.2f\n", VersionInfo.FortniteVersion);
-            return false;
-        }
+        const wchar_t* paths[kMaxMinimapPaths];
+        const int np = MinimapPathsForVersion(paths, kMaxMinimapPaths);
         const std::wstring cacheW = CachePathW();
 
         // 1) Live extraction from the loaded UTexture2D. Use StaticFindObject
@@ -806,7 +2609,8 @@ namespace SafeZoneMap
         }
 
         // 2) Pixels produced by the game-thread load bridge (see GameThreadTick):
-        // a previous Acquire posted a request, TickFlush loaded + extracted it.
+        // a previous Acquire posted a request and the pre-Start/server pump
+        // loaded and extracted it.
         if (g_LoadState.load(std::memory_order_acquire) == (int)LoadState::Ready)
         {
             const bool ok = CreateTextureFromRGBA8(g_LoadedRGBA.data(), g_LoadedW, g_LoadedH, dev, outSrv);
@@ -831,12 +2635,32 @@ namespace SafeZoneMap
         if (LoadPngFile(cacheW, dev, outSrv, outW, outH))
             return true;
 
-        // 5) Nothing resident and no PNG on disk: ask the game thread to load the
+        // 5) Migrate a cache made by an older DLL-adjacent build.
+        const std::wstring legacyCacheW = LegacyCachePathW();
+        if (legacyCacheW != cacheW &&
+            LoadPngFile(legacyCacheW, dev, outSrv, outW, outH))
+        {
+            std::error_code error;
+            std::filesystem::copy_file(
+                legacyCacheW, cacheW,
+                std::filesystem::copy_options::skip_existing, error);
+            SDK::DbgLog("[SafeZoneMap] legacy cache migration -> %ls%s\n",
+                cacheW.c_str(), error ? " (copy failed)" : "");
+            return true;
+        }
+
+        // 6) Nothing resident and no PNG on disk: ask the game thread to load the
         // asset properly (loading is game-thread-only; doing it here faulted on
-        // 17.30/27.x). One request per session; the ~3s Acquire retry polls state.
-        int expected = (int)LoadState::Idle;
-        if (g_LoadState.compare_exchange_strong(expected, (int)LoadState::Requested, std::memory_order_acq_rel))
-            SDK::DbgLog("[SafeZoneMap] posted game-thread load request\n");
+        // 17.30/27.x). Retry a few times because MapInfo and streamed UI assets can
+        // become available after the editor's first frame.
+        int state = g_LoadState.load(std::memory_order_acquire);
+        if (g_LoadAttempts.load(std::memory_order_relaxed) < 3 &&
+            (state == (int)LoadState::Idle || state == (int)LoadState::Failed) &&
+            g_LoadState.compare_exchange_strong(state, (int)LoadState::Requested, std::memory_order_acq_rel))
+        {
+            SDK::DbgLog("[SafeZoneMap] posted game-thread load request (attempt %d/3)\n",
+                g_LoadAttempts.load(std::memory_order_relaxed) + 1);
+        }
 
         SDK::DbgLog("[SafeZoneMap] acquire failed; numeric fallback in use\n");
         return false;
@@ -846,6 +2670,28 @@ namespace SafeZoneMap
 void GUI::SafeZoneMapGameTick()
 {
     SafeZoneMap::GameThreadTick();
+}
+
+void GUI::ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo)
+{
+    if (!SafeZoneMap::g_HasNormalizedSelection.load(std::memory_order_acquire))
+        return;
+
+    SafeZoneMap::MapTransform map;
+    const UObject* manager = nullptr;
+    if (SafeZoneMap::ReadRuntimeTransform(map, manager))
+    {
+        SafeZoneMap::PublishTransform(map);
+        SafeZoneMap::ReprojectRememberedSelection(map);
+        SDK::DbgLog(
+            "[SafeZoneMap] finalized custom zone from %s center=(%.1f, %.1f) axes=(%.1f, %.1f)\n",
+            manager == MapInfo ? "MapInfo" : "runtime map data",
+            map.CenterX, map.CenterY,
+            SafeZoneMap::AxisULength(map), SafeZoneMap::AxisVLength(map));
+        return;
+    }
+
+    SafeZoneMap::FinalizeSelectionForMapInfo(MapInfo);
 }
 
 void Hyperlink(const char* label, const char* url)
@@ -1723,7 +3569,7 @@ void GUI::Init()
             ImGui::SameLine(0.f, 8.f);
             ImGui::SetCursorPosY(TitleY);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.54f, 1.f));
-            ImGui::TextUnformatted("v2.1.0");
+            ImGui::TextUnformatted("v2.1.1");
             ImGui::PopStyleColor();
 
             // FN / UE versions on the right, aligned to the visible viewport so they
@@ -3305,7 +5151,9 @@ void GUI::Init()
                         static int s_RetryIn = 0;
                         if (!s_MapSRV) // retry until the minimap texture becomes resident
                         {
-                            if (s_RetryIn <= 0)
+                            // Pixels produced by TickFlush should be uploaded on the
+                            // next GUI frame, not after the normal three-second poll.
+                            if (s_RetryIn <= 0 || SafeZoneMap::HasReadyPixels())
                             {
                                 SafeZoneMap::Acquire(g_pd3dDevice, &s_MapSRV, &s_MapW, &s_MapH);
                                 s_RetryIn = 180; // ~3s between attempts
@@ -3313,13 +5161,15 @@ void GUI::Init()
                             else --s_RetryIn;
                         }
 
-                        const float E = SafeZoneMap::kWorldExtent;
+                        const SafeZoneMap::MapTransform map = SafeZoneMap::GetTransform();
 
                         if (s_MapSRV)
                         {
                             const float S = Width * 1.8f; // square canvas
                             const ImVec2 origin = ImGui::GetCursorScreenPos();
-                            ImGui::Image((void*)s_MapSRV, ImVec2(S, S));
+                            ImVec2 uv0, uv1;
+                            SafeZoneMap::GetImageUVs(uv0, uv1);
+                            ImGui::Image((void*)s_MapSRV, ImVec2(S, S), uv0, uv1);
                             ImGui::SetCursorScreenPos(origin); // overlay input on the same rect
                             ImGui::InvisibleButton("##mapcanvas", ImVec2(S, S));
                             const ImVec2 r0 = ImGui::GetItemRectMin();
@@ -3328,34 +5178,39 @@ void GUI::Init()
                             if (ImGui::IsItemActivated())
                             {
                                 const ImVec2 m = ImGui::GetIO().MousePos;
+                                const float u = SafeZoneMap::Clamp((m.x - r0.x) / S, 0.f, 1.f);
+                                const float v = SafeZoneMap::Clamp((m.y - r0.y) / S, 0.f, 1.f);
+                                SafeZoneMap::RememberSelection(u, v);
                                 float wx, wy;
-                                SafeZoneMap::PixelToWorld(m.x - r0.x, m.y - r0.y, S, wx, wy);
-                                FConfiguration::CustomSafeZoneCenter.X = SafeZoneMap::Clamp(wx, -E, E);
-                                FConfiguration::CustomSafeZoneCenter.Y = SafeZoneMap::Clamp(wy, -E, E);
+                                SafeZoneMap::PixelToWorld(u, v, 1.f, map, wx, wy);
+                                FConfiguration::CustomSafeZoneCenter.X = wx;
+                                FConfiguration::CustomSafeZoneCenter.Y = wy;
                             }
                             if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
                             {
-                                float lx, ly;
-                                SafeZoneMap::WorldToPixel((float)FConfiguration::CustomSafeZoneCenter.X,
-                                                          (float)FConfiguration::CustomSafeZoneCenter.Y, S, lx, ly);
                                 const ImVec2 m = ImGui::GetIO().MousePos;
-                                const float dx = m.x - (r0.x + lx), dy = m.y - (r0.y + ly);
-                                const float dpx = sqrtf(dx * dx + dy * dy);
+                                const float u = SafeZoneMap::Clamp((m.x - r0.x) / S, 0.f, 1.f);
+                                const float v = SafeZoneMap::Clamp((m.y - r0.y) / S, 0.f, 1.f);
+                                float mouseX, mouseY;
+                                SafeZoneMap::PixelToWorld(u, v, 1.f, map, mouseX, mouseY);
+                                const float dx = mouseX - (float)FConfiguration::CustomSafeZoneCenter.X;
+                                const float dy = mouseY - (float)FConfiguration::CustomSafeZoneCenter.Y;
                                 FConfiguration::CustomSafeZoneRadius =
-                                    SafeZoneMap::Clamp(SafeZoneMap::PixelsToRadius(dpx, S), 500.f, 100000.f);
+                                    SafeZoneMap::Clamp(sqrtf(dx * dx + dy * dy), 500.f, 100000.f);
                             }
 
                             // Overlay the stored center + radius every frame (also when idle).
                             ImDrawList* dl = ImGui::GetWindowDrawList();
                             float lx, ly;
                             SafeZoneMap::WorldToPixel((float)FConfiguration::CustomSafeZoneCenter.X,
-                                                      (float)FConfiguration::CustomSafeZoneCenter.Y, S, lx, ly);
+                                                      (float)FConfiguration::CustomSafeZoneCenter.Y, S, map, lx, ly);
                             const ImVec2 c(r0.x + lx, r0.y + ly);
-                            const float rpx = SafeZoneMap::RadiusToPixels(FConfiguration::CustomSafeZoneRadius, S);
+                            const ImVec2 rpx =
+                                SafeZoneMap::RadiusToPixelAxes(FConfiguration::CustomSafeZoneRadius, S, map);
                             // Storm shading: everything outside the safe circle is purple (~0.5 alpha).
-                            SafeZoneMap::FillOutsideCircle(dl, r0, ImVec2(r0.x + S, r0.y + S), c, rpx, IM_COL32(140, 40, 200, 128));
-                            dl->AddCircleFilled(c, rpx, IM_COL32(90, 160, 255, 40), 96);
-                            dl->AddCircle(c, rpx, IM_COL32(130, 200, 255, 230), 96, 2.f);
+                            SafeZoneMap::FillOutsideEllipse(dl, r0, ImVec2(r0.x + S, r0.y + S), c, rpx, IM_COL32(140, 40, 200, 128));
+                            dl->AddEllipseFilled(c, rpx, IM_COL32(90, 160, 255, 40), 0.f, 96);
+                            dl->AddEllipse(c, rpx, IM_COL32(130, 200, 255, 230), 0.f, 96, 2.f);
                             // Center marker (dot).
                             dl->AddCircleFilled(c, 4.f, IM_COL32(255, 255, 255, 235));
                             dl->AddCircle(c, 4.f, IM_COL32(20, 30, 60, 200), 0, 1.5f);
@@ -3364,7 +5219,10 @@ void GUI::Init()
                         }
                         else
                         {
-                            ImGui::TextDisabled("Map image unavailable - set coordinates manually.");
+                            if (SafeZoneMap::IsLoadingOrRetrying())
+                                ImGui::TextDisabled("Loading map...");
+                            else
+                                ImGui::TextDisabled("Map image unavailable - set coordinates manually.");
                         }
 
                         // Numeric readout + fine-tune (always available).
@@ -3372,13 +5230,23 @@ void GUI::Init()
                         float cy = (float)FConfiguration::CustomSafeZoneCenter.Y;
 
                         ImGui::SetNextItemWidth(Width);
-                        if (ImGui::InputFloat("Center X", &cx)) FConfiguration::CustomSafeZoneCenter.X = cx;
+                        if (ImGui::InputFloat("Center X", &cx))
+                        {
+                            SafeZoneMap::ForgetNormalizedSelection();
+                            FConfiguration::CustomSafeZoneCenter.X = cx;
+                        }
                         ImGui::SetNextItemWidth(Width);
-                        if (ImGui::InputFloat("Center Y", &cy)) FConfiguration::CustomSafeZoneCenter.Y = cy;
+                        if (ImGui::InputFloat("Center Y", &cy))
+                        {
+                            SafeZoneMap::ForgetNormalizedSelection();
+                            FConfiguration::CustomSafeZoneCenter.Y = cy;
+                        }
 
                         float RadiusMeters = FConfiguration::CustomSafeZoneRadius / 100.f;
                         if (LabeledSliderFloat("Radius", "##custom-sz-radius", &RadiusMeters, 5.f, 1000.f, "%.0f m", Width))
+                        {
                             FConfiguration::CustomSafeZoneRadius = RadiusMeters * 100.f;
+                        }
                     }
                 }
             }
@@ -4078,7 +5946,7 @@ void GUI::Init()
             ImGui::TextUnformatted("MAGNESIUM");
             ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 1.f));
-            ImGui::TextUnformatted("Gameserver  -  v2.1.0");
+            ImGui::TextUnformatted("Gameserver  -  v2.1.1");
             ImGui::PopStyleColor();
             ImGui::EndGroup();
 

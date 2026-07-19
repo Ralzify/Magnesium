@@ -14,6 +14,13 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
     if (!this || !Def || !Count)
         return nullptr;
     UFortWorldItem* Item = (UFortWorldItem*)Def->CreateTemporaryItemInstanceBP(Count, Level);
+    if (!Item)
+    {
+        SDK::DbgLog("[Inventory] CreateTemporaryItemInstanceBP failed: Def=%p Count=%d Level=%d FN=%.2f\n",
+            (void*)Def, Count, Level, VersionInfo.FortniteVersion);
+        return nullptr;
+    }
+
     Item->SetOwningControllerForTemporaryItem(Owner);
     if (Item->HasOwnerInventory())
         Item->OwnerInventory = this;
@@ -81,7 +88,7 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
         Item->ItemEntry.bIsDirty = true;
     }
 
-    if (OnItemInstanceAddedVft)
+    if (OnItemInstanceAddedVft && Owner)
         ((bool(*)(const UFortWorldItem*, const IInterface*)) Item->Vft[OnItemInstanceAddedVft])(Item, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()));
 
     return Item;
@@ -405,7 +412,7 @@ AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entr
 AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, const UFortItemDefinition* ItemDefinition, int Count, int LoadedAmmo, long long SourceTypeFlag, long long SpawnSource, AFortPlayerPawnAthena* Pawn, bool Toss, bool bRandomRotation, const UClass* OverrideClass)
 {
     auto ItemEntry = MakeItemEntry(ItemDefinition, Count, -1);
-    // ItemEntry->LoadedAmmo = LoadedAmmo;
+    ItemEntry->LoadedAmmo = LoadedAmmo;
 
     auto Pickup = SpawnPickup(Loc, *ItemEntry, SourceTypeFlag, SpawnSource, Pawn, -1, Toss, true, bRandomRotation, OverrideClass);
     free(ItemEntry);

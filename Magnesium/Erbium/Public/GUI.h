@@ -5,6 +5,8 @@
 #include <Windows.h>
 #include <Shellapi.h>
 
+class AFortAthenaMapInfo;
+
 enum EGSStatus
 {
     NotReady,
@@ -121,9 +123,10 @@ public:
     static void Init();
 
     // Drains the Custom Safe Zone minimap load request (UE asset loading is
-    // game-thread-only). Called from the UNetDriver::TickFlush hooks; a single
-    // atomic read when idle. Defined in GUI.cpp (SafeZoneMap::GameThreadTick).
+    // game-thread-only). Called by the pre-Start GetMaxTickRate pump and the
+    // server tick hooks; it also refreshes the authoritative map transform.
     static void SafeZoneMapGameTick();
+    static void ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo);
 
     static bool IsArenaPlaylist()
     {

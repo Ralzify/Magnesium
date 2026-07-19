@@ -528,6 +528,16 @@ bool Listen(); // fwd decl — defined below; driven from GetMaxTickRate on 32.1
 
 static volatile long g_frameCounter = 0;
 static DWORD g_gameThreadId = 0;
+
+static uint64 ResolveGetMaxTickRateTarget()
+{
+	// 32.11 is the one UE5 build with a verified RVA. Other builds must use
+	// their signature result rather than risking an early hook at a stale RVA.
+	if (VersionInfo.FortniteVersion == 32.11)
+		return Memcury::PE::GetModuleBase() + 0x189FE98;
+
+	return FindGetMaxTickRate();
+}
 extern volatile long g_tickFlushCounter; // NetDriver.cpp — replication flushes; confirms the net tick is alive
 
 // Watchdog: writes directly to its own file (own fflush) since the game thread that flushes the shared
@@ -614,6 +624,83 @@ static void WatchdogThread()
 		}
 		else { stuck = 0; last = cur; }
 	}
+}
+
+bool Misc::InstallPreStartSafeZoneTick()
+{
+	if (bSafeZoneTickHookInstalled)
+		return true;
+
+	const uint64 Target = ResolveGetMaxTickRateTarget();
+	if (!Target || !SDK::MemReadable(reinterpret_cast<void*>(Target), 1))
+	{
+		SDK::DbgLog("[SafeZoneMap] pre-Start GetMaxTickRate target unavailable\n");
+		return false;
+	}
+
+	const auto InitializeStatus = MH_Initialize();
+	if (InitializeStatus != MH_OK && InitializeStatus != MH_ERROR_ALREADY_INITIALIZED)
+	{
+		SDK::DbgLog(
+			"[SafeZoneMap] pre-Start hook MH_Initialize failed: %s\n",
+			MH_StatusToString(InitializeStatus));
+		return false;
+	}
+
+	const auto CreateStatus = MH_CreateHook(
+		reinterpret_cast<LPVOID>(Target),
+		SafeZoneTickGetMaxTickRate,
+		reinterpret_cast<LPVOID*>(&SafeZoneTickGetMaxTickRateOG));
+	if (CreateStatus != MH_OK)
+	{
+		SDK::DbgLog(
+			"[SafeZoneMap] pre-Start hook MH_CreateHook failed: %s\n",
+			MH_StatusToString(CreateStatus));
+		return false;
+	}
+
+	const auto EnableStatus = MH_EnableHook(reinterpret_cast<LPVOID>(Target));
+	if (EnableStatus != MH_OK && EnableStatus != MH_ERROR_ENABLED)
+	{
+		SDK::DbgLog(
+			"[SafeZoneMap] pre-Start hook MH_EnableHook failed: %s\n",
+			MH_StatusToString(EnableStatus));
+		MH_RemoveHook(reinterpret_cast<LPVOID>(Target));
+		SafeZoneTickGetMaxTickRateOG = nullptr;
+		return false;
+	}
+
+	SafeZoneTickHookTarget = Target;
+	bSafeZoneTickHookInstalled = true;
+	SDK::DbgLog(
+		"[SafeZoneMap] pre-Start game-thread pump installed at +0x%llX\n",
+		Target - Memcury::PE::GetModuleBase());
+	return true;
+}
+
+float Misc::SafeZoneTickGetMaxTickRate(
+	UEngine* Engine,
+	float DeltaTime,
+	bool bAllowFrameRateSmoothing)
+{
+	if (!bServerGetMaxTickRateActive.load(std::memory_order_acquire))
+	{
+		GUI::SafeZoneMapGameTick();
+		return SafeZoneTickGetMaxTickRateOG
+			? SafeZoneTickGetMaxTickRateOG(Engine, DeltaTime, bAllowFrameRateSmoothing)
+			: FConfiguration::MaxTickRate;
+	}
+
+	// Keep using the already-installed hook after Start. This preserves the
+	// button boundary while avoiding a second MinHook entry on the same target.
+	return GetMaxTickRate(Engine, DeltaTime, bAllowFrameRateSmoothing);
+}
+
+void Misc::ActivateServerGetMaxTickRate()
+{
+	bServerGetMaxTickRateActive.store(true, std::memory_order_release);
+	if (bSafeZoneTickHookInstalled)
+		SDK::DbgLog("[SafeZoneMap] pre-Start pump switched to server GetMaxTickRate behavior\n");
 }
 
 float Misc::GetMaxTickRate(UEngine* Engine, float DeltaTime, bool bAllowFrameRateSmoothing)
@@ -1282,6 +1369,9 @@ void Misc::Hook()
 		Utils::Hook(FindGetNetMode(), GetNetMode);
 
 	SDK::DbgLog("  [Misc] C pre-SendRequestNow\n");
+	const uint64 GetMaxTickRateTarget = bSafeZoneTickHookInstalled
+		? SafeZoneTickHookTarget
+		: ResolveGetMaxTickRateTarget();
 	// 32.11: sigs miss (43-vs-41 REX). Remix RVAs. GetMaxTickRate is critical — the real one reads
 	// World->NetDriver->NetServerMaxTickRate, which faults (read null) while NetDriver is still null
 	// during dedicated-server init; hooking it (return a constant) avoids that.
@@ -1290,14 +1380,16 @@ void Misc::Hook()
 		auto base = Memcury::PE::GetModuleBase();
 		Utils::Hook(base + 0x7DE4ED0, SendRequestNow, SendRequestNowOG); // SendRequestNow
 		SDK::DbgLog("  [Misc] D pre-GetMaxTickRate (32.11 RVA)\n");
-		Utils::Hook(base + 0x189FE98, GetMaxTickRate); // GetMaxTickRate
 	}
 	else
 	{
 		Utils::Hook(FindSendRequestNow(), SendRequestNow, SendRequestNowOG);
 		SDK::DbgLog("  [Misc] D pre-GetMaxTickRate\n");
-		Utils::Hook(FindGetMaxTickRate(), GetMaxTickRate);
 	}
+	if (bSafeZoneTickHookInstalled && GetMaxTickRateTarget == SafeZoneTickHookTarget)
+		SDK::DbgLog("  [Misc] reusing pre-Start GetMaxTickRate hook\n");
+	else
+		Utils::Hook(GetMaxTickRateTarget, GetMaxTickRate);
 	SDK::DbgLog("  [Misc] E GetMaxTickRate done\n");
 	if (VersionInfo.FortniteVersion >= 32.00)
 	{

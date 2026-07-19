@@ -67,6 +67,13 @@ LONG WINAPI ErbiumUnhandledExceptionFilter(LPEXCEPTION_POINTERS ExceptionInfo)
     if (GPlayerAIGuardedNativeCallDepth > 0)
         return EXCEPTION_CONTINUE_SEARCH;
 
+    // This address is used by some Fortnite builds as an intentional probe.
+    // Leave it to the OS/game before suspending any threads.
+    if ((ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ||
+         ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_IN_PAGE_ERROR) &&
+        ExceptionInfo->ExceptionRecord->ExceptionInformation[1] == 0xFFFFF78000000900)
+        return EXCEPTION_CONTINUE_SEARCH;
+
     FreezeOtherThreads();
 
     STACKFRAME64 stackFrame{};
@@ -142,9 +149,6 @@ LONG WINAPI ErbiumUnhandledExceptionFilter(LPEXCEPTION_POINTERS ExceptionInfo)
             reportStream << "\n- Trying to execute ";
             break;
         }
-        if (ExceptionInfo->ExceptionRecord->ExceptionInformation[1] == 0xFFFFF78000000900) // fn anti debug check ig
-            return EXCEPTION_CONTINUE_SEARCH;
-
         char addr[19];
         snprintf(addr, 19, "0x%016llx", ExceptionInfo->ExceptionRecord->ExceptionInformation[1]);
         reportStream << addr;
@@ -220,10 +224,19 @@ LONG WINAPI ErbiumUnhandledExceptionFilter(LPEXCEPTION_POINTERS ExceptionInfo)
     //while (true) {}
     TerminateProcess(GetCurrentProcess(), ExceptionInfo->ExceptionRecord->ExceptionCode);
     //ExitProcess(ExceptionInfo->ExceptionRecord->ExceptionCode);
-    return EXCEPTION_CONTINUE_EXECUTION;
+    // If TerminateProcess unexpectedly fails, tell Windows to perform its normal
+    // unhandled-exception termination instead of attempting to resume at the
+    // faulting instruction.
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 void FCrashReporter::Register()
 {
-    AddVectoredExceptionHandler(0, ErbiumUnhandledExceptionFilter);
+    // A vectored handler runs on *first-chance* exceptions, before Fortnite's
+    // own SEH frames. Older builds such as 6.21 intentionally raise/catch some
+    // access violations while loading frontend data; treating those as fatal
+    // froze every thread and killed the process. A top-level filter runs only
+    // after normal frame-based handlers decline the exception.
+    SetUnhandledExceptionFilter(ErbiumUnhandledExceptionFilter);
+    SDK::DbgLog("[CrashReporter] installed top-level unhandled exception filter\n");
 }

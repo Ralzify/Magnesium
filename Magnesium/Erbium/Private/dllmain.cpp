@@ -19,6 +19,157 @@
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "Normaliz.lib")
 
+namespace
+{
+    using UE421FrontendRenderTask = void (*)(void*, void*);
+
+    UE421FrontendRenderTask UE421FrontendRenderTaskOG = nullptr;
+    volatile LONG UE421SkippedNullRenderTasks = 0;
+
+    void UE421FrontendRenderTaskHook(void* Task, void* Context)
+    {
+        // On a UE 4.21 NullRHI host this frontend task can be queued without the
+        // renderer/resource object stored at +0x28. The original immediately
+        // passes that null pointer to a helper which reads [rcx+0x68].
+        if (!Task || !*reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(Task) + 0x28))
+        {
+            if (InterlockedIncrement(&UE421SkippedNullRenderTasks) == 1)
+                SDK::DbgLog("[Startup] UE4.21/FN %.2f: skipped invalid NullRHI frontend render task\n",
+                    VersionInfo.FortniteVersion);
+            return;
+        }
+
+        UE421FrontendRenderTaskOG(Task, Context);
+    }
+
+    bool InstallUE421FrontendRenderGuard()
+    {
+        const auto Target = Memcury::Scanner::FindPattern(
+            "48 89 5C 24 ? 48 89 74 24 ? 57 48 81 EC 90 00 00 00 "
+            "48 8B D9 48 8D 51 08 48 8B 49 28 E8 ? ? ? ?",
+            false).Get();
+
+        if (!Target)
+        {
+            SDK::DbgLog("[Startup] UE4.21/FN %.2f: frontend render guard target not found\n",
+                VersionInfo.FortniteVersion);
+            return false;
+        }
+
+        const auto InitializeStatus = MH_Initialize();
+        if (InitializeStatus != MH_OK && InitializeStatus != MH_ERROR_ALREADY_INITIALIZED)
+        {
+            SDK::DbgLog(
+                "[Startup] UE4.21/FN %.2f: frontend render guard MH_Initialize failed: %s\n",
+                VersionInfo.FortniteVersion,
+                MH_StatusToString(InitializeStatus));
+            return false;
+        }
+
+        const auto CreateStatus = MH_CreateHook(
+            reinterpret_cast<LPVOID>(Target),
+            UE421FrontendRenderTaskHook,
+            reinterpret_cast<LPVOID*>(&UE421FrontendRenderTaskOG));
+        if (CreateStatus != MH_OK)
+        {
+            SDK::DbgLog(
+                "[Startup] UE4.21/FN %.2f: frontend render guard MH_CreateHook failed: %s\n",
+                VersionInfo.FortniteVersion,
+                MH_StatusToString(CreateStatus));
+            return false;
+        }
+
+        const auto EnableStatus = MH_EnableHook(reinterpret_cast<LPVOID>(Target));
+        if (EnableStatus != MH_OK)
+        {
+            SDK::DbgLog(
+                "[Startup] UE4.21/FN %.2f: frontend render guard MH_EnableHook failed: %s\n",
+                VersionInfo.FortniteVersion,
+                MH_StatusToString(EnableStatus));
+            return false;
+        }
+
+        SDK::DbgLog(
+            "[Startup] UE4.21/FN %.2f: frontend render guard enabled at RVA 0x%llX\n",
+            VersionInfo.FortniteVersion,
+            Target - ImageBase);
+        return true;
+    }
+
+    bool ShouldPrepareCompatibilityBeforeStart()
+    {
+        // Every Season 5/6 build on UE 4.21 shares this NullRHI frontend path.
+        // Preparing only FN 6.21 left 5.41 ticking the same invalid render task
+        // while Magnesium waited at the Start button.
+        return VersionInfo.EngineVersion == 4.21;
+    }
+
+    struct FCompatibilityPatchCounts
+    {
+        size_t Nulls = 0;
+        size_t RetTrues = 0;
+    };
+
+    FCompatibilityPatchCounts ApplyResolvedCompatibilityPatches()
+    {
+        FCompatibilityPatchCounts Counts;
+
+        for (auto& NullFunc : NullFuncs)
+        {
+            if (NullFunc)
+            {
+                Utils::Patch<uint8_t>(NullFunc, 0xc3);
+                ++Counts.Nulls;
+            }
+        }
+
+        for (auto& RetTrueFunc : RetTrueFuncs)
+        {
+            if (!RetTrueFunc)
+                continue;
+
+            Utils::Patch<uint32_t>(RetTrueFunc, 0xc0ffc031);
+            Utils::Patch<uint8_t>(RetTrueFunc + 4, 0xc3);
+            ++Counts.RetTrues;
+        }
+
+        return Counts;
+    }
+
+    void PrepareCompatibilityPatches(bool UseStockErbiumFastPath)
+    {
+        FindNullsAndRetTrues();
+
+        if (UseStockErbiumFastPath)
+        {
+            // Match stock Erbium's short startup window exactly. The previous
+            // implementation patched only the first three NullFuncs and then
+            // spent several seconds scanning all 79 diagnostic finders. On
+            // UE 4.21 the rendering thread could still enter an unpatched
+            // RetTrue/Null compatibility target during that scan.
+            const auto Counts = ApplyResolvedCompatibilityPatches();
+            SDK::DbgLog(
+                "[Startup] UE4.21/FN %.2f: Erbium fast path applied %zu/%zu Null and %zu/%zu RetTrue patches\n",
+                VersionInfo.FortniteVersion,
+                Counts.Nulls,
+                NullFuncs.size(),
+                Counts.RetTrues,
+                RetTrueFuncs.size());
+            SDK::DbgLog("Main: cp7 (Null/RetTrue patches applied)\n");
+            return;
+        }
+
+        // Resolve every named finder before the full patch pass overwrites any
+        // function prologues. The resolved addresses are then reused after the
+        // Start button without rescanning patched code.
+        ValidateFinders();
+        SDK::DbgLog("Main: cp6b (ValidateFinders done)\n");
+
+        ApplyResolvedCompatibilityPatches();
+        SDK::DbgLog("Main: cp7 (Null/RetTrue patches applied)\n");
+    }
+}
+
 void Main()
 {
     if constexpr (!FConfiguration::bGUI)
@@ -54,6 +205,27 @@ void Main()
         }
 
         CreateThread(0, 0, (LPTHREAD_START_ROUTINE)GUI::Init, 0, 0, 0);
+    }
+
+    bool bCompatibilityPatchesPrepared = false;
+    if (ShouldPrepareCompatibilityBeforeStart())
+    {
+        SDK::DbgLog("[Startup] UE4.21/FN %.2f: preparing compatibility before Start gate\n",
+            VersionInfo.FortniteVersion);
+        InstallUE421FrontendRenderGuard();
+        PrepareCompatibilityPatches(true);
+        bCompatibilityPatchesPrepared = true;
+        SDK::DbgLog("[Startup] UE4.21/FN %.2f: compatibility ready; waiting for Start button\n",
+            VersionInfo.FortniteVersion);
+    }
+
+    if constexpr (FConfiguration::bGUI)
+    {
+        // Custom Safe Zone requests are made by the GUI before the Start
+        // button is pressed, but UE texture loading must run on the game
+        // thread. Install this after UE 4.21's frontend guard is ready.
+        if (!Misc::InstallPreStartSafeZoneTick())
+            SDK::DbgLog("[SafeZoneMap] pre-Start pump unavailable; disk/numeric fallback remains active\n");
     }
 
     if constexpr (FConfiguration::bGUI)
@@ -202,32 +374,15 @@ void Main()
 
     printf("Hooking & finding offsets... (this may take a while)\n");
 
-    FindNullsAndRetTrues();
-
-    // Resolve + log every finder before any hook consumes them, so a new
-    // version (e.g. 31.41) reports its dead sigs by name up front. Cached
-    // results are reused by the hooks below for free. Must run BEFORE the
-    // Null/RetTrue patch loops: those overwrite function prologues, and
-    // uncached finders (e.g. KickPlayer) re-scan and falsely report misses
-    // once their target's bytes have been patched.
-    ValidateFinders();
-    SDK::DbgLog("Main: cp6b (ValidateFinders done)\n");
-
-    for (auto& NullFunc : NullFuncs)
-        if (NullFunc != 0)
-        {
-            Utils::Patch<uint8_t>(NullFunc, 0xc3);
-        }
-
-    for (auto& RetTrueFunc : RetTrueFuncs)
+    if (!bCompatibilityPatchesPrepared)
     {
-        if (RetTrueFunc == 0)
-            continue;
-
-        Utils::Patch<uint32_t>(RetTrueFunc, 0xc0ffc031);
-        Utils::Patch<uint8_t>(RetTrueFunc + 4, 0xc3);
+        PrepareCompatibilityPatches(false);
     }
-    SDK::DbgLog("Main: cp7 (Null/RetTrue patches applied)\n");
+    else
+    {
+        SDK::DbgLog("[Startup] UE4.21/FN %.2f: reusing pre-Start compatibility patches\n",
+            VersionInfo.FortniteVersion);
+    }
 
     auto GameSessionPatch = FindGameSessionPatch();
     if (GameSessionPatch)
@@ -252,6 +407,7 @@ void Main()
     SDK::DbgLog("Main: cp10 (all _HookFuncs installed)\n");
 
     MH_EnableHook(MH_ALL_HOOKS);
+    Misc::ActivateServerGetMaxTickRate();
     SDK::DbgLog("Main: cp11 (hooks enabled)\n");
 
     auto _gic = FindGIsClient();
@@ -402,9 +558,23 @@ void Main()
             terrainOpen = L"open Apollo_Terrain";
     }
 
-    // DIAGNOSTIC: defer the map load until AFTER all hooks are installed, so it doesn't run
-    // concurrently on the game thread while Main is still installing post-load hooks.
-    SDK::DbgLog("Main: cp15 terrain-open DEFERRED (%ls)\n", terrainOpen);
+    // UE 4.16's front end is not safe to keep ticking after GIsClient is cleared
+    // and its only LocalPlayer is removed. Stock Erbium begins travel here; if
+    // we defer it while the post-load scanners run, 1.7.2 can dereference a
+    // null front-end object on an engine task thread. Newer builds retain the
+    // deferred order because their post-load hooks must be complete before the
+    // destination world starts initializing.
+    const bool bDeferTerrainOpen = VersionInfo.EngineVersion > 4.16;
+    if (bDeferTerrainOpen)
+    {
+        SDK::DbgLog("Main: cp15 terrain-open DEFERRED (%ls)\n", terrainOpen);
+    }
+    else
+    {
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(terrainOpen), nullptr);
+        SDK::DbgLog("Main: cp15 terrain-open issued early for UE %.2f (%ls)\n",
+            VersionInfo.EngineVersion, terrainOpen);
+    }
 
     auto EncryptionPatch = FindEncryptionPatch();
     if (EncryptionPatch)
@@ -430,7 +600,8 @@ void Main()
     MH_EnableHook(MH_ALL_HOOKS);
 
     Misc::bHookedAll = true;
-    SDK::DbgLog("Main: cp19 all hooks installed; issuing deferred terrain-open (%ls)\n", terrainOpen);
+    SDK::DbgLog("Main: cp19 all hooks installed; terrain-open %s (%ls)\n",
+        bDeferTerrainOpen ? "pending" : "already issued", terrainOpen);
 
     // 32.11 ground-truth crash/boot patches (Remix, verified on CL 38202817). These are raw byte
     // patches whose signatures don't exist in Magnesium's universal scanner; version-gated so no
@@ -474,8 +645,15 @@ void Main()
         SDK::DbgLog("Main: cp19c 32.11 crash patches done\n");
     }
 
-    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(terrainOpen), nullptr);
-    SDK::DbgLog("Main: cp20 terrain-open issued — Main() COMPLETE\n");
+    if (bDeferTerrainOpen)
+    {
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(terrainOpen), nullptr);
+        SDK::DbgLog("Main: cp20 deferred terrain-open issued - Main() COMPLETE\n");
+    }
+    else
+    {
+        SDK::DbgLog("Main: cp20 early terrain-open retained - Main() COMPLETE\n");
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule,

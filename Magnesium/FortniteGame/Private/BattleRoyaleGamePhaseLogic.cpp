@@ -234,6 +234,9 @@ struct FQuat FRotator::Quaternion() const
 
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GenerateStormCircles(AFortAthenaMapInfo* MapInfo)
 {
+	if (FConfiguration::bCustomSafeZone)
+		GUI::ResolveCustomSafeZoneForMap(MapInfo);
+
 	if (StormCircles.size() > 0)
 		return;
 
@@ -344,6 +347,8 @@ AFortSafeZoneIndicator* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Setu
 		if (SafeZoneIndicator)
 		{
 			auto GameState = (AFortGameStateAthena*) UWorld::GetWorld()->GameState;
+			if (FConfiguration::bCustomSafeZone)
+				GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
 			FFortSafeZoneDefinition& SafeZoneDefinition = GameState->MapInfo->SafeZoneDefinition;
 			float SafeZoneCount = SafeZoneDefinition.Count.Evaluate();
 
@@ -383,6 +388,10 @@ AFortSafeZoneIndicator* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Setu
 				{
 					PhaseInfo->Center = FConfiguration::CustomSafeZoneCenter;
 					PhaseInfo->Radius = FConfiguration::CustomSafeZoneRadius;
+					if (i == 0.f)
+						SDK::DbgLog("[SafeZoneMap] applying custom zone center=(%.1f, %.1f, %.1f) radius=%.1f\n",
+							PhaseInfo->Center.X, PhaseInfo->Center.Y, PhaseInfo->Center.Z,
+							PhaseInfo->Radius);
 				}
 
 				Array.Add(*PhaseInfo, FFortSafeZonePhaseInfo::Size());
@@ -423,6 +432,14 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 		}
 
 		auto& PhaseInfo = Array.Get(NewSafeZonePhase, FFortSafeZonePhaseInfo::Size());
+		if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+		{
+			auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
+			if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
+				GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+			PhaseInfo.Center = FConfiguration::CustomSafeZoneCenter;
+			PhaseInfo.Radius = FConfiguration::CustomSafeZoneRadius;
+		}
 
 		SafeZoneIndicator->NextCenter = PhaseInfo.Center;
 		SafeZoneIndicator->NextRadius = PhaseInfo.Radius;
@@ -461,6 +478,32 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 
 		SafeZoneIndicator->OnSafeZoneStateChange(2, bInitial);
 		SafeZoneIndicator->SafezoneStateChangedDelegate.Process(SafeZoneIndicator, 2);
+
+		if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+		{
+			FVector Center = FConfiguration::CustomSafeZoneCenter;
+			float Radius = FConfiguration::CustomSafeZoneRadius;
+			if (SafeZoneIndicator->HasLastCenter()) SafeZoneIndicator->LastCenter = Center;
+			if (SafeZoneIndicator->HasPreviousCenter()) SafeZoneIndicator->PreviousCenter = Center;
+			if (SafeZoneIndicator->HasNextCenter()) SafeZoneIndicator->NextCenter = Center;
+			if (SafeZoneIndicator->HasNextNextCenter()) SafeZoneIndicator->NextNextCenter = Center;
+			if (SafeZoneIndicator->HasLastRadius()) SafeZoneIndicator->LastRadius = Radius;
+			if (SafeZoneIndicator->HasPreviousRadius()) SafeZoneIndicator->PreviousRadius = Radius;
+			if (SafeZoneIndicator->HasNextRadius()) SafeZoneIndicator->NextRadius = Radius;
+			if (SafeZoneIndicator->HasNextNextRadius()) SafeZoneIndicator->NextNextRadius = Radius;
+			if (SafeZoneIndicator->HasRadius()) SafeZoneIndicator->Radius = Radius;
+			if (SafeZoneIndicator->HasFutureReplicator() && SafeZoneIndicator->FutureReplicator)
+			{
+				if (SafeZoneIndicator->FutureReplicator->HasNextNextCenter())
+					SafeZoneIndicator->FutureReplicator->NextNextCenter = Center;
+				if (SafeZoneIndicator->FutureReplicator->HasNextNextRadius())
+					SafeZoneIndicator->FutureReplicator->NextNextRadius = Radius;
+			}
+			SafeZoneIndicator->ForceNetUpdate();
+			SDK::DbgLog(
+				"[SafeZoneMap] active component zone phase=%d center=(%.1f, %.1f, %.1f) radius=%.1f\n",
+				NewSafeZonePhase, Center.X, Center.Y, Center.Z, Radius);
+		}
 
 		SetGamePhaseStep(EAthenaGamePhaseStep::StormHolding);
 

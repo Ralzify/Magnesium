@@ -216,6 +216,7 @@
     <ClInclude Include="FortniteGame\Public\BattleRoyaleGamePhaseLogic.h" />
     <ClInclude Include="FortniteGame\Public\BuildingContainer.h" />
     <ClInclude Include="FortniteGame\Public\BuildingFoundation.h" />
+    <ClInclude Include="FortniteGame\Public\FortAthenaSpawningPolicyManager.h" />
     <ClInclude Include="FortniteGame\Public\BuildingItemCollectorActor.h" />
     <ClInclude Include="FortniteGame\Public\BuildingSMActor.h" />
     <ClInclude Include="FortniteGame\Public\FortAthenaCreativePortal.h" />

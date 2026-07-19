@@ -125,7 +125,7 @@ public:
             auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
             if (!Prop)                                                                                                                                               \
                 Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.EngineVersion >= 5.1)                                                                                                               \
+            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
             {                                                                                                                                                        \
 		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
                 auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
@@ -141,7 +141,21 @@ public:
     bool Has##Name() const                                                                                                                                           \
     {                                                                                                                                                                \
         if (Name##__Offset == -2)                                                                                                                                    \
-            Name##__Offset = this->GetOffset(#Name, GUESS_PROP_FLAGS(__VA_ARGS__));                                                                                  \
+        {                                                                                                                                                            \
+            auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
+            if (!Prop)                                                                                                                                               \
+                Name##__Offset = -1;                                                                                                                                 \
+            else                                                                                                                                                     \
+            {                                                                                                                                                        \
+                if (VersionInfo.FortniteVersion >= 12.10)                                                                                                            \
+                {                                                                                                                                                    \
+                    auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                \
+                    auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                       \
+                    Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                    \
+                }                                                                                                                                                    \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
+            }                                                                                                                                                        \
+        }                                                                                                                                                            \
         return Name##__Offset != -1;                                                                                                                                 \
     }                                                                                                                                                                \
                                                                                                                                                                      \
@@ -152,7 +166,7 @@ public:
             auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
             if (!Prop)                                                                                                                                               \
                 Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.EngineVersion >= 5.1)                                                                                                               \
+            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
             {                                                                                                                                                        \
 		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
                 auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
@@ -176,7 +190,7 @@ public:
             auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
             if (!Prop)                                                                                                                                               \
                 Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.EngineVersion >= 5.1)                                                                                                               \
+            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
             {                                                                                                                                                        \
 		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
                 auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
@@ -207,7 +221,7 @@ public:
             auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
             if (!Prop)                                                                                                                                               \
                 Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.EngineVersion >= 5.1)                                                                                                               \
+            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
             {                                                                                                                                                        \
 		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
                 auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
@@ -227,7 +241,7 @@ public:
             auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
             if (!Prop)                                                                                                                                               \
                 Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.EngineVersion >= 5.1)                                                                                                               \
+            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
             {                                                                                                                                                        \
 		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
                 auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
@@ -247,7 +261,7 @@ public:
             auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
             if (!Prop)                                                                                                                                               \
                 Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.EngineVersion >= 5.1)                                                                                                               \
+            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
             {                                                                                                                                                        \
 		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
                 auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
@@ -271,7 +285,7 @@ public:
             auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
             if (!Prop)                                                                                                                                               \
                 Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.EngineVersion >= 5.1)                                                                                                               \
+            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
             {                                                                                                                                                        \
 		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
                 auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
