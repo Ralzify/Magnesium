@@ -361,32 +361,119 @@ namespace SafeZoneMap
 
     // Shade the part of rect [rmin,rmax] outside a world-space circle. It may
     // project as an ellipse when the runtime map bounds are not perfectly square.
+    // Horizontal strips avoid the anti-aliased shared edges that made the old
+    // angular fan look like purple rays radiating away from the safe zone.
     static void FillOutsideEllipse(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
                                    const ImVec2& c, const ImVec2& radius, ImU32 col)
     {
-        const int N = 96;
-        const float TwoPi = 6.28318530718f;
-        auto rayToRect = [&](float dx, float dy) -> float
+        if (radius.x <= 0.f || radius.y <= 0.f)
         {
-            float t = 1e30f, tt;
-            if (dx >  1e-6f) { tt = (rmax.x - c.x) / dx; if (tt < t) t = tt; }
-            else if (dx < -1e-6f) { tt = (rmin.x - c.x) / dx; if (tt < t) t = tt; }
-            if (dy >  1e-6f) { tt = (rmax.y - c.y) / dy; if (tt < t) t = tt; }
-            else if (dy < -1e-6f) { tt = (rmin.y - c.y) / dy; if (tt < t) t = tt; }
-            return t < 0.f ? 0.f : t;
-        };
-        for (int i = 0; i < N; ++i)
+            dl->AddRectFilled(rmin, rmax, col);
+            return;
+        }
+
+        const ImDrawListFlags oldFlags = dl->Flags;
+        dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+
+        const float ellipseTop = c.y - radius.y;
+        const float ellipseBottom = c.y + radius.y;
+        const float clippedTop = Clamp(ellipseTop, rmin.y, rmax.y);
+        const float clippedBottom = Clamp(ellipseBottom, rmin.y, rmax.y);
+
+        if (clippedTop > rmin.y)
+            dl->AddRectFilled(rmin, ImVec2(rmax.x, clippedTop), col);
+        if (clippedBottom < rmax.y)
+            dl->AddRectFilled(ImVec2(rmin.x, clippedBottom), rmax, col);
+
+        const int N = 128;
+        if (clippedBottom > clippedTop)
         {
-            float a0 = (float)i / N * TwoPi, a1 = (float)(i + 1) / N * TwoPi;
-            float c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
-            float t0 = rayToRect(c0, s0), t1 = rayToRect(c1, s1);
-            const float e0 = 1.f / sqrtf((c0 * c0) / (radius.x * radius.x) + (s0 * s0) / (radius.y * radius.y));
-            const float e1 = 1.f / sqrtf((c1 * c1) / (radius.x * radius.x) + (s1 * s1) / (radius.y * radius.y));
-            float r0 = e0 < t0 ? e0 : t0;  // clamp so we never overshoot the rect
-            float r1 = e1 < t1 ? e1 : t1;
-            ImVec2 in0(c.x + c0 * r0, c.y + s0 * r0), in1(c.x + c1 * r1, c.y + s1 * r1);
-            ImVec2 out0(c.x + c0 * t0, c.y + s0 * t0), out1(c.x + c1 * t1, c.y + s1 * t1);
-            dl->AddQuadFilled(in0, in1, out1, out0, col);
+            const float step = (clippedBottom - clippedTop) / (float)N;
+            for (int i = 0; i < N; ++i)
+            {
+                const float y0 = clippedTop + step * (float)i;
+                const float y1 = (i + 1 == N) ? clippedBottom : y0 + step;
+                const float ny0 = (y0 - c.y) / radius.y;
+                const float ny1 = (y1 - c.y) / radius.y;
+                const float extent0 = radius.x * sqrtf((std::max)(0.f, 1.f - ny0 * ny0));
+                const float extent1 = radius.x * sqrtf((std::max)(0.f, 1.f - ny1 * ny1));
+                const float left0 = Clamp(c.x - extent0, rmin.x, rmax.x);
+                const float left1 = Clamp(c.x - extent1, rmin.x, rmax.x);
+                const float right0 = Clamp(c.x + extent0, rmin.x, rmax.x);
+                const float right1 = Clamp(c.x + extent1, rmin.x, rmax.x);
+
+                if (left0 > rmin.x || left1 > rmin.x)
+                    dl->AddQuadFilled(ImVec2(rmin.x, y0), ImVec2(left0, y0),
+                                      ImVec2(left1, y1), ImVec2(rmin.x, y1), col);
+                if (right0 < rmax.x || right1 < rmax.x)
+                    dl->AddQuadFilled(ImVec2(right0, y0), ImVec2(rmax.x, y0),
+                                      ImVec2(rmax.x, y1), ImVec2(right1, y1), col);
+            }
+        }
+
+        dl->Flags = oldFlags;
+    }
+
+    // Draw one line, omitting the portion that lies inside the safe ellipse.
+    static void AddLineOutsideEllipse(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1,
+                                      const ImVec2& c, const ImVec2& radius,
+                                      ImU32 col, float thickness)
+    {
+        const ImVec2 d((p1.x - p0.x) / radius.x, (p1.y - p0.y) / radius.y);
+        const ImVec2 f((p0.x - c.x) / radius.x, (p0.y - c.y) / radius.y);
+        const float a = d.x * d.x + d.y * d.y;
+        const float b = 2.f * (f.x * d.x + f.y * d.y);
+        const float cc = f.x * f.x + f.y * f.y - 1.f;
+        const float discriminant = b * b - 4.f * a * cc;
+
+        float cuts[4] = { 0.f, 1.f, 0.f, 0.f };
+        int cutCount = 2;
+        if (a > 0.f && discriminant > 0.f)
+        {
+            const float root = sqrtf(discriminant);
+            const float t0 = (-b - root) / (2.f * a);
+            const float t1 = (-b + root) / (2.f * a);
+            if (t0 > 0.f && t0 < 1.f) cuts[cutCount++] = t0;
+            if (t1 > 0.f && t1 < 1.f) cuts[cutCount++] = t1;
+        }
+        std::sort(cuts, cuts + cutCount);
+
+        const ImVec2 screenD(p1.x - p0.x, p1.y - p0.y);
+        for (int i = 0; i + 1 < cutCount; ++i)
+        {
+            const float begin = cuts[i], end = cuts[i + 1];
+            const float mid = (begin + end) * 0.5f;
+            const float mx = f.x + d.x * mid;
+            const float my = f.y + d.y * mid;
+            if (mx * mx + my * my < 1.f)
+                continue;
+            dl->AddLine(ImVec2(p0.x + screenD.x * begin, p0.y + screenD.y * begin),
+                        ImVec2(p0.x + screenD.x * end, p0.y + screenD.y * end), col, thickness);
+        }
+    }
+
+    // Fortnite's storm map uses parallel bands running from bottom-left to
+    // top-right. Keep them clipped to the storm area outside the safe ellipse.
+    static void DrawStormBands(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
+                               const ImVec2& c, const ImVec2& radius, ImU32 col)
+    {
+        const float width = rmax.x - rmin.x;
+        const float height = rmax.y - rmin.y;
+        const float spacing = (std::max)(28.f, width / 10.f);
+        for (float diagonal = 0.f; diagonal <= width + height; diagonal += spacing)
+        {
+            ImVec2 p0, p1;
+            if (diagonal <= height)
+                p0 = ImVec2(rmin.x, rmin.y + diagonal);
+            else
+                p0 = ImVec2(rmin.x + diagonal - height, rmax.y);
+
+            if (diagonal <= width)
+                p1 = ImVec2(rmin.x + diagonal, rmin.y);
+            else
+                p1 = ImVec2(rmax.x, rmin.y + diagonal - width);
+
+            AddLineOutsideEllipse(dl, p0, p1, c, radius, col, 4.f);
         }
     }
 
@@ -5149,6 +5236,8 @@ void GUI::Init()
                         static ID3D11ShaderResourceView* s_MapSRV = nullptr;
                         static int s_MapW = 0, s_MapH = 0;
                         static int s_RetryIn = 0;
+                        static float s_MapZoom = 1.f;
+                        static ImVec2 s_MapPan(0.f, 0.f);
                         if (!s_MapSRV) // retry until the minimap texture becomes resident
                         {
                             // Pixels produced by TickFlush should be uploaded on the
@@ -5166,20 +5255,50 @@ void GUI::Init()
                         if (s_MapSRV)
                         {
                             const float S = Width * 1.8f; // square canvas
-                            const ImVec2 origin = ImGui::GetCursorScreenPos();
                             ImVec2 uv0, uv1;
                             SafeZoneMap::GetImageUVs(uv0, uv1);
-                            ImGui::Image((void*)s_MapSRV, ImVec2(S, S), uv0, uv1);
-                            ImGui::SetCursorScreenPos(origin); // overlay input on the same rect
                             ImGui::InvisibleButton("##mapcanvas", ImVec2(S, S));
                             const ImVec2 r0 = ImGui::GetItemRectMin();
+                            const ImVec2 r1(r0.x + S, r0.y + S);
+                            ImGuiIO& io = ImGui::GetIO();
+
+                            auto ClampMapPan = [&]()
+                            {
+                                const float minPan = S * (1.f - s_MapZoom);
+                                s_MapPan.x = SafeZoneMap::Clamp(s_MapPan.x, minPan, 0.f);
+                                s_MapPan.y = SafeZoneMap::Clamp(s_MapPan.y, minPan, 0.f);
+                            };
+                            ClampMapPan();
+
+                            // Ctrl + wheel zooms toward the mouse so the point under
+                            // the cursor remains stationary. The canvas itself stays
+                            // fixed-size and clips the enlarged map and its overlays.
+                            if (ImGui::IsItemHovered() && io.KeyCtrl)
+                            {
+                                ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+                                if (io.MouseWheel != 0.f)
+                                {
+                                    const float oldZoom = s_MapZoom;
+                                    const float newZoom = SafeZoneMap::Clamp(
+                                        oldZoom * powf(1.2f, io.MouseWheel), 1.f, 5.f);
+                                    const ImVec2 mouseLocal(io.MousePos.x - r0.x, io.MousePos.y - r0.y);
+                                    const ImVec2 imagePoint((mouseLocal.x - s_MapPan.x) / oldZoom,
+                                                            (mouseLocal.y - s_MapPan.y) / oldZoom);
+                                    s_MapZoom = newZoom;
+                                    s_MapPan.x = mouseLocal.x - imagePoint.x * newZoom;
+                                    s_MapPan.y = mouseLocal.y - imagePoint.y * newZoom;
+                                    ClampMapPan();
+                                }
+                            }
 
                             // Press => set center; drag => set radius from that center.
                             if (ImGui::IsItemActivated())
                             {
-                                const ImVec2 m = ImGui::GetIO().MousePos;
-                                const float u = SafeZoneMap::Clamp((m.x - r0.x) / S, 0.f, 1.f);
-                                const float v = SafeZoneMap::Clamp((m.y - r0.y) / S, 0.f, 1.f);
+                                const ImVec2 m = io.MousePos;
+                                const float u = SafeZoneMap::Clamp(
+                                    (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
+                                const float v = SafeZoneMap::Clamp(
+                                    (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
                                 SafeZoneMap::RememberSelection(u, v);
                                 float wx, wy;
                                 SafeZoneMap::PixelToWorld(u, v, 1.f, map, wx, wy);
@@ -5188,9 +5307,11 @@ void GUI::Init()
                             }
                             if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
                             {
-                                const ImVec2 m = ImGui::GetIO().MousePos;
-                                const float u = SafeZoneMap::Clamp((m.x - r0.x) / S, 0.f, 1.f);
-                                const float v = SafeZoneMap::Clamp((m.y - r0.y) / S, 0.f, 1.f);
+                                const ImVec2 m = io.MousePos;
+                                const float u = SafeZoneMap::Clamp(
+                                    (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
+                                const float v = SafeZoneMap::Clamp(
+                                    (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
                                 float mouseX, mouseY;
                                 SafeZoneMap::PixelToWorld(u, v, 1.f, map, mouseX, mouseY);
                                 const float dx = mouseX - (float)FConfiguration::CustomSafeZoneCenter.X;
@@ -5201,20 +5322,30 @@ void GUI::Init()
 
                             // Overlay the stored center + radius every frame (also when idle).
                             ImDrawList* dl = ImGui::GetWindowDrawList();
+                            dl->PushClipRect(r0, r1, true);
+                            const ImVec2 imageMin(r0.x + s_MapPan.x, r0.y + s_MapPan.y);
+                            const ImVec2 imageMax(imageMin.x + S * s_MapZoom, imageMin.y + S * s_MapZoom);
+                            dl->AddImage((void*)s_MapSRV, imageMin, imageMax, uv0, uv1);
                             float lx, ly;
                             SafeZoneMap::WorldToPixel((float)FConfiguration::CustomSafeZoneCenter.X,
                                                       (float)FConfiguration::CustomSafeZoneCenter.Y, S, map, lx, ly);
-                            const ImVec2 c(r0.x + lx, r0.y + ly);
-                            const ImVec2 rpx =
-                                SafeZoneMap::RadiusToPixelAxes(FConfiguration::CustomSafeZoneRadius, S, map);
+                            const ImVec2 c(r0.x + s_MapPan.x + lx * s_MapZoom,
+                                           r0.y + s_MapPan.y + ly * s_MapZoom);
+                            ImVec2 rpx = SafeZoneMap::RadiusToPixelAxes(
+                                FConfiguration::CustomSafeZoneRadius, S, map);
+                            rpx.x *= s_MapZoom;
+                            rpx.y *= s_MapZoom;
                             // Storm shading: everything outside the safe circle is purple (~0.5 alpha).
-                            SafeZoneMap::FillOutsideEllipse(dl, r0, ImVec2(r0.x + S, r0.y + S), c, rpx, IM_COL32(140, 40, 200, 128));
+                            SafeZoneMap::FillOutsideEllipse(dl, r0, r1, c, rpx, IM_COL32(140, 40, 200, 128));
+                            SafeZoneMap::DrawStormBands(dl, r0, r1, c, rpx, IM_COL32(205, 80, 235, 105));
                             dl->AddEllipseFilled(c, rpx, IM_COL32(90, 160, 255, 40), 0.f, 96);
                             dl->AddEllipse(c, rpx, IM_COL32(130, 200, 255, 230), 0.f, 96, 2.f);
                             // Center marker (dot).
                             dl->AddCircleFilled(c, 4.f, IM_COL32(255, 255, 255, 235));
                             dl->AddCircle(c, 4.f, IM_COL32(20, 30, 60, 200), 0, 1.5f);
+                            dl->PopClipRect();
 
+                            ImGui::TextDisabled("Ctrl + wheel to zoom  |  %.0f%%", s_MapZoom * 100.f);
                             ImGui::Spacing();
                         }
                         else
