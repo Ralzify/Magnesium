@@ -37,42 +37,70 @@
 #include <limits>
 #include <functional>
 
+// Infinite Render changes every real client's replication viewpoint to the
+// newest live player-like pawn. Spawned bots do not (and must not) own a
+// UNetConnection, but they are registered in GameMode->AlivePlayers, so this
+// target lookup includes both connected players and mid-match spawnbot actors.
+static AActor* FindInfiniteRenderViewPawn()
+{
+	auto World = UWorld::GetWorld();
+	if (!World)
+		return nullptr;
+
+	// GetPlayerViewPoint also runs in the frontend, where AuthorityGameMode is a
+	// different class. Casting that object to AFortGameMode and reading the
+	// cached AlivePlayers offset caused an invalid TArray access during launch.
+	auto AuthorityGameMode = World->AuthorityGameMode;
+	auto AthenaGameModeClass = AFortGameModeAthena::StaticClass();
+	if (AuthorityGameMode && AthenaGameModeClass && AuthorityGameMode->IsA(AthenaGameModeClass))
+	{
+		auto GameMode = (AFortGameMode*)AuthorityGameMode;
+		if (GameMode->HasAlivePlayers())
+		{
+			auto& AlivePlayers = GameMode->AlivePlayers;
+			for (int i = AlivePlayers.Num() - 1; i >= 0; --i)
+			{
+				auto Controller = (AFortPlayerControllerAthena*)AlivePlayers[i];
+				if (!Controller)
+					continue;
+
+				if (auto Pawn = Controller->GetPawn())
+					return Pawn;
+			}
+		}
+	}
+
+	// Keep the original behavior available while the game mode/alive list is
+	// not ready (for example during early connection setup).
+	auto Driver = (UNetDriver*)World->NetDriver;
+	if (!Driver)
+		return nullptr;
+
+	for (int i = Driver->ClientConnections.Num() - 1; i >= 0; --i)
+	{
+		auto Connection = Driver->ClientConnections[i];
+		if (!Connection)
+			continue;
+
+		auto Controller = Connection->GetPlayerController();
+		if (Controller)
+			if (auto Pawn = Controller->GetPawn())
+				return Pawn;
+	}
+
+	return nullptr;
+}
+
 void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena* PlayerController, FVector& Loc, FRotator& Rot)
 {
 	if (FConfiguration::bInfiniteRender)
 	{
-		UObject* NetDriver = UWorld::GetWorld()->NetDriver;
-
-		if (!NetDriver)
-			return;
-
-		UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
-
-		auto& ClientConnections = Driver->ClientConnections;
-
-		if (ClientConnections.Num() > 0)
+		if (auto ViewPawn = FindInfiniteRenderViewPawn())
 		{
-			auto ConnectionToView = ClientConnections[ClientConnections.Num() - 1];
-
-			if (ConnectionToView)
-			{
-				auto CurrentController = ConnectionToView->GetPlayerController();
-
-				if (CurrentController)
-				{
-					auto CurrentPawn = CurrentController->GetPawn();
-
-					if (CurrentPawn)
-					{
-						Loc = CurrentPawn->K2_GetActorLocation();
-						Rot = PlayerController->GetControlRotation();
-						return;
-					}
-				}
-			}
+			Loc = ViewPawn->K2_GetActorLocation();
+			Rot = PlayerController->GetControlRotation();
+			return;
 		}
-
-		return;
 	}
 
 	if (auto Pawn = PlayerController->MyFortPawn)
@@ -5984,6 +6012,13 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					GameState->OnRep_PlayersLeft();
 
 					GameMode->AlivePlayers.Add(PC);
+
+					// The bot is now eligible to become Infinite Render's viewpoint.
+					// Wake its replicated state immediately so existing clients can
+					// open/update the actor channel on the next replication pass.
+					Pawn->FlushNetDormancy();
+					Pawn->ForceNetUpdate();
+					PlayerState->ForceNetUpdate();
 
 					static auto Commando = FindObject(L"/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F", nullptr);
 					static auto Commando2 = FindObject(L"/Game/Athena/Heroes/HID_Commando_Athena_01.HID_Commando_Athena_01", nullptr);

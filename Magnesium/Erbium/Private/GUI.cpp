@@ -3825,7 +3825,21 @@ void GUI::Init()
 
             if (gsStatus >= Joinable)
             {
-                auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+                AFortGameMode* GameMode = nullptr;
+                auto World = UWorld::GetWorld();
+                auto AuthorityGameMode = World ? World->AuthorityGameMode : nullptr;
+                auto AthenaGameModeClass = AFortGameModeAthena::StaticClass();
+
+                // The frontend game mode derives from the generic FortGameMode
+                // but does not expose Athena's AlivePlayers array. Resolve that
+                // reflected property only on an actual Athena game mode.
+                if (AuthorityGameMode && AthenaGameModeClass &&
+                    AuthorityGameMode->IsA(AthenaGameModeClass))
+                {
+                    auto Candidate = (AFortGameMode*)AuthorityGameMode;
+                    if (Candidate->HasAlivePlayers())
+                        GameMode = Candidate;
+                }
 
                 int AliveCount = 0;
 
