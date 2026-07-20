@@ -5167,7 +5167,7 @@ void GUI::Init()
                         FinalLoc.X += cos(FinalAngle) * 100.f;
                         FinalLoc.Y += sin(FinalAngle) * 100.f;
 
-                        auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), TargetPawn);
+                        auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), TargetPawn);
 
                         if (TargetPawn && Pickup)
                             TargetPawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
@@ -5252,6 +5252,7 @@ void GUI::Init()
                         static int s_RetryIn = 0;
                         static float s_MapZoom = 1.f;
                         static ImVec2 s_MapPan(0.f, 0.f);
+                        static bool s_MapPanning = false;
                         if (!s_MapSRV) // retry until the minimap texture becomes resident
                         {
                             // Pixels produced by TickFlush should be uploaded on the
@@ -5305,33 +5306,57 @@ void GUI::Init()
                                 }
                             }
 
-                            // Press => set center; drag => set radius from that center.
-                            if (ImGui::IsItemActivated())
+                            // Ctrl + left drag pans the zoomed map. The gesture is latched on
+                            // press so letting go of Ctrl mid-drag does not turn the rest of
+                            // the drag into a zone edit. At 100% zoom ClampMapPan pins the
+                            // offset to zero, so this is a no-op until the user zooms in.
+                            if (ImGui::IsItemActivated() && io.KeyCtrl)
+                                s_MapPanning = true;
+                            if (!ImGui::IsItemActive())
+                                s_MapPanning = false;
+
+                            if (s_MapPanning || (ImGui::IsItemHovered() && io.KeyCtrl && s_MapZoom > 1.f))
+                                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+                            if (s_MapPanning)
                             {
-                                const ImVec2 m = io.MousePos;
-                                const float u = SafeZoneMap::Clamp(
-                                    (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
-                                const float v = SafeZoneMap::Clamp(
-                                    (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
-                                SafeZoneMap::RememberSelection(u, v);
-                                float wx, wy;
-                                SafeZoneMap::PixelToWorld(u, v, 1.f, map, wx, wy);
-                                FConfiguration::CustomSafeZoneCenter.X = wx;
-                                FConfiguration::CustomSafeZoneCenter.Y = wy;
+                                if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                                {
+                                    s_MapPan.x += io.MouseDelta.x;
+                                    s_MapPan.y += io.MouseDelta.y;
+                                    ClampMapPan();
+                                }
                             }
-                            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                            // Press => set center; drag => set radius from that center.
+                            else
                             {
-                                const ImVec2 m = io.MousePos;
-                                const float u = SafeZoneMap::Clamp(
-                                    (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
-                                const float v = SafeZoneMap::Clamp(
-                                    (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
-                                float mouseX, mouseY;
-                                SafeZoneMap::PixelToWorld(u, v, 1.f, map, mouseX, mouseY);
-                                const float dx = mouseX - (float)FConfiguration::CustomSafeZoneCenter.X;
-                                const float dy = mouseY - (float)FConfiguration::CustomSafeZoneCenter.Y;
-                                FConfiguration::CustomSafeZoneRadius =
-                                    SafeZoneMap::Clamp(sqrtf(dx * dx + dy * dy), 500.f, 100000.f);
+                                if (ImGui::IsItemActivated())
+                                {
+                                    const ImVec2 m = io.MousePos;
+                                    const float u = SafeZoneMap::Clamp(
+                                        (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
+                                    const float v = SafeZoneMap::Clamp(
+                                        (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
+                                    SafeZoneMap::RememberSelection(u, v);
+                                    float wx, wy;
+                                    SafeZoneMap::PixelToWorld(u, v, 1.f, map, wx, wy);
+                                    FConfiguration::CustomSafeZoneCenter.X = wx;
+                                    FConfiguration::CustomSafeZoneCenter.Y = wy;
+                                }
+                                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                                {
+                                    const ImVec2 m = io.MousePos;
+                                    const float u = SafeZoneMap::Clamp(
+                                        (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
+                                    const float v = SafeZoneMap::Clamp(
+                                        (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
+                                    float mouseX, mouseY;
+                                    SafeZoneMap::PixelToWorld(u, v, 1.f, map, mouseX, mouseY);
+                                    const float dx = mouseX - (float)FConfiguration::CustomSafeZoneCenter.X;
+                                    const float dy = mouseY - (float)FConfiguration::CustomSafeZoneCenter.Y;
+                                    FConfiguration::CustomSafeZoneRadius =
+                                        SafeZoneMap::Clamp(sqrtf(dx * dx + dy * dy), 500.f, 100000.f);
+                                }
                             }
 
                             // Overlay the stored center + radius every frame (also when idle).
@@ -5359,7 +5384,7 @@ void GUI::Init()
                             dl->AddCircle(c, 4.f, IM_COL32(20, 30, 60, 200), 0, 1.5f);
                             dl->PopClipRect();
 
-                            ImGui::TextDisabled("Ctrl + wheel to zoom  |  %.0f%%", s_MapZoom * 100.f);
+                            ImGui::TextDisabled("Ctrl + wheel to zoom  |  Ctrl + drag to pan  |  %.0f%%", s_MapZoom * 100.f);
                             ImGui::Spacing();
                         }
                         else

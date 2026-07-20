@@ -6933,7 +6933,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					FinalLoc = FinalLoc + ForwardVector * 450.f;
 					FinalLoc.Z += 50.f;
 
-					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, Count, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
 					if (Pickup)
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
 				};
@@ -7016,7 +7016,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					FinalLoc = FinalLoc + ForwardVector * 450.f;
 					FinalLoc.Z += 50.f;
 
-					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 999, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 999, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
 					if (Pickup)
 					{
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
@@ -7049,7 +7049,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					FinalLoc = FinalLoc + ForwardVector * 450.f;
 					FinalLoc.Z += 50.f;
 
-					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 500, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 500, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
 					if (Pickup)
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
 				}
@@ -7093,7 +7093,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					FinalLoc = FinalLoc + ForwardVector * 450.f;
 					FinalLoc.Z += 50.f;
 
-					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 6, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+					auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDef, 6, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
 					if (Pickup)
 					{
 						Pawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
@@ -7148,7 +7148,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				FinalLoc.X += cos(FinalAngle) * 100.f;
 				FinalLoc.Y += sin(FinalAngle) * 100.f;
 
-				auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
+				auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), Pawn);
 
 				if (Pawn && Pickup)
 				{
@@ -7256,7 +7256,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				if (!HasLocation)
 					SpawnLocation = Pawn->K2_GetActorLocation();
 
-				if (auto SpawnedPickup = AFortInventory::SpawnPickup(SpawnLocation, ItemDefinition, Count, 0, EFortPickupSourceTypeFlag::GetTossed(), EFortPickupSpawnSource::GetUnset(), Pawn))
+				if (auto SpawnedPickup = AFortInventory::SpawnPickup(SpawnLocation, ItemDefinition, Count, -1, EFortPickupSourceTypeFlag::GetTossed(), EFortPickupSpawnSource::GetUnset(), Pawn))
 				{
 					DisablePickupGravity(SpawnedPickup);
 					PlayerController->ClientMessage(FString(L"Spawned pickup!"), FName(), 1.f);
