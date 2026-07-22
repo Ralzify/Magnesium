@@ -1697,8 +1697,10 @@ namespace SafeZoneMap
     static bool BuildPoiCalibrationUnsafe(UWorld* world,
                                           const UObject* settings,
                                           const UObject* preferredManager,
-                                          MapTransform& out)
+                                          MapTransform& out,
+                                          bool& stableFailure)
     {
+        stableFailure = false;
         if (!world || !settings || !settings->Class)
             return false;
 
@@ -1907,7 +1909,13 @@ namespace SafeZoneMap
             loggedAnchorCount = (int)anchors.size();
         }
         if (anchors.size() < 4)
+        {
+            // At this point both the map metadata and the world's POI volumes
+            // are populated. A missing tag intersection is a version/layout
+            // incompatibility, not streaming that can become ready later.
+            stableFailure = true;
             return false;
+        }
 
         float brushWidth = 0.f;
         float brushHeight = 0.f;
@@ -2000,18 +2008,32 @@ namespace SafeZoneMap
         static const UObject* cachedSettings = nullptr;
         static MapTransform cachedTransform;
         static bool haveCachedTransform = false;
+        static const UWorld* unsupportedWorld = nullptr;
+        static const UObject* unsupportedSettings = nullptr;
         if (haveCachedTransform && cachedWorld == world &&
             cachedSettings == settings)
         {
             out = cachedTransform;
             return true;
         }
+        if (unsupportedWorld == world && unsupportedSettings == settings)
+            return false;
 
+        bool stableFailure = false;
         __try
         {
             if (!BuildPoiCalibrationUnsafe(
-                    world, settings, preferredManager, out))
+                    world, settings, preferredManager, out, stableFailure))
+            {
+                if (stableFailure)
+                {
+                    unsupportedWorld = world;
+                    unsupportedSettings = settings;
+                    SDK::DbgLog(
+                        "[SafeZoneMap] POI calibration unsupported for this world; using cached fallback\n");
+                }
                 return false;
+            }
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -2249,6 +2271,12 @@ namespace SafeZoneMap
 
     static void RefreshRuntimeTransform()
     {
+        // Once gameplay starts the map projection is immutable and the chosen
+        // safe-zone location has already been applied. Continuing to probe it
+        // from the server tick only risks game-thread hitches on old builds.
+        if (GUI::gsStatus >= StartedMatch)
+            return;
+
         static uint32_t ticks = 0;
         static MapTransform last{};
         static const UObject* lastManager = nullptr;
@@ -3970,8 +3998,7 @@ void GUI::Init()
 
                                 if (!bInitializedZone)
                                 {
-                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 1 :
-                                        (VersionInfo.FortniteVersion < 7.00 ? 3 : 4);
+                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 1 : 4;
                                     bInitializedZone = true;
                                 }
 

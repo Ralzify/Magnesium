@@ -305,9 +305,21 @@ void AFortInventory::Remove(FGuid Guid)
         Inventory.ItemInstances.Remove(ItemInstanceIdx);
 
     auto PlayerController = (AFortPlayerControllerAthena*)Owner;
-    if (PlayerController && PlayerController->QuickBars && EntryDef)
+    // 7.40 removed FortPlayerController::QuickBars and moved to the client-side
+    // quickbar model. Reading DEFINE_PROP(QuickBars) when it is absent resolves
+    // to offset -1 and produces a bogus pointer (PlayerController - 1). Keep the
+    // legacy actor bookkeeping only on builds that expose it; newer builds are
+    // updated by the replicated inventory path below.
+    AFortQuickBars* QuickBars = nullptr;
+    if (VersionInfo.FortniteVersion < 7.40 && PlayerController &&
+        PlayerController->HasQuickBars())
     {
-        auto& QuickBar = IsPrimaryQuickbar(EntryDef) ? PlayerController->QuickBars->PrimaryQuickBar : PlayerController->QuickBars->SecondaryQuickBar;
+        QuickBars = PlayerController->QuickBars;
+    }
+
+    if (QuickBars && EntryDef)
+    {
+        auto& QuickBar = IsPrimaryQuickbar(EntryDef) ? QuickBars->PrimaryQuickBar : QuickBars->SecondaryQuickBar;
         int i = 0;
         for (i = 0; i < QuickBar.Slots.Num(); i++)
         {
@@ -319,16 +331,16 @@ void AFortInventory::Remove(FGuid Guid)
         }
         goto _Skip;
     _Out:
-        PlayerController->QuickBars->EmptySlot(!IsPrimaryQuickbar(EntryDef), i);
-        PlayerController->QuickBars->ServerRemoveItemInternal(Guid, false, true);
+        QuickBars->EmptySlot(!IsPrimaryQuickbar(EntryDef), i);
+        QuickBars->ServerRemoveItemInternal(Guid, false, true);
         for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
         {
             auto& Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
 
-            if (Entry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest())
+            if (Entry.ItemDefinition && Entry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest())
             {
                 PlayerController->ServerExecuteInventoryItem(Entry.ItemGuid);
-                PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
+                QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
             }
         }
     }

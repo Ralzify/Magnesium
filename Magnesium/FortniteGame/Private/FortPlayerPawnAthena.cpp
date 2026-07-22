@@ -780,7 +780,10 @@ static void PerformReviveFromDBNO(AFortPlayerPawnAthena* Pawn, AActor* EventInst
 		}
 
 		Pawn->bIsDBNO = false;
-		Pawn->bPlayedDying(false);
+		if (Pawn->HasbPlayedDying())
+			Pawn->bPlayedDying = false;
+		if (Pawn->HasbIsDying())
+			Pawn->bIsDying = false;
 
 		Pawn->SetHealth(30.f);
 		Pawn->OnRep_IsDBNO();

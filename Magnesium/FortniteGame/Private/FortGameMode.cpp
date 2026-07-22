@@ -2119,21 +2119,34 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
 
     callOG(GameMode, Stack.GetCurrentNativeFunction(), OnAircraftExitedDropZone, Aircraft);
 
-    if (bDeferLegacyLateGamePhase)
-        SDK::DbgLog("[SafeZone] legacy native aircraft-exit phase %d -> %d step=%d indicator=%p active=%d effect=%p\n",
-            (int)PreviousGamePhase, (int)GameState->GamePhase, (int)GameState->GamePhaseStep,
-            (void*)(GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator : nullptr),
-            (int)(GameMode->HasbSafeZoneActive() ? GameMode->bSafeZoneActive : false),
-            (void*)(GameMode->HasGE_OutsideSafeZone() ? GameMode->GE_OutsideSafeZone : nullptr));
-
     // Normally the old native transition reaches SafeZones itself.  Retain the
     // late-game fallback only for a build that did not transition, and do it
     // after native setup so its timer/effect lifecycle cannot be skipped.
     if (bDeferLegacyLateGamePhase && GameState->GamePhase != 4)
     {
         GameState->GamePhase = 4;
-        GameState->GamePhaseStep = 7;
         GameState->OnRep_GamePhase(PreviousGamePhase);
+    }
+
+    if (bDeferLegacyLateGamePhase)
+    {
+        // Native lower-season playlists otherwise retain their ordinary
+        // roughly 60-second first-zone delay.  Override only after the native
+        // aircraft-exit path has initialized its indicator/timers.
+        GameState->GamePhaseStep = 7;
+        float SafeZonesStartTime = -1.f;
+        if (GameState->HasSafeZonesStartTime())
+        {
+            SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(GameState);
+            GameState->SafeZonesStartTime = SafeZonesStartTime;
+        }
+
+        SDK::DbgLog("[SafeZone] legacy lategame aircraft-exit phase %d -> %d step=%d start=%.2f indicator=%p active=%d effect=%p\n",
+            (int)PreviousGamePhase, (int)GameState->GamePhase, (int)GameState->GamePhaseStep,
+            SafeZonesStartTime,
+            (void*)(GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator : nullptr),
+            (int)(GameMode->HasbSafeZoneActive() ? GameMode->bSafeZoneActive : false),
+            (void*)(GameMode->HasGE_OutsideSafeZone() ? GameMode->GE_OutsideSafeZone : nullptr));
     }
 }
 

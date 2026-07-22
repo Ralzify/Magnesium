@@ -137,6 +137,24 @@ void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena
 }
 static std::unordered_set<AFortPlayerControllerAthena*> PlayersInitialized;
 static std::unordered_set<AFortPlayerControllerAthena*> GPendingRespawnLandingFinalization;
+// Custom respawn setup is per replacement pawn, not per acknowledgement. A
+// client can acknowledge the same pawn again while finishing possession; doing
+// all of the setup again reinitializes abilities and can start a restart loop.
+static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GLastAcknowledgedPawn;
+// A guided missile temporarily replaces the acknowledged pawn. Remember the
+// living player pawn independently because the missile's native teardown can
+// emit ClientOnPawnDied and clear the normal respawn identity map.
+static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GRemoteControlReturnPawn;
+static const UClass* GetRemoteControlledPawnClass()
+{
+	static auto RemoteControlledPawnClass = FindClass("FortRemoteControlledPawnAthena");
+	return RemoteControlledPawnClass;
+}
+static bool IsLiveRemoteControlReturnPawn(AActor* Actor);
+// A late-game aircraft jump replaces the lobby pawn with the real match pawn.
+// Keep that possession distinct from both the initial lobby acknowledgement and
+// a death respawn so it always receives the configured late-game loadout once.
+static std::unordered_set<AFortPlayerControllerAthena*> GPendingLateGameAircraftLoadout;
 
 static bool IsFiniteRespawnLocation(FVector Location)
 {
@@ -264,6 +282,172 @@ static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory)
 
 static void RestoreEquipmentAfterRespawn(AFortPlayerControllerAthena* PlayerController);
 
+static void ClearLegacyPawnDeathFlags(AFortPlayerPawnAthena* Pawn)
+{
+	if (!Pawn)
+		return;
+
+	if (Pawn->HasbPlayedDying())
+		Pawn->bPlayedDying = false;
+	if (Pawn->HasbIsDying())
+		Pawn->bIsDying = false;
+	if (Pawn->HasbWasDBNOOnDeath())
+		Pawn->bWasDBNOOnDeath = false;
+	if (Pawn->HasbIsHiddenForDeath())
+		Pawn->bIsHiddenForDeath = false;
+	if (Pawn->HasbIsDBNO() && Pawn->bIsDBNO)
+	{
+		Pawn->bIsDBNO = false;
+		Pawn->OnRep_IsDBNO();
+	}
+}
+
+static void ClearLegacyPlayerStateDeathFlags(AFortPlayerStateAthena* PlayerState)
+{
+	if (!PlayerState || !PlayerState->HasDeathInfo())
+		return;
+
+	bool bChanged = false;
+	if (FDeathInfo::HasbInitialized() && PlayerState->DeathInfo.bInitialized)
+	{
+		PlayerState->DeathInfo.bInitialized = false;
+		bChanged = true;
+	}
+	if (FDeathInfo::HasbDBNO() && PlayerState->DeathInfo.bDBNO)
+	{
+		PlayerState->DeathInfo.bDBNO = false;
+		bChanged = true;
+	}
+
+	if (bChanged)
+	{
+		PlayerState->OnRep_DeathInfo();
+		PlayerState->ForceNetUpdate();
+	}
+}
+
+static bool IsRespawnBlockingAbility(const UFortGameplayAbility* Ability)
+{
+	if (!Ability)
+		return false;
+
+	const auto Name = Ability->Name.ToString();
+	return Name.find("DBNO") != std::string::npos ||
+		Name.find("DefaultPlayer_Death") != std::string::npos ||
+		Name.find("GenericDeath") != std::string::npos;
+}
+
+static bool IsRespawnBlockingEffect(const UGameplayEffect* Effect)
+{
+	if (!Effect)
+		return false;
+
+	const auto Name = Effect->Name.ToString();
+	return Name.find("DBNO") != std::string::npos ||
+		Name.find("Downed") != std::string::npos ||
+		Name.find("Death") != std::string::npos ||
+		Name.find("Dying") != std::string::npos;
+}
+
+static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!PlayerController || !PlayerController->PlayerState ||
+		!PlayerController->PlayerState->AbilitySystemComponent)
+	{
+		ClearLegacyPawnDeathFlags(Pawn);
+		return;
+	}
+
+	auto AbilitySystemComponent = PlayerController->PlayerState->AbilitySystemComponent;
+	struct FPendingAbilityCancel
+	{
+		FGameplayAbilitySpecHandle Handle{};
+		std::vector<uint8_t> ActivationInfoBytes;
+		bool bWasActive = false;
+	};
+	std::vector<FPendingAbilityCancel> AbilitiesToCancel;
+	const auto ActivationInfoSize = FGameplayAbilityActivationInfo::Size();
+	const bool bValidActivationInfoSize = ActivationInfoSize > 0 && ActivationInfoSize <= 0x100;
+	int ActiveAbilityCount = 0;
+	for (int Index = 0; Index < AbilitySystemComponent->ActivatableAbilities.Items.Num(); Index++)
+	{
+		auto& Spec = AbilitySystemComponent->ActivatableAbilities.Items.Get(
+			Index, FGameplayAbilitySpec::Size());
+		if (IsRespawnBlockingAbility(Spec.Ability))
+		{
+			if (!bValidActivationInfoSize)
+				continue;
+
+			FPendingAbilityCancel Pending{};
+			Pending.Handle = Spec.Handle;
+			Pending.ActivationInfoBytes.resize(ActivationInfoSize);
+			memcpy(Pending.ActivationInfoBytes.data(), &Spec.ActivationInfo,
+				ActivationInfoSize);
+			Pending.bWasActive = !Spec.HasActiveCount() || Spec.ActiveCount > 0;
+			ActiveAbilityCount += Pending.bWasActive ? 1 : 0;
+			AbilitiesToCancel.push_back(Pending);
+		}
+	}
+
+	for (auto& Ability : AbilitiesToCancel)
+	{
+		auto& ActivationInfo = *reinterpret_cast<FGameplayAbilityActivationInfo*>(
+			Ability.ActivationInfoBytes.data());
+		// Legacy death/DBNO abilities can reject cancellation while still owning
+		// BlockAbilitiesWithTag entries such as ActionPlayerChangeEquipment. Match
+		// the native/Reboot revive sequence. Always notify the client because its
+		// predicted copy can remain active even when the server's ActiveCount is 0.
+		AbilitySystemComponent->ClientCancelAbility(Ability.Handle, ActivationInfo);
+		AbilitySystemComponent->ClientEndAbility(Ability.Handle, ActivationInfo);
+		if (Ability.bWasActive)
+		{
+			FPredictionKey EmptyPredictionKey{};
+			AbilitySystemComponent->ServerEndAbility(
+				Ability.Handle, ActivationInfo, EmptyPredictionKey);
+		}
+	}
+
+	int RemainingActiveAbilityCount = 0;
+	for (int Index = 0; Index < AbilitySystemComponent->ActivatableAbilities.Items.Num(); Index++)
+	{
+		auto& Spec = AbilitySystemComponent->ActivatableAbilities.Items.Get(
+			Index, FGameplayAbilitySpec::Size());
+		if (IsRespawnBlockingAbility(Spec.Ability) &&
+			(!Spec.HasActiveCount() || Spec.ActiveCount > 0))
+			RemainingActiveAbilityCount++;
+	}
+
+	std::vector<FActiveGameplayEffectHandle> EffectsToRemove;
+	auto& Effects = AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+	for (int Index = 0; Index < Effects.Num(); Index++)
+	{
+		auto& Effect = Effects.Get(Index, FActiveGameplayEffect::Size());
+		if (!IsRespawnBlockingEffect(Effect.Spec.Def))
+			continue;
+
+		auto Handle = *(FActiveGameplayEffectHandle*)(__int64(&Effect) + 0xc);
+		if (Handle.Handle > 0)
+			EffectsToRemove.push_back(Handle);
+	}
+
+	int RemovedEffectCount = 0;
+	auto RemoveActiveEffectFn = AbilitySystemComponent->GetFunction("RemoveActiveGameplayEffect");
+	if (RemoveActiveEffectFn)
+	{
+		for (auto& Handle : EffectsToRemove)
+			if (AbilitySystemComponent->Call<bool>(RemoveActiveEffectFn, Handle, -1))
+				RemovedEffectCount++;
+	}
+
+	ClearLegacyPawnDeathFlags(Pawn);
+	SDK::DbgLog(
+		"[Respawn] cleared legacy death state controller=%p pawn=%p abilities=%d active=%d->%d effects=%d/%d\n",
+		(void*)PlayerController, (void*)Pawn, (int)AbilitiesToCancel.size(),
+		ActiveAbilityCount, RemainingActiveAbilityCount,
+		RemovedEffectCount, (int)EffectsToRemove.size());
+}
+
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
 
@@ -310,10 +494,79 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	if (!Pawn)
 		return;
 
-	auto FortPawn = (AFortPlayerPawnAthena*)Pawn;
-
 	static auto FortPCServerAcknowledgePossession = (void(*)(AFortPlayerControllerAthena*, AActor*))DefaultObjImpl("FortPlayerController")->Vft[Stack.GetCurrentNativeFunction()->GetVTableIndex()];
 	FortPCServerAcknowledgePossession(PlayerController, Pawn);
+
+	// Guided missiles temporarily possess a FortRemoteControlledPawnAthena. It
+	// is not a replacement player pawn, so none of the custom death-respawn
+	// setup (especially the configured mid-zone teleport) belongs here. Do not
+	// update GLastAcknowledgedPawn either: when native code returns control to
+	// the original character, that acknowledgement remains a duplicate and is
+	// likewise left completely to the native remote-control lifecycle.
+	auto RemoteControlledPawnClass = GetRemoteControlledPawnClass();
+	if (RemoteControlledPawnClass && Pawn->IsA(RemoteControlledPawnClass))
+	{
+		AActor* ReturnPawn = nullptr;
+		auto ExistingReturn = GRemoteControlReturnPawn.find(PlayerController);
+		if (ExistingReturn != GRemoteControlReturnPawn.end())
+			ReturnPawn = ExistingReturn->second;
+		else
+		{
+			auto LastAcknowledged = GLastAcknowledgedPawn.find(PlayerController);
+			if (LastAcknowledged != GLastAcknowledgedPawn.end() &&
+				LastAcknowledged->second != Pawn &&
+				IsLiveRemoteControlReturnPawn(LastAcknowledged->second))
+			{
+				ReturnPawn = LastAcknowledged->second;
+			}
+			else if (PlayerController->MyFortPawn != Pawn &&
+				IsLiveRemoteControlReturnPawn(PlayerController->MyFortPawn))
+			{
+				ReturnPawn = PlayerController->MyFortPawn;
+			}
+
+			if (ReturnPawn)
+				GRemoteControlReturnPawn[PlayerController] = ReturnPawn;
+		}
+
+		SDK::DbgLog("[Possession] native-only remote-control acknowledgement controller=%p pawn=%p return=%p\n",
+			(void*)PlayerController, (void*)Pawn, (void*)ReturnPawn);
+		return;
+	}
+
+	// Returning from a guided missile is not a pawn replacement. Even if the
+	// missile's death callback erased GLastAcknowledgedPawn, restore its identity
+	// and leave the complete native possession lifecycle untouched.
+	auto RemoteReturn = GRemoteControlReturnPawn.find(PlayerController);
+	if (RemoteReturn != GRemoteControlReturnPawn.end())
+	{
+		auto ExpectedPawn = RemoteReturn->second;
+		GRemoteControlReturnPawn.erase(RemoteReturn);
+		if (ExpectedPawn == Pawn && IsLiveRemoteControlReturnPawn(Pawn))
+		{
+			GLastAcknowledgedPawn[PlayerController] = Pawn;
+			SDK::DbgLog("[Possession] native-only remote-control return controller=%p pawn=%p\n",
+				(void*)PlayerController, (void*)Pawn);
+			return;
+		}
+	}
+
+	const bool bPendingLateGameAircraftLoadout =
+		GPendingLateGameAircraftLoadout.erase(PlayerController) > 0;
+	const auto LastAcknowledgedPawn = GLastAcknowledgedPawn.find(PlayerController);
+	const bool bNewAcknowledgedPawn = LastAcknowledgedPawn == GLastAcknowledgedPawn.end() ||
+		LastAcknowledgedPawn->second != Pawn;
+	GLastAcknowledgedPawn[PlayerController] = Pawn;
+
+	auto FortPawn = (AFortPlayerPawnAthena*)Pawn;
+
+	// The native acknowledgement still has to run for retries, but all custom
+	// initialization below must run only once for this pawn. In particular,
+	// repeating InitializePlayerGameplayAbilities continually restarts the Fall
+	// action and prevents the client from completing possession.
+	if (!bNewAcknowledgedPawn && !bPendingLateGameAircraftLoadout &&
+		!GFinalizePossessTakeover.contains(PlayerController))
+		return;
 
 	auto Num = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num();
 
@@ -371,21 +624,17 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	// respawning player with zero entries. Track whether this controller has
 	// already acknowledged a pawn instead, so an empty-inventory respawn still
 	// exits the death/spectating state and restores usable equipment.
-	const bool bRestoringRespawnPawn = bRespawnAllowed && PlayersInitialized.contains(PlayerController);
+	const bool bRestoringRespawnPawn = !bPendingLateGameAircraftLoadout &&
+		bNewAcknowledgedPawn && bRespawnAllowed && PlayersInitialized.contains(PlayerController);
 	if (bRestoringRespawnPawn)
 	{
 		GPendingRespawnLandingFinalization.insert(PlayerController);
-		ResetLowerSeasonStormStateForRespawn(PlayerController, nullptr, FortPawn);
 
-		// On pre-RespawnData builds possession can complete while the controller
-		// remains in its death/spectating state. The inventory then appears but
-		// every item activation is rejected with "Cannot Do That Now".
-		FortPawn->bPlayedDying(false);
-		if (FortPawn->HasbIsDBNO() && FortPawn->bIsDBNO)
-		{
-			FortPawn->bIsDBNO = false;
-			FortPawn->OnRep_IsDBNO();
-		}
+		// RestartPlayer/Possess already completed the native replacement-pawn
+		// lifecycle before this client acknowledgement. Calling
+		// RespawnPlayerAfterDeath here starts another pawn transition and feeds back
+		// into ServerAcknowledgePossession on legacy builds.
+		ClearRespawnBlockingAbilityState(PlayerController, FortPawn);
 
 		PlayerController->StateName = FName(L"Playing");
 		PlayerController->ClientGotoState(FName(L"Playing"));
@@ -710,7 +959,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 	if ((!FConfiguration::bKeepInventory || FConfiguration::bLateGame) && PlayerController->WorldInventory)
 	{	
-		if (!PlayersInitialized.contains(PlayerController))
+		if (bPendingLateGameAircraftLoadout || !PlayersInitialized.contains(PlayerController))
 		{
 			UEAllocatedVector<FGuid> GuidsToRemove;
 			for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
@@ -789,12 +1038,71 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 	}
-	else
+	else if (!bRestoringRespawnPawn)
 		for (auto& AbilitySet : AFortGameMode::AbilitySets)
 			PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
 	if (bRestoringRespawnPawn)
 	{
+		// Ability initialization can restore persistent death/DBNO state, so final
+		// cleanup must run after it and before any item is equipped.
+		ClearRespawnBlockingAbilityState(PlayerController, FortPawn);
+		ResetLowerSeasonStormStateForRespawn(PlayerController, nullptr, FortPawn);
+
+		auto AbilitySystemComponent = PlayerController->PlayerState
+			? PlayerController->PlayerState->AbilitySystemComponent : nullptr;
+		bool bWasActivationInhibited = false;
+		bool bIsActivationInhibited = false;
+		if (AbilitySystemComponent)
+		{
+			if (auto GetInhibitedFn = AbilitySystemComponent->GetFunction("GetUserAbilityActivationInhibited"))
+				bWasActivationInhibited = AbilitySystemComponent->Call<bool>(GetInhibitedFn);
+
+			if (bWasActivationInhibited)
+				if (auto SetInhibitedFn = AbilitySystemComponent->GetFunction("SetUserAbilityActivationInhibited"))
+					AbilitySystemComponent->Call<void>(SetInhibitedFn, false);
+
+			if (auto GetInhibitedFn = AbilitySystemComponent->GetFunction("GetUserAbilityActivationInhibited"))
+				bIsActivationInhibited = AbilitySystemComponent->Call<bool>(GetInhibitedFn);
+		}
+
+		SDK::DbgLog(
+			"[Respawn] ASC lifecycle controller=%p owner=%p avatar=%p expectedOwner=%p expectedAvatar=%p inhibited=%d->%d\n",
+			(void*)PlayerController,
+			(void*)(AbilitySystemComponent && AbilitySystemComponent->HasOwnerActor()
+				? AbilitySystemComponent->OwnerActor : nullptr),
+			(void*)(AbilitySystemComponent && AbilitySystemComponent->HasAvatarActor()
+				? AbilitySystemComponent->AvatarActor : nullptr),
+			(void*)PlayerController->PlayerState, (void*)FortPawn,
+			(int)bWasActivationInhibited, (int)bIsActivationInhibited);
+
+		if (PlayerController->HasbMarkedAlive())
+			PlayerController->bMarkedAlive = true;
+		if (PlayerController->HasbClientNotifiedOfPawnDied())
+			PlayerController->bClientNotifiedOfPawnDied = false;
+
+		ClearLegacyPlayerStateDeathFlags(
+			(AFortPlayerStateAthena*)PlayerController->PlayerState);
+
+		// This reliable client notification performs the client-side half of the
+		// replacement-pawn lifecycle (including releasing death input/action
+		// state). Keep it one-shot here; ClientRestart or another server respawn
+		// from this acknowledgement would create a possession feedback loop.
+		PlayerController->ClientOnPawnSpawned();
+
+		bool bControllerInputIgnored = false;
+		if (auto IsIgnoredFn = PlayerController->GetFunction("IsActionInputIgnored"))
+			bControllerInputIgnored = PlayerController->Call<bool>(IsIgnoredFn);
+		bool bPawnInputIgnored = false;
+		if (auto IsIgnoredFn = FortPawn->GetFunction("IsActionInputIgnored"))
+			bPawnInputIgnored = FortPawn->Call<bool>(IsIgnoredFn);
+		SDK::DbgLog(
+			"[Respawn] client lifecycle controller=%p deathInput=%p actionIgnored=%d pawnIgnored=%d\n",
+			(void*)PlayerController,
+			(void*)(PlayerController->HasDeathInputComponent()
+				? PlayerController->DeathInputComponent : nullptr),
+			(int)bControllerInputIgnored, (int)bPawnInputIgnored);
+
 		if (FConfiguration::bLateGame && !FConfiguration::bKeepInventory)
 			LateGame::EquipLoadout(PlayerController);
 
@@ -804,7 +1112,11 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	if (FConfiguration::bForceRespawns && PlayersInitialized.contains(PlayerController))
 	{
 		FortPawn->SetHealth(100.f);
-		FortPawn->SetShield(100.f);
+		// Infinite respawns should not turn a normal BR aircraft jump into a
+		// full-shield spawn. Match native Erbium and leave the fresh pawn's zero
+		// shield untouched unless late game explicitly grants full shield.
+		if (FConfiguration::bLateGame)
+			FortPawn->SetShield(100.f);
 	}
 
 	if (Num == 0)
@@ -887,15 +1199,19 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
 	}
-	else if (FConfiguration::bLateGame && (!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
+	if (FConfiguration::bLateGame && (bPendingLateGameAircraftLoadout || Num != 0) &&
+		(!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
 	{
-		if (!PlayersInitialized.contains(PlayerController))
+		if (bPendingLateGameAircraftLoadout || !PlayersInitialized.contains(PlayerController))
 		{
 			PlayersInitialized.insert(PlayerController);
 
 			FortPawn->SetShield(100.f);
 
 			LateGame::EquipLoadout(PlayerController);
+			SDK::DbgLog("[LateGame] aircraft loadout granted controller=%p pending=%d initialEntries=%d finalEntries=%d\n",
+				(void*)PlayerController, (int)bPendingLateGameAircraftLoadout, Num,
+				PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num());
 
 			if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints && !FConfiguration::bForceRespawns)
 			{
@@ -1017,6 +1333,9 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 			PlayerController = (AFortPlayerControllerAthena*)((UActorComponent*)Context)->GetOwner();
 		else
 			PlayerController = (AFortPlayerControllerAthena*)Context;
+
+		if (FConfiguration::bLateGame && PlayerController)
+			GPendingLateGameAircraftLoadout.insert(PlayerController);
 
 		if (FConfiguration::IsKnownS27CustomMapPlaylist())
 		{
@@ -2013,6 +2332,24 @@ static bool IsUsableDeathObject(const UObject* Object)
 	return Object->Class && !IsBadReadPtr(Object->Class);
 }
 
+static bool IsLiveRemoteControlReturnPawn(AActor* Actor)
+{
+	if (!IsUsableDeathObject(Actor))
+		return false;
+
+	auto Pawn = Actor->Cast<AFortPlayerPawnAthena>();
+	if (!Pawn || Pawn->GetHealth() <= 0.f)
+		return false;
+	if (Pawn->HasbIsDying() && Pawn->bIsDying)
+		return false;
+	if (Pawn->HasbPlayedDying() && Pawn->bPlayedDying)
+		return false;
+	if (Pawn->HasbIsDBNO() && Pawn->bIsDBNO)
+		return false;
+
+	return true;
+}
+
 static AFortWeapon* GetPawnCurrentWeaponSafe(AFortPlayerPawnAthena* Pawn)
 {
 	if (!IsUsableDeathObject(Pawn) || !Pawn->HasCurrentWeapon())
@@ -2155,12 +2492,7 @@ void AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(AFortPlayerControl
 	if (!PlayerController || !Pawn || GPendingRespawnLandingFinalization.erase(PlayerController) == 0)
 		return;
 
-	Pawn->bPlayedDying(false);
-	if (Pawn->HasbIsDBNO() && Pawn->bIsDBNO)
-	{
-		Pawn->bIsDBNO = false;
-		Pawn->OnRep_IsDBNO();
-	}
+	ClearLegacyPawnDeathFlags(Pawn);
 
 	PlayerController->StateName = FName(L"Playing");
 	PlayerController->ClientGotoState(FName(L"Playing"));
@@ -2175,6 +2507,25 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 {
 	if (!PlayerController)
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
+
+	// Remote-controlled projectiles use the pawn-death notification to end their
+	// native possession. If the remembered character is still alive, this is the
+	// missile dying, not the player: running our custom elimination path here
+	// drops inventory and makes the native return look like a configured respawn.
+	auto RemoteReturn = GRemoteControlReturnPawn.find(PlayerController);
+	if (RemoteReturn != GRemoteControlReturnPawn.end() &&
+		IsLiveRemoteControlReturnPawn(RemoteReturn->second))
+	{
+		SDK::DbgLog("[Possession] remote-control pawn death left to native controller=%p return=%p\n",
+			(void*)PlayerController, (void*)RemoteReturn->second);
+		return ClientOnPawnDiedOG(PlayerController, DeathReport);
+	}
+	GRemoteControlReturnPawn.erase(PlayerController);
+
+	// Allow the next replacement pawn to receive exactly one respawn setup even
+	// if the allocator happens to reuse the dead pawn's address.
+	GLastAcknowledgedPawn.erase(PlayerController);
+
 	auto World = UWorld::GetWorld();
 	auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
 	auto GameState = GameMode ? (AFortGameStateAthena*)GameMode->GameState : nullptr;
@@ -2859,7 +3210,7 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		PlayerController->RespawnPlayerAfterDeath(true);
 
 		NewPawn->SetHealth(100.f);
-		NewPawn->SetShield(100.f);
+		NewPawn->SetShield(FConfiguration::bLateGame ? 100.f : 0.f);
 
 		// -315.373858 219.791659 452.150000 // button
 		if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn") && VersionInfo.FortniteVersion == 27.11)
@@ -2905,9 +3256,6 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 
 			InitializePlayerGameplayAbilities(Interface);
 		}
-		else
-			for (auto& AbilitySet : AFortGameMode::AbilitySets)
-				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
 		ResetLowerSeasonStormStateForRespawn(PlayerController, OldPawn, NewPawn);
 		RestoreEquipmentAfterRespawn(PlayerController);
@@ -5941,7 +6289,10 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					}
 
 					Pawn->bIsDBNO = false;
-					Pawn->bPlayedDying(false);
+					if (Pawn->HasbPlayedDying())
+						Pawn->bPlayedDying = false;
+					if (Pawn->HasbIsDying())
+						Pawn->bIsDying = false;
 
 					auto MaxHealth = Pawn->GetMaxHealth();
 					Pawn->SetHealth(MaxHealth);

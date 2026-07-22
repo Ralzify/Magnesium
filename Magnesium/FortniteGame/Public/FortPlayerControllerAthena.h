@@ -442,7 +442,10 @@ public:
     DEFINE_BITFIELD_PROP(bTryPickupSwap);
     DEFINE_PROP(bEnableBroadcastRemoteClientInfo, bool);
     DEFINE_BITFIELD_PROP(bReadyToStartMatch);
+    DEFINE_BITFIELD_PROP(bMarkedAlive);
+    DEFINE_BITFIELD_PROP(bClientNotifiedOfPawnDied);
     DEFINE_BITFIELD_PROP(bHoldingObject);
+    DEFINE_PROP(DeathInputComponent, UActorComponent*);
     DEFINE_PROP(StrongMyHero, UObject*);
     DEFINE_PROP(OwnedPortal, AActor*);
     DEFINE_PROP(CreativePlotLinkedVolume, AFortVolume*);
@@ -468,6 +471,8 @@ public:
     DEFINE_FUNC(ClientNotifyTeamWon, void);
     DEFINE_FUNC(ClientMessage, void);
     DEFINE_FUNC(ClientGotoState, void);
+    DEFINE_FUNC(ClientOnPawnSpawned, void);
+    DEFINE_FUNC(IsActionInputIgnored, bool);
     DEFINE_FUNC(IsInAircraft, bool);
     DEFINE_FUNC(ServerSetTeam, void);
     DEFINE_FUNC(GetAircraftComponent, UFortControllerComponent_Aircraft*);

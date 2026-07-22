@@ -59,7 +59,7 @@ struct FConfiguration
     static inline auto bHasPickaxe = true;
 
     static inline auto bLateGame = true;
-    static inline auto LateGameZone = 3; // original Erbium starting zone; GUI selects newer defaults by version
+    static inline auto LateGameZone = 4; // default starting zone; Season 27 selects its version-specific phase in the GUI
     static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
 
     static inline auto bCustomSafeZone = false;

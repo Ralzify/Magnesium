@@ -9,6 +9,7 @@
 #include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 
 #include <cmath>
+#include <unordered_set>
 
 uint32_t NetworkObjectListOffset = 0;
 uint32_t ReplicationFrameOffset = 0;
@@ -506,6 +507,12 @@ static UClass* GetLowerSeasonStormEffectClass()
 	return StormEffectClass;
 }
 
+// FN 4.x-6.x can retain an internal SafeZoneInsideChecks latch after replacing
+// a pawn. Only players that actually respawn are enrolled in the deduplicated
+// state backstop below; untouched native storm behavior remains unchanged.
+static std::unordered_set<AFortPlayerControllerAthena*> GRespawnManagedStormPlayers;
+static std::unordered_set<AFortPlayerControllerAthena*> GRespawnStormStateLoggedPlayers;
+
 static std::vector<FActiveGameplayEffectHandle> FindLowerSeasonStormEffectHandles(
 	UAbilitySystemComponent* AbilitySystemComponent, UClass* StormEffectClass)
 {
@@ -521,6 +528,51 @@ static std::vector<FActiveGameplayEffectHandle> FindLowerSeasonStormEffectHandle
 			Handles.push_back(*(FActiveGameplayEffectHandle*)(__int64(&Effect) + 0xc));
 	}
 	return Handles;
+}
+
+static int NormalizeLowerSeasonStormEffectLevels(AFortGameMode* GameMode,
+	UClass* StormEffectClass, int DesiredLevel, int& UpdatedCount)
+{
+	UpdatedCount = 0;
+	if (!GameMode || !StormEffectClass || DesiredLevel < 1)
+		return 0;
+
+	const bool bCanReadLevel = FGameplayEffectSpec::HasLevel();
+	int FoundCount = 0;
+	for (auto& UncastedPlayer : GameMode->AlivePlayers)
+	{
+		auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
+		if (!Player || !Player->PlayerState || !Player->PlayerState->AbilitySystemComponent)
+			continue;
+
+		auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
+		auto& Effects = AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+		for (int Index = 0; Index < Effects.Num(); Index++)
+		{
+			auto& Effect = Effects.Get(Index, FActiveGameplayEffect::Size());
+			if (!Effect.Spec.Def || !Effect.Spec.Def->IsA(StormEffectClass))
+				continue;
+
+			FoundCount++;
+			const float PreviousLevel = bCanReadLevel ? Effect.Spec.Level : -1.f;
+			if (bCanReadLevel && std::isfinite((double)PreviousLevel) &&
+				std::abs(PreviousLevel - (float)DesiredLevel) < 0.01f)
+			{
+				continue;
+			}
+
+			auto Handle = *(FActiveGameplayEffectHandle*)(__int64(&Effect) + 0xc);
+			if (Handle.Handle <= 0)
+				continue;
+
+			AbilitySystemComponent->SetActiveGameplayEffectLevel(Handle, DesiredLevel);
+			UpdatedCount++;
+			SDK::DbgLog("[SafeZone] normalized native storm effect controller=%p handle=%d level=%.2f->%d\n",
+				(void*)Player, Handle.Handle, PreviousLevel, DesiredLevel);
+		}
+	}
+
+	return FoundCount;
 }
 
 static bool RemoveLowerSeasonStormEffectHandle(UAbilitySystemComponent* AbilitySystemComponent,
@@ -567,22 +619,6 @@ static void RemoveLowerSeasonStormEffects(UAbilitySystemComponent* AbilitySystem
 	AbilitySystemComponent->ProcessEvent(RemoveBySourceFn, &Params);
 }
 
-void ResetLowerSeasonStormStateForRespawn(AFortPlayerControllerAthena* Player,
-	AFortPlayerPawnAthena* OldPawn, AFortPlayerPawnAthena* NewPawn)
-{
-	if (VersionInfo.FortniteVersion >= 7.00 || !Player)
-		return;
-
-	if (!Player->PlayerState)
-		return;
-
-	// PlayerState and its ASC survive a lower-season pawn replacement. Clear the
-	// old pawn's periodic storm effect; the native-wall sync below starts a fresh
-	// entry delay if the replacement pawn really is outside.
-	auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
-	RemoveLowerSeasonStormEffects(AbilitySystemComponent, GetLowerSeasonStormEffectClass());
-}
-
 static bool SetReflectedSafeZoneBool(UObject* Object, const char* PropertyName, bool Value)
 {
 	if (!Object)
@@ -605,6 +641,213 @@ static bool SetReflectedSafeZoneBool(UObject* Object, const char* PropertyName, 
 		Byte = Value ? 1 : 0;
 
 	return true;
+}
+
+static bool SetReflectedSafeZoneClass(UObject* Object, const char* PropertyName,
+	UClass* NewValue, UClass*& PreviousValue)
+{
+	PreviousValue = nullptr;
+	if (!Object)
+		return false;
+
+	auto Property = Object->GetProperty(PropertyName, 0x400);
+	if (!Property)
+		return false;
+
+	auto Offset = GetFromOffset<uint32>(Property, Offsets::Offset_Internal);
+	auto ElementSize = GetFromOffset<uint32>(Property, Offsets::ElementSize);
+	if (Offset == (uint32)-1 || ElementSize != sizeof(UClass*))
+		return false;
+
+	auto& Value = GetFromOffset<UClass*>(Object, Offset);
+	PreviousValue = Value;
+	Value = NewValue;
+	return true;
+}
+
+void ResetLowerSeasonStormStateForRespawn(AFortPlayerControllerAthena* Player,
+	AFortPlayerPawnAthena* OldPawn, AFortPlayerPawnAthena* NewPawn)
+{
+	if (VersionInfo.FortniteVersion >= 7.00 || !Player || !Player->PlayerState)
+		return;
+
+	// The lower-season PlayerState ASC survives pawn replacement. Removing its
+	// periodic GE is necessary when the new pawn respawns in safety, but the
+	// native pawn also caches that it is already outside and which GE it applied.
+	// Clear both sides so the next native SafeZoneInsideChecks call can observe a
+	// fresh safe-to-storm transition and attach exactly one new effect.
+	auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
+	auto StormEffectClass = GetLowerSeasonStormEffectClass();
+	if (VersionInfo.FortniteVersion >= 4.00)
+	{
+		GRespawnManagedStormPlayers.insert(Player);
+		GRespawnStormStateLoggedPlayers.erase(Player);
+	}
+	const int HandlesBefore = (int)FindLowerSeasonStormEffectHandles(
+		AbilitySystemComponent, StormEffectClass).size();
+	RemoveLowerSeasonStormEffects(AbilitySystemComponent, StormEffectClass);
+	const int HandlesAfter = (int)FindLowerSeasonStormEffectHandles(
+		AbilitySystemComponent, StormEffectClass).size();
+
+	bool bOldOutsideReset = false;
+	bool bNewOutsideReset = false;
+	UClass* OldAppliedEffect = nullptr;
+	UClass* NewAppliedEffect = nullptr;
+
+	if (OldPawn)
+	{
+		bOldOutsideReset = SetReflectedSafeZoneBool(OldPawn, "bIsOutsideSafeZone", false);
+		SetReflectedSafeZoneBool(OldPawn, "bIsOutsideSafeZoneCached", false);
+		SetReflectedSafeZoneClass(OldPawn, "SafeZoneAppliedGE", nullptr, OldAppliedEffect);
+	}
+
+	if (NewPawn && NewPawn != OldPawn)
+	{
+		bNewOutsideReset = SetReflectedSafeZoneBool(NewPawn, "bIsOutsideSafeZone", false);
+		SetReflectedSafeZoneBool(NewPawn, "bIsOutsideSafeZoneCached", false);
+		SetReflectedSafeZoneClass(NewPawn, "SafeZoneAppliedGE", nullptr, NewAppliedEffect);
+		NewPawn->ForceNetUpdate();
+	}
+
+	SDK::DbgLog(
+		"[SafeZone] respawn reset controller=%p oldPawn=%p newPawn=%p handles=%d->%d oldOutside=%d newOutside=%d oldGE=%p newGE=%p\n",
+		(void*)Player, (void*)OldPawn, (void*)NewPawn, HandlesBefore, HandlesAfter,
+		(int)bOldOutsideReset, (int)bNewOutsideReset,
+		(void*)OldAppliedEffect, (void*)NewAppliedEffect);
+}
+
+static void SynchronizeRespawnManagedStormEffects(UNetDriver* Driver,
+	AFortGameMode* GameMode, UClass* StormEffectClass, int DamageEffectLevel)
+{
+	if (!Driver || !GameMode || !StormEffectClass || VersionInfo.FortniteVersion < 4.00 ||
+		GRespawnManagedStormPlayers.empty())
+	{
+		return;
+	}
+
+	auto Indicator = GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator : nullptr;
+	if (!Indicator)
+		return;
+
+	// 4.5-6.21 do not expose AFortGameMode::IsInCurrentSafeZone. Radius is the
+	// live outer wall; GetSafeZoneRadius can resolve to the upcoming white-circle
+	// preview on these legacy indicators and incorrectly damage players between
+	// that preview and the current wall.
+	auto GetSafeZoneCenterFn = Indicator->GetFunction("GetSafeZoneCenter");
+	if (!GetSafeZoneCenterFn || !Indicator->HasRadius())
+		return;
+
+	const auto SafeZoneCenter = Indicator->Call<FVector>(GetSafeZoneCenterFn);
+	const float SafeZoneRadius = Indicator->Radius;
+	if (!std::isfinite(SafeZoneCenter.X) || !std::isfinite(SafeZoneCenter.Y) ||
+		!std::isfinite(SafeZoneRadius) || SafeZoneRadius <= 0.0f)
+	{
+		return;
+	}
+
+	const double SafeZoneRadiusSquared =
+		(double)SafeZoneRadius * (double)SafeZoneRadius;
+
+	// Once 4.5 has respawned a player this function replaces its faulty native
+	// inside callback, so synchronize every active player rather than only the
+	// respawned controller. Other lower-season versions retain native ownership.
+	const bool bSynchronizeAllPlayers = VersionInfo.FortniteVersion < 5.00;
+	std::unordered_set<AFortPlayerControllerAthena*> PlayersToSynchronize;
+	for (auto Connection : Driver->ClientConnections)
+	{
+		if (!Connection)
+			continue;
+
+		auto Player = Connection->PlayerController;
+		if (!Player && Connection->OwningActor &&
+			Connection->OwningActor->IsA(AFortPlayerControllerAthena::StaticClass()))
+		{
+			Player = (AFortPlayerControllerAthena*)Connection->OwningActor;
+		}
+
+		if (Player && (bSynchronizeAllPlayers || GRespawnManagedStormPlayers.contains(Player)))
+			PlayersToSynchronize.insert(Player);
+	}
+
+	for (auto& UncastedPlayer : GameMode->AlivePlayers)
+	{
+		auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
+		if (Player && (bSynchronizeAllPlayers || GRespawnManagedStormPlayers.contains(Player)))
+			PlayersToSynchronize.insert(Player);
+	}
+
+	for (auto Player : PlayersToSynchronize)
+	{
+		if (!Player->MyFortPawn || !Player->PlayerState ||
+			!Player->PlayerState->AbilitySystemComponent)
+		{
+			continue;
+		}
+
+		auto Pawn = Player->MyFortPawn;
+		auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
+		const auto PawnLocation = Pawn->K2_GetActorLocation();
+		const double DeltaX = (double)PawnLocation.X - (double)SafeZoneCenter.X;
+		const double DeltaY = (double)PawnLocation.Y - (double)SafeZoneCenter.Y;
+		const bool bInsideSafeZone =
+			DeltaX * DeltaX + DeltaY * DeltaY <= SafeZoneRadiusSquared;
+		auto Handles = FindLowerSeasonStormEffectHandles(AbilitySystemComponent, StormEffectClass);
+		if (GRespawnStormStateLoggedPlayers.insert(Player).second)
+		{
+			SDK::DbgLog(
+				"[SafeZone] respawn sync observed controller=%p pawn=(%.1f,%.1f) wall=(%.1f,%.1f) radius=%.1f last=%.1f next=%.1f inside=%d handles=%d\n",
+				(void*)Player, PawnLocation.X, PawnLocation.Y,
+				SafeZoneCenter.X, SafeZoneCenter.Y, SafeZoneRadius,
+				Indicator->HasLastRadius() ? Indicator->LastRadius : -1.f,
+				Indicator->HasNextRadius() ? Indicator->NextRadius : -1.f,
+				(int)bInsideSafeZone, (int)Handles.size());
+		}
+
+		if (bInsideSafeZone)
+		{
+			if (!Handles.empty())
+			{
+				RemoveLowerSeasonStormEffects(AbilitySystemComponent, StormEffectClass);
+				SDK::DbgLog("[SafeZone] respawn sync removed storm effect controller=%p handles=%d\n",
+					(void*)Player, (int)Handles.size());
+			}
+
+			SetReflectedSafeZoneBool(Pawn, "bIsOutsideSafeZone", false);
+			SetReflectedSafeZoneBool(Pawn, "bIsOutsideSafeZoneCached", false);
+			const bool bInStormChanged = SetReflectedSafeZoneBool(Pawn, "bIsInAnyStorm", false);
+			const bool bInsideChanged = SetReflectedSafeZoneBool(Pawn, "bIsInsideSafeZone", true);
+			if (bInStormChanged)
+				if (auto OnRepFn = Pawn->GetFunction("OnRep_IsInAnyStorm"))
+					Pawn->ProcessEvent(OnRepFn, nullptr);
+			if (bInsideChanged)
+				if (auto OnRepFn = Pawn->GetFunction("OnRep_IsInsideSafeZone"))
+					Pawn->ProcessEvent(OnRepFn, nullptr);
+			UClass* PreviousAppliedEffect = nullptr;
+			SetReflectedSafeZoneClass(Pawn, "SafeZoneAppliedGE", nullptr, PreviousAppliedEffect);
+			continue;
+		}
+
+		if (Handles.empty())
+		{
+			auto Context = AbilitySystemComponent->MakeEffectContext();
+			Context.Instigator = Player;
+			Context.Causer = Pawn;
+			Context.AddSourceObject(Pawn);
+			auto Handle = AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(
+				StormEffectClass, (float)DamageEffectLevel, Context);
+
+			if (Handle.Handle > 0)
+				SDK::DbgLog("[SafeZone] respawn sync applied storm effect controller=%p handle=%d level=%d\n",
+					(void*)Player, Handle.Handle, DamageEffectLevel);
+		}
+
+		SetReflectedSafeZoneBool(Pawn, "bIsOutsideSafeZone", true);
+		SetReflectedSafeZoneBool(Pawn, "bIsInAnyStorm", true);
+		SetReflectedSafeZoneBool(Pawn, "bIsInsideSafeZone", false);
+		UClass* PreviousAppliedEffect = nullptr;
+		SetReflectedSafeZoneClass(Pawn, "SafeZoneAppliedGE", StormEffectClass, PreviousAppliedEffect);
+		Pawn->ForceNetUpdate();
+	}
 }
 
 static void SyncErbiumSafeZonePreviewPause(UNetDriver* Driver)
@@ -660,11 +903,19 @@ static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
 	static UWorld* LastWorld = nullptr;
 	static float NextCheckTime = 0.f;
 	static bool bLoggedForWorld = false;
+	static bool bLoggedFourFiveRespawnReplacement = false;
+	static int LastEffectHandleCount = -1;
+	static int LastEffectLevel = -1;
 	if (LastWorld != World)
 	{
 		LastWorld = World;
+		GRespawnManagedStormPlayers.clear();
+		GRespawnStormStateLoggedPlayers.clear();
 		NextCheckTime = 0.f;
 		bLoggedForWorld = false;
+		bLoggedFourFiveRespawnReplacement = false;
+		LastEffectHandleCount = -1;
+		LastEffectLevel = -1;
 	}
 
 	const float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(World);
@@ -700,8 +951,51 @@ static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
 			StormEffectDelay);
 	}
 
-	if (SafeZoneInsideChecksFn)
+	// 4.5's native callback can emit an instant storm execution against a
+	// respawned pawn even when the live indicator says it is safe. The instant
+	// GE is gone before handle cleanup can see it. After the first respawn, stop
+	// invoking that callback and let the deduplicated indicator-based pass own
+	// both entry and exit for 4.x. Pre-respawn and all other versions stay native.
+	const bool bReplaceFourFiveNativeCheck =
+		VersionInfo.FortniteVersion >= 4.00 && VersionInfo.FortniteVersion < 5.00 &&
+		!GRespawnManagedStormPlayers.empty();
+	if (bReplaceFourFiveNativeCheck && !bLoggedFourFiveRespawnReplacement)
+	{
+		bLoggedFourFiveRespawnReplacement = true;
+		SDK::DbgLog("[SafeZone] 4.x post-respawn damage check switched to indicator ownership\n");
+	}
+
+	if (SafeZoneInsideChecksFn && !bReplaceFourFiveNativeCheck)
 		GameMode->ProcessEvent(SafeZoneInsideChecksFn, nullptr);
+
+	if (SafeZoneInsideChecksFn || bReplaceFourFiveNativeCheck)
+	{
+		// The lower-season asset scales its periodic Default.SafeZone.Damage curve
+		// from the GameplayEffect level.  Native entry can attach it at level zero
+		// while lategame is rapidly skipping phases, yielding the storm visuals but
+		// no health ticks.  Correct that same handle rather than applying a second
+		// effect (which previously caused double ticks).
+		const int GameModePhase = GameMode->HasSafeZonePhase() ? GameMode->SafeZonePhase : 0;
+		const int IndicatorPhase = GameMode->SafeZoneIndicator->HasCurrentPhase()
+			? GameMode->SafeZoneIndicator->CurrentPhase
+			: 0;
+		const int HighestStormPhase = GameModePhase > IndicatorPhase ? GameModePhase : IndicatorPhase;
+		const int DamageEffectLevel = HighestStormPhase > 1 ? HighestStormPhase : 1;
+		SynchronizeRespawnManagedStormEffects(
+			Driver, GameMode, GetLowerSeasonStormEffectClass(), DamageEffectLevel);
+		int UpdatedEffectCount = 0;
+		const int EffectHandleCount = NormalizeLowerSeasonStormEffectLevels(
+			GameMode, GetLowerSeasonStormEffectClass(), DamageEffectLevel, UpdatedEffectCount);
+
+		if (UpdatedEffectCount > 0 || EffectHandleCount != LastEffectHandleCount ||
+			DamageEffectLevel != LastEffectLevel)
+		{
+			SDK::DbgLog("[SafeZone] native storm effects gameModePhase=%d indicatorPhase=%d level=%d handles=%d updated=%d\n",
+				GameModePhase, IndicatorPhase, DamageEffectLevel, EffectHandleCount, UpdatedEffectCount);
+			LastEffectHandleCount = EffectHandleCount;
+			LastEffectLevel = DamageEffectLevel;
+		}
+	}
 }
 
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)

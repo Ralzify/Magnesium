@@ -583,20 +583,25 @@ extern uint64_t CanAffordToPlaceBuildableClass_;
 extern uint64_t CantBuild_;
 void AFortDecoTool::ServerCreateBuildingAndSpawnDeco(UObject* Context, FFrame& Stack)
 {
-	FVector BuildingLocation;
-	FRotator BuildingRotation;
-	FVector Location;
-	FRotator Rotation;
-	uint8_t InBuildingAttachmentType;
-	bool bSpawnDecoOnExtraPiece;
-	FVector BuildingExtraPieceLocation;
+	FVector BuildingLocation{};
+	FRotator BuildingRotation{};
+	FVector Location{};
+	FRotator Rotation{};
+	uint8_t InBuildingAttachmentType = 0;
+	bool bSpawnDecoOnExtraPiece = false;
+	FVector BuildingExtraPieceLocation{};
+	auto NativeFunction = Stack.GetCurrentNativeFunction();
 	Stack.StepCompiledIn(&BuildingLocation);
 	Stack.StepCompiledIn(&BuildingRotation);
 	Stack.StepCompiledIn(&Location);
 	Stack.StepCompiledIn(&Rotation);
 	Stack.StepCompiledIn(&InBuildingAttachmentType);
-	Stack.StepCompiledIn(&bSpawnDecoOnExtraPiece);
-	Stack.StepCompiledIn(&BuildingExtraPieceLocation);
+	// Extra-piece parameters were added after the original five-parameter RPC.
+	// Stepping fields which are absent advances legacy stacks into unrelated data.
+	if (NativeFunction && NativeFunction->GetProperty("bSpawnDecoOnExtraPiece"))
+		Stack.StepCompiledIn(&bSpawnDecoOnExtraPiece);
+	if (NativeFunction && NativeFunction->GetProperty("BuildingExtraPieceLocation"))
+		Stack.StepCompiledIn(&BuildingExtraPieceLocation);
 	Stack.IncrementCode();
 
 	auto Tool = (AFortDecoTool*)Context;
@@ -848,9 +853,31 @@ void ABuildingSMActor::PostLoadHook()
 	Utils::Hook(OnDamageServerAddr, OnDamageServer, OnDamageServerOG);
 	SDK::DbgLog("  [BSM] 5 OnDamageServer hooked\n");
 
-	if (auto Func = AFortDecoTool::GetDefaultObj()->GetFunction("ServerSpawnDeco"))
-		Utils::ExecHook(Func, AFortDecoTool::ServerSpawnDeco_, AFortDecoTool::ServerSpawnDeco_OG);
-	Utils::ExecHook(AFortDecoTool::GetDefaultObj()->GetFunction("ServerCreateBuildingAndSpawnDeco"), AFortDecoTool::ServerCreateBuildingAndSpawnDeco, AFortDecoTool::ServerCreateBuildingAndSpawnDecoOG);
+	auto ServerSpawnDecoFunc = AFortDecoTool::GetDefaultObj()->GetFunction("ServerSpawnDeco");
+	if (ServerSpawnDecoFunc)
+		Utils::ExecHook(ServerSpawnDecoFunc, AFortDecoTool::ServerSpawnDeco_, AFortDecoTool::ServerSpawnDeco_OG);
+
+	auto CreateBuildingAndSpawnDecoFunc =
+		AFortDecoTool::GetDefaultObj()->GetFunction("ServerCreateBuildingAndSpawnDeco");
+	auto GameStateClass = AFortGameStateAthena::StaticClass();
+	const bool bSupportsCustomCreateBuildingAndSpawnDeco =
+		CreateBuildingAndSpawnDecoFunc &&
+		CreateBuildingAndSpawnDecoFunc->GetProperty("BuildingLocation") &&
+		GameStateClass && GameStateClass->GetProperty("AllPlayerBuildableClasses");
+	if (bSupportsCustomCreateBuildingAndSpawnDeco)
+	{
+		Utils::ExecHook(CreateBuildingAndSpawnDecoFunc,
+			AFortDecoTool::ServerCreateBuildingAndSpawnDeco,
+			AFortDecoTool::ServerCreateBuildingAndSpawnDecoOG);
+	}
+	else
+	{
+		// 7.40's RPC contains only Location, Rotation and attachment type, and its
+		// game state has no AllPlayerBuildableClasses array. Its native routine is
+		// the compatible path and ultimately reaches our legacy ServerSpawnDeco
+		// wrapper for team/definition bookkeeping.
+		SDK::DbgLog("  [BSM] legacy ServerCreateBuildingAndSpawnDeco left native\n");
+	}
 	if (AFortDecoTool_ContextTrap::StaticClass())
 	{
 		auto Func = AFortDecoTool_ContextTrap::GetDefaultObj()->GetFunction("ServerSpawnDeco");
@@ -858,7 +885,7 @@ void ABuildingSMActor::PostLoadHook()
 		if (!Func)
 			Func = AFortDecoTool_ContextTrap::GetDefaultObj()->GetFunction("ServerSpawnDeco_Implementation");
 
-		if (Func)
+		if (Func && Func != ServerSpawnDecoFunc)
 			Utils::ExecHook(Func, AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation, AFortDecoTool_ContextTrap::ServerSpawnDeco_ImplementationOG);
 
 		auto Func2 = AFortDecoTool_ContextTrap::GetDefaultObj()->GetFunction("ServerCreateBuildingAndSpawnDeco_Implementation");
@@ -866,7 +893,12 @@ void ABuildingSMActor::PostLoadHook()
 		if (!Func2)
 			Func2 = AFortDecoTool_ContextTrap::GetDefaultObj()->GetFunction("ServerCreateBuildingAndSpawnDeco");
 
-		Utils::ExecHook(Func2, AFortDecoTool::ServerCreateBuildingAndSpawnDeco, AFortDecoTool::ServerCreateBuildingAndSpawnDecoOG);
+		if (bSupportsCustomCreateBuildingAndSpawnDeco && Func2 &&
+			Func2 != CreateBuildingAndSpawnDecoFunc)
+		{
+			Utils::ExecHook(Func2, AFortDecoTool::ServerCreateBuildingAndSpawnDeco,
+				AFortDecoTool::ServerCreateBuildingAndSpawnDecoOG);
+		}
 	}
 	SDK::DbgLog("  [BSM] 6 PostLoadHook complete\n");
 }

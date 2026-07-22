@@ -135,6 +135,8 @@ public:
     DEFINE_PROP(LastReplicatedEmoteExecuted, UObject*);
     DEFINE_PROP(Mesh, UActorComponent*);
     DEFINE_BITFIELD_PROP(bIsDBNO);
+    DEFINE_BITFIELD_PROP(bWasDBNOOnDeath);
+    DEFINE_BITFIELD_PROP(bIsHiddenForDeath);
     DEFINE_BITFIELD_PROP(bIsSkydiving);
     DEFINE_BITFIELD_PROP(bIsSkydivingFromBus);
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
@@ -288,9 +290,13 @@ public:
             return;
         }
 
-        // When the GE path is used it adds a flat +1, so pre-subtract 1 to land
-        // on the exact requested value. On 1.7.2 (no GE) write the value as-is.
-        float Target = ShieldAbsorbUsesGE() ? (NewValue - 1.f) : NewValue;
+        // When the GE path is used it adds a flat +1, so positive values are
+        // pre-subtracted by 1. An exact clear must skip that GE entirely;
+        // applying it after a zero write is what leaves 1 shield on the HUD.
+        const bool bUsesShieldGE = ShieldAbsorbUsesGE();
+        const bool bClearingShield = NewValue <= 0.f;
+        float Target = bClearingShield ? 0.f :
+            (bUsesShieldGE ? (NewValue - 1.f) : NewValue);
         if (Target < 0.f)
             Target = 0.f;
 
@@ -311,7 +317,8 @@ public:
         // own shield GE (which does reach the aggregator) - it syncs the
         // aggregator from the value we wrote and adds its flat +1, landing on
         // NewValue. No-op on 1.7.2. Defined in the .cpp.
-        ActivateShieldAbsorb();
+        if (bUsesShieldGE && !bClearingShield)
+            ActivateShieldAbsorb();
 
         ForceNetUpdate();
     }
@@ -405,8 +412,11 @@ public:
     DEFINE_FUNC(OnCapsuleBeginOverlap, void);
     DEFINE_FUNC(ServerHandlePickup, void);
     DEFINE_FUNC(IsDBNO, bool);
-    DEFINE_FUNC(bIsDying, bool);
-    DEFINE_FUNC(bPlayedDying, bool);
+    // These are reflected BoolProperty fields on legacy Athena builds (not
+    // callable functions). Treating them as UFunctions leaves a respawned pawn
+    // authoritatively in its death state.
+    DEFINE_BITFIELD_PROP(bIsDying);
+    DEFINE_BITFIELD_PROP(bPlayedDying);
     DEFINE_FUNC(PickUpActor, void);
     DEFINE_FUNC(OnRep_IsInAnyStorm, void);
     DEFINE_FUNC(OnRep_IsInsideSafeZone, void);

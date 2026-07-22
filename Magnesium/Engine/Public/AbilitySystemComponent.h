@@ -51,6 +51,7 @@ struct FGameplayAbilityActivationInfo
     USCRIPTSTRUCT_COMMON_MEMBERS(FGameplayAbilityActivationInfo);
 
     DEFINE_STRUCT_PROP(ActivationMode, EGameplayAbilityActivationMode);
+	DEFINE_STRUCT_BITFIELD_PROP(bCanBeEndedByOtherInstance);
 	DEFINE_STRUCT_PROP(PredictionKeyWhenActivated, FPredictionKey);
 };
 
@@ -65,6 +66,7 @@ public:
     DEFINE_STRUCT_PROP(InputID, int32);
     DEFINE_STRUCT_PROP(ActivationInfo, FGameplayAbilityActivationInfo);
     DEFINE_STRUCT_NEWOBJ_PROP(SourceObject, UObject);
+    DEFINE_STRUCT_PROP(ActiveCount, uint8);
     DEFINE_STRUCT_BITFIELD_PROP(InputPressed);
 };
 
@@ -144,6 +146,7 @@ public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FGameplayEffectSpec);
 
     DEFINE_STRUCT_PROP(Def, UGameplayEffect*);
+    DEFINE_STRUCT_PROP(Level, float);
 };
 
 
@@ -195,6 +198,8 @@ public:
 
     DEFINE_PROP(ActivatableAbilities, FGameplayAbilitySpecContainer);
     DEFINE_PROP(ActiveGameplayEffects, FActiveGameplayEffectsContainer);
+    DEFINE_PROP(OwnerActor, AActor*);
+    DEFINE_PROP(AvatarActor, AActor*);
 
     DEFINE_FUNC(ServerCancelAbility, void);
     DEFINE_FUNC(ServerEndAbility, void);
