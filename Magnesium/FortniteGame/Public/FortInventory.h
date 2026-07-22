@@ -124,6 +124,8 @@ public:
     UCLASS_COMMON_MEMBERS(UFortWorldItemDefinition);
 
     DEFINE_FUNC(GetAmmoWorldItemDefinition_BP, UFortWorldItemDefinition*);
+
+    bool ServerExecute(UFortItem* Item, AFortPlayerControllerAthena* Instigator) const;
 };
 
 struct FFortItemQuantityPair
@@ -412,6 +414,7 @@ public:
     UCLASS_COMMON_MEMBERS(UFortGadgetItemDefinition);
 
     DEFINE_PROP(bValidForLastEquipped, bool);
+    DEFINE_BITFIELD_PROP(bDropAllOnEquip);
 
     DEFINE_FUNC(GetWeaponItemDefinition, UFortWeaponItemDefinition*);
 };

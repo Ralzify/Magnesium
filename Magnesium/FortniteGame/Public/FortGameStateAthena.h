@@ -120,6 +120,7 @@ public:
     DEFINE_PROP(SupplyDropInfoList, TArray<UFortSupplyDropInfo*>);
     DEFINE_PROP(VendingMachineRarityCount, FScalableFloat);
     DEFINE_PROP(SafeZoneDefinition, FFortSafeZoneDefinition);
+    DEFINE_PROP(SafeZoneDefinitions, TArray<FFortSafeZoneDefinition>);
     DEFINE_PROP(AircraftClass, TSubclassOf<AFortAthenaAircraft>);
     DEFINE_PROP(FlightInfos, TArray<FAircraftFlightInfo>);
     DEFINE_PROP(CachedPlayableBoundsForClients, FBoxSphereBounds);

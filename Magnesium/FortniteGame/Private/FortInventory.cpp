@@ -9,10 +9,56 @@
 
 uint32_t OnItemInstanceAddedVft;
 
+bool UFortWorldItemDefinition::ServerExecute(UFortItem* Item, AFortPlayerControllerAthena* Instigator) const
+{
+    if (!this || !Item || !Instigator)
+        return false;
+
+    const int32 ServerExecuteVft = FindWorldItemDefinitionServerExecuteVft();
+    if (ServerExecuteVft < 0 || ServerExecuteVft >= 1024 || !Vft[ServerExecuteVft])
+        return false;
+
+    return ((bool(*)(const UFortWorldItemDefinition*, UFortItem*, AFortPlayerControllerAthena*))Vft[ServerExecuteVft])(
+        this, Item, Instigator);
+}
+
 UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Count, int LoadedAmmo, int Level, bool ShowPickupNoti, bool updateInventory, int PhantomReserveAmmo, TArray<FFortItemEntryStateValue> StateValues)
 {
     if (!this || !Def || !Count)
         return nullptr;
+
+    auto PlayerController = Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+    auto Gadget = Def->Cast<UFortGadgetItemDefinition>();
+
+    // Exclusive Chapter 1 gadgets expect the backpack to be emptied before
+    // their native ServerExecute runs. The Infinity Gauntlet sets this flag.
+    if (VersionInfo.FortniteVersion >= 4.0 && VersionInfo.FortniteVersion <= 4.5 &&
+        PlayerController && PlayerController->MyFortPawn && Gadget &&
+        Gadget->HasbDropAllOnEquip() && Gadget->bDropAllOnEquip)
+    {
+        const FVector DropLocation = PlayerController->MyFortPawn->K2_GetActorLocation();
+        for (int32 Index = Inventory.ReplicatedEntries.Num() - 1; Index >= 0; Index--)
+        {
+            auto& ExistingEntry = Inventory.ReplicatedEntries.Get(Index, FFortItemEntry::Size());
+            auto ExistingDefinition = ExistingEntry.ItemDefinition;
+            if (!ExistingDefinition)
+                continue;
+
+            const bool CanDrop = ExistingDefinition->HasbCanBeDropped()
+                ? ExistingDefinition->bCanBeDropped
+                : (ExistingDefinition->GetPickupComponent()
+                    ? ExistingDefinition->GetPickupComponent()->bCanBeDroppedFromInventory
+                    : false);
+            if (!CanDrop)
+                continue;
+
+            const FGuid ExistingGuid = ExistingEntry.ItemGuid;
+            AFortInventory::SpawnPickup(DropLocation, ExistingEntry, EFortPickupSourceTypeFlag::GetPlayer(),
+                EFortPickupSpawnSource::GetUnset(), PlayerController->MyFortPawn);
+            Remove(ExistingGuid);
+        }
+    }
+
     UFortWorldItem* Item = (UFortWorldItem*)Def->CreateTemporaryItemInstanceBP(Count, Level);
     if (!Item)
     {
@@ -90,6 +136,16 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
 
     if (OnItemInstanceAddedVft && Owner)
         ((bool(*)(const UFortWorldItem*, const IInterface*)) Item->Vft[OnItemInstanceAddedVft])(Item, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()));
+
+    // The S4 gauntlet is force-focused when collected. Route that focus through
+    // ServerExecuteInventoryItem so the native gadget execution path above is
+    // used instead of merely equipping its backing weapon definition.
+    if (VersionInfo.FortniteVersion >= 4.0 && VersionInfo.FortniteVersion <= 4.5 &&
+        PlayerController && Gadget && Def->HasbForceFocusWhenAdded() && Def->bForceFocusWhenAdded)
+    {
+        PlayerController->ServerExecuteInventoryItem(Item->ItemEntry.ItemGuid);
+        PlayerController->ClientEquipItem(Item->ItemEntry.ItemGuid, true);
+    }
 
     return Item;
 }
@@ -228,13 +284,19 @@ void AFortInventory::Remove(FGuid Guid)
 {
     auto ItemEntryIdx = Inventory.ReplicatedEntries.SearchIndex([&](FFortItemEntry& entry)
         { return entry.ItemGuid == Guid; }, FFortItemEntry::Size());
-    auto& ItemEntry = Inventory.ReplicatedEntries.Get(ItemEntryIdx, FFortItemEntry::Size());
-    auto EntryDef = ItemEntry.ItemDefinition;
+    if (ItemEntryIdx == -1)
+        return;
+
+    auto EntryDef = Inventory.ReplicatedEntries.Get(ItemEntryIdx, FFortItemEntry::Size()).ItemDefinition;
 
     auto ItemInstanceIdx = Inventory.ItemInstances.SearchIndex([&](UFortWorldItem* entry)
         { return entry->ItemEntry.ItemGuid == Guid; });
-    auto ItemInstance = Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
+    auto ItemInstanceResult = Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
         { return entry->ItemEntry.ItemGuid == Guid; });
+
+    // Save the object before mutating either replicated array. Search returns
+    // storage owned by the array, which is invalid after Remove.
+    auto Instance = ItemInstanceResult ? *ItemInstanceResult : nullptr;
 
 
     if (ItemEntryIdx != -1)
@@ -242,11 +304,8 @@ void AFortInventory::Remove(FGuid Guid)
     if (ItemInstanceIdx != -1)
         Inventory.ItemInstances.Remove(ItemInstanceIdx);
 
-    auto Instance = ItemInstance ? *ItemInstance : nullptr;
-
-
     auto PlayerController = (AFortPlayerControllerAthena*)Owner;
-    if (VersionInfo.FortniteVersion < 3 && ItemEntryIdx != -1)
+    if (PlayerController && PlayerController->QuickBars && EntryDef)
     {
         auto& QuickBar = IsPrimaryQuickbar(EntryDef) ? PlayerController->QuickBars->PrimaryQuickBar : PlayerController->QuickBars->SecondaryQuickBar;
         int i = 0;

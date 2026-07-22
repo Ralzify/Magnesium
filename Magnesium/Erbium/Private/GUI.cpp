@@ -697,21 +697,6 @@ namespace SafeZoneMap
         if (!DetectPlatformData(tex, pd)) return false;
 
         const int w = pd.SizeX, h = pd.SizeY;
-
-        // Guard against a mis-detected platform-data header handing us huge
-        // dimensions. IsPow2Dim accepts up to 16384, so a wrong match can give
-        // 8192x8192 or 16384x16384 - and then pixels*4 allocates hundreds of MB
-        // while the block decode loops tens of millions of times, all on the
-        // render thread during the toggle click. That is the "GUI freezes when I
-        // enable the custom zone" hang, and it is not an access violation so the
-        // SEH guard never catches it. Real Fortnite minimaps are <= 4096; skip
-        // anything larger and fall back to the numeric editor.
-        if (w <= 0 || h <= 0 || w > 4096 || h > 4096)
-        {
-            SDK::DbgLog("[SafeZoneMap] implausible texture dims %dx%d; skipping decode\n", w, h);
-            return false;
-        }
-
         const size_t pixels = (size_t)w * h;
 
         int fmt = pd.PixelFormat;
@@ -2305,12 +2290,8 @@ namespace SafeZoneMap
         const bool bLoadRequested =
             g_LoadState.load(std::memory_order_acquire) == (int)LoadState::Requested;
 
-        // Before Start this runs from the GetMaxTickRate pump while the engine is still
-        // streaming packages in on other threads. RefreshRuntimeTransform reaches
-        // StaticClass()/IsA/FindObject, all of which walk the UObject array -- doing that
-        // mid-init can observe a non-null but half-constructed entry and fault. It also
-        // cannot succeed pre-Start (it needs an Athena GameState, which does not exist yet),
-        // so skip it entirely and only service an explicit GUI load request.
+        // Before Start, only service an explicit GUI load. Runtime transform
+        // discovery needs an Athena GameState and cannot succeed yet.
         if (!FConfiguration::bReadyToStart)
         {
             if (!bLoadRequested)
@@ -2528,12 +2509,7 @@ namespace SafeZoneMap
         for (int32 i = 0; i < total; ++i)
         {
             const UObject* obj = SDK::TUObjectArray::GetObjectByIndex(i);
-            // This scan also runs from the pre-Start GetMaxTickRate pump, i.e. while the engine is
-            // still streaming packages in on other threads. Entries can be non-null yet point at a
-            // half-constructed or already-freed object, so a plain null check is not enough --
-            // dereferencing one faults (observed on 31.41: read of 0x1e3000010).
-            if (!obj || !SDK::MemReadable((void*)obj, 0x40) || !SDK::MemReadable(*(void* const*)obj, 0x8))
-                continue;
+            if (!obj) continue;
             int hitIndex = -1;
             for (int k = 0; k < nn; ++k) if (obj->Name == want[k]) { hitIndex = k; break; }
             if (hitIndex >= 0)
@@ -3994,7 +3970,8 @@ void GUI::Init()
 
                                 if (!bInitializedZone)
                                 {
-                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 1 : 4;
+                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 1 :
+                                        (VersionInfo.FortniteVersion < 7.00 ? 3 : 4);
                                     bInitializedZone = true;
                                 }
 
@@ -4086,27 +4063,15 @@ void GUI::Init()
                 SectionHeader("Storm Control", SectionWidth);
                 BeginSectionBody();
 
-                if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone)
+                if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused())
                 {
                     if (ImGui::Button("Pause Safe Zone", ImVec2(Width, Height)))
-                    {
-                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = true;
-                        auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                        if (GameMode->HasbSafeZonePaused())
-                            GameMode->bSafeZonePaused = true;
-                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
-                    }
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(true);
                 }
                 else
                 {
                     if (ImGui::Button("Resume Safe Zone", ImVec2(Width, Height)))
-                    {
-                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = false;
-                        auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                        if (GameMode->HasbSafeZonePaused())
-                            GameMode->bSafeZonePaused = false;
-                        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
-                    }
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(false);
                 }
 
                 if (ImGui::Button("Skip Safe Zone", ImVec2(Width, Height)))
@@ -5351,11 +5316,6 @@ void GUI::Init()
                             if (!ImGui::IsItemActive())
                                 s_MapPanning = false;
 
-                            // Middle-drag pans as well, with no Ctrl needed. The
-                            // InvisibleButton only tracks the left button, so this
-                            // latches itself: it starts when the press lands on the
-                            // canvas and runs until release, so dragging past the
-                            // canvas edge keeps panning instead of stopping dead.
                             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Middle))
                                 s_MapPanningMiddle = true;
                             if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle))
@@ -5365,14 +5325,11 @@ void GUI::Init()
                                 (ImGui::IsItemHovered() && io.KeyCtrl && s_MapZoom > 1.f))
                                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
 
-                            if (s_MapPanningMiddle)
+                            if (s_MapPanningMiddle && ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
                             {
-                                if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
-                                {
-                                    s_MapPan.x += io.MouseDelta.x;
-                                    s_MapPan.y += io.MouseDelta.y;
-                                    ClampMapPan();
-                                }
+                                s_MapPan.x += io.MouseDelta.x;
+                                s_MapPan.y += io.MouseDelta.y;
+                                ClampMapPan();
                             }
 
                             if (s_MapPanning)

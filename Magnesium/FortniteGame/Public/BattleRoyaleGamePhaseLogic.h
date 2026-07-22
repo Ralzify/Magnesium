@@ -39,6 +39,8 @@ public:
 	static inline bool bEnableZones = true;
 	static inline bool bPausedZone = false;
 	static inline bool bStartAircraft = false;
+	static bool IsSafeZonePaused();
+	static void SetSafeZonePaused(bool bPaused);
 
 	DEFINE_PROP(WarmupCountdownStartTime, float);
 	DEFINE_PROP(WarmupCountdownEndTime, float);

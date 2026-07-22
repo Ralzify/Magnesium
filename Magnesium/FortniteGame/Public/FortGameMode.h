@@ -43,6 +43,8 @@ public:
     DEFINE_PROP(WarmupCountdownDuration, float);
     DEFINE_PROP(WarmupEarlyCountdownDuration, float);
     DEFINE_PROP(SafeZoneLocations, TArray<FVector>);
+    DEFINE_PROP(bSafeZoneLocationsInitialized, bool);
+    DEFINE_PROP(GE_OutsideSafeZone, UClass*);
     DEFINE_PROP(DefaultPawnClass, const UClass*);
     DEFINE_PROP(PlayerControllerClass, const UClass*);
     DEFINE_PROP(PlaylistHotfixOriginalGCFrequency, float);
@@ -84,9 +86,6 @@ public:
     DefHookOg(bool, StartAircraftPhase, AFortGameMode*, char);
     DefUHookOg(OnAircraftExitedDropZone_);
     DefHookOg(void, FinishWorldInitialization, AFortGameMode*, AActor*);
-
-    // CH5 / UE5.4+ listen-server bring-up (ReadyToStartMatch's exec hook never fires there).
-    static void SetupListenServerCH5(class AFortGameModeAthena* GameMode, class AFortGameStateAthena* GameState);
     static int GetLateSafeZoneIndex();
     
     InitHooks;

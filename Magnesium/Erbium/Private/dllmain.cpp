@@ -426,15 +426,11 @@ void Main()
     // injecting client is the host — it travels into the terrain and gets a PlayerController, which the
     // match needs (ReadyPlayers>=1) to start. Removing it (the dedicated-server model used pre-32) leaves
     // 0 PlayerControllers -> match never starts -> client stuck on "Setting up the server".
-    // Widened from ">= 32.00" to all of CH5 (UE5.4+): 31.41 has the same native-ReadyToStartMatch
-    // behaviour, so the dedicated model leaves it with 0 PlayerControllers and the match never
-    // starts unless a second client connects.
-    const bool bKeepLocalPlayer = VersionInfo.EngineVersion >= 5.4 && !FConfiguration::UseCH5DedicatedModel();
-    if (!bKeepLocalPlayer && UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Num() > 0)
+    if (VersionInfo.FortniteVersion < 32.00 && UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Num() > 0)
     {
         UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Remove(0);
     }
-    SDK::DbgLog("Main: cp14 (LocalPlayers handled, kept=%d)\n", (int)bKeepLocalPlayer);
+    SDK::DbgLog("Main: cp14 (LocalPlayers handled, kept=%d)\n", (int)(VersionInfo.FortniteVersion >= 32.00));
 
     const wchar_t* terrainOpen = L"open Athena_Terrain";
 

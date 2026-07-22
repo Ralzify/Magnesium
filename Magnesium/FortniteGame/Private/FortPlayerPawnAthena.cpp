@@ -689,6 +689,7 @@ void AFortPlayerPawnAthena::EndSkydiving(AFortPlayerPawnAthena* Pawn)
 	EndSkydivingOG(Pawn);
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Pawn->Controller;
+	AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(PlayerController, Pawn);
 
 	if (PlayerController && Pawn->bIsSkydiving)
 		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetLand(), 1, Pawn);

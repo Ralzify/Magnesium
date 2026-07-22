@@ -216,3 +216,8 @@ public:
 
     InitPostLoadHooks;
 };
+
+// Removes a stale native outside-safe-zone effect carried by the persistent
+// PlayerState ability system when a lower-season pawn is replaced.
+void ResetLowerSeasonStormStateForRespawn(AFortPlayerControllerAthena* Player,
+    AFortPlayerPawnAthena* OldPawn, AFortPlayerPawnAthena* NewPawn);

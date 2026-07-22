@@ -25,6 +25,7 @@
 
 #include <sstream>
 #include <fstream>
+#include <cmath>
 
 void ShowFoundation(const ABuildingFoundation* Foundation)
 {
@@ -119,29 +120,19 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         if (GameState->HasCachedSafeZoneStartUp() && Playlist->HasSafeZoneStartUp())
             GameState->CachedSafeZoneStartUp = Playlist->SafeZoneStartUp;
 
-        // DBNO is always on - it is normal game behaviour, not an option. Each property is
-        // guarded on its own because they were added/renamed across versions; gating the whole
-        // block behind bEnableDBNO (as before) meant any build lacking that single property got
-        // no DBNO configuration at all, which is why downing/reviving only worked on some
-        // versions.
-        bool bDBNOOn = true;   // non-const: DEFINE_PROP setters take bool&
+        // Configure each reflected DBNO property independently because their
+        // availability and names vary by game version.
+        bool bDBNOOn = true;
         bool bAlwaysDBNO = false;
-
         if (GameMode->HasbEnableDBNO())
             GameMode->bEnableDBNO = bDBNOOn;
-
         if (GameMode->HasbDBNOEnabled())
             GameMode->bDBNOEnabled = bDBNOOn;
-
         if (GameState->HasbDBNOEnabledForGameMode())
             GameState->bDBNOEnabledForGameMode = bDBNOOn;
-
         if (GameState->HasbDBNODeathEnabled())
             GameState->bDBNODeathEnabled = bDBNOOn;
-
-        // Left off deliberately: forcing it makes a solo player go down with nobody able to
-        // revive them. Off means the game follows its own rules - you go down when a teammate
-        // could pick you up, and die outright when there is no one.
+        // Let native rules decide whether a solo player can be downed.
         if (GameMode->HasbAlwaysDBNO())
             GameMode->bAlwaysDBNO = bAlwaysDBNO;
 
@@ -157,6 +148,196 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         if (GameMode->GameSession->HasMaxPlayers())
             GameMode->GameSession->MaxPlayers = 100;
     }
+}
+
+// PlaylistDataLoaded is what fills AFortGameMode::SafeZoneLocations in the
+// newer Athena flow, but Seasons 5 and earlier never run that setup here.
+// Late game used to choose a fallback center only *after*
+// StartAircraftPhase had already consumed the empty array.  Seed the native
+// array first so the indicator, map preview and server storm all use the same
+// center from the beginning.
+static bool FindLegacyLateGameSafeZoneCenter(FVector& OutCenter)
+{
+    TArray<ABuildingFoundation*> Foundations;
+    Utils::GetAll<ABuildingFoundation>(Foundations);
+
+    const int FoundationCount = Foundations.Num();
+    if (FoundationCount <= 0)
+    {
+        Foundations.Free();
+        return false;
+    }
+
+    const int StartIndex = rand() % FoundationCount;
+    bool bFound = false;
+    for (int Offset = 0; Offset < FoundationCount; Offset++)
+    {
+        auto Foundation = Foundations[(StartIndex + Offset) % FoundationCount];
+        if (!Foundation)
+            continue;
+
+        auto Candidate = Foundation->K2_GetActorLocation();
+        if (!std::isfinite(Candidate.X) || !std::isfinite(Candidate.Y) || Candidate.IsZero())
+            continue;
+
+        OutCenter = Candidate;
+        bFound = true;
+        break;
+    }
+
+    Foundations.Free();
+    return bFound;
+}
+
+static const UFortPlaylistAthena* GetLegacySafeZonePlaylist(AFortGameMode* GameMode)
+{
+    if (GameMode && GameMode->GameState && VersionInfo.FortniteVersion >= 3.5 &&
+        GameMode->HasWarmupRequiredPlayerCount())
+    {
+        auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+        if (GameState->HasCurrentPlaylistInfo())
+            return GameState->CurrentPlaylistInfo.BasePlaylist;
+        if (GameState->HasCurrentPlaylistData())
+            return GameState->CurrentPlaylistData;
+    }
+
+    auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+    return Playlist ? Playlist : FindObject<UFortPlaylistAthena>(
+        L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+}
+
+static int GetLegacySafeZoneLocationCount(AFortGameMode* GameMode)
+{
+    int RequiredLocationCount = 0;
+    auto Playlist = GetLegacySafeZonePlaylist(GameMode);
+    if (Playlist && Playlist->HasLastSafeZoneIndex() && Playlist->LastSafeZoneIndex >= 0 &&
+        Playlist->LastSafeZoneIndex < 32)
+    {
+        RequiredLocationCount = Playlist->LastSafeZoneIndex + 1;
+    }
+
+    auto GameState = GameMode ? (AFortGameStateAthena*)GameMode->GameState : nullptr;
+    auto MapInfo = GameState && GameState->HasMapInfo() ? GameState->MapInfo : nullptr;
+    if (RequiredLocationCount <= 0 && MapInfo)
+    {
+        if (MapInfo->HasSafeZoneDefinitions() && MapInfo->SafeZoneDefinitions.Num() > 0)
+            RequiredLocationCount = MapInfo->SafeZoneDefinitions.Num();
+        else if (MapInfo->HasSafeZoneDefinition() && FFortSafeZoneDefinition::HasCount())
+            RequiredLocationCount = (int)MapInfo->SafeZoneDefinition.Count.Evaluate(0.0f);
+    }
+
+    if (RequiredLocationCount <= 0 || RequiredLocationCount > 32)
+        RequiredLocationCount = 12;
+
+    // The existing late-game aircraft path intentionally requires one entry
+    // beyond the selected phase before it trusts the native array.
+    const int MinimumLocationCount = FConfiguration::LateGameZone + 1;
+    if (RequiredLocationCount < MinimumLocationCount)
+        RequiredLocationCount = MinimumLocationCount;
+    return RequiredLocationCount;
+}
+
+static void EnsureLegacySafeZoneDamageEffect(AFortGameMode* GameMode)
+{
+    if (!GameMode || VersionInfo.FortniteVersion >= 7.00 || !FConfiguration::bLateGame)
+        return;
+
+    static UClass* OutsideSafeZoneEffect = nullptr;
+    if (!OutsideSafeZoneEffect)
+        OutsideSafeZoneEffect = const_cast<UClass*>(FindObject<UClass>(
+            L"/Game/Athena/SafeZone/GE_OutsideSafeZoneDamage.GE_OutsideSafeZoneDamage_C"));
+
+    if (!OutsideSafeZoneEffect)
+        return;
+
+    bool bAssigned = false;
+    if (GameMode->HasGE_OutsideSafeZone() && !GameMode->GE_OutsideSafeZone)
+    {
+        GameMode->GE_OutsideSafeZone = OutsideSafeZoneEffect;
+        bAssigned = true;
+    }
+
+    auto DefaultGameMode = GameMode->Class
+        ? (AFortGameMode*)GameMode->Class->GetDefaultObj()
+        : nullptr;
+    if (DefaultGameMode && DefaultGameMode->HasGE_OutsideSafeZone() &&
+        !DefaultGameMode->GE_OutsideSafeZone)
+    {
+        DefaultGameMode->GE_OutsideSafeZone = OutsideSafeZoneEffect;
+        bAssigned = true;
+    }
+
+    if (bAssigned)
+        SDK::DbgLog("[SafeZone] assigned legacy native outside effect actor=%p cdo=%p effect=%p\n",
+            (void*)GameMode, (void*)DefaultGameMode, (void*)OutsideSafeZoneEffect);
+}
+
+static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
+{
+    if (!GameMode || VersionInfo.FortniteVersion >= 7.00 || !FConfiguration::bLateGame)
+        return;
+
+    // Damage lifecycle setup is needed through Season 6. Location generation
+    // itself is already native there, so keep the geometry workaround pre-S6.
+    EnsureLegacySafeZoneDamageEffect(GameMode);
+
+    if (VersionInfo.FortniteVersion >= 6.00)
+        return;
+
+    if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bEnableZones ||
+        !GameMode->HasSafeZoneLocations())
+        return;
+
+    // Keep any locations the build did initialize and extend from the last
+    // valid center; using one
+    // center for the missing tail preserves contained, concentric late-game
+    // circles instead of making later phases jump across the map.
+    const int RequiredLocationCount = GetLegacySafeZoneLocationCount(GameMode);
+    const int ExistingLocationCount = GameMode->SafeZoneLocations.Num();
+    FVector Center;
+    bool bHasCenter = false;
+
+    for (int Index = ExistingLocationCount - 1; Index >= 0; Index--)
+    {
+        auto Candidate = GameMode->SafeZoneLocations.Get(Index, FVector::Size());
+        if (std::isfinite(Candidate.X) && std::isfinite(Candidate.Y) && !Candidate.IsZero())
+        {
+            Center = Candidate;
+            bHasCenter = true;
+            break;
+        }
+    }
+
+    if (!bHasCenter && !FindLegacyLateGameSafeZoneCenter(Center))
+    {
+        SDK::DbgLog("[SafeZone] pre-S6 location setup deferred: no loaded foundation\n");
+        return;
+    }
+
+    if (!std::isfinite(Center.X) || !std::isfinite(Center.Y) || Center.IsZero())
+        return;
+
+    for (int Index = 0; Index < ExistingLocationCount; Index++)
+    {
+        auto& ExistingCenter = GameMode->SafeZoneLocations.Get(Index, FVector::Size());
+        if (!std::isfinite(ExistingCenter.X) || !std::isfinite(ExistingCenter.Y) || ExistingCenter.IsZero())
+            ExistingCenter = Center;
+    }
+
+    for (int Index = ExistingLocationCount; Index < RequiredLocationCount; Index++)
+        GameMode->SafeZoneLocations.Add(Center, FVector::Size());
+
+    if (GameMode->HasbSafeZoneLocationsInitialized())
+        GameMode->bSafeZoneLocationsInitialized = true;
+
+    // A populated native array means the old post-aircraft fallback must stay
+    // inactive; otherwise HandlePostSafeZonePhaseChanged would overwrite the
+    // native wall and recreate the offset circle.
+    AFortGameMode::SafeZoneLoc = FVector{};
+
+    if (ExistingLocationCount < RequiredLocationCount)
+        SDK::DbgLog("[SafeZone] initialized pre-S6 native locations %d -> %d at (%.1f, %.1f, %.1f)\n",
+            ExistingLocationCount, GameMode->SafeZoneLocations.Num(), Center.X, Center.Y, Center.Z);
 }
 
 
@@ -267,11 +448,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     {
         setup = true;
 
-        // On UE5.4+ the listen server is brought up from FinishWorldInitialization instead (this
-        // exec hook is normally dead there). If it *does* fire on some build, don't create a
-        // second GameNetDriver on the same world.
-        auto _existingWorld = UWorld::GetWorld();
-        if (!(VersionInfo.EngineVersion >= 5.4 && _existingWorld && _existingWorld->NetDriver))
+        //if (!FindListenCall())
         {
             SDK::DbgLog("[GameMode] ReadyToStart Listen: ENTER setup=%d\n", (int)setup);
             auto World = UWorld::GetWorld();
@@ -294,7 +471,6 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 World->NetDriver = NetDriver = ((UNetDriver * (*)(UEngine*, UWorld*, FName)) FindCreateNetDriver())(Engine, World, NetDriverName);
             if (!NetDriver)
             {
-                // Every line below dereferences NetDriver; carrying on here faults.
                 SDK::DbgLog("[GameMode] Listen: NetDriver NULL, abort\n");
                 *Ret = false;
                 return;
@@ -1138,6 +1314,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             if (GameMode->GameSession->HasMaxPlayers())
                 GameMode->GameSession->MaxPlayers = 100;
 
+        EnsureLegacyLateGameSafeZoneLocations(GameMode);
         GameMode->bWorldIsReady = true;
     }
 
@@ -1567,15 +1744,11 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
 
     HandlePostSafeZonePhaseChangedOG(GameMode, NewSafeZonePhase_Inp);
 
-    // 6.x and other old native-zone builds fast-forward through the phases
-    // below. Apply the custom circle before those branches return.
-    if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+    // Keep the original Erbium/native zone data untouched on Chapter 1 builds.
+    // The custom-zone path writes every circle representation at once, which is
+    // incompatible with the old indicator's distinct current/preview fields.
+    if (VersionInfo.FortniteVersion >= 7.00 && FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
         ApplyCustomSafeZoneState(GameMode, "native-phase-change");
-    else if (FConfiguration::bLateGame && (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
-    {
-        GameMode->SafeZoneIndicator->NextCenter = SafeZoneLoc;
-        GameMode->SafeZoneIndicator->LastCenter = SafeZoneLoc;
-    }
 
     /*if (FConfiguration::bLateGame && GameMode->SafeZonePhase > FConfiguration::LateGameZone)
     {
@@ -1603,6 +1776,15 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
             GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = 676767.f;
         if (VersionInfo.FortniteVersion >= 13)
             GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + Durations[FConfiguration::LateGameZone];
+    }
+
+    // Original Erbium applies the selected late-game center only after the
+    // native fast-forward reaches its target phase. Applying it to each skipped
+    // phase makes the old client's current and preview circles disagree.
+    if (FConfiguration::bLateGame && (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
+    {
+        GameMode->SafeZoneIndicator->NextCenter = SafeZoneLoc;
+        GameMode->SafeZoneIndicator->LastCenter = SafeZoneLoc;
     }
 
     if (NewSafeZonePhase > (FConfiguration::bLateGame ? FConfiguration::LateGameZone : 1))
@@ -1718,8 +1900,12 @@ uint8_t AFortGameMode::PickTeam(AFortGameMode* GameMode, uint8_t PreferredTeam, 
 bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
 {
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-    if (FConfiguration::bCustomSafeZone && GameState && GameState->HasMapInfo())
+    if (VersionInfo.FortniteVersion >= 7.00 && FConfiguration::bCustomSafeZone && GameState && GameState->HasMapInfo())
         GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+
+    // This must precede the original: early Athena reads the array while
+    // StartAircraftPhase is creating/configuring its native safe-zone actor.
+    EnsureLegacyLateGameSafeZoneLocations(GameMode);
 
     auto Ret = StartAircraftPhaseOG(GameMode, a2);
     
@@ -1768,15 +1954,20 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
         bool bScuffed = false;
         if (GameMode->SafeZoneLocations.Num() < 4)
         {
+            // Never move the pre-S6 indicator after native aircraft setup. If
+            // the early initialization could not find a center, leaving the
+            // native state untouched is safer than creating two storm centers.
+            if (VersionInfo.FortniteVersion < 6.00)
+            {
+                SDK::DbgLog("[SafeZone] pre-S6 aircraft started without four native locations\n");
+                return Ret;
+            }
+
             bScuffed = true;
 
-            TArray<ABuildingFoundation*> Foundations;
-            Utils::GetAll<ABuildingFoundation>(Foundations);
-            auto Foundation = Foundations[rand() % Foundations.Num()];
-            
-            Foundations.Free();
-            
-            SafeZoneLoc = Loc = Foundation->K2_GetActorLocation();
+            if (!FindLegacyLateGameSafeZoneCenter(Loc))
+                return Ret;
+            SafeZoneLoc = Loc;
 
             //FConfiguration::bLateGame = false;
             //printf("LateGame is not supported on this version!\n");
@@ -1787,7 +1978,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             Loc = GameMode->SafeZoneLocations.Get(FConfiguration::LateGameZone + (VersionInfo.FortniteVersion >= 24 ? 3 : 0) - 1, FVector::Size());
         }
 
-        if (FConfiguration::bCustomSafeZone)
+        if (VersionInfo.FortniteVersion >= 7.00 && FConfiguration::bCustomSafeZone)
             SafeZoneLoc = Loc = FConfiguration::CustomSafeZoneCenter;
 
         if (FConfiguration::bMovingBus)
@@ -1912,7 +2103,14 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
         }
     }
 
-    if (FConfiguration::bLateGame)
+    // Through Season 6, native OnAircraftExitedDropZone must observe the
+    // Aircraft phase so it can run StartSafeZonesPhase and arm the recurring
+    // SafeZoneInsideChecks timer. Newer Erbium paths retain their old ordering.
+    const bool bDeferLegacyLateGamePhase =
+        FConfiguration::bLateGame && VersionInfo.FortniteVersion < 7.00;
+    const auto PreviousGamePhase = GameState->GamePhase;
+
+    if (FConfiguration::bLateGame && !bDeferLegacyLateGamePhase)
     {
         GameState->GamePhase = 4;
         GameState->GamePhaseStep = 7;
@@ -1920,6 +2118,23 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
     }
 
     callOG(GameMode, Stack.GetCurrentNativeFunction(), OnAircraftExitedDropZone, Aircraft);
+
+    if (bDeferLegacyLateGamePhase)
+        SDK::DbgLog("[SafeZone] legacy native aircraft-exit phase %d -> %d step=%d indicator=%p active=%d effect=%p\n",
+            (int)PreviousGamePhase, (int)GameState->GamePhase, (int)GameState->GamePhaseStep,
+            (void*)(GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator : nullptr),
+            (int)(GameMode->HasbSafeZoneActive() ? GameMode->bSafeZoneActive : false),
+            (void*)(GameMode->HasGE_OutsideSafeZone() ? GameMode->GE_OutsideSafeZone : nullptr));
+
+    // Normally the old native transition reaches SafeZones itself.  Retain the
+    // late-game fallback only for a build that did not transition, and do it
+    // after native setup so its timer/effect lifecycle cannot be skipped.
+    if (bDeferLegacyLateGamePhase && GameState->GamePhase != 4)
+    {
+        GameState->GamePhase = 4;
+        GameState->GamePhaseStep = 7;
+        GameState->OnRep_GamePhase(PreviousGamePhase);
+    }
 }
 
 TArray<FFortSafeZonePhaseInfo> Phases;
@@ -2156,191 +2371,6 @@ void OnWorldInitDone(UNavigationSystem* NavSys, char Mode)
     AllNavmeshes.Free();*/
 }
 
-// CH5 / UE5.4+ listen-server bring-up, driven from FinishWorldInitialization.
-//
-// Differs from the classic ReadyToStartMatch path in how the driver is created: on 5.4+ we call
-// UEngine::CreateNamedNetDriver_Local(Engine, Context, Name, Definition), which returns a BOOL and
-// registers the driver into FWorldContext::ActiveNetDrivers -- it does NOT return the driver. The
-// pre-5.4 overloads return UNetDriver* directly; conflating the two stores a 0/1 into
-// World->NetDriver and faults on the next member write.
-//
-// Every failure path bails with a log and leaves the one-shot latch clear so a later world can retry.
-void AFortGameMode::SetupListenServerCH5(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState)
-{
-    static UWorld* s_listenDoneWorld = nullptr;
-
-    auto World = UWorld::GetWorld();
-    if (!GameMode || !GameState || !World)
-        return;
-
-    if (s_listenDoneWorld == World)
-        return;
-
-    if (World->NetDriver)
-    {
-        // Something already brought a driver up (e.g. the exec hook did fire on this build).
-        s_listenDoneWorld = World;
-        SDK::DbgLog("[CH5-Listen] NetDriver already present (%p) — skipping\n", (void*)World->NetDriver);
-        return;
-    }
-
-    auto Engine = UEngine::GetEngine();
-    auto GetWorldContextFn = FindGetWorldContext();
-    auto CreateNamedLocalFn = FindCreateNamedNetDriverLocal();
-
-    SDK::DbgLog("[CH5-Listen] World=%p Engine=%p GetWorldContext=%p CreateNamedNetDriver_Local=%p\n",
-        (void*)World, (void*)Engine, (void*)GetWorldContextFn, (void*)CreateNamedLocalFn);
-
-    if (!Engine || !GetWorldContextFn || !CreateNamedLocalFn)
-    {
-        SDK::DbgLog("[CH5-Listen] ABORT: finders missing — needs a pattern for this build\n");
-        return;
-    }
-
-    auto WorldCtx = ((void* (*)(UEngine*, UWorld*)) GetWorldContextFn)(Engine, World);
-    if (!WorldCtx || !SDK::MemReadable(WorldCtx, 0x220))
-    {
-        SDK::DbgLog("[CH5-Listen] ABORT: bad WorldContext %p\n", WorldCtx);
-        return;
-    }
-
-    s_listenDoneWorld = World;
-
-    if (GameMode->HasbEnableReplicationGraph())
-        GameMode->bEnableReplicationGraph = true;
-
-    auto NetDriverName = FName(L"GameNetDriver");
-    ((char (*)(UEngine*, void*, FName, FName)) CreateNamedLocalFn)(Engine, WorldCtx, NetDriverName, NetDriverName);
-
-    // Recover the driver from FWorldContext::ActiveNetDrivers -- TArray<FNamedNetDriver> at +0x208
-    // (Data), count at +0x210; FNamedNetDriver is 0x10 with UNetDriver* at +0x0. Walk newest-first.
-    // The offset comes from a UE5.5 dump, so validate it rather than trusting it blindly: a wrong
-    // offset here would otherwise hand us a garbage pointer to write through.
-    UNetDriver* NetDriver = nullptr;
-    auto TryReadDrivers = [&](uint32_t DataOff, uint32_t NumOff) -> UNetDriver*
-    {
-        if (!SDK::MemReadable((uint8_t*)WorldCtx + DataOff, 0x10))
-            return nullptr;
-
-        auto Data = *(uint8_t**)((uint8_t*)WorldCtx + DataOff);
-        auto Num = *(int32_t*)((uint8_t*)WorldCtx + NumOff);
-
-        if (!Data || Num <= 0 || Num > 64 || !SDK::MemReadable(Data, (size_t)Num * 0x10))
-            return nullptr;
-
-        for (int i = Num - 1; i >= 0; i--)
-        {
-            auto Candidate = *(UNetDriver**)(Data + (size_t)i * 0x10);
-            // A real driver is a UObject: readable, with a readable vtable.
-            if (Candidate && (uintptr_t)Candidate > 0x10000 && SDK::MemReadable(Candidate, 0x40) &&
-                SDK::MemReadable(*(void**)Candidate, 0x8))
-                return Candidate;
-        }
-        return nullptr;
-    };
-
-    NetDriver = TryReadDrivers(0x208, 0x210);
-
-    if (!NetDriver)
-    {
-        // Layout moved on this build — probe nearby 8-byte-aligned slots for a plausible TArray.
-        for (uint32_t Off = 0x1C0; Off <= 0x260 && !NetDriver; Off += 8)
-        {
-            if (Off == 0x208)
-                continue;
-            NetDriver = TryReadDrivers(Off, Off + 8);
-            if (NetDriver)
-                SDK::DbgLog("[CH5-Listen] ActiveNetDrivers found at +0x%X (not +0x208) — layout differs\n", Off);
-        }
-    }
-
-    if (!NetDriver)
-    {
-        SDK::DbgLog("[CH5-Listen] ABORT: CreateNamedNetDriver_Local ran but no driver in ActiveNetDrivers\n");
-        s_listenDoneWorld = nullptr;
-        return;
-    }
-
-    SDK::DbgLog("[CH5-Listen] NetDriver=%p\n", (void*)NetDriver);
-
-    World->NetDriver = NetDriver;
-    NetDriver->NetDriverName = NetDriverName;
-    NetDriver->World = World;
-
-    if (VersionInfo.FortniteVersion >= 20)
-        NetDriver->NetServerMaxTickRate = 30;
-
-    if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
-        *(bool*)(__int64(&NetDriver->ReplicationDriver) + 0x11) = true;
-
-    for (int i = 0; i < World->LevelCollections.Num(); i++)
-        World->LevelCollections.Get(i, FLevelCollection::Size()).NetDriver = NetDriver;
-
-    auto URL = (FURL*)malloc(FURL::Size());
-    memset((PBYTE)URL, 0, FURL::Size());
-    URL->Port = FConfiguration::Port;
-
-    auto InitListen = (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&)) FindInitListen();
-    auto SetWorld = (void (*)(UNetDriver*, UWorld*)) FindSetWorld();
-    SDK::DbgLog("[CH5-Listen] InitListen=%p SetWorld=%p Port=%d\n",
-        (void*)InitListen, (void*)SetWorld, (int)FConfiguration::Port);
-
-    if (!InitListen || !SetWorld)
-    {
-        SDK::DbgLog("[CH5-Listen] ABORT: InitListen/SetWorld unresolved\n");
-        free(URL);
-        return;
-    }
-
-    SetWorld(NetDriver, World);
-    FString Err;
-    bool bListening = InitListen(NetDriver, World, URL, false, Err);
-    if (bListening)
-    {
-        SetWorld(NetDriver, World);
-        SDK::DbgLog("[CH5-Listen] GameNetDriver listening on port %d\n", (int)FConfiguration::Port);
-    }
-    else
-        SDK::DbgLog("[CH5-Listen] InitListen FAILED\n");
-
-    free(URL);
-
-    // Playlist + world-ready, normally done by ReadyToStartMatch_ further down.
-    if (GameMode->HasWarmupRequiredPlayerCount())
-        GameMode->WarmupRequiredPlayerCount = 1;
-
-    SetupPlaylist(GameMode, GameState);
-
-    if (auto PawnClass = FindObject<UClass>(L"/Game/Athena/PlayerPawn_Athena.PlayerPawn_Athena_C"))
-        if (GameMode->HasDefaultPawnClass())
-            GameMode->DefaultPawnClass = PawnClass;
-
-    // Flight path + storm. FindInitializeFlightPath's existing pattern resolves cleanly on 31.41
-    // (verified statically: unique hit, prologue matches the known-good 32.11 function), so CH5
-    // gets a real bus rather than a drop-in fallback.
-    if (GameState->HasMapInfo() && GameState->MapInfo)
-    {
-        auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(GameState);
-        auto InitializeFlightPath = (void(*)(AFortAthenaMapInfo*, AFortGameStateAthena*, UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, bool, double, float, float))
-            FindInitializeFlightPath();
-
-        SDK::DbgLog("[CH5-Listen] GamePhaseLogic=%p InitializeFlightPath=%p\n",
-            (void*)GamePhaseLogic, (void*)InitializeFlightPath);
-
-        if (GamePhaseLogic && InitializeFlightPath)
-            InitializeFlightPath(GameState->MapInfo, GameState, GamePhaseLogic, false, 0.0, 0.f, 360.f);
-
-        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GenerateStormCircles(GameState->MapInfo);
-        SDK::DbgLog("[CH5-Listen] FlightInfos=%d after InitializeFlightPath\n",
-            GameState->MapInfo->FlightInfos.Num());
-    }
-
-    if (GameMode->HasbWorldIsReady())
-        GameMode->bWorldIsReady = true;
-
-    SDK::DbgLog("[CH5-Listen] setup complete\n");
-}
-
 void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* WorldManager)
 {
     auto GameMode = (AFortGameModeAthena*)_this;
@@ -2352,16 +2382,6 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
     SDK::DbgLog("[GameMode] FinishWorldInitialization entered (this=%p GameState=%p) pre-OG\n", (void*)_this, (void*)GameState);
     FinishWorldInitializationOG(_this, WorldManager);
     SDK::DbgLog("[GameMode] FinishWorldInitialization post-OG\n");
-
-    // CH5 (UE5.4+): AGameMode::ReadyToStartMatch is invoked as a native call, so the exec hook that
-    // normally brings the listen server up never fires and the server never binds a port. This
-    // function is an address detour, which does fire, so do the bring-up here instead.
-    //
-    // Upper-bounded at 32.00 on purpose: 32.11 already has a working path (Misc.cpp's
-    // GetMaxTickRate-driven Listen + the direct ReadyToStartMatch RVA hook), so this cannot
-    // regress it. Pre-5.4 is untouched and keeps using ReadyToStartMatch_.
-    if (VersionInfo.EngineVersion >= 5.4 && VersionInfo.FortniteVersion < 32.00)
-        SetupListenServerCH5(GameMode, GameState);
 
     if (GameState && VersionInfo.EngineVersion >= 4.22 && VersionInfo.EngineVersion < 4.26)
         GameState->OnRep_CurrentPlaylistInfo();

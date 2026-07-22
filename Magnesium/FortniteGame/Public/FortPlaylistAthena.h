@@ -71,6 +71,8 @@ public:
     DEFINE_PROP(LootPackages, TSoftObjectPtr<UDataTable>);
     DEFINE_PROP(AirCraftBehavior, uint8);
     DEFINE_PROP(SafeZoneStartUp, uint8);
+    DEFINE_PROP(StormEffectDelay, float);
+    DEFINE_PROP(LastSafeZoneIndex, int32);
     DEFINE_PROP(bRespawnInAir, bool);
     DEFINE_PROP(RespawnHeight, FScalableFloat);
     DEFINE_PROP(RespawnTime, FScalableFloat);

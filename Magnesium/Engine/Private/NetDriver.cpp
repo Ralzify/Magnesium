@@ -498,35 +498,63 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 
 	ViewerMap.clear();
 }
-
-static bool GetActiveStormEffectHandle(UAbilitySystemComponent* AbilitySystemComponent, UClass* StormEffectClass, FActiveGameplayEffectHandle& OutHandle)
+static UClass* GetLowerSeasonStormEffectClass()
 {
-	if (!AbilitySystemComponent || !StormEffectClass)
-		return false;
-
-	auto& Effects = AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
-
-	for (int i = 0; i < Effects.Num(); i++)
-	{
-		auto& Effect = Effects.Get(i, FActiveGameplayEffect::Size());
-
-		if (Effect.Spec.Def && Effect.Spec.Def->IsA(StormEffectClass))
-		{
-			OutHandle = *(FActiveGameplayEffectHandle*)(__int64(&Effect) + 0xc);
-			return true;
-		}
-	}
-
-	return false;
+	static UClass* StormEffectClass = nullptr;
+	if (!StormEffectClass)
+		StormEffectClass = const_cast<UClass*>(FindObject<UClass>(L"/Game/Athena/SafeZone/GE_OutsideSafeZoneDamage.GE_OutsideSafeZoneDamage_C"));
+	return StormEffectClass;
 }
 
-static void RemoveStormEffect(UAbilitySystemComponent* AbilitySystemComponent, UClass* StormEffectClass)
+static std::vector<FActiveGameplayEffectHandle> FindLowerSeasonStormEffectHandles(
+	UAbilitySystemComponent* AbilitySystemComponent, UClass* StormEffectClass)
+{
+	std::vector<FActiveGameplayEffectHandle> Handles;
+	if (!AbilitySystemComponent || !StormEffectClass)
+		return Handles;
+
+	auto& Effects = AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+	for (int Index = 0; Index < Effects.Num(); Index++)
+	{
+		auto& Effect = Effects.Get(Index, FActiveGameplayEffect::Size());
+		if (Effect.Spec.Def && Effect.Spec.Def->IsA(StormEffectClass))
+			Handles.push_back(*(FActiveGameplayEffectHandle*)(__int64(&Effect) + 0xc));
+	}
+	return Handles;
+}
+
+static bool RemoveLowerSeasonStormEffectHandle(UAbilitySystemComponent* AbilitySystemComponent,
+	const FActiveGameplayEffectHandle& Handle)
+{
+	if (!AbilitySystemComponent || Handle.Handle <= 0)
+		return false;
+
+	auto RemoveActiveEffectFn = AbilitySystemComponent->GetFunction("RemoveActiveGameplayEffect");
+	return RemoveActiveEffectFn && AbilitySystemComponent->Call<bool>(RemoveActiveEffectFn, Handle, -1);
+}
+
+static void RemoveLowerSeasonStormEffects(UAbilitySystemComponent* AbilitySystemComponent,
+	UClass* StormEffectClass)
 {
 	if (!AbilitySystemComponent || !StormEffectClass)
 		return;
 
-	static auto RemoveActiveGameplayEffectBySourceEffectFn = const_cast<UFunction*>(FindObject<UFunction>(L"/Script/GameplayAbilities.AbilitySystemComponent.RemoveActiveGameplayEffectBySourceEffect"));
-	if (!RemoveActiveGameplayEffectBySourceEffectFn)
+	auto Handles = FindLowerSeasonStormEffectHandles(AbilitySystemComponent, StormEffectClass);
+	bool bRemovedEveryHandle = !Handles.empty();
+	for (auto& Handle : Handles)
+		if (!RemoveLowerSeasonStormEffectHandle(AbilitySystemComponent, Handle))
+			bRemovedEveryHandle = false;
+
+	if (bRemovedEveryHandle || Handles.empty())
+		return;
+
+	// Very old GAS builds expose source-effect removal even when the handle
+	// wrapper cannot be invoked. This is only a fallback; handle removal is what
+	// reliably catches effects inherited through the persistent PlayerState ASC.
+	static UFunction* RemoveBySourceFn = nullptr;
+	if (!RemoveBySourceFn)
+		RemoveBySourceFn = const_cast<UFunction*>(FindObject<UFunction>(L"/Script/GameplayAbilities.AbilitySystemComponent.RemoveActiveGameplayEffectBySourceEffect"));
+	if (!RemoveBySourceFn)
 		return;
 
 	struct
@@ -534,12 +562,28 @@ static void RemoveStormEffect(UAbilitySystemComponent* AbilitySystemComponent, U
 		UClass* GameplayEffect;
 		UObject* InstigatorAbilitySystemComponent;
 		int StacksToRemove;
-	} Params{ StormEffectClass, AbilitySystemComponent, 1 };
+	} Params{ StormEffectClass, AbilitySystemComponent, -1 };
 
-	AbilitySystemComponent->ProcessEvent(RemoveActiveGameplayEffectBySourceEffectFn, &Params);
+	AbilitySystemComponent->ProcessEvent(RemoveBySourceFn, &Params);
 }
 
-static bool TrySetReflectedBool(UObject* Object, const char* PropertyName, bool Value, bool& bOutChanged)
+void ResetLowerSeasonStormStateForRespawn(AFortPlayerControllerAthena* Player,
+	AFortPlayerPawnAthena* OldPawn, AFortPlayerPawnAthena* NewPawn)
+{
+	if (VersionInfo.FortniteVersion >= 7.00 || !Player)
+		return;
+
+	if (!Player->PlayerState)
+		return;
+
+	// PlayerState and its ASC survive a lower-season pawn replacement. Clear the
+	// old pawn's periodic storm effect; the native-wall sync below starts a fresh
+	// entry delay if the replacement pawn really is outside.
+	auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
+	RemoveLowerSeasonStormEffects(AbilitySystemComponent, GetLowerSeasonStormEffectClass());
+}
+
+static bool SetReflectedSafeZoneBool(UObject* Object, const char* PropertyName, bool Value)
 {
 	if (!Object)
 		return false;
@@ -549,640 +593,122 @@ static bool TrySetReflectedBool(UObject* Object, const char* PropertyName, bool 
 		return false;
 
 	auto Offset = GetFromOffset<uint32>(Property, Offsets::Offset_Internal);
-	auto FieldMask = Property->GetFieldMask();
-	auto& ByteValue = GetFromOffset<uint8_t>(Object, Offset);
-	bool bPreviousValue = FieldMask != 0 ? (ByteValue & FieldMask) != 0 : ByteValue != 0;
+	auto Mask = Property->GetFieldMask();
+	auto& Byte = GetFromOffset<uint8_t>(Object, Offset);
+	const bool Previous = Mask ? (Byte & Mask) != 0 : Byte != 0;
+	if (Previous == Value)
+		return false;
 
-	if (FieldMask != 0)
-	{
-		if (Value)
-			ByteValue |= FieldMask;
-		else
-			ByteValue &= ~FieldMask;
-	}
+	if (Mask)
+		Value ? Byte |= Mask : Byte &= ~Mask;
 	else
-	{
-		ByteValue = Value ? 1 : 0;
-	}
+		Byte = Value ? 1 : 0;
 
-	bOutChanged = bPreviousValue != Value;
 	return true;
 }
 
-static void TryCallZeroedFunction(UObject* Object, const char* FunctionName)
+static void SyncErbiumSafeZonePreviewPause(UNetDriver* Driver)
 {
-	if (!Object)
+	// Chapter 1 indicators have a separate replicated preview-pause flag. The
+	// native console command pauses the wall/server phase, but these builds can
+	// leave the white preview running unless this flag follows the same state.
+	if (VersionInfo.FortniteVersion >= 6.00)
 		return;
 
-	auto Function = Object->GetFunction(FunctionName);
-	if (!Function)
+	auto World = UWorld::GetWorld();
+	if (!World || Driver != World->NetDriver)
 		return;
 
-	auto ParamsSize = Function->GetPropertiesSize();
-	if (ParamsSize <= 0)
-	{
-		Object->ProcessEvent(Function, nullptr);
-		return;
-	}
-
-	auto Params = FMemory::Malloc(ParamsSize);
-	memset((PBYTE)Params, 0, ParamsSize);
-	Object->ProcessEvent(Function, Params);
-	FMemory::Free(Params);
-}
-
-static void SyncReflectedStormState(AFortPlayerPawnAthena* Pawn, bool bInZone)
-{
-	if (!Pawn)
+	auto GameMode = (AFortGameMode*)World->AuthorityGameMode;
+	auto Indicator = GameMode && GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator : nullptr;
+	if (!Indicator)
 		return;
 
-	bool bAnyStormPropertyFound = false;
-	bool bAnyStormPropertyChanged = false;
+	const bool bPaused = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused();
 
-	struct FStormBoolProperty
-	{
-		const char* Name;
-		bool Value;
-	};
+	if (SetReflectedSafeZoneBool(Indicator, "bPausedForPreview", bPaused))
+		Indicator->ForceNetUpdate();
+}
 
-	const FStormBoolProperty StormProperties[] =
-	{
-		{ "bIsInsideSafeZone", bInZone },
-		{ "bIsInSafeZone", bInZone },
-		{ "bIsOutsideSafeZone", !bInZone },
-		{ "bIsInAnyStorm", !bInZone },
-		{ "bIsInStorm", !bInZone },
-		{ "bInStorm", !bInZone }
-	};
-
-	for (auto& StormProperty : StormProperties)
-	{
-		bool bChanged = false;
-		if (TrySetReflectedBool(Pawn, StormProperty.Name, StormProperty.Value, bChanged))
-		{
-			bAnyStormPropertyFound = true;
-			bAnyStormPropertyChanged |= bChanged;
-		}
-	}
-
-	if (!bAnyStormPropertyChanged)
+static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
+{
+	// The old Erbium path through Season 6 can reach SafeZones without arming
+	// its repeating player-inside check. Run that native, idempotent callback at
+	// its normal coarse cadence instead of applying a second gameplay effect
+	// (which is what caused the old double ticks).
+	if (VersionInfo.FortniteVersion >= 7.00)
 		return;
 
-	static const char* StormOnRepFunctions[] =
-	{
-		"OnRep_IsInsideSafeZone",
-		"OnRep_bIsInsideSafeZone",
-		"OnRep_IsInSafeZone",
-		"OnRep_bIsInSafeZone",
-		"OnRep_IsOutsideSafeZone",
-		"OnRep_bIsOutsideSafeZone",
-		"OnRep_IsInAnyStorm",
-		"OnRep_bIsInAnyStorm",
-		"OnRep_IsInStorm",
-		"OnRep_bIsInStorm",
-		"OnRep_InStorm"
-	};
-
-	for (auto OnRepFunction : StormOnRepFunctions)
-		TryCallZeroedFunction(Pawn, OnRepFunction);
-
-	if (bAnyStormPropertyFound)
-		Pawn->ForceNetUpdate();
-}
-
-static void SetSafeZoneAppliedGameplayEffectHandle(AFortPlayerPawnAthena* Pawn, const FActiveGameplayEffectHandle* StormEffectHandle)
-{
-	if (!Pawn)
+	auto World = UWorld::GetWorld();
+	if (!World || Driver != World->NetDriver)
 		return;
 
-	auto Property = Pawn->GetProperty("SafeZoneAppliedGE");
-	if (!Property)
-		return;
-
-	auto ElementSize = GetFromOffset<uint32>(Property, Offsets::ElementSize);
-	if (ElementSize < sizeof(int32) || ElementSize > 0x20)
-		return;
-
-	auto Offset = GetFromOffset<uint32>(Property, Offsets::Offset_Internal);
-	auto Destination = (PBYTE)(__int64(Pawn) + Offset);
-	memset(Destination, 0, ElementSize);
-
-	if (StormEffectHandle)
-		memcpy(Destination, StormEffectHandle, (std::min)(ElementSize, (uint32)sizeof(FActiveGameplayEffectHandle)));
-
-	TryCallZeroedFunction(Pawn, "OnRep_SafeZoneAppliedGE");
-	Pawn->ForceNetUpdate();
-}
-
-static bool IsFiniteSafeZoneVector(FVector Location)
-{
-	return std::isfinite(static_cast<double>(Location.X)) &&
-		std::isfinite(static_cast<double>(Location.Y)) &&
-		std::isfinite(static_cast<double>(Location.Z));
-}
-
-static bool IsUsableSafeZoneRadius(float Radius, bool bAllowZero = false)
-{
-	return (bAllowZero ? Radius >= 0.f : Radius > 0.f) && std::isfinite(static_cast<double>(Radius));
-}
-
-static bool TryUseSafeZoneCircle(FVector Center, float Radius, FVector& OutCenter, float& OutRadius, bool bAllowZeroCenter, bool bAllowZeroRadius = false)
-{
-	if (!IsUsableSafeZoneRadius(Radius, bAllowZeroRadius) || !IsFiniteSafeZoneVector(Center) || (!bAllowZeroCenter && Center.IsZero()))
-		return false;
-
-	OutCenter = Center;
-	OutRadius = Radius;
-	return true;
-}
-
-static bool TryGetCurrentPhaseSafeZoneCircle(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, float& OutRadius)
-{
-	if (!SafeZoneIndicator || !SafeZoneIndicator->HasSafeZonePhases() || !SafeZoneIndicator->HasCurrentPhase())
-		return false;
-
-	if (!FFortSafeZonePhaseInfo::HasCenter() || !FFortSafeZonePhaseInfo::HasRadius())
-		return false;
-
-	auto& SafeZonePhases = SafeZoneIndicator->SafeZonePhases;
-	auto CurrentPhase = SafeZoneIndicator->CurrentPhase;
-
-	if (!SafeZonePhases.IsValidIndex(CurrentPhase))
-		return false;
-
-	auto& PhaseInfo = SafeZonePhases.Get(CurrentPhase, FFortSafeZonePhaseInfo::Size());
-	return TryUseSafeZoneCircle(PhaseInfo.Center, PhaseInfo.Radius, OutCenter, OutRadius, true, true);
-}
-
-static bool TryGetLiveSafeZoneCenter(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, bool bAllowZeroCenter)
-{
-	if (!SafeZoneIndicator)
-		return false;
-
-	if (auto GetSafeZoneCenterFn = SafeZoneIndicator->GetFunction("GetSafeZoneCenter"))
+	auto GameMode = (AFortGameMode*)World->AuthorityGameMode;
+	auto GameState = (AFortGameStateAthena*)World->GameState;
+	if (!GameMode || !GameState || !GameMode->HasSafeZoneIndicator() || !GameMode->SafeZoneIndicator ||
+		!GameState->HasGamePhase() || GameState->GamePhase != 4)
 	{
-		auto Center = SafeZoneIndicator->Call<FVector>(GetSafeZoneCenterFn);
-
-		if (IsFiniteSafeZoneVector(Center) && (bAllowZeroCenter || !Center.IsZero()))
-		{
-			OutCenter = Center;
-			return true;
-		}
-	}
-
-	return false;
-}
-
-static bool TryGetInterpolatedSafeZoneCircle(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, float& OutRadius)
-{
-	if (!SafeZoneIndicator ||
-		!SafeZoneIndicator->HasPreviousCenter() || !SafeZoneIndicator->HasPreviousRadius() ||
-		!SafeZoneIndicator->HasNextCenter() || !SafeZoneIndicator->HasNextRadius() ||
-		!SafeZoneIndicator->HasSafeZoneStartShrinkTime() || !SafeZoneIndicator->HasSafeZoneFinishShrinkTime())
-	{
-		return false;
-	}
-
-	auto PreviousCenter = SafeZoneIndicator->PreviousCenter;
-	auto NextCenter = SafeZoneIndicator->NextCenter;
-	auto PreviousRadius = SafeZoneIndicator->PreviousRadius;
-	auto NextRadius = SafeZoneIndicator->NextRadius;
-
-	if (!IsFiniteSafeZoneVector(PreviousCenter) || !IsFiniteSafeZoneVector(NextCenter) ||
-		!IsUsableSafeZoneRadius(PreviousRadius) || !IsUsableSafeZoneRadius(NextRadius, true))
-	{
-		return false;
-	}
-
-	auto StartShrinkTime = SafeZoneIndicator->SafeZoneStartShrinkTime;
-	auto FinishShrinkTime = SafeZoneIndicator->SafeZoneFinishShrinkTime;
-	auto Alpha = 1.f;
-
-	if (FinishShrinkTime > StartShrinkTime)
-	{
-		auto TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-		Alpha = (TimeSeconds - StartShrinkTime) / (FinishShrinkTime - StartShrinkTime);
-
-		if (Alpha < 0.f)
-			Alpha = 0.f;
-		else if (Alpha > 1.f)
-			Alpha = 1.f;
-	}
-
-	auto Center = PreviousCenter + ((NextCenter - PreviousCenter) * Alpha);
-	auto Radius = PreviousRadius + ((NextRadius - PreviousRadius) * Alpha);
-
-	return TryUseSafeZoneCircle(Center, Radius, OutCenter, OutRadius, true, true);
-}
-
-static bool TryGetSafeZoneCircle(AFortSafeZoneIndicator* SafeZoneIndicator, FVector& OutCenter, float& OutRadius)
-{
-	if (!SafeZoneIndicator)
-		return false;
-
-	FVector PhaseCenter{};
-	float PhaseRadius = 0.f;
-	const bool bHasPhaseCircle = TryGetCurrentPhaseSafeZoneCircle(SafeZoneIndicator, PhaseCenter, PhaseRadius);
-
-	FVector LiveCenter{};
-	const bool bHasLiveCenter = TryGetLiveSafeZoneCenter(SafeZoneIndicator, LiveCenter, bHasPhaseCircle);
-
-	if (TryGetInterpolatedSafeZoneCircle(SafeZoneIndicator, OutCenter, OutRadius))
-		return true;
-
-	if (SafeZoneIndicator->HasRadius() && IsUsableSafeZoneRadius(SafeZoneIndicator->Radius))
-	{
-		if (bHasLiveCenter && TryUseSafeZoneCircle(LiveCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, true))
-			return true;
-
-		if (bHasPhaseCircle && TryUseSafeZoneCircle(PhaseCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, true))
-			return true;
-
-		if (SafeZoneIndicator->HasNextCenter() && TryUseSafeZoneCircle(SafeZoneIndicator->NextCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, false))
-			return true;
-
-		if (SafeZoneIndicator->HasLastCenter() && TryUseSafeZoneCircle(SafeZoneIndicator->LastCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, false))
-			return true;
-
-		if (SafeZoneIndicator->HasPreviousCenter() && TryUseSafeZoneCircle(SafeZoneIndicator->PreviousCenter, SafeZoneIndicator->Radius, OutCenter, OutRadius, false))
-			return true;
-	}
-
-	if (bHasPhaseCircle)
-	{
-		OutCenter = PhaseCenter;
-		OutRadius = PhaseRadius;
-		return true;
-	}
-
-	if (SafeZoneIndicator->HasNextCenter() && SafeZoneIndicator->HasNextRadius() &&
-		TryUseSafeZoneCircle(SafeZoneIndicator->NextCenter, SafeZoneIndicator->NextRadius, OutCenter, OutRadius, false, true))
-	{
-		return true;
-	}
-
-	if (SafeZoneIndicator->HasLastCenter() && SafeZoneIndicator->HasLastRadius() &&
-		TryUseSafeZoneCircle(SafeZoneIndicator->LastCenter, SafeZoneIndicator->LastRadius, OutCenter, OutRadius, false))
-	{
-		return true;
-	}
-
-	if (SafeZoneIndicator->HasPreviousCenter() && SafeZoneIndicator->HasPreviousRadius() &&
-		TryUseSafeZoneCircle(SafeZoneIndicator->PreviousCenter, SafeZoneIndicator->PreviousRadius, OutCenter, OutRadius, false))
-	{
-		return true;
-	}
-
-	return false;
-}
-
-static bool IsLocationInsideSafeZoneCircle(FVector Location, FVector Center, float Radius)
-{
-	auto DeltaX = static_cast<double>(Center.X - Location.X);
-	auto DeltaY = static_cast<double>(Center.Y - Location.Y);
-	auto RadiusDouble = static_cast<double>(Radius);
-
-	return (DeltaX * DeltaX) + (DeltaY * DeltaY) <= RadiusDouble * RadiusDouble;
-}
-
-static float GetDefaultLowerSeasonStormDamagePerSecond(int Phase)
-{
-	constexpr float DamageByPhase[] = { 1.f, 1.f, 1.f, 2.f, 5.f, 7.5f, 10.f, 10.f, 10.f, 10.f, 10.f, 10.f, 10.f };
-
-	if (Phase < 0)
-		Phase = 0;
-
-	const int LastIndex = (int)(sizeof(DamageByPhase) / sizeof(DamageByPhase[0])) - 1;
-	return DamageByPhase[Phase > LastIndex ? LastIndex : Phase];
-}
-
-static bool ShouldUseLowerSeasonStormFixes()
-{
-	return VersionInfo.FortniteVersion < 7.00;
-}
-
-static bool ShouldSyncStormState()
-{
-	// Erbium 0121c55 ("proper zones") dropped the manual safe-zone forcing for 18.00-25.20:
-	// the game maintains bIsInsideSafeZone / bIsInAnyStorm itself on those builds, and
-	// rewriting them every tick fought the native state. For that range SyncStormState did
-	// nothing else either - it returns right after SyncReflectedStormState - so dropping the
-	// range removes the interference without losing behaviour.
-	//
-	// Lower seasons (< 7.00) still need the full path (reconstructed zone circle + the storm
-	// damage timer), so that side is deliberately kept.
-	return ShouldUseLowerSeasonStormFixes();
-}
-
-static int GetSafeZoneDamagePhase(AFortGameMode* GameMode, AFortSafeZoneIndicator* SafeZoneIndicator)
-{
-	if (GameMode && GameMode->HasSafeZonePhase() && GameMode->SafeZonePhase > 0)
-		return GameMode->SafeZonePhase;
-
-	if (SafeZoneIndicator && SafeZoneIndicator->HasCurrentPhase() && SafeZoneIndicator->CurrentPhase > 0)
-		return SafeZoneIndicator->CurrentPhase;
-
-	return 1;
-}
-
-static float GetStormDamagePerTick(AFortPlayerPawnAthena* Pawn, AFortSafeZoneIndicator* SafeZoneIndicator, int StormPhase)
-{
-	float DefaultDamage = 1.f;
-	if (ShouldUseLowerSeasonStormFixes())
-		DefaultDamage = GetDefaultLowerSeasonStormDamagePerSecond(StormPhase);
-
-	if (ShouldUseLowerSeasonStormFixes())
-		return DefaultDamage;
-
-	if (!SafeZoneIndicator || !SafeZoneIndicator->HasCurrentDamageInfo() || !FFortSafeZoneDamageInfo::HasDamage())
-		return DefaultDamage;
-
-	auto Damage = SafeZoneIndicator->CurrentDamageInfo.Damage;
-
-	if (!std::isfinite(static_cast<double>(Damage)) || Damage <= 0.f)
-		return DefaultDamage;
-
-	if (FFortSafeZoneDamageInfo::HasbPercentageBasedDamage() && SafeZoneIndicator->CurrentDamageInfo.bPercentageBasedDamage)
-	{
-		auto MaxHealth = Pawn ? Pawn->GetMaxHealth() : 100.f;
-
-		if (!std::isfinite(static_cast<double>(MaxHealth)) || MaxHealth <= 0.f)
-			MaxHealth = 100.f;
-
-		Damage *= MaxHealth;
-	}
-
-	return Damage < 1.f ? 1.f : Damage;
-}
-
-static void InvokeStormDamageGameplayCue(UAbilitySystemComponent* AbilitySystemComponent, AFortPlayerControllerAthena* Player, AFortPlayerPawnAthena* Pawn, float Damage)
-{
-	if (!AbilitySystemComponent)
-		return;
-
-	FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
-	Context.Instigator = Player;
-	Context.Causer = Pawn;
-	Context.AddSourceObject(Pawn);
-
-	auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-	memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-
-	const wchar_t* StormDamageCueNames[] =
-	{
-		L"GameplayCue.Athena.Storm.Damage",
-		L"GameplayCue.Athena.SafeZone.Damage",
-		L"GameplayCue.Athena.OutsideSafeZone.Damage",
-		L"GameplayCue.Athena.StormDamage",
-		L"GameplayCue.SafeZone.Damage",
-		L"GameplayCue.Storm.Damage"
-	};
-
-	for (auto CueName : StormDamageCueNames)
-	{
-		FGameplayTag CueTag{};
-		CueTag.TagName = FName(CueName);
-		AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(CueTag, *PredictionKey, Context);
-
-		auto CueParamsStruct = FGameplayCueParameters::StaticStruct();
-		if (CueParamsStruct)
-		{
-			FGameplayCueParameters Params{};
-
-			if (FGameplayCueParameters::HasEffectContext())
-				Params.EffectContext = Context;
-
-			auto RawMagnitudeProperty = FGameplayCueParameters::StaticStruct()->GetProperty("RawMagnitude");
-			if (RawMagnitudeProperty)
-			{
-				auto Offset = GetFromOffset<uint32>(RawMagnitudeProperty, Offsets::Offset_Internal);
-				if (Offset + sizeof(float) <= sizeof(FGameplayCueParameters))
-					GetFromOffset<float>(&Params, Offset) = Damage;
-			}
-
-			auto NormalizedMagnitudeProperty = FGameplayCueParameters::StaticStruct()->GetProperty("NormalizedMagnitude");
-			if (NormalizedMagnitudeProperty)
-			{
-				auto Offset = GetFromOffset<uint32>(NormalizedMagnitudeProperty, Offsets::Offset_Internal);
-				if (Offset + sizeof(float) <= sizeof(FGameplayCueParameters))
-					GetFromOffset<float>(&Params, Offset) = Damage;
-			}
-
-			auto LocationProperty = FGameplayCueParameters::StaticStruct()->GetProperty("Location");
-			if (LocationProperty && Pawn)
-			{
-				auto Offset = GetFromOffset<uint32>(LocationProperty, Offsets::Offset_Internal);
-				if (Offset + sizeof(FVector) <= sizeof(FGameplayCueParameters))
-					GetFromOffset<FVector>(&Params, Offset) = Pawn->K2_GetActorLocation();
-			}
-
-			AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted_WithParams(CueTag, *PredictionKey, Params);
-		}
-	}
-
-	free(PredictionKey);
-}
-
-static void TryForceKillPawnForStorm(AFortPlayerPawnAthena* Pawn)
-{
-	if (!Pawn)
-		return;
-
-	auto ForceKillFn = Pawn->GetFunction("ForceKill");
-
-	if (ForceKillFn)
-	{
-		FGameplayTag DeathTag{};
-		AFortPlayerControllerAthena* InstigatorController = nullptr;
-		AActor* DamageCauser = nullptr;
-		Pawn->Call<void>(ForceKillFn, DeathTag, InstigatorController, DamageCauser);
 		return;
 	}
 
-	Pawn->SetHealth(0.f);
-	Pawn->ForceNetUpdate();
-}
+	// A visible, in-progress storm is active by definition. Some legacy
+	// playlist paths create the indicator without setting this gate, and the
+	// native callback exits immediately while it is false.
+	if (GameMode->HasbSafeZoneActive() && !GameMode->bSafeZoneActive)
+		GameMode->bSafeZoneActive = true;
 
-static std::unordered_map<AFortPlayerPawnAthena*, float> LowerSeasonStormDamageTimes;
-
-static void ResetLowerSeasonStormDamageDelay(AFortPlayerPawnAthena* Pawn)
-{
-	if (Pawn)
-		LowerSeasonStormDamageTimes.erase(Pawn);
-}
-
-static void ApplyLowerSeasonStormDamage(AFortPlayerControllerAthena* Player, AFortPlayerPawnAthena* Pawn, float TimeSeconds, UAbilitySystemComponent* AbilitySystemComponent, float Damage)
-{
-	if (!Pawn)
-		return;
-
-	if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
-		return;
-
-	auto LastDamageTimeIt = LowerSeasonStormDamageTimes.find(Pawn);
-	if (LastDamageTimeIt == LowerSeasonStormDamageTimes.end())
+	static UWorld* LastWorld = nullptr;
+	static float NextCheckTime = 0.f;
+	static bool bLoggedForWorld = false;
+	if (LastWorld != World)
 	{
-		LowerSeasonStormDamageTimes[Pawn] = TimeSeconds;
-		return;
+		LastWorld = World;
+		NextCheckTime = 0.f;
+		bLoggedForWorld = false;
 	}
 
-	if (TimeSeconds - LastDamageTimeIt->second < 1.f)
+	const float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(World);
+	if (TimeSeconds < NextCheckTime)
 		return;
+	NextCheckTime = TimeSeconds + 1.f;
 
-	LastDamageTimeIt->second = TimeSeconds;
+	if (GameMode->HasGE_OutsideSafeZone() && !GameMode->GE_OutsideSafeZone)
+		GameMode->GE_OutsideSafeZone = GetLowerSeasonStormEffectClass();
 
-	auto Health = Pawn->GetHealth();
-	const bool bFatal = Health <= Damage;
+	auto SafeZoneInsideChecksFn = GameMode->GetFunction("SafeZoneInsideChecks");
+	const UFortPlaylistAthena* Playlist = nullptr;
+	if (GameState->HasCurrentPlaylistInfo() && GameState->CurrentPlaylistInfo.BasePlaylist)
+		Playlist = GameState->CurrentPlaylistInfo.BasePlaylist;
+	else if (GameState->HasCurrentPlaylistData())
+		Playlist = GameState->CurrentPlaylistData;
+	const float StormEffectDelay = Playlist && Playlist->HasStormEffectDelay()
+		? Playlist->StormEffectDelay
+		: -1.f;
 
-	if (bFatal)
-		TryForceKillPawnForStorm(Pawn);
-	else
-		Pawn->SetHealth(Health - Damage);
-
-	InvokeStormDamageGameplayCue(AbilitySystemComponent, Player, Pawn, Damage);
-	Pawn->ForceNetUpdate();
-}
-
-static bool IsStormIgnoredBot(AFortPlayerControllerAthena* Player)
-{
-	if (!Player || !Player->PlayerState)
-		return false;
-
-	auto PlayerState = (AFortPlayerStateAthena*)Player->PlayerState;
-	return PlayerState->HasbIsABot() && PlayerState->bIsABot;
-}
-
-static void SyncStormState(AFortGameMode* GameMode)
-{
-	if (!GameMode || !GameMode->SafeZoneIndicator)
-		return;
-
-	const bool bUseLowerSeasonStormFixes = ShouldUseLowerSeasonStormFixes();
-	if (!bUseLowerSeasonStormFixes && !ShouldSyncStormState())
-		return;
-
-	static auto StormEffectClass = const_cast<UClass*>(FindObject<UClass>(L"/Game/Athena/SafeZone/GE_OutsideSafeZoneDamage.GE_OutsideSafeZoneDamage_C"));
-	static std::unordered_map<AFortPlayerPawnAthena*, bool> LastKnownSafeZoneStates;
-	const float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-
-	for (auto& UncastedPlayer : GameMode->AlivePlayers)
+	if (!bLoggedForWorld)
 	{
-		auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
-		if (!Player)
-			continue;
-
-		if (IsStormIgnoredBot(Player))
-			continue;
-
-		auto Pawn = Player->MyFortPawn;
-		if (!Pawn)
-			Pawn = Player->Pawn;
-
-		if (!Pawn || !Pawn->IsA(AFortPlayerPawnAthena::StaticClass()))
-			continue;
-
-		auto PawnLocation = Pawn->K2_GetActorLocation();
-		bool bInZone = true;
-
-		if (bUseLowerSeasonStormFixes)
-		{
-			FVector SafeZoneCenter{};
-			float SafeZoneRadius = 0.f;
-			const bool bNativeInZone = GameMode->IsInCurrentSafeZone(PawnLocation, false);
-
-			if (TryGetSafeZoneCircle(GameMode->SafeZoneIndicator, SafeZoneCenter, SafeZoneRadius))
-			{
-				const bool bReconstructedInZone = IsLocationInsideSafeZoneCircle(PawnLocation, SafeZoneCenter, SafeZoneRadius);
-
-				// Older indicators do not update every replicated center/radius field at the
-				// same point in a phase transition.  The reconstructed circle is needed when
-				// the native check fails on these builds, but disagreement must never cause
-				// server-authored damage to a pawn that the game still considers safe.
-				bInZone = bNativeInZone || bReconstructedInZone;
-			}
-			else
-				bInZone = bNativeInZone;
-		}
-		else
-		{
-			bInZone = GameMode->IsInCurrentSafeZone(PawnLocation, false);
-		}
-
-		auto LastKnownSafeZoneState = LastKnownSafeZoneStates.find(Pawn);
-
-		if (LastKnownSafeZoneState == LastKnownSafeZoneStates.end() || LastKnownSafeZoneState->second != bInZone)
-		{
-			printf("Pawn %s new storm status: %s\n", Pawn->Name.ToString().c_str(), bInZone ? "true" : "false");
-			LastKnownSafeZoneStates[Pawn] = bInZone;
-		}
-
-		SyncReflectedStormState(Pawn, bInZone);
-
-		if (!bUseLowerSeasonStormFixes)
-			continue;
-
-		const int StormPhase = GetSafeZoneDamagePhase(GameMode, GameMode->SafeZoneIndicator);
-		const float StormDamage = GetStormDamagePerTick(Pawn, GameMode->SafeZoneIndicator, StormPhase);
-
-		if (bInZone)
-			ResetLowerSeasonStormDamageDelay(Pawn);
-
-		if (!StormEffectClass || !Player->PlayerState)
-		{
-			if (!bInZone)
-				ApplyLowerSeasonStormDamage(Player, Pawn, TimeSeconds, nullptr, StormDamage);
-
-			continue;
-		}
-
-		auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
-		if (!AbilitySystemComponent)
-		{
-			if (!bInZone)
-				ApplyLowerSeasonStormDamage(Player, Pawn, TimeSeconds, nullptr, StormDamage);
-
-			continue;
-		}
-
-		FActiveGameplayEffectHandle StormEffectHandle{};
-		bool bHasStormEffect = GetActiveStormEffectHandle(AbilitySystemComponent, StormEffectClass, StormEffectHandle);
-
-		if (bInZone)
-		{
-			if (bHasStormEffect)
-				RemoveStormEffect(AbilitySystemComponent, StormEffectClass);
-
-			SetSafeZoneAppliedGameplayEffectHandle(Pawn, nullptr);
-			continue;
-		}
-
-		// GE_OutsideSafeZoneDamage has its own periodic execution. Applying it here
-		// while also using the lower-season fallback below produces two independent
-		// damage ticks, and the gameplay effect can execute immediately on contact.
-		// Keep one authoritative one-second timer for these builds instead.
-		if (bHasStormEffect)
-			RemoveStormEffect(AbilitySystemComponent, StormEffectClass);
-
-		SetSafeZoneAppliedGameplayEffectHandle(Pawn, nullptr);
-
-		ApplyLowerSeasonStormDamage(Player, Pawn, TimeSeconds, AbilitySystemComponent, StormDamage);
+		bLoggedForWorld = true;
+		SDK::DbgLog(
+			"[SafeZone] legacy native damage watchdog armed version=%.2f fn=%p effect=%p active=%d paused=%d phase=%d locations=%d delay=%.2f\n",
+			VersionInfo.FortniteVersion,
+			(void*)SafeZoneInsideChecksFn,
+			(void*)(GameMode->HasGE_OutsideSafeZone() ? GameMode->GE_OutsideSafeZone : nullptr),
+			(int)(GameMode->HasbSafeZoneActive() ? GameMode->bSafeZoneActive : true),
+			(int)(GameMode->HasbSafeZonePaused() ? GameMode->bSafeZonePaused : false),
+			(int)GameState->GamePhase,
+			GameMode->HasSafeZoneLocations() ? GameMode->SafeZoneLocations.Num() : -1,
+			StormEffectDelay);
 	}
-}
 
-// CH5 (UE5.4+): ReadyToStartMatch is a native call, so nothing ever drives the match out of
-// WaitingToStart -- the listen server comes up fine but a joining client sits on
-// "Setting up the server" forever. Once a connection has a PlayerController, start the match
-// and arm the warmup countdown ourselves. Runs once per world.
-//
-// Bounded below 32.00: 32.11 drives this from its direct ReadyToStartMatch RVA hook.
-// Defined further down, next to the Iris tick; declared here for the earlier call sites.
-void DriveCH5MatchStart(UNetDriver* Driver);
+	if (SafeZoneInsideChecksFn)
+		GameMode->ProcessEvent(SafeZoneInsideChecksFn, nullptr);
+}
 
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
-
-	DriveCH5MatchStart(Driver);
+	SyncErbiumSafeZonePreviewPause(Driver);
+	DriveLegacySafeZoneInsideChecks(Driver);
 
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
@@ -1209,7 +735,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
             UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
         }
 	}
-	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || ShouldSyncStormState()))
+	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
 	{
 		auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -1247,10 +773,6 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 					TerminateProcess(GetCurrentProcess(), 0);
 			}
 		}
-		else if (Driver == WorldNetDriver && ShouldSyncStormState())
-		{
-			SyncStormState(GameMode);
-		}
 	}
 
     return TickFlushOG(Driver, DeltaSeconds);
@@ -1260,8 +782,8 @@ uint64_t ServerReplicateActors_;
 void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
-
-	DriveCH5MatchStart(Driver);
+	SyncErbiumSafeZonePreviewPause(Driver);
+	DriveLegacySafeZoneInsideChecks(Driver);
 
 	// Universal PlayerAI system (separate from the bot command and native AI).
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
@@ -1286,7 +808,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
 			}
 		}
-		else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || ShouldSyncStormState()))
+		else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
 		{
 			auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 			auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -1323,10 +845,6 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 					if (FConfiguration::bAutoRestart)
 						TerminateProcess(GetCurrentProcess(), 0);
 				}
-			}
-			else if (Driver == WorldNetDriver && ShouldSyncStormState())
-			{
-				SyncStormState(GameMode);
 			}
 		}
 	}
@@ -1377,98 +895,11 @@ void SendClientMoveAdjustments(UNetDriver* Driver)
 // actually flushing every frame, not just the game thread ticking. Incremented every call.
 volatile long g_tickFlushCounter = 0;
 
-static void DriveCH5MatchStart_Impl(UNetDriver* Driver)
-{
-	if (VersionInfo.EngineVersion < 5.4 || VersionInfo.FortniteVersion >= 32.00)
-		return;
-
-	static UWorld* s_forceStartWorld = nullptr;
-	auto World = UWorld::GetWorld();
-
-	// Periodic state dump so a stall here is diagnosable from the log instead of guessed at.
-	// Rate-limited hard: DbgLog fopen/fflush/fcloses per call and this runs on the game thread.
-	static uint32_t s_ticks = 0;
-	static int s_dumps = 0;
-	if ((s_ticks++ % 240) == 0 && s_dumps < 15 && !s_forceStartWorld)
-	{
-		++s_dumps;
-		auto DumpGM = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
-		int Conns = Driver ? Driver->ClientConnections.Num() : -1;
-		int WithPC = 0;
-		if (Driver)
-			for (auto C : Driver->ClientConnections)
-				if (C && C->PlayerController)
-					++WithPC;
-
-		const char* MatchStateStr = "<no gamemode>";
-		UC::UEAllocatedString MatchStateBuf;
-		if (DumpGM)
-		{
-			MatchStateBuf = DumpGM->MatchState.ToString();
-			MatchStateStr = MatchStateBuf.c_str();
-		}
-
-		SDK::DbgLog("[CH5-Start] waiting: conns=%d withPC=%d driverIsWorlds=%d GM=%p MatchState=%s hasWarmupCount=%d\n",
-			Conns, WithPC, (int)(World && Driver == World->NetDriver), (void*)DumpGM,
-			MatchStateStr, (int)(DumpGM && DumpGM->HasWarmupRequiredPlayerCount()));
-	}
-
-	if (!Driver || Driver->ClientConnections.Num() <= 0)
-		return;
-	if (!World || s_forceStartWorld == World || Driver != World->NetDriver)
-		return;
-
-	bool bHasReadyConn = false;
-	for (auto Conn : Driver->ClientConnections)
-		if (Conn && Conn->PlayerController)
-		{
-			bHasReadyConn = true;
-			break;
-		}
-	if (!bHasReadyConn)
-		return;
-
-	auto GameMode = (AFortGameMode*)World->AuthorityGameMode;
-	auto GameState = (AFortGameStateAthena*)World->GameState;
-	static auto WaitingToStart = FName(L"WaitingToStart");
-
-	if (!GameMode || !GameState || !GameMode->HasWarmupRequiredPlayerCount() ||
-		GameMode->MatchState != WaitingToStart)
-		return;
-
-	s_forceStartWorld = World;
-	GameMode->WarmupRequiredPlayerCount = 1;
-
-	auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
-	SDK::DbgLog("[CH5-Start] PlayerController present and MatchState=WaitingToStart -> forcing start (GamePhaseLogic=%p)\n",
-		(void*)GamePhaseLogic);
-
-	GameMode->MatchState = FName(L"InProgress");
-
-	if (GamePhaseLogic)
-	{
-		// Non-const on purpose: DEFINE_PROP's setters take float&/float&&, so a const
-		// local will not bind.
-		auto Time = (float)UGameplayStatics::GetTimeSeconds(World);
-		auto WarmupDuration = 60.f;
-		GamePhaseLogic->WarmupCountdownStartTime = Time;
-		GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
-		GamePhaseLogic->WarmupCountdownDuration = 10.f;
-		GamePhaseLogic->WarmupEarlyCountdownDuration = WarmupDuration - 10.f;
-
-		GamePhaseLogic->SetGamePhase(EAthenaGamePhase::Warmup);
-		GamePhaseLogic->SetGamePhaseStep(EAthenaGamePhaseStep::Warmup);
-		SDK::DbgLog("[CH5-Start] GamePhase -> Warmup, countdown armed (%.1fs)\n", WarmupDuration);
-	}
-}
-
-void DriveCH5MatchStart(UNetDriver* Driver) { DriveCH5MatchStart_Impl(Driver); }
-
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
-
-	DriveCH5MatchStart(Driver);
+	SyncErbiumSafeZonePreviewPause(Driver);
+	DriveLegacySafeZoneInsideChecks(Driver);
 
 	static int _tf = 0;
 	_InterlockedIncrement(&g_tickFlushCounter);
@@ -1522,7 +953,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 			UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
 		}
 	}
-	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL) || ShouldSyncStormState()))
+	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
 	{
 		auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -1560,10 +991,6 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 				if (FConfiguration::bAutoRestart)
 					TerminateProcess(GetCurrentProcess(), 0);
 			}
-		}
-		else if (Driver == WorldNetDriver && ShouldSyncStormState())
-		{
-			SyncStormState(GameMode);
 		}
 	}
 

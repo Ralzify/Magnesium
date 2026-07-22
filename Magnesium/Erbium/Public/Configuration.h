@@ -59,7 +59,7 @@ struct FConfiguration
     static inline auto bHasPickaxe = true;
 
     static inline auto bLateGame = true;
-    static inline auto LateGameZone = 4; // starting zone
+    static inline auto LateGameZone = 3; // original Erbium starting zone; GUI selects newer defaults by version
     static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
 
     static inline auto bCustomSafeZone = false;
@@ -80,23 +80,12 @@ struct FConfiguration
     static inline auto SiphonAnimType = 0;
     static inline auto SiphonAmount = 50;
 
-    // CH5 (UE5.4+) server model, switchable without a rebuild for A/B diagnosis.
-    // Default = listen server: keep LocalPlayers[0] and report NM_ListenServer, so the injecting
-    // process is host AND player. Drop a file named "ch5_dedicated.txt" next to
-    // FortniteClient-Win64-Shipping.exe to force the old dedicated model instead (local player
-    // removed, NM_DedicatedServer), which needs a separate client to connect.
-    static bool UseCH5DedicatedModel()
-    {
-        static const bool bDedicated =
-            GetFileAttributesW(L"ch5_dedicated.txt") != INVALID_FILE_ATTRIBUTES;
-        return bDedicated;
-    }
-
     static inline auto bEnableTrickshotTab = false;
     static inline auto bUseWinLines = true;
     static inline auto RandomizeArenaPoints = false;
     static inline auto RandomizeKills = false;
     static inline auto RandomizeLevels = false;
+    static inline auto bEnableDBNO = true;
     static inline auto bInfiniteRender = false;
     static inline auto bFModCannon = false;
 	static inline auto CannonLaunchMultiplier = 1.f;

@@ -136,6 +136,7 @@ void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena
 	}
 }
 static std::unordered_set<AFortPlayerControllerAthena*> PlayersInitialized;
+static std::unordered_set<AFortPlayerControllerAthena*> GPendingRespawnLandingFinalization;
 
 static bool IsFiniteRespawnLocation(FVector Location)
 {
@@ -261,6 +262,8 @@ static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory)
 		}, FFortItemEntry::Size());
 }
 
+static void RestoreEquipmentAfterRespawn(AFortPlayerControllerAthena* PlayerController);
+
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
 
@@ -355,11 +358,39 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	{
 		auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
 
-		// respawn except storm needs to be fixed
-		bRespawnAllowed = Playlist ? Playlist->RespawnType > 0 : false;
+		bRespawnAllowed = Playlist
+			? (Playlist->HasRespawnType() ? Playlist->RespawnType > 0 : FConfiguration::bForceRespawns)
+			: FConfiguration::bForceRespawns;
 	}
 	else
 		bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerController->PlayerState);
+
+	bRespawnAllowed |= FConfiguration::bForceRespawns;
+
+	// Inventory count is not a lifecycle signal: death may legitimately leave a
+	// respawning player with zero entries. Track whether this controller has
+	// already acknowledged a pawn instead, so an empty-inventory respawn still
+	// exits the death/spectating state and restores usable equipment.
+	const bool bRestoringRespawnPawn = bRespawnAllowed && PlayersInitialized.contains(PlayerController);
+	if (bRestoringRespawnPawn)
+	{
+		GPendingRespawnLandingFinalization.insert(PlayerController);
+		ResetLowerSeasonStormStateForRespawn(PlayerController, nullptr, FortPawn);
+
+		// On pre-RespawnData builds possession can complete while the controller
+		// remains in its death/spectating state. The inventory then appears but
+		// every item activation is rejected with "Cannot Do That Now".
+		FortPawn->bPlayedDying(false);
+		if (FortPawn->HasbIsDBNO() && FortPawn->bIsDBNO)
+		{
+			FortPawn->bIsDBNO = false;
+			FortPawn->OnRep_IsDBNO();
+		}
+
+		PlayerController->StateName = FName(L"Playing");
+		PlayerController->ClientGotoState(FName(L"Playing"));
+		PlayerController->OnRep_Pawn();
+	}
 
 	FVector ConfiguredRespawnLocation{};
 	bool bSkipRespawn = ConsumePossessRespawnSkip(PlayerController);
@@ -762,6 +793,14 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		for (auto& AbilitySet : AFortGameMode::AbilitySets)
 			PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
+	if (bRestoringRespawnPawn)
+	{
+		if (FConfiguration::bLateGame && !FConfiguration::bKeepInventory)
+			LateGame::EquipLoadout(PlayerController);
+
+		RestoreEquipmentAfterRespawn(PlayerController);
+	}
+
 	if (FConfiguration::bForceRespawns && PlayersInitialized.contains(PlayerController))
 	{
 		FortPawn->SetHealth(100.f);
@@ -947,6 +986,11 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		}
 	}
 
+	// Mark every successful first possession, including Num == 0. Previously
+	// this happened only in the late-game/non-empty-inventory branch, causing a
+	// later empty respawn to be mistaken for another initial possession.
+	PlayersInitialized.insert(PlayerController);
+
 	// Very last thing: if this ack is a "possess" command takeover, put the pawn
 	// on the ground and give it health. Nothing above overrode it because this
 	// runs after the native possession setup and the ability re-init that reset
@@ -1060,6 +1104,25 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 		return;
 
 	UFortItemDefinition* RealDef = (UFortItemDefinition*)entry->ItemDefinition;
+
+	// Season 4 special gadgets carry their own server execution path. The
+	// Infinity Gauntlet uses it to perform the original Thanos transformation;
+	// treating it as an ordinary weapon only equips the gauntlet mesh/abilities.
+	if (VersionInfo.FortniteVersion >= 4.0 && VersionInfo.FortniteVersion <= 4.5)
+	{
+		if (auto Gadget = RealDef->Cast<UFortGadgetItemDefinition>())
+		{
+			auto ItemInstance = PlayerController->WorldInventory->Inventory.ItemInstances.Search(
+				[&](UFortWorldItem* Item)
+				{
+					return Item && Item->ItemEntry.ItemGuid == ItemGuid;
+				});
+
+			if (ItemInstance && *ItemInstance && Gadget->ServerExecute((UFortItem*)*ItemInstance, PlayerController))
+				return;
+		}
+	}
+
 	auto UncastedDef = RealDef;
 
 	if (auto Gadget = RealDef->Cast<UFortGadgetItemDefinition>())
@@ -1712,12 +1775,13 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 		static auto SprayAbilityClass = FindObject<UClass>(L"/Game/Abilities/Sprays/GAB_Spray_Generic.GAB_Spray_Generic_C");
 		AbilityToUse = SprayAbilityClass->GetDefaultObj();
 
-		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetSpray(), 1, true, nullptr);
+		// Do not emulate cosmetic quest progress here. Inline quest-objective
+		// layouts vary between versions, and walking a mismatched TagConditions
+		// array can crash the server before the cosmetic ability is activated.
 	}
 	else if (auto ToyAsset = Asset->Cast<UAthenaToyItemDefinition>())
 	{
 		AbilityToUse = ToyAsset->ToySpawnAbility->GetDefaultObj();
-		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetToy(), 1, true, nullptr);
 	}
 	else if (auto DanceAsset = Asset->Cast<UAthenaDanceItemDefinition>())
 	{
@@ -1747,7 +1811,6 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 			AbilityToUse = EmoteAbilityClass->GetDefaultObj();
 		}
 
-		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetEmote(), 1, true, nullptr);
 	}
 
 	if (AbilityToUse)
@@ -2023,6 +2086,91 @@ static bool TryGetItemDefinitionDisplayName(UFortItemDefinition* ItemDefinition,
 }
 
 uint64 RemoveFromAlivePlayers_ = 0;
+
+static void PurgeExclusiveGadgets(AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController || !PlayerController->WorldInventory)
+		return;
+
+	// Native special-gadget code can retain or restore its item while handling
+	// death. Remove every exclusive gadget until neither the replicated entry
+	// nor its item instance remains. The S4 Infinity Gauntlet is identified by
+	// bDropAllOnEquip, so this does not depend on a hard-coded asset name.
+	for (int32 RemovalAttempt = 0; RemovalAttempt < 32; RemovalAttempt++)
+	{
+		FGuid GadgetGuid{};
+		bool bFound = false;
+		for (int32 Index = 0; Index < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); Index++)
+		{
+			auto& Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(Index, FFortItemEntry::Size());
+			auto Gadget = Entry.ItemDefinition ? Entry.ItemDefinition->Cast<UFortGadgetItemDefinition>() : nullptr;
+			if (Gadget && Gadget->HasbDropAllOnEquip() && Gadget->bDropAllOnEquip)
+			{
+				GadgetGuid = Entry.ItemGuid;
+				bFound = true;
+				break;
+			}
+		}
+
+		if (!bFound)
+			break;
+
+		const int32 PreviousEntryCount = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num();
+		PlayerController->WorldInventory->Remove(GadgetGuid);
+		if (PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num() >= PreviousEntryCount)
+			break;
+	}
+}
+
+static void RestoreEquipmentAfterRespawn(AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController || !PlayerController->WorldInventory)
+		return;
+
+	// Equipping on the new pawn re-grants the item-owned gameplay abilities.
+	// Prefer a usable primary weapon, then fall back to the harvesting tool.
+	auto EntryToEquip = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
+		{
+			return Entry.ItemDefinition && AFortInventory::IsPrimaryQuickbar(Entry.ItemDefinition) &&
+				Entry.ItemDefinition->IsA<UFortWeaponItemDefinition>() &&
+				!Entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>();
+		}, FFortItemEntry::Size());
+
+	if (!EntryToEquip)
+		EntryToEquip = FindHarvestingToolEntry(PlayerController->WorldInventory);
+
+	if (!EntryToEquip)
+		return;
+
+	PlayerController->ServerExecuteInventoryItem(EntryToEquip->ItemGuid);
+	if (VersionInfo.FortniteVersion > 3.00)
+		PlayerController->ClientEquipItem(EntryToEquip->ItemGuid, true);
+	else if (PlayerController->QuickBars)
+		PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
+}
+
+void AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!PlayerController || !Pawn || GPendingRespawnLandingFinalization.erase(PlayerController) == 0)
+		return;
+
+	Pawn->bPlayedDying(false);
+	if (Pawn->HasbIsDBNO() && Pawn->bIsDBNO)
+	{
+		Pawn->bIsDBNO = false;
+		Pawn->OnRep_IsDBNO();
+	}
+
+	PlayerController->StateName = FName(L"Playing");
+	PlayerController->ClientGotoState(FName(L"Playing"));
+	PlayerController->OnRep_Pawn();
+
+	RestoreEquipmentAfterRespawn(PlayerController);
+	Pawn->ForceNetUpdate();
+	PlayerController->ForceNetUpdate();
+}
+
 void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* PlayerController, FFortPlayerDeathReport& DeathReport)
 {
 	if (!PlayerController)
@@ -2037,15 +2185,29 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 	if (PlayerController->WorldInventory && PlayerController->Pawn && ((PlayerController->Pawn->HasbShouldDropItemsOnDeath() ? PlayerController->Pawn->bShouldDropItemsOnDeath : true) && !FConfiguration::bKeepInventory))
 	{
-		bool bHasMats = false;
+		std::vector<FGuid> DroppedItemGuids;
 		for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
 		{
 			auto& entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
 
 			if (entry.ItemDefinition->HasbCanBeDropped() ? entry.ItemDefinition->bCanBeDropped : (entry.ItemDefinition->GetPickupComponent() ? entry.ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false))
+			{
 				AFortInventory::SpawnPickup(PlayerController->Pawn->K2_GetActorLocation(), entry, EFortPickupSourceTypeFlag::GetPlayer(), EFortPickupSpawnSource::GetPlayerElimination(), PlayerController->MyFortPawn);
+				DroppedItemGuids.push_back(entry.ItemGuid);
+			}
 		}
+
+		// Core's DropAllItems removes every entry after spawning its pickup.
+		// Magnesium previously spawned the world actors but left the entries in
+		// the dead player's inventory, which was especially visible with the
+		// persistent Infinity Gauntlet gadget.
+		for (const FGuid& ItemGuid : DroppedItemGuids)
+			PlayerController->WorldInventory->Remove(ItemGuid);
 	}
+
+	// Exclusive gadgets must never survive death, including keep-inventory
+	// modes. Their native transformation otherwise carries into the next pawn.
+	PurgeExclusiveGadgets(PlayerController);
 
 	auto KillerPlayerState = DeathReport.HasKillerPlayerState() ? (AFortPlayerStateAthena*)DeathReport.KillerPlayerState : nullptr;
 	auto KillerPawn = DeathReport.HasKillerPawn() ? (AFortPlayerPawnAthena*)DeathReport.KillerPawn : nullptr;
@@ -2173,6 +2335,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 		else
 			bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerState);
+
+		bRespawnAllowed |= FConfiguration::bForceRespawns;
 
 		if (!bRespawnAllowed && (PlayerController->Pawn ? !PlayerController->Pawn->IsDBNO() : true) && PlayerState->HasPlace())
 		{
@@ -2653,7 +2817,11 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 	}
 
-	return ClientOnPawnDiedOG(PlayerController, DeathReport);
+	ClientOnPawnDiedOG(PlayerController, DeathReport);
+
+	// Run once more after native death handling, which may restore persistent
+	// gadget items as part of its pawn-replacement teardown.
+	PurgeExclusiveGadgets(PlayerController);
 }
 
 void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context, FFrame& Stack)
@@ -2668,6 +2836,10 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 
 	if (PlayerState->RespawnData.bRespawnDataAvailable && PlayerState->RespawnData.bServerIsReady)
 	{
+		PurgeExclusiveGadgets(PlayerController);
+		auto OldPawn = PlayerController->MyFortPawn;
+		ResetLowerSeasonStormStateForRespawn(PlayerController, OldPawn, nullptr);
+
 		auto RespawnData = PlayerState->RespawnData;
 		FTransform SpawnTransform{};
 
@@ -2736,6 +2908,9 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		else
 			for (auto& AbilitySet : AFortGameMode::AbilitySets)
 				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+
+		ResetLowerSeasonStormStateForRespawn(PlayerController, OldPawn, NewPawn);
+		RestoreEquipmentAfterRespawn(PlayerController);
 	}
 
 	PlayerState->RespawnData.bClientIsReady = true;
@@ -2762,7 +2937,13 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 			auto& Item = WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
 
 			if (AFortInventory::IsPrimaryQuickbar(Item.ItemDefinition) && (!Item.ItemDefinition->HasbForceIntoOverflow() || !Item.ItemDefinition->bForceIntoOverflow))
-				ItemCount += Item.ItemDefinition->HasNumberOfSlotsToTake() ? Item.ItemDefinition->NumberOfSlotsToTake : 1;
+			{
+				// The visible backpack allocates one occupied slot per replicated
+				// primary inventory entry. NumberOfSlotsToTake is not a reliable
+				// capacity signal across supported builds and can overcount an
+				// entry, making an open slot appear full while the pickaxe is held.
+				ItemCount++;
+			}
 		}
 
 	//printf("br: %d\n", ItemCount);
@@ -5116,6 +5297,7 @@ cheat spawnbot <count> <weapon> <s[size] | s[X,Y,Z]> [X Y Z] - Spawns a player b
 cheat tpbot - Teleports the player bot to your location
 cheat delbot - Removes every spawned player bot (PlayerAI is left alone)
 cheat dumppawns - Lists every player pawn with its index and owner
+cheat dumpge - Lists every loaded gameplay effect with its index and class
 cheat possess <player name | index | pawn name | reset> - Puppet a pawn (move it around, owner watches), reset returns you to your own
 cheat tpall - Teleports all real players around your location
 cheat botemote - Plays the 'Accolades' emote to the player bot
@@ -5172,18 +5354,12 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			}
 			else if (command == "resumesafezone")
 			{
-				UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = false;
-				if (GameMode->HasbSafeZonePaused())
-					GameMode->bSafeZonePaused = false;
-				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startsafezone"), nullptr);
+				UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(false);
 				PlayerController->ClientMessage(FString(L"Resumed the safe zone."), FName(), 1.f);
 			}
 			else if (command == "pausesafezone")
 			{
-				UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = true;
-				if (GameMode->HasbSafeZonePaused())
-					GameMode->bSafeZonePaused = true;
-				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"pausesafezone"), nullptr);
+				UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(true);
 				PlayerController->ClientMessage(FString(L"Paused the safe zone."), FName(), 1.f);
 			}
 			else if (command == "skipsafezone")
@@ -8643,6 +8819,48 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				Pawns.Free();
 			}
+			else if (command == "dumpge")
+			{
+				auto GameplayEffectClass = UGameplayEffect::StaticClass();
+
+				if (!GameplayEffectClass)
+				{
+					PlayerController->ClientMessage(FString(L"GameplayEffect class was not found on this version."), FName(), 1.f);
+					return;
+				}
+
+				std::vector<const UObject*> GameplayEffects;
+				const int ObjectCount = SDK::TUObjectArray::Num();
+
+				for (int i = 0; i < ObjectCount; i++)
+				{
+					auto Object = SDK::TUObjectArray::GetObjectByIndex(i);
+
+					if (!Object || !SDK::MemReadable((void*)Object, 0x40) ||
+						!Object->Class || !SDK::MemReadable(Object->Class, 0x40))
+						continue;
+
+					if (Object->IsA(GameplayEffectClass))
+						GameplayEffects.push_back(Object);
+				}
+
+				wchar_t wcount[80];
+				swprintf_s(wcount, 80, L"Found %zu loaded gameplay effects:", GameplayEffects.size());
+				PlayerController->ClientMessage(FString(wcount), FName(), 1.f);
+
+				for (size_t i = 0; i < GameplayEffects.size(); i++)
+				{
+					auto Effect = GameplayEffects[i];
+					std::string Line = "[" + std::to_string(i) + "] " +
+						std::string(Effect->Name.ToString().c_str());
+
+					if (Effect->Class)
+						Line += " (" + std::string(Effect->Class->GetName().ToString().c_str()) + ")";
+
+					auto Message = std::wstring(Line.begin(), Line.end());
+					PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
+				}
+			}
 			else if (command == "possess")
 			{
 				// Remembered so "possess" with no argument gets you back out
@@ -11130,6 +11348,8 @@ void AFortPlayerControllerAthena::ServerAwardVehicleTrickPoints_(UObject* Contex
 
 void ServerRestartPlayer_(AFortPlayerControllerAthena* _this)
 {
+	PurgeExclusiveGadgets(_this);
+
 	if (_this->Pawn)
 		_this->UnPossess(_this->Pawn);
 

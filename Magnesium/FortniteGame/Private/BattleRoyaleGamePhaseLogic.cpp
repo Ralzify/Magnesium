@@ -22,6 +22,44 @@ UFortGameStateComponent_BattleRoyaleGamePhaseLogic* UFortGameStateComponent_Batt
 	return s_cached;
 }
 
+bool UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused()
+{
+	auto World = UWorld::GetWorld();
+	auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
+	if (GameMode && GameMode->HasbSafeZonePaused())
+	{
+		// The native GameMode flag is scoped to the current match. Mirroring it
+		// also prevents the process-static UI flag from leaking across travel.
+		bPausedZone = GameMode->bSafeZonePaused;
+		return GameMode->bSafeZonePaused;
+	}
+
+	return bPausedZone;
+}
+
+void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(bool bPaused)
+{
+	auto World = UWorld::GetWorld();
+	auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
+	const bool bHasNativeFlag = GameMode && GameMode->HasbSafeZonePaused();
+	const bool bAlreadyPaused = bHasNativeFlag && GameMode->bSafeZonePaused == bPaused;
+
+	// Let Fortnite observe the native state edge first so it can capture or
+	// restore TimeRemainingWhenPhasePaused and its other pause bookkeeping.
+	if (World && !bAlreadyPaused)
+		UKismetSystemLibrary::ExecuteConsoleCommand(World,
+			FString(bPaused ? L"pausesafezone" : L"startsafezone"), nullptr);
+
+	if (bHasNativeFlag && GameMode->bSafeZonePaused != bPaused)
+	{
+		SDK::DbgLog("[SafeZone] Native %s command did not update bSafeZonePaused; using flag fallback.\n",
+			bPaused ? "pause" : "resume");
+		GameMode->bSafeZonePaused = bPaused;
+	}
+
+	bPausedZone = bPaused;
+}
+
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetGamePhase(EAthenaGamePhase GamePhase)
 {
 	auto SetGamePhaseInternal = (void(*)(UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, EAthenaGamePhase)) SetGamePhase_;
