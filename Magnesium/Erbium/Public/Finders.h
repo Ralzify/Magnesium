@@ -7,6 +7,7 @@ uint64 FindGetNetMode();
 uint64 FindGetWorldContext();
 uint64 FindCreateNetDriver();
 uint64 FindCreateNetDriverWorldContext();
+uint64 FindCreateNamedNetDriverLocal();
 uint64 FindInitListen();
 uint64 FindSetWorld();
 uint64 FindTickFlush();

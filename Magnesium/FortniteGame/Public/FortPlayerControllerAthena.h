@@ -458,6 +458,7 @@ public:
 	DEFINE_PROP(IndicatedActorManagementComponent, UFortIndicatedActorManagementComponent*);
 
     DEFINE_FUNC(GetViewTarget, AActor*);
+    DEFINE_FUNC(SetViewTargetWithBlend, void);
     DEFINE_FUNC(GetControlRotation, FRotator);
     DEFINE_FUNC(SetControlRotation, void);
     DEFINE_FUNC(ClientSetRotation, void);

@@ -507,11 +507,16 @@ const std::unordered_map<std::string, std::string> Misc::ObjectNames = {
 
 int Misc::GetNetMode()
 {
-	// 32.11 runs as a LISTEN server (the injecting client is also the host player). Returning
-	// NM_ListenServer(2) — not NM_DedicatedServer(1) — makes the engine create the local host
-	// player so the client actually enters the world instead of sitting on "Setting up the
-	// server" forever, while still being != NM_Client(3) so the Iris-worker null-deref stays fixed.
-	if (VersionInfo.FortniteVersion >= 32.00)
+	// CH5 (UE5.4+) runs as a LISTEN server (the injecting client is also the host player).
+	// Returning NM_ListenServer(2) — not NM_DedicatedServer(1) — makes the engine create the
+	// local host player so the client actually enters the world instead of sitting on "Setting
+	// up the server" forever, while still being != NM_Client(3) so the Iris-worker null-deref
+	// stays fixed.
+	//
+	// Applies from 5.4, not just 32.11: on CH5 ReadyToStartMatch is a native call, so the match
+	// only starts once a PlayerController exists. The dedicated model gives none unless a second
+	// client connects, which is exactly the 31.41 stall (conns=0, MatchState stuck WaitingToStart).
+	if (VersionInfo.EngineVersion >= 5.4 && !FConfiguration::UseCH5DedicatedModel())
 		return 2;
 	return 1;
 }

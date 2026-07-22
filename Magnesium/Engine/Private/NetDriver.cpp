@@ -863,7 +863,15 @@ static bool ShouldUseLowerSeasonStormFixes()
 
 static bool ShouldSyncStormState()
 {
-	return ShouldUseLowerSeasonStormFixes() || (VersionInfo.FortniteVersion >= 18.00 && VersionInfo.FortniteVersion < 25.20);
+	// Erbium 0121c55 ("proper zones") dropped the manual safe-zone forcing for 18.00-25.20:
+	// the game maintains bIsInsideSafeZone / bIsInAnyStorm itself on those builds, and
+	// rewriting them every tick fought the native state. For that range SyncStormState did
+	// nothing else either - it returns right after SyncReflectedStormState - so dropping the
+	// range removes the interference without losing behaviour.
+	//
+	// Lower seasons (< 7.00) still need the full path (reconstructed zone circle + the storm
+	// damage timer), so that side is deliberately kept.
+	return ShouldUseLowerSeasonStormFixes();
 }
 
 static int GetSafeZoneDamagePhase(AFortGameMode* GameMode, AFortSafeZoneIndicator* SafeZoneIndicator)
@@ -1161,9 +1169,20 @@ static void SyncStormState(AFortGameMode* GameMode)
 	}
 }
 
+// CH5 (UE5.4+): ReadyToStartMatch is a native call, so nothing ever drives the match out of
+// WaitingToStart -- the listen server comes up fine but a joining client sits on
+// "Setting up the server" forever. Once a connection has a PlayerController, start the match
+// and arm the warmup countdown ourselves. Runs once per world.
+//
+// Bounded below 32.00: 32.11 drives this from its direct ReadyToStartMatch RVA hook.
+// Defined further down, next to the Iris tick; declared here for the earlier call sites.
+void DriveCH5MatchStart(UNetDriver* Driver);
+
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+
+	DriveCH5MatchStart(Driver);
 
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
@@ -1241,6 +1260,8 @@ uint64_t ServerReplicateActors_;
 void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+
+	DriveCH5MatchStart(Driver);
 
 	// Universal PlayerAI system (separate from the bot command and native AI).
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
@@ -1356,9 +1377,98 @@ void SendClientMoveAdjustments(UNetDriver* Driver)
 // actually flushing every frame, not just the game thread ticking. Incremented every call.
 volatile long g_tickFlushCounter = 0;
 
+static void DriveCH5MatchStart_Impl(UNetDriver* Driver)
+{
+	if (VersionInfo.EngineVersion < 5.4 || VersionInfo.FortniteVersion >= 32.00)
+		return;
+
+	static UWorld* s_forceStartWorld = nullptr;
+	auto World = UWorld::GetWorld();
+
+	// Periodic state dump so a stall here is diagnosable from the log instead of guessed at.
+	// Rate-limited hard: DbgLog fopen/fflush/fcloses per call and this runs on the game thread.
+	static uint32_t s_ticks = 0;
+	static int s_dumps = 0;
+	if ((s_ticks++ % 240) == 0 && s_dumps < 15 && !s_forceStartWorld)
+	{
+		++s_dumps;
+		auto DumpGM = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
+		int Conns = Driver ? Driver->ClientConnections.Num() : -1;
+		int WithPC = 0;
+		if (Driver)
+			for (auto C : Driver->ClientConnections)
+				if (C && C->PlayerController)
+					++WithPC;
+
+		const char* MatchStateStr = "<no gamemode>";
+		UC::UEAllocatedString MatchStateBuf;
+		if (DumpGM)
+		{
+			MatchStateBuf = DumpGM->MatchState.ToString();
+			MatchStateStr = MatchStateBuf.c_str();
+		}
+
+		SDK::DbgLog("[CH5-Start] waiting: conns=%d withPC=%d driverIsWorlds=%d GM=%p MatchState=%s hasWarmupCount=%d\n",
+			Conns, WithPC, (int)(World && Driver == World->NetDriver), (void*)DumpGM,
+			MatchStateStr, (int)(DumpGM && DumpGM->HasWarmupRequiredPlayerCount()));
+	}
+
+	if (!Driver || Driver->ClientConnections.Num() <= 0)
+		return;
+	if (!World || s_forceStartWorld == World || Driver != World->NetDriver)
+		return;
+
+	bool bHasReadyConn = false;
+	for (auto Conn : Driver->ClientConnections)
+		if (Conn && Conn->PlayerController)
+		{
+			bHasReadyConn = true;
+			break;
+		}
+	if (!bHasReadyConn)
+		return;
+
+	auto GameMode = (AFortGameMode*)World->AuthorityGameMode;
+	auto GameState = (AFortGameStateAthena*)World->GameState;
+	static auto WaitingToStart = FName(L"WaitingToStart");
+
+	if (!GameMode || !GameState || !GameMode->HasWarmupRequiredPlayerCount() ||
+		GameMode->MatchState != WaitingToStart)
+		return;
+
+	s_forceStartWorld = World;
+	GameMode->WarmupRequiredPlayerCount = 1;
+
+	auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
+	SDK::DbgLog("[CH5-Start] PlayerController present and MatchState=WaitingToStart -> forcing start (GamePhaseLogic=%p)\n",
+		(void*)GamePhaseLogic);
+
+	GameMode->MatchState = FName(L"InProgress");
+
+	if (GamePhaseLogic)
+	{
+		// Non-const on purpose: DEFINE_PROP's setters take float&/float&&, so a const
+		// local will not bind.
+		auto Time = (float)UGameplayStatics::GetTimeSeconds(World);
+		auto WarmupDuration = 60.f;
+		GamePhaseLogic->WarmupCountdownStartTime = Time;
+		GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
+		GamePhaseLogic->WarmupCountdownDuration = 10.f;
+		GamePhaseLogic->WarmupEarlyCountdownDuration = WarmupDuration - 10.f;
+
+		GamePhaseLogic->SetGamePhase(EAthenaGamePhase::Warmup);
+		GamePhaseLogic->SetGamePhaseStep(EAthenaGamePhaseStep::Warmup);
+		SDK::DbgLog("[CH5-Start] GamePhase -> Warmup, countdown armed (%.1fs)\n", WarmupDuration);
+	}
+}
+
+void DriveCH5MatchStart(UNetDriver* Driver) { DriveCH5MatchStart_Impl(Driver); }
+
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+
+	DriveCH5MatchStart(Driver);
 
 	static int _tf = 0;
 	_InterlockedIncrement(&g_tickFlushCounter);

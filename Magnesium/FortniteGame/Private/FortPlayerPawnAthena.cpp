@@ -70,6 +70,78 @@ static bool CompletePickupWithoutSpline(AFortPlayerPawnAthena* Pawn, AFortPickup
 	return true;
 }
 
+// Makes a shield value written straight into the attribute actually absorb
+// damage on S4+ builds. The raw write only works on the earliest builds (1.7.2);
+// by S4 the shield lives in the ability-system aggregator that native damage
+// reads, and a struct write never reaches it. The game's own BR shield GE does
+// reach it, so we apply that GE at level 0 - it activates the aggregator on the
+// amount we already wrote and adds nothing. On 1.7.2 there is no such GE and the
+// raw write already absorbs, so finding nothing here is the correct no-op.
+// The BR shield-grant GE, cached. GE_Athena_Shields (Ch1) / GE_Athena_*_Shields
+// (Ch2). Null on 1.7.2, where the raw write already absorbs. Skips the
+// damage/tag/default-object variants.
+static UClass* FindShieldAbsorbGE()
+{
+	static UClass* ShieldGE = nullptr;
+	static bool bSearched = false;
+
+	if (!bSearched)
+	{
+		bSearched = true;
+
+		int total = TUObjectArray::Num();
+		for (int i = 0; i < total; i++)
+		{
+			auto obj = TUObjectArray::GetObjectByIndex(i);
+			if (!obj)
+				continue;
+
+			std::string nm = obj->Name.ToString().c_str();
+
+			if (nm.rfind("GE_Athena", 0) == 0 &&
+				nm.find("Shield") != std::string::npos &&
+				!nm.empty() && nm.back() == 'C' &&
+				nm.find("Damage") == std::string::npos &&
+				nm.find("Default__") == std::string::npos)
+			{
+				ShieldGE = (UClass*)obj;
+				break;
+			}
+		}
+	}
+
+	return ShieldGE;
+}
+
+// True when SetShield will route through the GE. The GE grants a flat +1 shield
+// when applied, so SetShield pre-subtracts 1 from its raw write to land on the
+// exact requested value.
+bool AFortPlayerPawnAthena::ShieldAbsorbUsesGE() const
+{
+	return FindShieldAbsorbGE() != nullptr;
+}
+
+void AFortPlayerPawnAthena::ActivateShieldAbsorb() const
+{
+	auto ShieldGE = FindShieldAbsorbGE();
+	if (!ShieldGE)
+		return;
+
+	auto PlayerStateAthena = (AFortPlayerStateAthena*)this->PlayerState;
+	if (!PlayerStateAthena)
+		return;
+
+	auto ASC = PlayerStateAthena->AbilitySystemComponent;
+	if (!ASC)
+		return;
+
+	auto Context = ASC->MakeEffectContext();
+	Context.Instigator = (AActor*)this->Controller;
+	Context.Causer = (AActor*)this;
+	Context.AddSourceObject((AActor*)this);
+	ASC->BP_ApplyGameplayEffectToSelf(ShieldGE, 0.f, Context);
+}
+
 void AFortPlayerPawnAthena::ServerHandlePickup_(UObject* Context, FFrame& Stack)
 {
 	AFortPickupAthena* Pickup;
@@ -627,18 +699,45 @@ void AFortPlayerPawnAthena::EndSkydiving(AFortPlayerPawnAthena* Pawn)
 	}
 }
 
-void AFortPlayerPawnAthena::ServerReviveFromDBNO_(UObject* Context, FFrame& Stack)
+// UFunction::GetImpl()/GetVTableIndex() both work by scanning for a 0F 95 (setnz), which only
+// exists when the function has a _Validate. Where it does not (27.11), they scan from the wrong
+// place and hand back an address outside the module entirely.
+//
+// The exec thunk itself is reliable, so resolve the implementation from it directly: walk the
+// thunk for the first relative call/jmp whose target actually lands inside the game module.
+static void* ResolveNativeImplFromExecThunk(void* ExecFn, uint64 ModuleBase, uint64 ModuleSize)
 {
-	AFortPlayerControllerAthena* EventInstigator;
+	if (!ExecFn || !ModuleBase || !ModuleSize)
+		return nullptr;
 
-	Stack.StepCompiledIn(&EventInstigator);
-	Stack.IncrementCode();
-	auto Pawn = (AFortPlayerPawnAthena*)Context;
+	auto Bytes = (uint8_t*)ExecFn;
+
+	for (int i = 0; i < 0x200; i++)
+	{
+		if (Bytes[i] != 0xE8 && Bytes[i] != 0xE9)
+			continue;
+
+		auto Relative = *(int32_t*)(Bytes + i + 1);
+		auto Target = (uint64)(Bytes + i + 5) + Relative;
+
+		if (Target >= ModuleBase && Target < ModuleBase + ModuleSize)
+			return (void*)Target;
+	}
+
+	return nullptr;
+}
+// Shared revive body. Reached from two different call paths - see the hook install.
+static void PerformReviveFromDBNO(AFortPlayerPawnAthena* Pawn, AActor* EventInstigator)
+{
+	printf("[Revive] body: Pawn=%p Instigator=%p DBNO=%d\n",
+		(void*)Pawn, (void*)EventInstigator, (Pawn && Pawn->IsDBNO()) ? 1 : 0);
 	auto DeadPC = (AFortPlayerControllerAthena*)Pawn->Controller;
 	auto DeadPlayerState = (AFortPlayerStateAthena*)DeadPC->PlayerState;
 
 	if (!DeadPC || !DeadPlayerState)
+	{
 		return;
+	}
 
 	bool bIsSelfRevive = (EventInstigator == DeadPC);
 
@@ -688,6 +787,32 @@ void AFortPlayerPawnAthena::ServerReviveFromDBNO_(UObject* Context, FFrame& Stac
 		DeadPC->ClientOnPawnRevived(EventInstigator);
 		DeadPC->RespawnPlayerAfterDeath(false);
 	}
+}
+
+// ServerReviveFromDBNO is reachable two ways and which one the game uses varies:
+//
+//   - through the script VM (a replicated RPC / blueprint call), caught by ExecHook
+//   - as a plain native C++ call, which an ExecHook never sees - only a vtable hook does
+//
+// We previously hooked the exec path only, so when the game called it natively our code
+// never ran and reviving silently did nothing. Both are hooked now. A single call goes
+// down exactly one of these paths, so there is no risk of reviving twice.
+void AFortPlayerPawnAthena::ServerReviveFromDBNO_(UObject* Context, FFrame& Stack)
+{
+	AFortPlayerControllerAthena* EventInstigator;
+
+	Stack.StepCompiledIn(&EventInstigator);
+	Stack.IncrementCode();
+
+	printf("[Revive] exec path fired\n");
+	PerformReviveFromDBNO((AFortPlayerPawnAthena*)Context, EventInstigator);
+}
+
+void (*ServerReviveFromDBNONative_OG)(AFortPlayerPawnAthena* Pawn, AActor* EventInstigator);
+void ServerReviveFromDBNONative(AFortPlayerPawnAthena* Pawn, AActor* EventInstigator)
+{
+	printf("[Revive] native path fired\n");
+	PerformReviveFromDBNO(Pawn, EventInstigator);
 }
 
 void AFortPlayerPawnAthena::ServerThrowCarriedPlayer_(UObject* Context, FFrame& Stack)
@@ -763,7 +888,76 @@ void AFortPlayerPawnAthena::PostLoadHook()
 		Utils::Hook<AFortPlayerPawnAthena>(EndSkydivingFn->GetVTableIndex(), EndSkydiving, EndSkydivingOG);
 	SDK::DbgLog("  [PPA] 5 EndSkydiving done\n");
 
-	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerReviveFromDBNO"), ServerReviveFromDBNO_, ServerReviveFromDBNO_OG);
+	auto ReviveFn = GetDefaultObj()->GetFunction("ServerReviveFromDBNO");
+
+	if (ReviveFn)
+	{
+		// Script path - safe everywhere.
+		Utils::ExecHook(ReviveFn, ServerReviveFromDBNO_, ServerReviveFromDBNO_OG);
+
+		// Native path. The game calls this function natively, which an ExecHook never sees,
+		// so it has to be hooked directly or reviving silently does nothing.
+		//
+		// GetVTableIndex() resolves by scanning for the <Name>_Validate call site. When that
+		// scan latches onto the wrong instruction it returns nonsense (76124521 on 27.11 vs a
+		// correct 476 on 13.40), and hooking that would write far outside the vtable. So the
+		// index is range-checked, and we fall back to the function's native implementation
+		// address when it cannot be trusted.
+		constexpr uint32 MaxSaneVTableIndex = 4096;
+		auto VTableIndex = ReviveFn->GetVTableIndex();
+
+		if (VTableIndex != (uint32)-1 && VTableIndex < MaxSaneVTableIndex)
+		{
+			Utils::Hook<AFortPlayerPawnAthena>(VTableIndex, ServerReviveFromDBNONative, ServerReviveFromDBNONative_OG);
+			SDK::DbgLog("  [PPA] revive hooked (exec + vtable idx %u)\n", VTableIndex);
+		}
+		else
+		{
+			// GetImpl() also resolves by instruction scanning and can hand back an address
+			// outside the game module (0x7FF9459DBDE0 on 27.11, where the exe spans roughly
+			// 0x7FF65B500000 + 0x7994800). Hooking that is meaningless at best and unsafe at
+			// worst, so the address is bounds-checked against the module before use.
+			auto ReviveImpl = (uint64)ReviveFn->GetImpl();
+			auto ModuleBase = (uint64)GetModuleHandleW(nullptr);
+			uint64 ModuleSize = 0;
+
+			if (ModuleBase)
+			{
+				auto Dos = (PIMAGE_DOS_HEADER)ModuleBase;
+				auto Nt = (PIMAGE_NT_HEADERS)(ModuleBase + Dos->e_lfanew);
+				ModuleSize = Nt->OptionalHeader.SizeOfImage;
+			}
+
+			bool bImplInModule = ReviveImpl && ModuleBase && ModuleSize
+				&& ReviveImpl >= ModuleBase && ReviveImpl < ModuleBase + ModuleSize;
+
+			// GetImpl gave us nothing usable - derive it from the exec thunk instead.
+			if (!bImplInModule)
+			{
+				auto Derived = (uint64)ResolveNativeImplFromExecThunk(ReviveFn->GetNativeFunc(), ModuleBase, ModuleSize);
+
+				if (Derived)
+				{
+					SDK::DbgLog("  [PPA] revive: derived impl 0x%llX from exec thunk (GetImpl gave 0x%llX)\n",
+						Derived, ReviveImpl);
+					ReviveImpl = Derived;
+					bImplInModule = true;
+				}
+			}
+
+			if (bImplInModule)
+			{
+				Utils::Hook(__int64(ReviveImpl), ServerReviveFromDBNONative, ServerReviveFromDBNONative_OG);
+				SDK::DbgLog("  [PPA] revive hooked (exec + native impl 0x%llX, vtable idx %u rejected)\n",
+					ReviveImpl, VTableIndex);
+			}
+			else
+				SDK::DbgLog("  [PPA] revive: exec hook only - vtable idx %u rejected, impl 0x%llX outside module 0x%llX+0x%llX\n",
+					VTableIndex, ReviveImpl, ModuleBase, ModuleSize);
+		}
+	}
+	else
+		SDK::DbgLog("  [PPA] revive: ServerReviveFromDBNO not found on this version\n");
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerThrowCarriedPlayer"), ServerThrowCarriedPlayer_, ServerThrowCarriedPlayer_OG);
 
 	// Shakedown - only present on builds that shipped DBNO interrogation, so guard the lookup.

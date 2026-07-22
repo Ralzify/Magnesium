@@ -71,8 +71,23 @@ public:
     UCLASS_COMMON_MEMBERS(UFortHealthSet);
 
     DEFINE_PROP(Health, FFortGameplayAttributeData);
+    DEFINE_PROP(MaxHealth, FFortGameplayAttributeData);
+
+    // Naming trap: on the builds that need the fallback path in
+    // AFortPlayerPawnAthena, "Shield" is the MAX shield attribute and
+    // "CurrentShield" is the current one - not the other way around.
+    // Inverting these gives you a full shield bar that dies instantly.
+    DEFINE_PROP(Shield, FFortGameplayAttributeData);
+    DEFINE_PROP(CurrentShield, FFortGameplayAttributeData);
+    // Newer builds (Ch1 S5+) use "Shield" for current and "MaxShield" for max,
+    // instead of the early "Shield"(max)/"CurrentShield"(current) pair.
+    DEFINE_PROP(MaxShield, FFortGameplayAttributeData);
 
     DEFINE_FUNC(OnRep_Health, void);
+    DEFINE_FUNC(OnRep_MaxHealth, void);
+    DEFINE_FUNC(OnRep_Shield, void);
+    DEFINE_FUNC(OnRep_CurrentShield, void);
+    DEFINE_FUNC(OnRep_MaxShield, void);
 };
 
 struct FDamagerInfo
@@ -137,14 +152,254 @@ public:
     DEFINE_FUNC(PawnStopFire, void);
 
     DEFINE_FUNC(BeginSkydiving, void);
-    DEFINE_FUNC(GetHealth, float);
-    DEFINE_FUNC(GetShield, float);
-    DEFINE_FUNC(SetHealth, void);
-    DEFINE_FUNC(SetShield, void);
-    DEFINE_FUNC(SetMaxHealth, void);
-	DEFINE_FUNC(SetMaxShield, void);
-    DEFINE_FUNC(GetMaxHealth, float);
-    DEFINE_FUNC(GetMaxShield, float);
+
+    // ---------------------------------------------------------------------
+    // Health / shield
+    //
+    // Early builds (roughly S1-S4) ship without the native SetShield and
+    // SetMaxShield UFunctions. UObject::Call returns silently when the
+    // UFunction is missing, so on those builds every shield write - god,
+    // regen, lategame, bot shield, respawn, the cheat commands - did
+    // nothing at all, with no crash and no log.
+    //
+    // So each setter probes for its native UFunction and writes the
+    // attribute set directly when it isn't there. This is a capability
+    // probe rather than a version number on purpose: builds nobody has
+    // tested still degrade correctly, and the fallback can never engage on
+    // a build where the native setter exists.
+    //
+    // The fallback needs all three of these or it looks broken:
+    //   1. BaseValue AND CurrentValue - the ASC aggregator recomputes from
+    //      whichever one you left stale and stomps the write.
+    //   2. The server-side OnRep - runs the game's own attribute-changed
+    //      broadcast and clamping that a raw memory write skips. Without
+    //      it the server value is right but the client HUD never updates.
+    //      CRUCIAL: call it with NO argument. It is a GAS repnotify that
+    //      applies delta (NewBase - OldValue.Base) to the aggregated current
+    //      value. A zeroed OldValue (what a no-arg call gives) makes the delta
+    //      the full new value; passing the just-written attribute makes the
+    //      delta zero, so current shield never leaves 0. This is the one line
+    //      that separates "works like Core" from "reports success, does
+    //      nothing" - the exact shield bug on Ch1 S5.
+    //   3. ForceNetUpdate on the PAWN, not the attribute set - the set
+    //      replicates as a subobject of the pawn's actor channel, so the
+    //      pawn is what has to be dirtied.
+    // ---------------------------------------------------------------------
+    // A missing native setter AND a missing property means the write is
+    // dropped, which is exactly the silent failure this whole path exists to
+    // fix - so say so once instead of failing quietly a second way.
+    static void WarnMissingAttributeOnce(bool& bWarned, const char* AttributeName)
+    {
+        if (bWarned)
+            return;
+
+        bWarned = true;
+        SDK::DbgLog("  [HealthSet] no native setter and no '%s' property on this build - writes will not apply\n", AttributeName);
+    }
+
+    void SetHealth(float NewValue) const
+    {
+        static auto Fn = GetFunction("SetHealth");
+
+        if (Fn)
+        {
+            Call<void>(Fn, NewValue);
+            return;
+        }
+
+        auto Set = HealthSet;
+
+        if (!Set || !Set->HasHealth())
+        {
+            static bool bWarned = false;
+            WarnMissingAttributeOnce(bWarned, "Health");
+            return;
+        }
+
+        auto& Attribute = Set->Health;
+        Attribute.BaseValue = NewValue;
+        Attribute.CurrentValue = NewValue;
+
+        Set->OnRep_Health();
+        // Re-apply after the OnRep recompute (see SetShield for why).
+        Attribute.CurrentValue = NewValue;
+        Attribute.BaseValue = NewValue;
+
+        ForceNetUpdate();
+    }
+
+    void SetMaxHealth(float NewValue) const
+    {
+        static auto Fn = GetFunction("SetMaxHealth");
+
+        if (Fn)
+        {
+            Call<void>(Fn, NewValue);
+            return;
+        }
+
+        auto Set = HealthSet;
+
+        if (!Set || !Set->HasMaxHealth())
+        {
+            static bool bWarned = false;
+            WarnMissingAttributeOnce(bWarned, "MaxHealth");
+            return;
+        }
+
+        auto& Attribute = Set->MaxHealth;
+        Attribute.BaseValue = NewValue;
+        Attribute.CurrentValue = NewValue;
+        Attribute.Maximum = NewValue;
+
+        Set->OnRep_MaxHealth();
+        // Re-apply after the OnRep recompute (see SetShield for why).
+        Attribute.BaseValue = NewValue;
+        Attribute.CurrentValue = NewValue;
+        Attribute.Maximum = NewValue;
+
+        ForceNetUpdate();
+    }
+
+    void SetShield(float NewValue) const
+    {
+        // Shield is the one attribute a capability probe gets WRONG. Early builds
+        // (<= 5.0) DO ship a SetShield UFunction, but it does not actually apply
+        // current shield - so "the function exists, call it" left the bar at 0
+        // even though it reported success. Core gates this purely by version for
+        // this exact reason. So: native only above 5.0 (and only if present);
+        // 5.0 and below always take the direct attribute write. SetMaxShield is a
+        // separate, working function on those builds, which is why max shield
+        // applied while current shield did not.
+        static auto Fn = GetFunction("SetShield");
+
+        if (Fn && VersionInfo.FortniteVersion > 5.0)
+        {
+            Call<void>(Fn, NewValue);
+            return;
+        }
+
+        auto Set = HealthSet;
+
+        if (!Set || !Set->HasCurrentShield())
+        {
+            static bool bWarned = false;
+            WarnMissingAttributeOnce(bWarned, "CurrentShield");
+            return;
+        }
+
+        // When the GE path is used it adds a flat +1, so pre-subtract 1 to land
+        // on the exact requested value. On 1.7.2 (no GE) write the value as-is.
+        float Target = ShieldAbsorbUsesGE() ? (NewValue - 1.f) : NewValue;
+        if (Target < 0.f)
+            Target = 0.f;
+
+        auto& Attribute = Set->CurrentShield;
+        Attribute.BaseValue = Target;
+        Attribute.CurrentValue = Target;
+
+        // OnRep is what makes damage read the shield on the earliest builds
+        // (1.7.2) - exactly Core's path. On S4+ the same OnRep recomputes current
+        // from a GAS aggregator seeded at 0 and wipes it, so we re-write after.
+        Set->OnRep_CurrentShield();
+        Attribute.CurrentValue = Target;
+        Attribute.BaseValue = Target;
+
+        // The raw write only ABSORBS on the earliest builds. By S4 the shield
+        // lives in the ability-system aggregator that native damage reads, and a
+        // struct write never reaches it. ActivateShieldAbsorb applies the game's
+        // own shield GE (which does reach the aggregator) - it syncs the
+        // aggregator from the value we wrote and adds its flat +1, landing on
+        // NewValue. No-op on 1.7.2. Defined in the .cpp.
+        ActivateShieldAbsorb();
+
+        ForceNetUpdate();
+    }
+
+    // Applies the shield GE so the written value absorbs on S4+ (see .cpp).
+    void ActivateShieldAbsorb() const;
+    // Whether SetShield will route through the GE (which adds a flat +1).
+    bool ShieldAbsorbUsesGE() const;
+
+    void SetMaxShield(float NewValue) const
+    {
+        // Same story as SetShield but the native SetMaxShield came back a little
+        // earlier, so Core's threshold is 3.0 rather than 5.0.
+        static auto Fn = GetFunction("SetMaxShield");
+
+        if (Fn && VersionInfo.FortniteVersion > 3.0)
+        {
+            Call<void>(Fn, NewValue);
+            return;
+        }
+
+        auto Set = HealthSet;
+
+        if (!Set || !Set->HasShield())
+        {
+            static bool bWarned = false;
+            WarnMissingAttributeOnce(bWarned, "Shield");
+            return;
+        }
+
+        // "Shield" is the max-shield attribute on these builds.
+        auto& Attribute = Set->Shield;
+        Attribute.BaseValue = NewValue;
+        Attribute.CurrentValue = NewValue;
+        Attribute.Maximum = NewValue;
+
+        Set->OnRep_Shield();
+        // Re-apply after the OnRep recompute (see SetShield for why).
+        Attribute.BaseValue = NewValue;
+        Attribute.CurrentValue = NewValue;
+        Attribute.Maximum = NewValue;
+
+        ForceNetUpdate();
+    }
+
+    float GetHealth() const
+    {
+        static auto Fn = GetFunction("GetHealth");
+
+        if (Fn)
+            return Call<float>(Fn);
+
+        auto Set = HealthSet;
+        return (Set && Set->HasHealth()) ? Set->Health.CurrentValue : 0.f;
+    }
+
+    float GetMaxHealth() const
+    {
+        static auto Fn = GetFunction("GetMaxHealth");
+
+        if (Fn)
+            return Call<float>(Fn);
+
+        auto Set = HealthSet;
+        return (Set && Set->HasMaxHealth()) ? Set->MaxHealth.CurrentValue : 0.f;
+    }
+
+    float GetShield() const
+    {
+        static auto Fn = GetFunction("GetShield");
+
+        if (Fn)
+            return Call<float>(Fn);
+
+        auto Set = HealthSet;
+        return (Set && Set->HasCurrentShield()) ? Set->CurrentShield.CurrentValue : 0.f;
+    }
+
+    float GetMaxShield() const
+    {
+        static auto Fn = GetFunction("GetMaxShield");
+
+        if (Fn)
+            return Call<float>(Fn);
+
+        auto Set = HealthSet;
+        return (Set && Set->HasShield()) ? Set->Shield.CurrentValue : 0.f;
+    }
     DEFINE_FUNC(EquipWeaponDefinition, AActor*);
     DEFINE_FUNC(LaunchCharacterJump, void);
     DEFINE_FUNC(OnCapsuleBeginOverlap, void);

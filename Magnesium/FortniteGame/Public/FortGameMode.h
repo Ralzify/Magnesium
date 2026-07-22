@@ -84,6 +84,9 @@ public:
     DefHookOg(bool, StartAircraftPhase, AFortGameMode*, char);
     DefUHookOg(OnAircraftExitedDropZone_);
     DefHookOg(void, FinishWorldInitialization, AFortGameMode*, AActor*);
+
+    // CH5 / UE5.4+ listen-server bring-up (ReadyToStartMatch's exec hook never fires there).
+    static void SetupListenServerCH5(class AFortGameModeAthena* GameMode, class AFortGameStateAthena* GameState);
     static int GetLateSafeZoneIndex();
     
     InitHooks;

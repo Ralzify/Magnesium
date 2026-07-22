@@ -1,8 +1,9 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/FortGameMode.h"
 #include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 #include "../../Erbium/PlayerAI/Public/AIDebugLogger.h"
+#include "../../Erbium/PlayerAI/Public/PlayerAIManager.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/BuildingSMActor.h"
 #include "../Public/FortKismetLibrary.h"
@@ -262,6 +263,40 @@ static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory)
 
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
+
+// Controllers whose NEXT possession-ack should skip the respawn-point teleport.
+// Set by commands that re-possess deliberately ("size", "possess"), consumed in
+// ServerAcknowledgePossession below.
+//
+// This is a per-controller SET, not a single flag, on purpose: a single possess
+// command can re-possess two controllers at once (yours plus a player you took
+// a pawn from). ServerAcknowledgePossession fires once per controller on a
+// network round-trip, so a lone global flag gets consumed by whichever ack
+// arrives first and the other controller is flung to the respawn point. That is
+// exactly why a possessed player did not stay where they were left.
+static std::unordered_set<AFortPlayerControllerAthena*> GSkipPossessRespawnControllers;
+
+static void SkipNextPossessRespawn(AFortPlayerControllerAthena* PC)
+{
+	if (PC)
+		GSkipPossessRespawnControllers.insert(PC);
+}
+
+static bool ConsumePossessRespawnSkip(AFortPlayerControllerAthena* PC)
+{
+	return PC && GSkipPossessRespawnControllers.erase(PC) > 0;
+}
+
+// Controllers whose next possession-ack is a "possess" command takeover of a
+// live pawn. ServerAcknowledgePossession fires AFTER the command finishes (a
+// client round-trip) and re-runs the native possession setup, which resets the
+// pawn's health and movement mode - so finalizing in the command alone gets
+// undone. This flag lets the ack re-apply the fixups as its very last step,
+// after nothing else can touch the pawn. Defined here, consumed at the bottom
+// of ServerAcknowledgePossession.
+static std::unordered_set<AFortPlayerControllerAthena*> GFinalizePossessTakeover;
+static void FinalizePossessedPawnForCommand(AFortPlayerControllerAthena* PC, AFortPlayerPawnAthena* Pawn); // fwd
+
 void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, FFrame& Stack)
 {
 	AActor* Pawn;
@@ -327,7 +362,8 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerController->PlayerState);
 
 	FVector ConfiguredRespawnLocation{};
-	if (bRespawnAllowed && TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
+	bool bSkipRespawn = ConsumePossessRespawnSkip(PlayerController);
+	if (bRespawnAllowed && !bSkipRespawn && TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
 		FortPawn->K2_TeleportTo(ConfiguredRespawnLocation, FRotator(0.f, 0.f, 0.f));
 
 	if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1") && VersionInfo.FortniteVersion == 14.40)
@@ -910,6 +946,13 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 	}
+
+	// Very last thing: if this ack is a "possess" command takeover, put the pawn
+	// on the ground and give it health. Nothing above overrode it because this
+	// runs after the native possession setup and the ability re-init that reset
+	// them.
+	if (GFinalizePossessTakeover.erase(PlayerController) > 0)
+		FinalizePossessedPawnForCommand(PlayerController, FortPawn);
 }
 
 uint32 ServerAttemptAircraftJumpVft;
@@ -3481,6 +3524,69 @@ static bool TryParsePrefixedCommandFloat(const std::string& Arg, char Prefix, fl
 	}
 }
 
+static bool TryParsePrefixedCommandVector(const std::string& Arg, char Prefix, FVector& OutValue)
+{
+	auto TrimmedArg = TrimPlayerCommandString(Arg);
+
+	if (TrimmedArg.size() < 2 || std::tolower(static_cast<unsigned char>(TrimmedArg[0])) != Prefix)
+		return false;
+
+	auto ValuePart = TrimmedArg.substr(1);
+
+	auto ParseOne = [](const std::string& S, float& Out) -> bool
+	{
+		if (S.empty())
+			return false;
+
+		size_t Cnt = 0;
+
+		try
+		{
+			auto V = std::stof(S, &Cnt);
+
+			if (Cnt != S.size() || !std::isfinite(V))
+				return false;
+
+			Out = V;
+			return true;
+		}
+		catch (...)
+		{
+			return false;
+		}
+	};
+
+	auto FirstComma = ValuePart.find(',');
+
+	if (FirstComma == std::string::npos)
+	{
+		// uniform: "s2" -> (2, 2, 2)
+		float V = 0.f;
+
+		if (!ParseOne(ValuePart, V))
+			return false;
+
+		OutValue = FVector(V, V, V);
+		return true;
+	}
+
+	// per-axis: "s1,1,5" -> (1, 1, 5)
+	auto SecondComma = ValuePart.find(',', FirstComma + 1);
+
+	if (SecondComma == std::string::npos || ValuePart.find(',', SecondComma + 1) != std::string::npos)
+		return false;
+
+	float X = 0.f, Y = 0.f, Z = 0.f;
+
+	if (!ParseOne(ValuePart.substr(0, FirstComma), X) ||
+		!ParseOne(ValuePart.substr(FirstComma + 1, SecondComma - FirstComma - 1), Y) ||
+		!ParseOne(ValuePart.substr(SecondComma + 1), Z))
+		return false;
+
+	OutValue = FVector(X, Y, Z);
+	return true;
+}
+
 static bool TryParseCommandFloat(const std::string& Arg, float& OutValue)
 {
 	auto TrimmedArg = TrimPlayerCommandString(Arg);
@@ -3553,6 +3659,16 @@ static std::wstring FormatCommandFloatForMessage(float Value)
 
 	auto Text = Stream.str();
 	return std::wstring(Text.begin(), Text.end());
+}
+
+static std::wstring FormatCommandScaleForMessage(const FVector& Scale)
+{
+	if (Scale.X == Scale.Y && Scale.Y == Scale.Z)
+		return FormatCommandFloatForMessage((float)Scale.X);
+
+	return FormatCommandFloatForMessage((float)Scale.X) + L"," +
+		FormatCommandFloatForMessage((float)Scale.Y) + L"," +
+		FormatCommandFloatForMessage((float)Scale.Z);
 }
 
 static bool FunctionHasSingleCommandInputParam(UFunction* Function, uint32 ExpectedElementSize)
@@ -3647,6 +3763,26 @@ static bool SetReflectedTransformScaleProperty(UObject* Object, const char* Prop
 	return true;
 }
 
+static bool GetReflectedFloatForCommand(UObject* Object, const char* PropertyName, float& OutValue)
+{
+	if (!Object)
+		return false;
+
+	auto Prop = Object->GetProperty(PropertyName);
+
+	if (!Prop)
+		return false;
+
+	auto Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
+	auto ElementSize = GetFromOffset<uint32>(Prop, Offsets::ElementSize);
+
+	if (Offset == -1 || ElementSize != sizeof(float))
+		return false;
+
+	OutValue = GetFromOffset<float>(Object, Offset);
+	return true;
+}
+
 static void RefreshScaledComponentForCommand(UObject* Component)
 {
 	if (!Component)
@@ -3694,21 +3830,22 @@ static bool SetComponentScaleForCommand(UObject* Component, const FVector& Scale
 	return bApplied;
 }
 
-static bool SetActorScaleForCommand(AActor* Actor, float ScaleValue)
+static bool SetActorScaleForCommand(AActor* Actor, const FVector& Scale)
 {
 	if (!Actor)
 		return false;
 
-	auto Scale = FVector(ScaleValue, ScaleValue, ScaleValue);
 	bool bApplied = false;
 
 	bApplied = TryCallVectorCommandFunction(Actor, "K2_SetActorScale3D", Scale) || bApplied;
 	bApplied = TryCallVectorCommandFunction(Actor, "SetActorScale3D", Scale) || bApplied;
 	bApplied = SetReflectedProperty<FVector>(Actor, "DrawScale3D", Scale) || bApplied;
-	bApplied = SetReflectedProperty<float>(Actor, "DrawScale", ScaleValue) || bApplied;
+	float DrawScaleValue = (float)Scale.X;
+	bApplied = SetReflectedProperty<float>(Actor, "DrawScale", DrawScaleValue) || bApplied;
 
 	auto Transform = Actor->GetTransform();
-	Transform.Scale3D = Scale;
+	auto ScaleCopy = Scale;
+	Transform.Scale3D = ScaleCopy;
 
 	if (auto SetTransformFn = Actor->GetFunction("SetTransform"))
 	{
@@ -3737,6 +3874,11 @@ static bool SetActorScaleForCommand(AActor* Actor, float ScaleValue)
 	Actor->FlushNetDormancy();
 	Actor->ForceNetUpdate();
 	return bApplied;
+}
+
+static bool SetActorScaleForCommand(AActor* Actor, float ScaleValue)
+{
+	return SetActorScaleForCommand(Actor, FVector(ScaleValue, ScaleValue, ScaleValue));
 }
 
 static bool TryGetCrosshairGroundLocationForCommand(AFortPlayerControllerAthena* PlayerController, FVector& OutLocation)
@@ -3809,6 +3951,398 @@ static bool TryGetCrosshairGroundLocationForCommand(AFortPlayerControllerAthena*
 		OutLocation = FVector(EndPoint.X, EndPoint.Y, ViewLoc.Z);
 
 	return true;
+}
+
+// Collects every loaded emote definition. Used by "emoteall" when no specific
+// emote was given, so the random pick is drawn from whatever the build has
+// actually loaded instead of a hardcoded list.
+static std::vector<UAthenaDanceItemDefinition*> GatherLoadedEmotesForCommand()
+{
+	std::vector<UAthenaDanceItemDefinition*> Emotes;
+
+	auto DanceClass = UAthenaDanceItemDefinition::StaticClass();
+
+	if (!DanceClass)
+		return Emotes;
+
+	for (int i = 0; i < TUObjectArray::Num(); i++)
+	{
+		auto Object = const_cast<UObject*>(TUObjectArray::GetObjectByIndex(i));
+
+		if (!Object || !Object->IsA(DanceClass))
+			continue;
+
+		Emotes.push_back((UAthenaDanceItemDefinition*)Object);
+	}
+
+	return Emotes;
+}
+
+// Resolves an emote by short name (EID_Foo) or full path, matching the lookup
+// order "botemote" already uses.
+static UAthenaDanceItemDefinition* FindEmoteByCommandArg(const std::string& Arg)
+{
+	if (Arg.empty())
+		return nullptr;
+
+	auto Wide = UEAllocatedWString(Arg.begin(), Arg.end());
+
+	auto Emote = const_cast<UAthenaDanceItemDefinition*>(FindObject<UAthenaDanceItemDefinition>(Wide.c_str()));
+
+	if (!Emote)
+		Emote = const_cast<UAthenaDanceItemDefinition*>(TUObjectArray::FindObject<UAthenaDanceItemDefinition>(Arg.c_str()));
+
+	if (!Emote)
+	{
+		UEAllocatedWString FullPath = L"/Game/Athena/Items/Cosmetics/Dances/" + Wide + L"." + Wide;
+		Emote = const_cast<UAthenaDanceItemDefinition*>(FindObject<UAthenaDanceItemDefinition>(FullPath.c_str()));
+	}
+
+	return Emote;
+}
+
+// Finds a player (real or bot) by case-insensitive player-name substring.
+// Reports ambiguity rather than silently picking the first match.
+// bAllowRequester lets a command match the caller as well. possess needs it -
+// "possess cipher" when you ARE cipher has to find you, and an exact match on
+// your own name must win over a partial match on "cipher2".
+static AFortPlayerControllerAthena* FindPlayerByNameSubstringForCommand(AFortGameMode* GameMode, const std::string& Name, AFortPlayerControllerAthena* Requester, std::string& OutMatchedName, bool& bOutAmbiguous, bool bAllowRequester = false)
+{
+	bOutAmbiguous = false;
+
+	if (!GameMode || Name.empty())
+		return nullptr;
+
+	auto Needle = NormalizePlayerCommandString(Name);
+
+	AFortPlayerControllerAthena* ExactMatch = nullptr;
+	std::string ExactMatchName;
+	std::vector<std::pair<AFortPlayerControllerAthena*, std::string>> PartialMatches;
+
+	for (auto& Player : GameMode->AlivePlayers)
+	{
+		auto PC = (AFortPlayerControllerAthena*)Player;
+
+		if (!PC || (!bAllowRequester && PC == Requester) || !PC->PlayerState)
+			continue;
+
+		auto PlayerState = (AFortPlayerStateAthena*)PC->PlayerState;
+		std::string PlayerName = PlayerState->GetPlayerName().ToString().c_str();
+
+		if (PlayerName.empty())
+			continue;
+
+		auto Haystack = NormalizePlayerCommandString(PlayerName);
+
+		if (Haystack == Needle)
+		{
+			ExactMatch = PC;
+			ExactMatchName = PlayerName;
+			break;
+		}
+
+		if (Haystack.find(Needle) != std::string::npos)
+			PartialMatches.push_back({ PC, PlayerName });
+	}
+
+	if (ExactMatch)
+	{
+		OutMatchedName = ExactMatchName;
+		return ExactMatch;
+	}
+
+	if (PartialMatches.size() == 1)
+	{
+		OutMatchedName = PartialMatches[0].second;
+		return PartialMatches[0].first;
+	}
+
+	if (PartialMatches.size() > 1)
+		bOutAmbiguous = true;
+
+	return nullptr;
+}
+
+// Player pawns only - deliberately NOT the generic "Pawn" class.
+//
+// Enumerating every Pawn sweeps up vehicles, AI and spectator pawns whose
+// classes do not have the properties AFortPlayerPawnAthena declares. That
+// matters more than it looks: DEFINE_PROP caches its resolved offset in a
+// static keyed on the declaring class, so the FIRST object it is read from
+// decides the offset for every later read. Reading ->Controller off a
+// foreign pawn class resolves to -1 and poisons the cache permanently,
+// after which every access lands at base + 0xFFFFFFFF.
+//
+// The index printed by "dumppawns" is the one "possess <index>" takes, so
+// both must enumerate identically.
+static void GatherAllPawnsForCommand(TArray<AActor*>& OutPawns)
+{
+	static auto PawnClass = FindClass("Pawn");
+
+	if (!PawnClass)
+		return;
+
+	Utils::GetAll<AActor>(PawnClass, OutPawns);
+}
+
+// Guard for every AFortPlayerPawnAthena-declared property read below.
+//
+// This matters more than it looks: DEFINE_PROP caches its resolved offset in a
+// static keyed on the DECLARING class, and the first object it is read from
+// decides that offset forever. Reading ->Controller or ->PlayerState off a
+// vehicle or AI pawn resolves to -1 and poisons the cache permanently, after
+// which every later access lands at base + 0xFFFFFFFF. That was the possess
+// crash. The list can therefore contain any pawn, as long as nothing reads a
+// player-pawn property without checking this first.
+static bool IsFortPlayerPawnForCommand(AActor* Actor)
+{
+	return Actor && Actor->IsA(AFortPlayerPawnAthena::StaticClass());
+}
+
+// True only for real player controllers. Object/AI pawns carry an AI controller
+// (or none), and treating those as AFortPlayerControllerAthena - calling the
+// spectate/view-target path on them - is not safe. The Controller property
+// itself is a base APawn field, so reading it off any pawn resolves to the same
+// offset and does not poison the cache the way a Fortnite-specific field would.
+static bool IsPlayerControllerForCommand(AActor* Controller)
+{
+	static auto PlayerControllerClass = FindClass("PlayerController");
+	return Controller && PlayerControllerClass && Controller->IsA(PlayerControllerClass);
+}
+
+// Matches on the pawn's object name (what dumppawns prints), unlike the
+// player-name matching used by swap - possess is a debugging tool and object
+// names are what you actually have in front of you.
+static AActor* FindPawnByNameSubstringForCommand(const std::string& Name, std::string& OutMatchedName, bool& bOutAmbiguous)
+{
+	bOutAmbiguous = false;
+
+	if (Name.empty())
+		return nullptr;
+
+	auto Needle = NormalizePlayerCommandString(Name);
+
+	TArray<AActor*> Pawns;
+	GatherAllPawnsForCommand(Pawns);
+
+	AActor* ExactMatch = nullptr;
+	std::string ExactMatchName;
+	std::vector<std::pair<AActor*, std::string>> PartialMatches;
+
+	for (auto& Pawn : Pawns)
+	{
+		if (!Pawn)
+			continue;
+
+		std::string PawnName = Pawn->Name.ToString().c_str();
+		auto Haystack = NormalizePlayerCommandString(PawnName);
+
+		if (Haystack == Needle)
+		{
+			ExactMatch = Pawn;
+			ExactMatchName = PawnName;
+			break;
+		}
+
+		if (Haystack.find(Needle) != std::string::npos)
+			PartialMatches.push_back({ Pawn, PawnName });
+	}
+
+	Pawns.Free();
+
+	if (ExactMatch)
+	{
+		OutMatchedName = ExactMatchName;
+		return ExactMatch;
+	}
+
+	if (PartialMatches.size() == 1)
+	{
+		OutMatchedName = PartialMatches[0].second;
+		return PartialMatches[0].first;
+	}
+
+	if (PartialMatches.size() > 1)
+		bOutAmbiguous = true;
+
+	return nullptr;
+}
+
+// Forces a (possibly remote) client's camera onto an actor via the client RPC.
+//
+// SetViewTargetWithBlend acts on the server-side camera manager and does not
+// reliably push the change down to a remote client. ClientSetViewTarget is a
+// client RPC: called on the server against a controller owned by a client
+// connection, it is delivered to that client and runs there, which is what
+// actually moves their camera.
+//
+// The params are [AActor* A][FViewTargetTransitionParams]. A zeroed transition
+// struct means BlendTime 0 - an instant cut. ProcessEvent copies only the
+// function's real ParmsSize, so an over-sized zeroed buffer is safe.
+static void ClientForceViewTargetForCommand(AFortPlayerControllerAthena* PC, AActor* Target)
+{
+	if (!PC || !Target)
+		return;
+
+	static auto Fn = PC->GetFunction("ClientSetViewTarget");
+
+	if (!Fn)
+		return;
+
+	uint8_t Params[0x40];
+	memset(Params, 0, sizeof(Params));
+	*(AActor**)(Params + 0) = Target;
+
+	PC->ProcessEvent(Fn, Params);
+}
+
+// Cleans up the state a freshly possessed pawn is left in.
+//
+//   Float instead of walk: possession lands the pawn in a non-walking movement
+//   mode (leftover skydive/glide, or a disabled-movement state). Forcing
+//   MOVE_Walking and clearing the flags puts it back on the ground - which also
+//   tends to un-block weapon fire, since firing is suppressed while airborne in
+//   a cheat-fly state.
+//
+//   Zero health bar: re-initializing the ability system does not repopulate the
+//   pawn's health/shield attributes, so the bar reads empty. Set them so the
+//   body is actually alive and playable.
+static void FinalizePossessedPawnForCommand(AFortPlayerControllerAthena* PC, AFortPlayerPawnAthena* Pawn)
+{
+	(void)PC;
+
+	if (!Pawn)
+		return;
+
+	// PUPPET MODE finalize - kept deliberately minimal. Earlier versions of this
+	// also rebound the pawn's PlayerState (with a native OnRep_PlayerState) and
+	// forced health/shield, but those native calls faulted on early builds where
+	// the reflected functions/attributes are laid out differently - that was the
+	// possess crash. Movement is all a puppet needs, so that is all this does.
+
+	// Put it on the ground so it walks instead of floating. Guard the UFunction:
+	// on a build where it is absent, the multi-arg param marshalling must not run.
+	if (Pawn->CharacterMovement && Pawn->CharacterMovement->GetFunction("SetMovementMode"))
+	{
+		Pawn->CharacterMovement->bCheatFlying = false;
+		Pawn->CharacterMovement->SetMovementMode(EMovementMode::MOVE_Walking, 0);
+	}
+
+	// Keep the puppet alive. SetHealth is the known-good path (health writes work
+	// on these builds); shield is intentionally left alone - it goes through the
+	// early-build fallback and is not needed for a movement puppet.
+	Pawn->SetHealth(100.f);
+
+	Pawn->ForceNetUpdate();
+}
+
+// Turns a player into a spectator locked onto the pawn we took from them, so
+// they watch it move under our control.
+//
+// UnPossess is unavoidable here: while a controller still possesses a pawn, its
+// OWN client keeps predicting that pawn locally, and with no input the pawn
+// just freezes in place on their screen - it never follows what we do. Freeing
+// it makes the pawn a normal replicated actor that animates for them.
+//
+// The catch UnPossess brings is a stranded camera (view target goes null), so
+// SetViewTargetWithBlend then pins their camera onto the pawn. That explicit
+// view target is the part the earlier PlayerToSpectateOnDeath-only attempt was
+// missing.
+static void MakeControllerSpectatePawnForCommand(AFortPlayerControllerAthena* PC, AFortPlayerPawnAthena* Pawn)
+{
+	if (!PC)
+		return;
+
+	PC->UnPossess();
+
+	if (PC->HasPlayerToSpectateOnDeath())
+		PC->PlayerToSpectateOnDeath = (AActor*)Pawn;
+
+	PC->ClientGotoState(FName(L"Spectating"));
+
+	// (target, blend time 0, VTBlend_Linear, exp 0, don't lock outgoing)
+	PC->SetViewTargetWithBlend((AActor*)Pawn, 0.f, (uint8_t)0, 0.f, false);
+
+	// The one that actually moves a remote client's camera.
+	ClientForceViewTargetForCommand(PC, (AActor*)Pawn);
+
+	PC->ForceNetUpdate();
+}
+
+// Re-equips the pickaxe so the controller has a working held item on its new
+// pawn. The inventory lives on the CONTROLLER, not the pawn, so after any
+// possession change the held weapon still points at the old body and cannot be
+// used. This is the same equip path the "size" command uses after it
+// re-possesses - ClientActivateSlot alone does not restore it.
+static void ReEquipAfterPossessForCommand(AFortPlayerControllerAthena* PC)
+{
+	if (!PC || !PC->WorldInventory)
+		return;
+
+	auto PickaxeEntry = PC->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
+		{ return Entry.ItemDefinition && Entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>(); }, FFortItemEntry::Size());
+
+	if (!PickaxeEntry)
+		return;
+
+	PC->ServerExecuteInventoryItem(PickaxeEntry->ItemGuid);
+	PC->ClientEquipItem(PickaxeEntry->ItemGuid, true);
+}
+
+// Puts a controller back in control by SPAWNING A FRESH PAWN, not by
+// re-possessing the old one.
+//
+// Re-attaching to a pawn you previously left never fully re-binds movement and
+// input on the client: you cannot jump, cannot use items, and your inventory
+// still looks like it is driving the pawn you came from. The "size" command
+// hits exactly the same problem and sidesteps it by swapping in a new pawn -
+// which is why running "size 1" clears the symptoms. So do what size does.
+//
+// Deliberately does NOT touch the inventory: WorldInventory lives on the
+// controller and survives the pawn swap by itself, and Remove/GiveItem here
+// hard-crashes on some builds (see the note in the "size" command).
+//
+// Returns the new pawn, or nullptr if the spawn failed - in which case the old
+// pawn is left untouched rather than destroyed.
+static AFortPlayerPawnAthena* RespawnControllerOnFreshPawnForCommand(AFortGameMode* GameMode, AFortPlayerControllerAthena* PC, AFortPlayerPawnAthena* OldPawn)
+{
+	if (!GameMode || !PC || !OldPawn)
+		return nullptr;
+
+	FTransform SpawnTransform = OldPawn->GetTransform();
+
+	// Preserve health/shield so a possession round-trip is not a free heal.
+	float SavedHealth = OldPawn->GetHealth();
+	float SavedShield = OldPawn->GetShield();
+
+	auto NewPawn = GameMode->SpawnDefaultPawnAtTransform(PC, SpawnTransform);
+
+	if (!NewPawn)
+		return nullptr;
+
+	SkipNextPossessRespawn(PC);
+	PC->Possess(NewPawn);
+	PC->MyFortPawn = NewPawn;
+
+	NewPawn->SetHealth(SavedHealth);
+	NewPawn->SetShield(SavedShield);
+
+	OldPawn->K2_DestroyActor();
+
+	// If they were spectating (a displaced owner getting their body back), pull
+	// them back into play and put the camera on the new pawn - possessing alone
+	// does not clear the spectator view target we set earlier.
+	PC->ClientGotoState(FName(L"Playing"));
+	PC->SetViewTargetWithBlend((AActor*)NewPawn, 0.f, (uint8_t)0, 0.f, false);
+	ClientForceViewTargetForCommand(PC, (AActor*)NewPawn);
+
+	ReEquipAfterPossessForCommand(PC);
+
+	PC->OnRep_Pawn();
+	PC->ForceNetUpdate();
+	NewPawn->ForceNetUpdate();
+
+	return NewPawn;
 }
 
 static void SetMatchingNukeTargetVectorProperties(UObject* Object, const FVector& TargetLocation)
@@ -4559,8 +5093,10 @@ cheat ghost <speed> - Toggles no-clip flying (with optional speed value)
 cheat gravity <scale> - Sets the gravity scale
 cheat changename <name> - Changes your player name
 cheat keepinventory - Toggles keeping inventory on death
-cheat spawnactor/summon <class/path> [s<size>] [h<meters>] - Spawns an actor near your location
+cheat spawnactor/summon <class/path> [s<size> | s<X>,<Y>,<Z>] [h<meters>] - Spawns an actor near your location
 cheat destroyall <class/path> - Destroys all actors of a class
+cheat deltarget - Destroys the actor your crosshair is aiming at
+cheat resetbuilds <radius> - Resets player builds, all of them without a radius
 cheat sethealth <amount> - Sets your pawn's health (0-100)
 cheat setshield <amount> - Sets your pawn's shield (0-100)
 cheat setmaxhealth <amount> - Sets your pawn's maximum health
@@ -4573,31 +5109,39 @@ cheat demospeed <speed> - Sets the speed of the server
 cheat god - Toggles god mode
 cheat godall - Toggles god mode for all players
 cheat speed <scale> - Sets the player's movement speed
+cheat size <scale> | size <X> <Y> <Z> - Resizes your pawn (uniform or per-axis)
 cheat timeofday <hour> - Sets the time of day (0-23)
 cheat pausetimeofday - Pauses/Unpauses the time of day
-cheat spawnbot <count> <weapon> <s[size]> [X Y Z] - Spawns a player bot at your or a specified location (WIP)
+cheat spawnbot <count> <weapon> <s[size] | s[X,Y,Z]> [X Y Z] - Spawns a player bot at your or a specified location (WIP)
 cheat tpbot - Teleports the player bot to your location
+cheat delbot - Removes every spawned player bot (PlayerAI is left alone)
+cheat dumppawns - Lists every player pawn with its index and owner
+cheat possess <player name | index | pawn name | reset> - Puppet a pawn (move it around, owner watches), reset returns you to your own
 cheat tpall - Teleports all real players around your location
 cheat botemote - Plays the 'Accolades' emote to the player bot
+cheat emoteall <emote> - Makes everyone emote, a random one each without an emote
 cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
 cheat tpto <exact player name> - Teleports you next to a real player
-cheat tp - Teleports to where your crosshair is aiming
-cheat tp <X> <Y> <Z> - Teleports to a location
+cheat swap <player name> - Swaps places with a player or bot (partial name)
+cheat tp | tp <X> <Y> <Z> - Teleports to where your crosshair is aiming, or to a location
 cheat launch <X> <Y> <Z> - Launches the player
 cheat savewaypoint - Saves your current location as a waypoint
 cheat waypoint <name> - Loads a saved waypoint
 cheat skydive - Toggles skydiving
 cheat mark - Toggles teleporting to placed map markers
+cheat togglepersonalvehicle - Toggles the personal vehicle
 cheat giveitem <WID/path> <Count = 1> - Gives you an item
 cheat giveall - Gives you all ammo, mats, and traps
 cheat givetraps - Gives you all available traps
 cheat giveammo - Gives you 999 of every ammo type
 cheat givemats - Gives you 500 of each material
 cheat spawnpickup <WID/path> <Count = 1> [X Y Z] - Spawns a pickup at your player's or specified location
+cheat lootrain <Count = 20> <Radius = 600> <TierGroup = Loot_AthenaTreasure> - Rains loot drops around you
 cheat clearinventory - Clears your inventory of all items that are droppable
-cheat spawn <class/path> <s[size]> <h[meters]> - Spawns an actor at your location
+cheat delitem - Removes the item you currently have equipped
+cheat spawn <class/path> <s[size] | s[X,Y,Z]> <h[meters]> - Spawns an actor at your location
 cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 )"), FName(), 1);
 	}
@@ -5017,6 +5561,98 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 				Pawn->ProcessEvent(SetMovementSpeedFn, &Speed);
 				PlayerController->ClientMessage(FString(L"Set player speed!"), FName(), 1.f);
+			}
+			else if (command == "size")
+			{
+				double X = 1., Y = 1., Z = 1.;
+
+				if (args.size() == 2)
+				{
+					// Uniform scale on every axis: "size 5"
+					X = Y = Z = strtod(args[1].c_str(), nullptr);
+				}
+				else if (args.size() == 4)
+				{
+					// Per-axis scale: "size 1 1 5"
+					X = strtod(args[1].c_str(), nullptr);
+					Y = strtod(args[2].c_str(), nullptr);
+					Z = strtod(args[3].c_str(), nullptr);
+				}
+				else
+				{
+					PlayerController->ClientMessage(FString(L"Usage: size <scale>  or  size <X> <Y> <Z>"), FName(), 1.f);
+					return;
+				}
+
+				auto OldPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
+
+				if (!OldPawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn to resize!"), FName(), 1.f);
+					return;
+				}
+
+				// IMPORTANT: do NOT touch the inventory (Remove/GiveItem) here. On this build that reliably
+				// hard-crashes the game. The WorldInventory lives on the controller and survives the pawn
+				// swap on its own, so we just respawn a scaled pawn and re-equip the pickaxe.
+
+				// Build the spawn transform: current location + rotation, new scale, and raise the (bigger)
+				// pawn by the change in capsule half-height so its feet stay on the ground.
+				FTransform SpawnTransform = OldPawn->GetTransform();
+				FVector OldScaleVec = SpawnTransform.Scale3D;
+				float OldScaleZ = (float)OldScaleVec.Z;
+				if (OldScaleZ == 0.f)
+					OldScaleZ = 1.f;
+
+				float BaseHalfHeight = 0.f;
+				static auto CapsuleComponentClass = FindClass("CapsuleComponent");
+				if (auto CapsuleComponent = CapsuleComponentClass ? OldPawn->GetComponentByClass(CapsuleComponentClass) : nullptr)
+					GetReflectedFloatForCommand(CapsuleComponent, "CapsuleHalfHeight", BaseHalfHeight);
+
+				auto Scale = FVector(X, Y, Z);
+				SpawnTransform.Scale3D = Scale;
+				if (BaseHalfHeight > 0.f)
+					SpawnTransform.Translation.Z += BaseHalfHeight * ((float)Z - OldScaleZ);
+
+				// Preserve health/shield so resizing is not a free heal.
+				float SavedHealth = OldPawn->GetHealth();
+				float SavedShield = OldPawn->GetShield();
+
+				auto NewPawn = GameMode->SpawnDefaultPawnAtTransform(PlayerController, SpawnTransform);
+
+				if (!NewPawn)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to spawn resized pawn!"), FName(), 1.f);
+					return;
+				}
+
+				// Mark this possess as a resize so the possession handler does not teleport us to a
+				// respawn point / leave us in a cannot-use-items respawn state.
+				SkipNextPossessRespawn(PlayerController);
+				PlayerController->Possess(NewPawn);
+				PlayerController->MyFortPawn = NewPawn;
+
+				NewPawn->SetHealth(SavedHealth);
+				NewPawn->SetShield(SavedShield);
+
+				// Remove the old body so it does not linger as a ghost (safe without inventory edits).
+				OldPawn->K2_DestroyActor();
+
+				// Re-equip the pickaxe (equip is safe; only Remove/GiveItem crash). The rest of your items
+				// are still in the inventory - switch weapon slots to them.
+				if (PlayerController->WorldInventory)
+				{
+					auto PickaxeEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
+						{ return Entry.ItemDefinition && Entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>(); }, FFortItemEntry::Size());
+
+					if (PickaxeEntry)
+					{
+						PlayerController->ServerExecuteInventoryItem(PickaxeEntry->ItemGuid);
+						PlayerController->ClientEquipItem(PickaxeEntry->ItemGuid, true);
+					}
+				}
+
+				PlayerController->ClientMessage(FString(L"Set size!"), FName(), 1.f);
 			}
 			else if (command == "randomize")
 			{
@@ -5858,7 +6494,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				auto CallerController = PlayerController;
 				int Count = 1;
 				std::string WeaponArg = "";
-				float BotScale = 1.f;
+				FVector BotScale = FVector(1.f, 1.f, 1.f);
 				bool HasLocation = false;
 				FVector SpawnLocation{};
 
@@ -5867,15 +6503,12 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					auto CurrentArg = std::string(args[ArgIndex].c_str());
 					float ParsedScale = 0.f;
 
-					if (TryParsePrefixedCommandFloat(CurrentArg, 's', ParsedScale))
-					{
-						BotScale = ParsedScale;
+					if (TryParsePrefixedCommandVector(CurrentArg, 's', BotScale))
 						continue;
-					}
 
 					if (LooksLikeSizeOrHeightModifierArg(CurrentArg))
 					{
-						PlayerController->ClientMessage(FString(L"Invalid bot size. Use s0.5 for half size or s2 for 2x size."), FName(), 1.f);
+						PlayerController->ClientMessage(FString(L"Invalid bot size. Use s2 for 2x, or s1,1,5 for per-axis (X,Y,Z)."), FName(), 1.f);
 						return;
 					}
 
@@ -5907,7 +6540,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					if (CurrentArg.find('.') != std::string::npos && TryParseCommandFloat(CurrentArg, ParsedScale))
 					{
-						BotScale = ParsedScale;
+						BotScale = FVector(ParsedScale, ParsedScale, ParsedScale);
 						continue;
 					}
 
@@ -5917,15 +6550,14 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						continue;
 					}
 
-					PlayerController->ClientMessage(FString(L"Invalid spawnbot argument. Use count, weapon, s0.5/s2 size, or X Y Z location."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Invalid spawnbot argument. Use count, weapon, s2 or s1,1,5 size, or X Y Z location."), FName(), 1.f);
 					return;
 				}
 
 				for (int i = 0; i < Count; i++)
 				{
 					auto Transform = PlayerController->Pawn->GetTransform();
-					auto BotScaleVector = FVector(BotScale, BotScale, BotScale);
-					Transform.Scale3D = BotScaleVector;
+					Transform.Scale3D = BotScale;
 
 					if (HasLocation)
 						Transform.Translation = SpawnLocation;
@@ -6187,7 +6819,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						}
 					}
 
-					auto Message = L"Spawned a player bot! (s" + FormatCommandFloatForMessage(BotScale) +
+					auto Message = L"Spawned a player bot! (s" + FormatCommandScaleForMessage(BotScale) +
 						(HasLocation
 							? L" @ " + FormatCommandFloatForMessage((float)SpawnLocation.X) + L" " + FormatCommandFloatForMessage((float)SpawnLocation.Y) + L" " + FormatCommandFloatForMessage((float)SpawnLocation.Z)
 							: std::wstring()) +
@@ -7297,7 +7929,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				if (SummonArgsStart == std::string::npos)
 				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [hp<health>] [direction] [p<pitch>]"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size> | s<X,Y,Z>] [h<meters>] [hp<health>] [direction] [p<pitch>]"), FName(), 1.f);
 					return;
 				}
 
@@ -7306,7 +7938,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				if (SummonTokens.empty())
 				{
-					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size>] [h<meters>] [hp<health>] [direction] [p<pitch>]"), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat summon <class/path> [X Y Z] [count] [s<size> | s<X,Y,Z>] [h<meters>] [hp<health>] [direction] [p<pitch>]"), FName(), 1.f);
 					return;
 				}
 
@@ -7326,7 +7958,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				int Count = 1;
 				constexpr float DefaultSummonScale = 1.f;
 				constexpr float DefaultSummonHeightMeters = 2.f;
-				auto SummonScale = DefaultSummonScale;
+				FVector SummonScale = FVector(DefaultSummonScale, DefaultSummonScale, DefaultSummonScale);
 				auto SummonHeightMeters = DefaultSummonHeightMeters;
 				auto SummonHealth = 0.f;
 
@@ -7340,11 +7972,8 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					auto CurrentArg = TrimPlayerCommandString(SummonTokens[i]);
 					float ModifierValue = 0.f;
 
-					if (TryParsePrefixedCommandFloat(CurrentArg, 's', ModifierValue))
-					{
-						SummonScale = ModifierValue;
+					if (TryParsePrefixedCommandVector(CurrentArg, 's', SummonScale))
 						continue;
-					}
 
 					if (CurrentArg.size() > 2 &&
 						std::tolower(static_cast<unsigned char>(CurrentArg[0])) == 'h' &&
@@ -7370,7 +7999,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 					if (LooksLikeSizeOrHeightModifierArg(CurrentArg))
 					{
-						PlayerController->ClientMessage(FString(L"Invalid summon modifier. Use s2 for 2x size or h100 for 100 meters high."), FName(), 1.f);
+						PlayerController->ClientMessage(FString(L"Invalid summon modifier. Use s2 (or s1,1,5 per-axis) for size or h100 for height."), FName(), 1.f);
 						return;
 					}
 
@@ -7436,7 +8065,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				for (int i = 0; i < Count; i++)
 				{
 					FQuat SpawnQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
-					auto SpawnScale = FVector(SummonScale, SummonScale, SummonScale);
+					auto SpawnScale = SummonScale;
 					FTransform SpawnTransform(Loc, SpawnQuat, SpawnScale);
 					auto Actor = UWorld::SpawnActor(Class, SpawnTransform);
 
@@ -7453,7 +8082,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					AmountSpawned++;
 				}
 
-				auto Message = L"Spawned " + std::to_wstring(AmountSpawned) + L" actor(s)! (s" + FormatCommandFloatForMessage(SummonScale) +
+				auto Message = L"Spawned " + std::to_wstring(AmountSpawned) + L" actor(s)! (s" + FormatCommandScaleForMessage(SummonScale) +
 					L" h" + FormatCommandFloatForMessage(AppliedSummonHeightMeters) + L"m" +
 					(HasExplicitHealth ? std::wstring(L" hp") + FormatCommandFloatForMessage(SummonHealth) : std::wstring()) + L")";
 				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
@@ -7621,17 +8250,701 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 			}
 			else if (command == "resetbuilds" || command == "reset")
 			{
+				float ResetRadius = 0.f;
+				bool bHasResetRadius = args.size() >= 2 && TryParseCommandFloat(std::string(args[1].c_str()), ResetRadius) && ResetRadius > 0.f;
+				FVector ResetCenter{};
+
+				if (bHasResetRadius)
+				{
+					if (!PlayerController->Pawn)
+					{
+						PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+						return;
+					}
+
+					ResetCenter = PlayerController->Pawn->K2_GetActorLocation();
+				}
+
 				TArray<ABuildingSMActor*> Builds;
 				Utils::GetAll<ABuildingSMActor>(Builds);
 
+				int ResetCount = 0;
+
 				for (auto& Build : Builds)
 				{
-					if (Build->bPlayerPlaced)
-						Build->SilentDie(true);
+					if (!Build || !Build->bPlayerPlaced)
+						continue;
+
+					if (bHasResetRadius)
+					{
+						auto BuildLocation = Build->K2_GetActorLocation();
+						auto DX = BuildLocation.X - ResetCenter.X;
+						auto DY = BuildLocation.Y - ResetCenter.Y;
+						auto DZ = BuildLocation.Z - ResetCenter.Z;
+
+						if ((DX * DX) + (DY * DY) + (DZ * DZ) > (ResetRadius * ResetRadius))
+							continue;
+					}
+
+					Build->SilentDie(true);
+					ResetCount++;
 				}
 
 				Builds.Free();
-				PlayerController->ClientMessage(FString(L"Resetting builds!"), FName(), 1.f);
+
+				wchar_t wmsg[96];
+
+				if (bHasResetRadius)
+					swprintf_s(wmsg, 96, L"Reset %d builds within %.0f units!", ResetCount, ResetRadius);
+				else
+					swprintf_s(wmsg, 96, L"Reset %d builds!", ResetCount);
+
+				PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
+			}
+			else if (command == "lootrain")
+			{
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				// Parsed from originalCommand because tier group names are
+				// case-sensitive and fullCommand has been lowercased.
+				auto LootRainArgsStart = originalCommand.find(' ');
+				auto LootRainTokens = LootRainArgsStart == std::string::npos
+					? std::vector<std::string>()
+					: SplitPlayerCommandArgs(TrimPlayerCommandString(originalCommand.substr(LootRainArgsStart + 1).c_str()));
+
+				int Count = 20;
+				float Radius = 600.f;
+				std::string TierGroupArg;
+
+				if (LootRainTokens.size() >= 1 && !TryParseCommandInt(LootRainTokens[0], Count))
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat lootrain [count] [radius] [tiergroup]"), FName(), 1.f);
+					return;
+				}
+
+				if (LootRainTokens.size() >= 2 && !TryParseCommandFloat(LootRainTokens[1], Radius))
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat lootrain [count] [radius] [tiergroup]"), FName(), 1.f);
+					return;
+				}
+
+				if (LootRainTokens.size() >= 3)
+					TierGroupArg = TrimPlayerCommandString(LootRainTokens[2]);
+
+				if (LootRainTokens.size() > 3)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat lootrain [count] [radius] [tiergroup]"), FName(), 1.f);
+					return;
+				}
+
+				Count = std::clamp(Count, 1, 200);
+				Radius = std::clamp(Radius, 100.f, 20000.f);
+
+				static auto Loot_AthenaTreasure = FName(L"Loot_AthenaTreasure");
+
+				FName TierGroup = Loot_AthenaTreasure;
+
+				if (!TierGroupArg.empty())
+				{
+					auto TierGroupWide = UEAllocatedWString(TierGroupArg.begin(), TierGroupArg.end());
+					TierGroup = FName(TierGroupWide.c_str());
+				}
+
+				auto Center = Pawn->K2_GetActorLocation();
+				int Spawned = 0;
+
+				// Each ChooseLootForContainer call returns one container's worth
+				// of drops, so roll until the requested count is reached. The
+				// roll cap stops an empty/invalid tier group from spinning.
+				for (int Roll = 0; Spawned < Count && Roll < Count * 4; Roll++)
+				{
+					TArray<FFortItemEntry*> LootDrops{};
+					UFortLootPackage::ChooseLootForContainer(LootDrops, TierGroup);
+
+					if (LootDrops.Num() == 0)
+					{
+						LootDrops.Free();
+						break;
+					}
+
+					for (auto& LootDrop : LootDrops)
+					{
+						if (LootDrop && Spawned < Count)
+						{
+							auto Angle = ((float)rand() / (float)RAND_MAX) * 6.2831853f;
+							auto Dist = ((float)rand() / (float)RAND_MAX) * Radius;
+
+							FVector GroundLoc(
+								Center.X + (cosf(Angle) * Dist),
+								Center.Y + (sinf(Angle) * Dist),
+								Center.Z
+							);
+
+							FVector AirLoc(
+								GroundLoc.X,
+								GroundLoc.Y,
+								GroundLoc.Z + 400.f + (((float)rand() / (float)RAND_MAX) * 400.f)
+							);
+
+							// Spawned from the air with GroundLoc as the final
+							// location so the pickups arc down like real drops.
+							if (AFortInventory::SpawnPickup(AirLoc, *LootDrop, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), nullptr, -1, true, true, true, nullptr, GroundLoc))
+								Spawned++;
+						}
+
+						free(LootDrop);
+					}
+
+					LootDrops.Free();
+				}
+
+				if (Spawned > 0)
+				{
+					wchar_t wmsg[128];
+					swprintf_s(wmsg, 128, L"Rained %d items!", Spawned);
+					PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
+				}
+				else
+					PlayerController->ClientMessage(FString(L"Found no loot for that tier group. Check the name (e.g. Loot_AthenaTreasure, Loot_AthenaFloorLoot)."), FName(), 1.f);
+			}
+			else if (command == "deltarget")
+			{
+				static auto DestroyTargetFn = const_cast<UFunction*>(FindObject<UFunction>(L"/Script/Engine.CheatManager.DestroyTarget"));
+				static auto CheatManagerClass = FindClass("CheatManager");
+
+				if (!DestroyTargetFn)
+				{
+					PlayerController->ClientMessage(FString(L"DestroyTarget function not found on this version."), FName(), 1.f);
+					return;
+				}
+
+				auto CheatManagerOffset = PlayerController->GetOffset("CheatManager");
+				UObject* CheatManager = CheatManagerOffset != -1 ? *(UObject**)(__int64(PlayerController) + CheatManagerOffset) : nullptr;
+
+				if (!CheatManager && CheatManagerClass)
+				{
+					CheatManager = UGameplayStatics::SpawnObject(CheatManagerClass, PlayerController);
+
+					if (CheatManager && CheatManagerOffset != -1)
+						*(UObject**)(__int64(PlayerController) + CheatManagerOffset) = CheatManager;
+				}
+
+				if (!CheatManager)
+				{
+					PlayerController->ClientMessage(FString(L"Failed to create cheat manager!"), FName(), 1.f);
+					return;
+				}
+
+				CheatManager->ProcessEvent(DestroyTargetFn, nullptr);
+				PlayerController->ClientMessage(FString(L"Destroyed target."), FName(), 1.f);
+			}
+			else if (command == "delitem")
+			{
+				if (!PlayerController->WorldInventory)
+				{
+					PlayerController->ClientMessage(FString(L"No inventory found!"), FName(), 1.f);
+					return;
+				}
+
+				auto Pawn = PlayerController->MyFortPawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				auto CurrentWeapon = (AFortWeapon*)Pawn->CurrentWeapon;
+
+				if (!CurrentWeapon)
+				{
+					PlayerController->ClientMessage(FString(L"No equipped item to remove."), FName(), 1.f);
+					return;
+				}
+
+				PlayerController->WorldInventory->Remove(CurrentWeapon->ItemEntryGuid);
+				PlayerController->ClientMessage(FString(L"Removed the equipped item."), FName(), 1.f);
+			}
+			else if (command == "emoteall")
+			{
+				// Case preserved from originalCommand so EID names resolve.
+				auto EmoteAllArgsStart = originalCommand.find(' ');
+				auto EmoteArg = EmoteAllArgsStart == std::string::npos
+					? std::string()
+					: TrimPlayerCommandString(originalCommand.substr(EmoteAllArgsStart + 1).c_str());
+
+				UAthenaDanceItemDefinition* ChosenEmote = nullptr;
+				std::vector<UAthenaDanceItemDefinition*> EmotePool;
+
+				if (!EmoteArg.empty())
+				{
+					ChosenEmote = FindEmoteByCommandArg(EmoteArg);
+
+					if (!ChosenEmote)
+					{
+						PlayerController->ClientMessage(FString(L"Failed to find that emote. Try an EID name or a full path."), FName(), 1.f);
+						return;
+					}
+				}
+				else
+				{
+					EmotePool = GatherLoadedEmotesForCommand();
+
+					if (EmotePool.empty())
+					{
+						PlayerController->ClientMessage(FString(L"No emotes are loaded!"), FName(), 1.f);
+						return;
+					}
+				}
+
+				int Dancing = 0;
+
+				for (auto& Player : GameMode->AlivePlayers)
+				{
+					auto TargetPC = (AFortPlayerControllerAthena*)Player;
+
+					if (!TargetPC || !TargetPC->MyFortPawn)
+						continue;
+
+					// Re-rolled per player when no emote was specified, so
+					// everyone gets a different one.
+					auto Emote = ChosenEmote ? ChosenEmote : EmotePool[rand() % EmotePool.size()];
+
+					PlayEmoteInternal(TargetPC, Emote);
+					Dancing++;
+				}
+
+				wchar_t wmsg[96];
+				swprintf_s(wmsg, 96, L"%d players are emoting!", Dancing);
+				PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
+			}
+			else if (command == "swap")
+			{
+				auto Pawn = PlayerController->Pawn;
+
+				if (!Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"No pawn found!"), FName(), 1.f);
+					return;
+				}
+
+				auto SwapArgsStart = originalCommand.find(' ');
+
+				if (SwapArgsStart == std::string::npos)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat swap <player name>"), FName(), 1.f);
+					return;
+				}
+
+				auto SwapName = TrimPlayerCommandString(originalCommand.substr(SwapArgsStart + 1).c_str());
+
+				if (SwapName.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat swap <player name>"), FName(), 1.f);
+					return;
+				}
+
+				std::string MatchedName;
+				bool bAmbiguous = false;
+				auto TargetPC = FindPlayerByNameSubstringForCommand(GameMode, SwapName, PlayerController, MatchedName, bAmbiguous);
+
+				if (bAmbiguous)
+				{
+					PlayerController->ClientMessage(FString(L"Multiple players match that name. Be more specific."), FName(), 1.f);
+					return;
+				}
+
+				if (!TargetPC || !TargetPC->Pawn)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find a player with that name."), FName(), 1.f);
+					return;
+				}
+
+				auto TargetPawn = TargetPC->Pawn;
+
+				auto MyLocation = Pawn->K2_GetActorLocation();
+				auto TheirLocation = TargetPawn->K2_GetActorLocation();
+
+				Pawn->K2_TeleportTo(TheirLocation, Pawn->K2_GetActorRotation());
+				TargetPawn->K2_TeleportTo(MyLocation, TargetPawn->K2_GetActorRotation());
+
+				auto Message = L"Swapped places with " + std::wstring(MatchedName.begin(), MatchedName.end()) + L"!";
+				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
+			}
+			else if (command == "togglepersonalvehicle")
+			{
+				static auto TogglePersonalVehicleFn = PlayerController->GetFunction("TogglePersonalVehicle");
+
+				if (!TogglePersonalVehicleFn)
+				{
+					PlayerController->ClientMessage(FString(L"Personal vehicles are not supported on this version."), FName(), 1.f);
+					return;
+				}
+
+				bool bIsPersonalVehicleActive = false;
+				auto IsActiveFn = PlayerController->GetFunction("IsPersonalVehicleActive");
+
+				if (IsActiveFn)
+					bIsPersonalVehicleActive = PlayerController->Call<bool>(IsActiveFn);
+
+				bool bNewState = !bIsPersonalVehicleActive;
+				PlayerController->Call<void>(TogglePersonalVehicleFn, bNewState);
+
+				PlayerController->ClientMessage(FString(bNewState ? L"Personal vehicle enabled!" : L"Personal vehicle disabled!"), FName(), 1.f);
+			}
+			else if (command == "dumppawns")
+			{
+				TArray<AActor*> Pawns;
+				GatherAllPawnsForCommand(Pawns);
+
+				wchar_t wcount[64];
+				swprintf_s(wcount, 64, L"Found %d pawns:", Pawns.Num());
+				PlayerController->ClientMessage(FString(wcount), FName(), 1.f);
+
+				for (int i = 0; i < Pawns.Num(); i++)
+				{
+					auto IndexedPawn = Pawns[i];
+
+					if (!IndexedPawn)
+						continue;
+
+					std::string Line = "[" + std::to_string(i) + "] " + std::string(IndexedPawn->Name.ToString().c_str());
+
+					// The player name is what you will usually want to type, so
+					// lead with it. Guarded - see IsFortPlayerPawnForCommand.
+					if (IsFortPlayerPawnForCommand(IndexedPawn))
+					{
+						auto FortPawn = (AFortPlayerPawnAthena*)IndexedPawn;
+
+						if (FortPawn->PlayerState)
+						{
+							std::string OwnerName = ((AFortPlayerStateAthena*)FortPawn->PlayerState)->GetPlayerName().ToString().c_str();
+
+							if (!OwnerName.empty())
+								Line += " \"" + OwnerName + "\"";
+						}
+					}
+
+					if (IndexedPawn->Class)
+						Line += " (" + std::string(IndexedPawn->Class->GetName().ToString().c_str()) + ")";
+
+					if (IndexedPawn == PlayerController->Pawn)
+						Line += " <- you";
+
+					auto Message = std::wstring(Line.begin(), Line.end());
+					PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
+				}
+
+				Pawns.Free();
+			}
+			else if (command == "possess")
+			{
+				// Remembered so "possess" with no argument gets you back out
+				// again - otherwise taking over a bot is a one-way trip.
+				static std::unordered_map<AFortPlayerControllerAthena*, AActor*> OriginalPawns;
+
+				// Pawn -> the controller we took it from, so it can be handed
+				// back whenever we leave it, however we leave it.
+				static std::unordered_map<AActor*, AFortPlayerControllerAthena*> DisplacedOwners;
+
+				auto CurrentPawn = (AActor*)PlayerController->Pawn;
+
+				auto PossessArgsStart = originalCommand.find(' ');
+				auto PossessArg = PossessArgsStart == std::string::npos
+					? std::string()
+					: TrimPlayerCommandString(originalCommand.substr(PossessArgsStart + 1).c_str());
+
+				if (NormalizePlayerCommandString(PossessArg) == "reset")
+					PossessArg.clear();
+
+				AActor* TargetPawn = nullptr;
+				std::string MatchedName;
+
+				if (PossessArg.empty())
+				{
+					auto It = OriginalPawns.find(PlayerController);
+
+					if (It == OriginalPawns.end() || !It->second)
+					{
+						PlayerController->ClientMessage(FString(L"Usage: cheat possess <player name | index | pawn name>. With no argument it returns you to your own pawn."), FName(), 1.f);
+						return;
+					}
+
+					// The pawn we left behind may have been destroyed since, so
+					// only trust the pointer if it is still in the world.
+					TArray<AActor*> Pawns;
+					GatherAllPawnsForCommand(Pawns);
+
+					bool bStillAlive = false;
+
+					for (auto& Pawn : Pawns)
+					{
+						if (Pawn == It->second)
+						{
+							bStillAlive = true;
+							break;
+						}
+					}
+
+					Pawns.Free();
+
+					if (!bStillAlive)
+					{
+						OriginalPawns.erase(It);
+						PlayerController->ClientMessage(FString(L"Your original pawn no longer exists."), FName(), 1.f);
+						return;
+					}
+
+					TargetPawn = It->second;
+					MatchedName = TargetPawn->Name.ToString().c_str();
+				}
+				else
+				{
+					int PawnIndex = 0;
+
+					if (TryParseCommandInt(PossessArg, PawnIndex))
+					{
+						TArray<AActor*> Pawns;
+						GatherAllPawnsForCommand(Pawns);
+
+						if (PawnIndex < 0 || PawnIndex >= Pawns.Num())
+						{
+							wchar_t wmsg[96];
+							swprintf_s(wmsg, 96, L"Invalid index. Use 0 to %d, see cheat dumppawns.", Pawns.Num() - 1);
+							Pawns.Free();
+							PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
+							return;
+						}
+
+						TargetPawn = Pawns[PawnIndex];
+						Pawns.Free();
+
+						if (TargetPawn)
+							MatchedName = TargetPawn->Name.ToString().c_str();
+					}
+					else
+					{
+						// Player name first - "possess cipher" is what you
+						// actually want to type. Falls back to the pawn's
+						// object name so dumppawns output still works.
+						bool bAmbiguous = false;
+						auto TargetPC = FindPlayerByNameSubstringForCommand(GameMode, PossessArg, PlayerController, MatchedName, bAmbiguous, true);
+
+						if (bAmbiguous)
+						{
+							PlayerController->ClientMessage(FString(L"Multiple players match that name. Be more specific."), FName(), 1.f);
+							return;
+						}
+
+						if (TargetPC)
+							TargetPawn = (AActor*)TargetPC->Pawn;
+
+						if (!TargetPawn)
+						{
+							TargetPawn = FindPawnByNameSubstringForCommand(PossessArg, MatchedName, bAmbiguous);
+
+							if (bAmbiguous)
+							{
+								PlayerController->ClientMessage(FString(L"Multiple pawns match that name. Be more specific, or use an index from cheat dumppawns."), FName(), 1.f);
+								return;
+							}
+						}
+					}
+				}
+
+				if (!TargetPawn)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find that player or pawn."), FName(), 1.f);
+					return;
+				}
+
+				if (TargetPawn == CurrentPawn)
+				{
+					PlayerController->ClientMessage(FString(L"You are already possessing that pawn."), FName(), 1.f);
+					return;
+				}
+
+				// Objects (vehicles, AI, wildlife) are pawns too and can be
+				// possessed - only the Fortnite-specific steps below are gated on
+				// this, so their properties are never touched. See
+				// IsFortPlayerPawnForCommand for why that guard matters.
+				bool bTargetIsFortPawn = IsFortPlayerPawnForCommand(TargetPawn);
+
+				// Only remember the pawn we started on, not each hop, so
+				// repeated possessions still return to the real one.
+				if (CurrentPawn && OriginalPawns.find(PlayerController) == OriginalPawns.end())
+					OriginalPawns[PlayerController] = CurrentPawn;
+
+				auto Original = OriginalPawns.find(PlayerController);
+				bool bReturningHome = Original != OriginalPawns.end() && TargetPawn == Original->second;
+
+				// Give back whatever we are currently borrowing before moving on.
+				// This runs no matter HOW we leave - reset, an index, or a name -
+				// so stepping back onto your own pawn also restores the player you
+				// were riding. Release ourselves first so the pawn is never
+				// attached to two controllers at once.
+				auto Borrowed = CurrentPawn ? DisplacedOwners.find(CurrentPawn) : DisplacedOwners.end();
+
+				if (Borrowed != DisplacedOwners.end())
+				{
+					auto ReturnedTo = Borrowed->second;
+					DisplacedOwners.erase(Borrowed);
+
+					std::string ReturnedName = CurrentPawn->Name.ToString().c_str();
+
+					if (ReturnedTo && ReturnedTo->PlayerState)
+					{
+						std::string PS = ((AFortPlayerStateAthena*)ReturnedTo->PlayerState)->GetPlayerName().ToString().c_str();
+
+						if (!PS.empty())
+							ReturnedName = PS;
+					}
+
+					PlayerController->UnPossess();
+
+					// Fresh pawn rather than a re-possess, or they come back
+					// unable to jump or use items - see the helper.
+					RespawnControllerOnFreshPawnForCommand(GameMode, ReturnedTo, (AFortPlayerPawnAthena*)CurrentPawn);
+
+					auto Back = L"Gave " + std::wstring(ReturnedName.begin(), ReturnedName.end()) + L" back control.";
+					PlayerController->ClientMessage(FString(Back.c_str()), FName(), 1.f);
+				}
+
+				if (bReturningHome)
+				{
+					// Coming back to our own body. Re-possessing the pawn we left
+					// leaves us unable to jump or use items, so swap in a fresh
+					// one at the same spot the way "size" does.
+					auto NewPawn = RespawnControllerOnFreshPawnForCommand(GameMode, PlayerController, (AFortPlayerPawnAthena*)TargetPawn);
+
+					if (!NewPawn)
+					{
+						PlayerController->ClientMessage(FString(L"Failed to spawn your pawn!"), FName(), 1.f);
+						return;
+					}
+
+					OriginalPawns.erase(PlayerController);
+					PlayerController->ClientMessage(FString(L"Back on your own pawn!"), FName(), 1.f);
+					return;
+				}
+
+				// Controller is a base APawn field, safe to read off any pawn.
+				auto ExistingController = ((AFortPlayerPawnAthena*)TargetPawn)->Controller;
+
+				if (ExistingController && ExistingController != (AActor*)PlayerController)
+				{
+					if (IsPlayerControllerForCommand(ExistingController))
+					{
+						// A real player - turn them into a spectator locked on
+						// their pawn so it moves for them under our control rather
+						// than freezing. Must happen BEFORE we possess so the pawn
+						// is never attached to two controllers at once.
+						auto DisplacedPC = (AFortPlayerControllerAthena*)ExistingController;
+						DisplacedOwners[TargetPawn] = DisplacedPC;
+						MakeControllerSpectatePawnForCommand(DisplacedPC, (AFortPlayerPawnAthena*)TargetPawn);
+
+						auto WarnName = std::wstring(MatchedName.begin(), MatchedName.end());
+						PlayerController->ClientMessage(FString((WarnName + L" is now watching you.").c_str()), FName(), 1.f);
+					}
+					else
+					{
+						// An AI controller (or similar). Detach it so the possess
+						// is clean, but do not run any of the player-only spectate
+						// logic on it. UnPossess is a base AController function.
+						((AFortPlayerControllerAthena*)ExistingController)->UnPossess();
+					}
+				}
+
+				// Taking a live pawn has to be a real possess - swapping in a
+				// fresh pawn would defeat the point. Skip the possession handler's
+				// respawn teleport the way "size" does, or we land in a
+				// just-respawned state where items cannot be used.
+				SkipNextPossessRespawn(PlayerController);
+				PlayerController->Possess(TargetPawn);
+
+				// Only touch Fortnite-specific state for actual player pawns.
+				// Pointing MyFortPawn at a vehicle would feed a non-player pawn
+				// into systems that assume it is one; re-equipping a weapon onto
+				// an object is meaningless.
+				if (bTargetIsFortPawn)
+				{
+					PlayerController->MyFortPawn = (AFortPlayerPawnAthena*)TargetPawn;
+
+					// PUPPET MODE: this drives another player's body around for
+					// movement/emotes only. We deliberately do NOT rebind abilities
+					// or re-equip weapons - taking over a live pawn's ability and
+					// weapon systems fought the engine's ownership assumptions and
+					// never became reliable. Keeping it to movement is the stable
+					// subset.
+					//
+					// Put it on the ground and give it health so the puppet does
+					// not float or die. Done now AND again from the possession-ack:
+					// the ack fires after this command on a client round-trip and
+					// re-runs native setup that resets both, so the in-ack pass is
+					// the one that sticks (this covers the no-ack case).
+					FinalizePossessedPawnForCommand(PlayerController, (AFortPlayerPawnAthena*)TargetPawn);
+					GFinalizePossessTakeover.insert(PlayerController);
+				}
+
+				PlayerController->OnRep_Pawn();
+				PlayerController->ForceNetUpdate();
+				TargetPawn->ForceNetUpdate();
+
+				auto Message = L"Possessing " + std::wstring(MatchedName.begin(), MatchedName.end()) + (bTargetIsFortPawn ? L" (puppet - movement only)!" : L" (object)!");
+				PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
+			}
+			else if (command == "delbot")
+			{
+				std::vector<AFortPlayerControllerAthena*> BotsToRemove;
+
+				for (auto& Player : GameMode->AlivePlayers)
+				{
+					auto BotPC = (AFortPlayerControllerAthena*)Player;
+
+					if (!BotPC || BotPC == PlayerController || !BotPC->PlayerState)
+						continue;
+
+					auto BotPS = (AFortPlayerStateAthena*)BotPC->PlayerState;
+
+					if (!BotPS->HasbIsABot() || !BotPS->bIsABot)
+						continue;
+
+					// PlayerAI entities also carry bIsABot. They are owned by
+					// PlayerAI (which does its own alive-count bookkeeping), so
+					// leave them alone - delbot is for "spawnbot" bots only.
+					if (PlayerAIManager::FindByController(BotPC))
+						continue;
+
+					BotsToRemove.push_back(BotPC);
+				}
+
+				int Removed = 0;
+
+				for (auto& BotPC : BotsToRemove)
+				{
+					// "spawnbot" creates a pawn, a controller and a player
+					// state, so all three go.
+					if (BotPC->MyFortPawn)
+						BotPC->MyFortPawn->K2_DestroyActor();
+					else if (BotPC->Pawn)
+						BotPC->Pawn->K2_DestroyActor();
+
+					if (BotPC->PlayerState)
+						BotPC->PlayerState->K2_DestroyActor();
+
+					BotPC->K2_DestroyActor();
+					Removed++;
+				}
+
+				wchar_t wmsg[96];
+				swprintf_s(wmsg, 96, L"Removed %d bots!", Removed);
+				PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
 			}
 			else if (command == "shortcmds" || command == "shortcommands")
 			{

@@ -119,15 +119,31 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         if (GameState->HasCachedSafeZoneStartUp() && Playlist->HasSafeZoneStartUp())
             GameState->CachedSafeZoneStartUp = Playlist->SafeZoneStartUp;
 
-        if (GameMode->HasbEnableDBNO())
-        {
-            GameMode->bEnableDBNO = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false; // ploosh's thing i dont think this even exists im ngl
-            GameMode->bAlwaysDBNO = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
-            GameMode->bDBNOEnabled = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
+        // DBNO is always on - it is normal game behaviour, not an option. Each property is
+        // guarded on its own because they were added/renamed across versions; gating the whole
+        // block behind bEnableDBNO (as before) meant any build lacking that single property got
+        // no DBNO configuration at all, which is why downing/reviving only worked on some
+        // versions.
+        bool bDBNOOn = true;   // non-const: DEFINE_PROP setters take bool&
+        bool bAlwaysDBNO = false;
 
-            GameState->bDBNOEnabledForGameMode = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
-            GameState->bDBNODeathEnabled = FConfiguration::bEnableDBNO ? Playlist->MaxSquadSize > 1 : false;
-        }
+        if (GameMode->HasbEnableDBNO())
+            GameMode->bEnableDBNO = bDBNOOn;
+
+        if (GameMode->HasbDBNOEnabled())
+            GameMode->bDBNOEnabled = bDBNOOn;
+
+        if (GameState->HasbDBNOEnabledForGameMode())
+            GameState->bDBNOEnabledForGameMode = bDBNOOn;
+
+        if (GameState->HasbDBNODeathEnabled())
+            GameState->bDBNODeathEnabled = bDBNOOn;
+
+        // Left off deliberately: forcing it makes a solo player go down with nobody able to
+        // revive them. Off means the game follows its own rules - you go down when a teammate
+        // could pick you up, and die outright when there is no one.
+        if (GameMode->HasbAlwaysDBNO())
+            GameMode->bAlwaysDBNO = bAlwaysDBNO;
 
         bIsLargeTeamGame = Playlist->bIsLargeTeamGame;
 
@@ -251,7 +267,11 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     {
         setup = true;
 
-        //if (!FindListenCall())
+        // On UE5.4+ the listen server is brought up from FinishWorldInitialization instead (this
+        // exec hook is normally dead there). If it *does* fire on some build, don't create a
+        // second GameNetDriver on the same world.
+        auto _existingWorld = UWorld::GetWorld();
+        if (!(VersionInfo.EngineVersion >= 5.4 && _existingWorld && _existingWorld->NetDriver))
         {
             SDK::DbgLog("[GameMode] ReadyToStart Listen: ENTER setup=%d\n", (int)setup);
             auto World = UWorld::GetWorld();
@@ -272,7 +292,13 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
             else
                 World->NetDriver = NetDriver = ((UNetDriver * (*)(UEngine*, UWorld*, FName)) FindCreateNetDriver())(Engine, World, NetDriverName);
-            if (!NetDriver) { SDK::DbgLog("[GameMode] Listen: NetDriver NULL, abort\n"); }
+            if (!NetDriver)
+            {
+                // Every line below dereferences NetDriver; carrying on here faults.
+                SDK::DbgLog("[GameMode] Listen: NetDriver NULL, abort\n");
+                *Ret = false;
+                return;
+            }
             if (VersionInfo.FortniteVersion >= 20 && NetDriver)
                 NetDriver->NetServerMaxTickRate = 30;
 
@@ -2130,6 +2156,191 @@ void OnWorldInitDone(UNavigationSystem* NavSys, char Mode)
     AllNavmeshes.Free();*/
 }
 
+// CH5 / UE5.4+ listen-server bring-up, driven from FinishWorldInitialization.
+//
+// Differs from the classic ReadyToStartMatch path in how the driver is created: on 5.4+ we call
+// UEngine::CreateNamedNetDriver_Local(Engine, Context, Name, Definition), which returns a BOOL and
+// registers the driver into FWorldContext::ActiveNetDrivers -- it does NOT return the driver. The
+// pre-5.4 overloads return UNetDriver* directly; conflating the two stores a 0/1 into
+// World->NetDriver and faults on the next member write.
+//
+// Every failure path bails with a log and leaves the one-shot latch clear so a later world can retry.
+void AFortGameMode::SetupListenServerCH5(AFortGameModeAthena* GameMode, AFortGameStateAthena* GameState)
+{
+    static UWorld* s_listenDoneWorld = nullptr;
+
+    auto World = UWorld::GetWorld();
+    if (!GameMode || !GameState || !World)
+        return;
+
+    if (s_listenDoneWorld == World)
+        return;
+
+    if (World->NetDriver)
+    {
+        // Something already brought a driver up (e.g. the exec hook did fire on this build).
+        s_listenDoneWorld = World;
+        SDK::DbgLog("[CH5-Listen] NetDriver already present (%p) — skipping\n", (void*)World->NetDriver);
+        return;
+    }
+
+    auto Engine = UEngine::GetEngine();
+    auto GetWorldContextFn = FindGetWorldContext();
+    auto CreateNamedLocalFn = FindCreateNamedNetDriverLocal();
+
+    SDK::DbgLog("[CH5-Listen] World=%p Engine=%p GetWorldContext=%p CreateNamedNetDriver_Local=%p\n",
+        (void*)World, (void*)Engine, (void*)GetWorldContextFn, (void*)CreateNamedLocalFn);
+
+    if (!Engine || !GetWorldContextFn || !CreateNamedLocalFn)
+    {
+        SDK::DbgLog("[CH5-Listen] ABORT: finders missing — needs a pattern for this build\n");
+        return;
+    }
+
+    auto WorldCtx = ((void* (*)(UEngine*, UWorld*)) GetWorldContextFn)(Engine, World);
+    if (!WorldCtx || !SDK::MemReadable(WorldCtx, 0x220))
+    {
+        SDK::DbgLog("[CH5-Listen] ABORT: bad WorldContext %p\n", WorldCtx);
+        return;
+    }
+
+    s_listenDoneWorld = World;
+
+    if (GameMode->HasbEnableReplicationGraph())
+        GameMode->bEnableReplicationGraph = true;
+
+    auto NetDriverName = FName(L"GameNetDriver");
+    ((char (*)(UEngine*, void*, FName, FName)) CreateNamedLocalFn)(Engine, WorldCtx, NetDriverName, NetDriverName);
+
+    // Recover the driver from FWorldContext::ActiveNetDrivers -- TArray<FNamedNetDriver> at +0x208
+    // (Data), count at +0x210; FNamedNetDriver is 0x10 with UNetDriver* at +0x0. Walk newest-first.
+    // The offset comes from a UE5.5 dump, so validate it rather than trusting it blindly: a wrong
+    // offset here would otherwise hand us a garbage pointer to write through.
+    UNetDriver* NetDriver = nullptr;
+    auto TryReadDrivers = [&](uint32_t DataOff, uint32_t NumOff) -> UNetDriver*
+    {
+        if (!SDK::MemReadable((uint8_t*)WorldCtx + DataOff, 0x10))
+            return nullptr;
+
+        auto Data = *(uint8_t**)((uint8_t*)WorldCtx + DataOff);
+        auto Num = *(int32_t*)((uint8_t*)WorldCtx + NumOff);
+
+        if (!Data || Num <= 0 || Num > 64 || !SDK::MemReadable(Data, (size_t)Num * 0x10))
+            return nullptr;
+
+        for (int i = Num - 1; i >= 0; i--)
+        {
+            auto Candidate = *(UNetDriver**)(Data + (size_t)i * 0x10);
+            // A real driver is a UObject: readable, with a readable vtable.
+            if (Candidate && (uintptr_t)Candidate > 0x10000 && SDK::MemReadable(Candidate, 0x40) &&
+                SDK::MemReadable(*(void**)Candidate, 0x8))
+                return Candidate;
+        }
+        return nullptr;
+    };
+
+    NetDriver = TryReadDrivers(0x208, 0x210);
+
+    if (!NetDriver)
+    {
+        // Layout moved on this build — probe nearby 8-byte-aligned slots for a plausible TArray.
+        for (uint32_t Off = 0x1C0; Off <= 0x260 && !NetDriver; Off += 8)
+        {
+            if (Off == 0x208)
+                continue;
+            NetDriver = TryReadDrivers(Off, Off + 8);
+            if (NetDriver)
+                SDK::DbgLog("[CH5-Listen] ActiveNetDrivers found at +0x%X (not +0x208) — layout differs\n", Off);
+        }
+    }
+
+    if (!NetDriver)
+    {
+        SDK::DbgLog("[CH5-Listen] ABORT: CreateNamedNetDriver_Local ran but no driver in ActiveNetDrivers\n");
+        s_listenDoneWorld = nullptr;
+        return;
+    }
+
+    SDK::DbgLog("[CH5-Listen] NetDriver=%p\n", (void*)NetDriver);
+
+    World->NetDriver = NetDriver;
+    NetDriver->NetDriverName = NetDriverName;
+    NetDriver->World = World;
+
+    if (VersionInfo.FortniteVersion >= 20)
+        NetDriver->NetServerMaxTickRate = 30;
+
+    if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
+        *(bool*)(__int64(&NetDriver->ReplicationDriver) + 0x11) = true;
+
+    for (int i = 0; i < World->LevelCollections.Num(); i++)
+        World->LevelCollections.Get(i, FLevelCollection::Size()).NetDriver = NetDriver;
+
+    auto URL = (FURL*)malloc(FURL::Size());
+    memset((PBYTE)URL, 0, FURL::Size());
+    URL->Port = FConfiguration::Port;
+
+    auto InitListen = (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&)) FindInitListen();
+    auto SetWorld = (void (*)(UNetDriver*, UWorld*)) FindSetWorld();
+    SDK::DbgLog("[CH5-Listen] InitListen=%p SetWorld=%p Port=%d\n",
+        (void*)InitListen, (void*)SetWorld, (int)FConfiguration::Port);
+
+    if (!InitListen || !SetWorld)
+    {
+        SDK::DbgLog("[CH5-Listen] ABORT: InitListen/SetWorld unresolved\n");
+        free(URL);
+        return;
+    }
+
+    SetWorld(NetDriver, World);
+    FString Err;
+    bool bListening = InitListen(NetDriver, World, URL, false, Err);
+    if (bListening)
+    {
+        SetWorld(NetDriver, World);
+        SDK::DbgLog("[CH5-Listen] GameNetDriver listening on port %d\n", (int)FConfiguration::Port);
+    }
+    else
+        SDK::DbgLog("[CH5-Listen] InitListen FAILED\n");
+
+    free(URL);
+
+    // Playlist + world-ready, normally done by ReadyToStartMatch_ further down.
+    if (GameMode->HasWarmupRequiredPlayerCount())
+        GameMode->WarmupRequiredPlayerCount = 1;
+
+    SetupPlaylist(GameMode, GameState);
+
+    if (auto PawnClass = FindObject<UClass>(L"/Game/Athena/PlayerPawn_Athena.PlayerPawn_Athena_C"))
+        if (GameMode->HasDefaultPawnClass())
+            GameMode->DefaultPawnClass = PawnClass;
+
+    // Flight path + storm. FindInitializeFlightPath's existing pattern resolves cleanly on 31.41
+    // (verified statically: unique hit, prologue matches the known-good 32.11 function), so CH5
+    // gets a real bus rather than a drop-in fallback.
+    if (GameState->HasMapInfo() && GameState->MapInfo)
+    {
+        auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(GameState);
+        auto InitializeFlightPath = (void(*)(AFortAthenaMapInfo*, AFortGameStateAthena*, UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, bool, double, float, float))
+            FindInitializeFlightPath();
+
+        SDK::DbgLog("[CH5-Listen] GamePhaseLogic=%p InitializeFlightPath=%p\n",
+            (void*)GamePhaseLogic, (void*)InitializeFlightPath);
+
+        if (GamePhaseLogic && InitializeFlightPath)
+            InitializeFlightPath(GameState->MapInfo, GameState, GamePhaseLogic, false, 0.0, 0.f, 360.f);
+
+        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GenerateStormCircles(GameState->MapInfo);
+        SDK::DbgLog("[CH5-Listen] FlightInfos=%d after InitializeFlightPath\n",
+            GameState->MapInfo->FlightInfos.Num());
+    }
+
+    if (GameMode->HasbWorldIsReady())
+        GameMode->bWorldIsReady = true;
+
+    SDK::DbgLog("[CH5-Listen] setup complete\n");
+}
+
 void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* WorldManager)
 {
     auto GameMode = (AFortGameModeAthena*)_this;
@@ -2141,6 +2352,16 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
     SDK::DbgLog("[GameMode] FinishWorldInitialization entered (this=%p GameState=%p) pre-OG\n", (void*)_this, (void*)GameState);
     FinishWorldInitializationOG(_this, WorldManager);
     SDK::DbgLog("[GameMode] FinishWorldInitialization post-OG\n");
+
+    // CH5 (UE5.4+): AGameMode::ReadyToStartMatch is invoked as a native call, so the exec hook that
+    // normally brings the listen server up never fires and the server never binds a port. This
+    // function is an address detour, which does fire, so do the bring-up here instead.
+    //
+    // Upper-bounded at 32.00 on purpose: 32.11 already has a working path (Misc.cpp's
+    // GetMaxTickRate-driven Listen + the direct ReadyToStartMatch RVA hook), so this cannot
+    // regress it. Pre-5.4 is untouched and keeps using ReadyToStartMatch_.
+    if (VersionInfo.EngineVersion >= 5.4 && VersionInfo.FortniteVersion < 32.00)
+        SetupListenServerCH5(GameMode, GameState);
 
     if (GameState && VersionInfo.EngineVersion >= 4.22 && VersionInfo.EngineVersion < 4.26)
         GameState->OnRep_CurrentPlaylistInfo();

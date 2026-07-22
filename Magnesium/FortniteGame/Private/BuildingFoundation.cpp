@@ -55,7 +55,9 @@ void ABuildingFoundation::SetDynamicFoundationTransform_(UObject* Context, FFram
 	Foundation->DynamicFoundationTransform = Transform;
 	if (Foundation->HasDynamicFoundationRepData())
 	{
-		Foundation->DynamicFoundationRepData.Rotation = Transform.Rotation.Rotator();
+		// Not a plain assignment: on 10.40 this field is an FQuat, not an
+		// FRotator. See FDynamicBuildingFoundationRepData::IsRotationQuat.
+		Foundation->DynamicFoundationRepData.SetRotationFromQuat(Transform.Rotation);
 		Foundation->DynamicFoundationRepData.Translation = Transform.Translation;
 	}
 	Foundation->StreamingData.FoundationLocation = Transform.Translation;

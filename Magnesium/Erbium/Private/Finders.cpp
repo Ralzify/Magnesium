@@ -204,6 +204,120 @@ uint64_t FindGetWorldContext()
     return GetWorldContext;
 }
 
+// UEngine::CreateNamedNetDriver_Local(Engine, Context, NetDriverName, NetDriverDefinition) -> bool
+//
+// Distinct from FindCreateNetDriver/FindCreateNetDriverWorldContext: this one returns a bool and
+// registers the driver into Context->ActiveNetDrivers instead of returning it. Only the UE5.4+
+// (CH5) listen path uses it -- on those builds ReadyToStartMatch is a native call, so the exec
+// hook that normally brings the listen server up never fires.
+//
+// Verified statically against 31.41 CL 37324991: the prologue pattern below is a single unique
+// hit at RVA 0x2EE08BC, landing on the function start (mov rax,rsp / reg saves / movsxd from the
+// engine WorldList index).
+uint64 FindCreateNamedNetDriverLocal()
+{
+    static uint64_t Addr = 0;
+    static bool bInitialized = false;
+
+    if (bInitialized)
+        return Addr;
+    bInitialized = true;
+
+    if (VersionInfo.EngineVersion >= 5.4)
+    {
+        Addr = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 44 89 40 ? 57 41 54 41 55 41 56 41 57 48 83 EC ? 48 63 81", false).Get();
+
+        if (Addr)
+        {
+            SDK::DbgLog("[Finder] CreateNamedNetDriver_Local (pattern) = %p (RVA 0x%llX)\n",
+                (void*)Addr, (unsigned long long)(Addr - ImageBase));
+            return Addr;
+        }
+
+        SDK::DbgLog("[Finder] CreateNamedNetDriver_Local pattern MISS -> trying string anchor\n");
+    }
+
+    // Fallback: anchor on the failure log. On UE5.x the ref usually sits in an outlined cold block
+    // far from the hot function, so a naive backward walk lands in the wrong place -- follow the
+    // cold block's far-backward jmp home first, then back up to the function start.
+    const wchar_t* Candidates[] = {
+        L"CreateNamedNetDriver failed to create driver %s from definition %s",
+        L"CreateNamedNetDriver failed to create driver from definition %s",
+        L"CreateNamedNetDriver failed to create driver",
+    };
+
+    uint64_t RefAddr = 0;
+    for (auto Candidate : Candidates)
+    {
+        RefAddr = Memcury::Scanner::FindStringRef(Candidate, false, 0, true).Get();
+        if (RefAddr)
+            break;
+    }
+
+    if (!RefAddr)
+    {
+        SDK::DbgLog("[Finder] CreateNamedNetDriver_Local: no string anchor either\n");
+        return Addr = 0;
+    }
+
+    // First FAR-backward E9 is the cold block's jmp back into the hot function; small local E9s
+    // inside the cold block are skipped by the distance test.
+    uint64_t Hot = 0;
+    for (int i = 0; i < 0x4000; i++)
+    {
+        auto Ptr = (uint8_t*)(RefAddr + i);
+        if (!SDK::MemReadable(Ptr, 5))
+            break;
+
+        if (*Ptr == 0xE9)
+        {
+            auto Target = uint64_t(Ptr) + 5 + *(int32_t*)(Ptr + 1);
+            if (Target < RefAddr && (RefAddr - Target) > 0x100000)
+            {
+                Hot = Target;
+                break;
+            }
+        }
+    }
+
+    if (!Hot)
+        Hot = RefAddr;
+
+    for (int i = 0; i < 0x2000; i++)
+    {
+        auto Ptr = (uint8_t*)(Hot - i);
+        if (!SDK::MemReadable(Ptr, 4))
+            break;
+
+        // int3 padding or a ret ends the previous function; the next byte starts ours.
+        if ((*Ptr == 0xCC && *(Ptr + 1) != 0xCC) || *Ptr == 0xC3)
+        {
+            Addr = uint64_t(Ptr + 1);
+            break;
+        }
+    }
+
+    // Sanity: a real function start here begins with a frame/reg-save prologue. Anything else is a
+    // bad walk -- return 0 so the caller aborts cleanly rather than calling into the middle of code.
+    if (Addr)
+    {
+        auto P = (uint8_t*)Addr;
+        bool bLooksLikeProlog = SDK::MemReadable(P, 4) &&
+            ((P[0] == 0x48 && (P[1] == 0x8B || P[1] == 0x89 || P[1] == 0x83)) ||
+             (P[0] == 0x4C && P[1] == 0x8B) ||
+              P[0] == 0x40 || P[0] == 0x55 || (P[0] >= 0x41 && P[0] <= 0x43));
+
+        if (!bLooksLikeProlog)
+        {
+            SDK::DbgLog("[Finder] CreateNamedNetDriver_Local: walk landed on non-prologue %p, discarding\n", (void*)Addr);
+            Addr = 0;
+        }
+    }
+
+    SDK::DbgLog("[Finder] CreateNamedNetDriver_Local (string) = %p\n", (void*)Addr);
+    return Addr;
+}
+
 uint64_t FindCreateNetDriver()
 {
     static uint64_t CreateNetDriver = 0;
@@ -219,8 +333,12 @@ uint64_t FindCreateNetDriver()
             CreateNetDriver = Memcury::Scanner::FindPattern("E8 ?? ?? ?? ?? 4C 8B 44 24 ?? 48 8B D0 48 8B CB E8 ?? ?? ?? ?? 48 83 C4 ?? 5B C3").Get();
             if (!CreateNetDriver)
                 CreateNetDriver = Memcury::Scanner::FindPattern("33 D2 E8 ?? ?? ?? ?? 48 8B D0 4C 8B C3 48 8B CF E8 ?? ?? ?? ?? 48 8B 5C 24 ?? 48 83 C4 ?? 5F C3").Get();
-            if (!CreateNetDriver)
-                CreateNetDriver = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 44 89 40 ? 57 41 54 41 55 41 56 41 57 48 83 EC ? 48 63 81").Get();
+            // NOTE: the UE5.4+ "48 8B C4 48 89 58 ..." prologue used to be tried here. It resolves
+            // CreateNamedNetDriver_Local, which returns bool (not UNetDriver*) and registers into
+            // WorldContext->ActiveNetDrivers -- a different ABI from this 3-arg overload. It also
+            // could never fire: both call sites only reach FindCreateNetDriver() below FN 16.00,
+            // and the back-walk below would have stepped off its prologue anyway. Its correct home
+            // is FindCreateNamedNetDriverLocal(), used by the UE5.4+ listen path.
         }
 
         if (CreateNetDriver)
@@ -3267,9 +3385,15 @@ uint64 FindSelectAndSetupMyBuildingLevel()
 
 uint64 FindStreamInMyBuilding()
 {
+    // Erbium ab1c686: on 4.27 the string-ref walk below does not resolve, so match the
+    // function prologue directly for that engine version.
+    if (VersionInfo.EngineVersion == 4.27)
+        return Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 70 ? 48 89 78 ? 55 41 54 41 55 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? 0F 29 70 ? 0F 29 78 ? 44 0F 29 40 ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 ? 45 33 F6").Get();
+
     auto sRef = Memcury::Scanner::FindStringRef(
         L"%s.%s trying to load invalid level %s", false, 0,
-        VersionInfo.FortniteVersion >= 19, false);
+        // Erbium f3ef92f: S17/S18 share the 19+ string-ref form, so widen the gate.
+        VersionInfo.FortniteVersion >= 17, false);
 
     if (!sRef.IsValid())
         return 0;
