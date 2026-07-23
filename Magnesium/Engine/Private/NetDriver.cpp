@@ -1070,7 +1070,14 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		}
 	}
 
-    return TickFlushOG(Driver, DeltaSeconds);
+	TickFlushOG(Driver, DeltaSeconds);
+	auto World = UWorld::GetWorld();
+	if (World && Driver == World->NetDriver &&
+		Driver->ClientConnections.Num() > 0)
+	{
+		AFortPlayerControllerAthena::
+			TickPendingVictoryCrownNotifications();
+	}
 }
 
 uint64_t ServerReplicateActors_;
@@ -1145,7 +1152,14 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		}
 	}
 
-	return TickFlushOG(Driver, DeltaSeconds);
+	TickFlushOG(Driver, DeltaSeconds);
+	auto World = UWorld::GetWorld();
+	if (World && Driver == World->NetDriver &&
+		Driver->ClientConnections.Num() > 0)
+	{
+		AFortPlayerControllerAthena::
+			TickPendingVictoryCrownNotifications();
+	}
 }
 
 

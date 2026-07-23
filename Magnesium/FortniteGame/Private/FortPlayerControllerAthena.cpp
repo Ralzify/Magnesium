@@ -2447,6 +2447,1152 @@ static bool IsUsableDeathObject(const UObject* Object)
 	return Object->Class && !IsBadReadPtr(Object->Class);
 }
 
+static bool IsHumanVictoryController(
+	AFortPlayerControllerAthena* Controller)
+{
+	if (!IsUsableDeathObject(Controller) ||
+		!Controller->HasPlayerState() ||
+		!IsUsableDeathObject(Controller->PlayerState))
+	{
+		return false;
+	}
+
+	auto PlayerState =
+		Controller->PlayerState->Cast<AFortPlayerStateAthena>();
+	if (!PlayerState ||
+		(PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
+		GSpawnedBotControllers.contains(Controller) ||
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(Controller))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+static bool IsHumanVictoryCrownController(
+	AFortPlayerControllerAthena* Controller)
+{
+	return FConfiguration::bCrownSlomo &&
+		VersionInfo.FortniteVersion >= 19.0 &&
+		VersionInfo.FortniteVersion < 26.0 &&
+		IsHumanVictoryController(Controller);
+}
+
+static UFortControllerComponent_VictoryCrowns*
+GetVictoryCrownComponent(AFortPlayerControllerAthena* Controller)
+{
+	if (!IsHumanVictoryCrownController(Controller))
+		return nullptr;
+
+	auto CrownComponentClass =
+		UFortControllerComponent_VictoryCrowns::StaticClass();
+	if (!CrownComponentClass ||
+		!IsUsableDeathObject(CrownComponentClass))
+	{
+		return nullptr;
+	}
+
+	auto RawComponent =
+		Controller->GetComponentByClass(CrownComponentClass);
+	if (!IsUsableDeathObject(RawComponent) ||
+		!RawComponent->IsA(CrownComponentClass))
+	{
+		return nullptr;
+	}
+
+	return (UFortControllerComponent_VictoryCrowns*)RawComponent;
+}
+
+static const UFortWorldItemDefinition* ResolveVictoryCrownDefinition(
+	AFortPlayerControllerAthena* Controller)
+{
+	auto CrownComponent = GetVictoryCrownComponent(Controller);
+	if (CrownComponent &&
+		CrownComponent->HasCrownInventoryItemClass())
+	{
+		auto& CrownInventoryItemClass =
+			CrownComponent->GetCrownInventoryItemClass();
+		auto ConfiguredDefinition =
+			CrownInventoryItemClass.Get();
+		if (IsUsableDeathObject(ConfiguredDefinition))
+			return ConfiguredDefinition;
+	}
+
+	auto FallbackDefinition =
+		FindObject<UFortWorldItemDefinition>(
+			L"/VictoryCrownsGameplay/Items/AGID_VictoryCrown.AGID_VictoryCrown");
+	return IsUsableDeathObject(FallbackDefinition)
+		? FallbackDefinition
+		: nullptr;
+}
+
+struct FVictoryCrownOwnershipSnapshot
+{
+	uint64 Generation = 0;
+	bool bHadCrown = false;
+};
+
+static uint64 GVictoryCrownSnapshotGeneration = 0;
+static std::unordered_map<
+	AFortPlayerControllerAthena*,
+	FVictoryCrownOwnershipSnapshot>
+	GVictoryCrownOwnershipSnapshots;
+
+struct FPendingVictoryCrownNotification
+{
+	UWorld* World = nullptr;
+	UNetDriver* NetDriver = nullptr;
+	AFortPlayerControllerAthena* Controller = nullptr;
+	AFortPlayerPawnAthena* WinnerPawn = nullptr;
+	UFortWeaponItemDefinition* FinishingWeapon = nullptr;
+	uint8 DeathCause = 0;
+	uint64 EarliestReplicationPass = 0;
+	bool bPlayWinEffects = false;
+	bool bNotifyWon = false;
+	bool bNotifyTeamWon = false;
+};
+
+static uint64 GVictoryCrownReplicationPass = 0;
+static std::vector<FPendingVictoryCrownNotification>
+	GPendingVictoryCrownNotifications;
+
+static bool MarkVictoryCrownPropertyDirty(
+	const UObject* Object,
+	const wchar_t* PropertyName)
+{
+	if (VersionInfo.FortniteVersion < 19.0 ||
+		VersionInfo.FortniteVersion >= 26.0 ||
+		!IsUsableDeathObject(Object) ||
+		!PropertyName)
+		return false;
+
+	static const UObject* PushModelHelpersDefault = nullptr;
+	static UFunction* MarkPropertyDirtyFunction = nullptr;
+	static bool bLoggedResolution = false;
+
+	if (!IsUsableDeathObject(PushModelHelpersDefault) ||
+		!IsUsableDeathObject(MarkPropertyDirtyFunction))
+	{
+		auto PushModelHelpersClass =
+			FindObject<UClass>(
+				L"/Script/Engine.NetPushModelHelpers");
+		if (!IsUsableDeathObject(PushModelHelpersClass))
+		{
+			PushModelHelpersClass =
+				FindClass("NetPushModelHelpers");
+		}
+		PushModelHelpersDefault =
+			IsUsableDeathObject(PushModelHelpersClass)
+				? PushModelHelpersClass->GetDefaultObj()
+				: nullptr;
+		MarkPropertyDirtyFunction =
+			IsUsableDeathObject(PushModelHelpersDefault)
+				? PushModelHelpersDefault->GetFunction(
+					"MarkPropertyDirty")
+				: nullptr;
+
+		if (!bLoggedResolution)
+		{
+			bLoggedResolution = true;
+			SDK::DbgLog(
+				"[VictoryCrown] push-model helper class=%p default=%p function=%p\n",
+				(void*)PushModelHelpersClass,
+				(void*)PushModelHelpersDefault,
+				(void*)MarkPropertyDirtyFunction);
+		}
+	}
+
+	if (!IsUsableDeathObject(PushModelHelpersDefault) ||
+		!IsUsableDeathObject(MarkPropertyDirtyFunction))
+	{
+		return false;
+	}
+
+	FName ReplicatedPropertyName(PropertyName);
+	PushModelHelpersDefault->Call<void>(
+		MarkPropertyDirtyFunction,
+		(UObject*)Object,
+		ReplicatedPropertyName);
+	SDK::DbgLog(
+		"[VictoryCrown] marked push property dirty object=%p property=%ls\n",
+		(void*)Object, PropertyName);
+	return true;
+}
+
+static bool TryGetVictoryCrownInInventory(
+	AFortPlayerControllerAthena* Controller,
+	UFortWorldItem*& OutCrown)
+{
+	OutCrown = nullptr;
+	if (!IsHumanVictoryCrownController(Controller))
+		return false;
+
+	auto CrownComponent =
+		GetVictoryCrownComponent(Controller);
+	if (CrownComponent)
+	{
+		if (auto GetCrownFunction =
+			CrownComponent->GetFunction(
+				"GetCrownInPlayerInventory"))
+		{
+			OutCrown =
+				CrownComponent->Call<UFortWorldItem*>(
+					GetCrownFunction);
+			if (IsUsableDeathObject(OutCrown))
+				return true;
+
+			OutCrown = nullptr;
+		}
+	}
+
+	// Manually inserted lategame crowns can exist before the native crown
+	// component has observed its inventory callback. Fall back to the actual
+	// item instances so pre-end winner preparation still sees the held crown.
+	auto Inventory = Controller->WorldInventory;
+	if (!IsUsableDeathObject(Inventory))
+		return CrownComponent != nullptr;
+
+	auto CrownDefinition =
+		ResolveVictoryCrownDefinition(Controller);
+	if (!CrownDefinition)
+		return CrownComponent != nullptr;
+
+	for (auto ItemInstance : Inventory->Inventory.ItemInstances)
+	{
+		if (IsUsableDeathObject(ItemInstance) &&
+			ItemInstance->ItemEntry.ItemDefinition ==
+				CrownDefinition)
+		{
+			OutCrown = ItemInstance;
+			break;
+		}
+	}
+
+	return CrownComponent != nullptr ||
+		OutCrown != nullptr;
+}
+
+static void SnapshotVictoryCrownOwnershipBeforeNativeDeath()
+{
+	if (!FConfiguration::bCrownSlomo ||
+		VersionInfo.FortniteVersion < 19.0 ||
+		VersionInfo.FortniteVersion >= 26.0)
+	{
+		return;
+	}
+
+	++GVictoryCrownSnapshotGeneration;
+	GVictoryCrownOwnershipSnapshots.clear();
+	auto World = UWorld::GetWorld();
+	auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
+	if (!Driver)
+		return;
+
+	for (int32 Index = 0;
+		Index < Driver->ClientConnections.Num(); Index++)
+	{
+		auto Connection = Driver->ClientConnections[Index];
+		auto Controller =
+			Connection && Connection->PlayerController
+				? Connection->PlayerController
+					->Cast<AFortPlayerControllerAthena>()
+				: nullptr;
+		if (!IsHumanVictoryCrownController(Controller))
+			continue;
+
+		UFortWorldItem* Crown = nullptr;
+		if (!TryGetVictoryCrownInInventory(
+			Controller, Crown))
+		{
+			continue;
+		}
+
+		GVictoryCrownOwnershipSnapshots[Controller] =
+			{ GVictoryCrownSnapshotGeneration,
+				IsUsableDeathObject(Crown) };
+		SDK::DbgLog(
+			"[VictoryCrown] pre-native snapshot generation=%llu controller=%p crown=%p\n",
+			(unsigned long long)GVictoryCrownSnapshotGeneration,
+			(void*)Controller, (void*)Crown);
+	}
+}
+
+static bool SetVictoryCrownPlayerStateRoyalRoyale(
+	AFortPlayerControllerAthena* WinnerController)
+{
+	auto WinnerPlayerState =
+		WinnerController && WinnerController->PlayerState
+			? WinnerController->PlayerState
+				->Cast<AFortPlayerStateAthena>()
+			: nullptr;
+	auto PlayerStateCrownClass =
+		UFortPlayerStateComponent_VictoryCrowns::StaticClass();
+	auto RawPlayerStateCrownComponent =
+		IsUsableDeathObject(WinnerPlayerState) &&
+		IsUsableDeathObject(PlayerStateCrownClass)
+			? WinnerPlayerState->GetComponentByClass(
+				PlayerStateCrownClass)
+			: nullptr;
+	if (!IsUsableDeathObject(
+			RawPlayerStateCrownComponent) ||
+		!RawPlayerStateCrownComponent->IsA(
+			PlayerStateCrownClass))
+	{
+		return false;
+	}
+
+	auto PlayerStateCrownComponent =
+		(UFortPlayerStateComponent_VictoryCrowns*)
+			RawPlayerStateCrownComponent;
+	if (!PlayerStateCrownComponent->HasbHasWonRoyalRoyale())
+	{
+		return false;
+	}
+
+	PlayerStateCrownComponent->bHasWonRoyalRoyale = true;
+	MarkVictoryCrownPropertyDirty(
+		PlayerStateCrownComponent,
+		L"bHasWonRoyalRoyale");
+	WinnerPlayerState->ForceNetUpdate();
+	return true;
+}
+
+static bool PrepareVictoryCrownRoyalRoyaleBeforeEnd(
+	AFortPlayerControllerAthena* WinnerController)
+{
+	if (!FConfiguration::bCrownSlomo ||
+		!IsHumanVictoryCrownController(WinnerController))
+	{
+		return false;
+	}
+
+	auto CrownComponent =
+		GetVictoryCrownComponent(WinnerController);
+	if (!CrownComponent ||
+		!CrownComponent->HasbWonRoyalRoyale())
+	{
+		return false;
+	}
+
+	if (CrownComponent->bWonRoyalRoyale)
+	{
+		MarkVictoryCrownPropertyDirty(
+			CrownComponent,
+			L"bWonRoyalRoyale");
+		SetVictoryCrownPlayerStateRoyalRoyale(
+			WinnerController);
+		WinnerController->ForceNetUpdate();
+		return true;
+	}
+
+	UFortWorldItem* HeldCrown = nullptr;
+	if (!TryGetVictoryCrownInInventory(
+		WinnerController, HeldCrown) ||
+		!IsUsableDeathObject(HeldCrown))
+	{
+		return false;
+	}
+
+	// Native endgame snapshots these values while removing the final victim.
+	// Set both the controller and PlayerState component before that transition,
+	// not after its victory widget has already been created.
+	if (CrownComponent->HasbWonCrownInMatch())
+	{
+		CrownComponent->bWonCrownInMatch = false;
+		MarkVictoryCrownPropertyDirty(
+			CrownComponent,
+			L"bWonCrownInMatch");
+	}
+	CrownComponent->bWonRoyalRoyale = true;
+	MarkVictoryCrownPropertyDirty(
+		CrownComponent,
+		L"bWonRoyalRoyale");
+	if (auto OnRepRoyalRoyaleFunction =
+		CrownComponent->GetFunction(
+			"OnRep_WonRoyalRoyale"))
+	{
+		CrownComponent->Call(
+			OnRepRoyalRoyaleFunction);
+	}
+
+	const bool bPlayerStateRoyalRoyale =
+		SetVictoryCrownPlayerStateRoyalRoyale(
+			WinnerController);
+
+	WinnerController->ForceNetUpdate();
+
+	SDK::DbgLog(
+		"[VictoryCrown] prepared Royal Royale before end winner=%p crown=%p playerStateFlag=%d\n",
+		(void*)WinnerController, (void*)HeldCrown,
+		bPlayerStateRoyalRoyale ? 1 : 0);
+	return true;
+}
+
+static void ApplyVictoryCrownWinState(
+	AFortPlayerControllerAthena* WinnerController)
+{
+	if (!FConfiguration::bCrownSlomo ||
+		VersionInfo.FortniteVersion < 19.0 ||
+		VersionInfo.FortniteVersion >= 26.0 ||
+		!IsHumanVictoryCrownController(WinnerController))
+	{
+		return;
+	}
+
+	auto Inventory = WinnerController->WorldInventory;
+	if (!IsUsableDeathObject(Inventory))
+	{
+		SDK::DbgLog(
+			"[VictoryCrown] skipped winner=%p: no usable inventory\n",
+			(void*)WinnerController);
+		return;
+	}
+
+	auto CrownComponent =
+		GetVictoryCrownComponent(WinnerController);
+	if (!CrownComponent ||
+		!CrownComponent->HasbWonRoyalRoyale())
+	{
+		SDK::DbgLog(
+			"[VictoryCrown] skipped winner=%p: component/flags unavailable\n",
+			(void*)WinnerController);
+		return;
+	}
+
+	auto OnRepWonCrownFunction =
+		CrownComponent->GetFunction("OnRep_WonCrownInMatch");
+	auto OnRepRoyalRoyaleFunction =
+		CrownComponent->GetFunction("OnRep_WonRoyalRoyale");
+	if (!OnRepRoyalRoyaleFunction)
+	{
+		SDK::DbgLog(
+			"[VictoryCrown] skipped winner=%p: Royal Royale API unavailable\n",
+			(void*)WinnerController);
+		return;
+	}
+
+	bool bHasPreNativeSnapshot = false;
+	bool bHadCrownBeforeNativeEnd = false;
+	auto Snapshot =
+		GVictoryCrownOwnershipSnapshots.find(
+			WinnerController);
+	if (Snapshot !=
+			GVictoryCrownOwnershipSnapshots.end() &&
+		Snapshot->second.Generation ==
+			GVictoryCrownSnapshotGeneration)
+	{
+		bHasPreNativeSnapshot = true;
+		bHadCrownBeforeNativeEnd =
+			Snapshot->second.bHadCrown;
+	}
+
+	if (CrownComponent->bWonRoyalRoyale)
+	{
+		MarkVictoryCrownPropertyDirty(
+			CrownComponent,
+			L"bWonRoyalRoyale");
+		SetVictoryCrownPlayerStateRoyalRoyale(
+			WinnerController);
+		WinnerController->ForceNetUpdate();
+		return;
+	}
+
+	UFortWorldItem* ExistingCrown = nullptr;
+	TryGetVictoryCrownInInventory(
+		WinnerController, ExistingCrown);
+
+	// Trust the pre-RemoveFromAlivePlayers snapshot over postgame inventory.
+	// Native can consume or award a crown while starting endgame, making the
+	// post-transition inventory alone ambiguous.
+	const bool bShouldBeRoyalRoyale =
+		bHasPreNativeSnapshot
+			? bHadCrownBeforeNativeEnd
+			: ExistingCrown != nullptr;
+	if (bShouldBeRoyalRoyale)
+	{
+		if (IsUsableDeathObject(ExistingCrown) &&
+			PrepareVictoryCrownRoyalRoyaleBeforeEnd(
+				WinnerController))
+		{
+			return;
+		}
+
+		// The crown can be consumed from inventory during native endgame. The
+		// pre-native snapshot still proves this was a crowned win.
+		if (CrownComponent->HasbWonCrownInMatch())
+		{
+			CrownComponent->bWonCrownInMatch = false;
+			MarkVictoryCrownPropertyDirty(
+				CrownComponent,
+				L"bWonCrownInMatch");
+		}
+		CrownComponent->bWonRoyalRoyale = true;
+		MarkVictoryCrownPropertyDirty(
+			CrownComponent,
+			L"bWonRoyalRoyale");
+		CrownComponent->Call(OnRepRoyalRoyaleFunction);
+		SetVictoryCrownPlayerStateRoyalRoyale(
+			WinnerController);
+		WinnerController->ForceNetUpdate();
+		SDK::DbgLog(
+			"[VictoryCrown] restored Royal Royale winner=%p preNative=%d currentCrown=%p\n",
+			(void*)WinnerController,
+			bHadCrownBeforeNativeEnd ? 1 : 0,
+			(void*)ExistingCrown);
+		return;
+	}
+
+	// The custom-map and normal placement paths can overlap. A false pre-native
+	// snapshot plus this flag means the first path already awarded the crown;
+	// do not reinterpret that newly granted item as a crowned win.
+	if (CrownComponent->HasbWonCrownInMatch() &&
+		CrownComponent->bWonCrownInMatch)
+		return;
+
+	// Native may already have awarded the ordinary winner a crown after our
+	// pre-native snapshot. Keep it as a normal crown award and do not duplicate.
+	if (bHasPreNativeSnapshot &&
+		!bHadCrownBeforeNativeEnd &&
+		IsUsableDeathObject(ExistingCrown))
+	{
+		if (CrownComponent->HasbWonCrownInMatch())
+		{
+			CrownComponent->bWonCrownInMatch = true;
+			MarkVictoryCrownPropertyDirty(
+				CrownComponent,
+				L"bWonCrownInMatch");
+		}
+		if (OnRepWonCrownFunction)
+			CrownComponent->Call(OnRepWonCrownFunction);
+		WinnerController->ForceNetUpdate();
+		SDK::DbgLog(
+			"[VictoryCrown] retained native crown award winner=%p crown=%p\n",
+			(void*)WinnerController, (void*)ExistingCrown);
+		return;
+	}
+
+	auto CrownDefinition =
+		ResolveVictoryCrownDefinition(WinnerController);
+	if (!CrownDefinition ||
+		!FFortItemEntryStateValue::StaticStruct() ||
+		!FFortItemEntryStateValue::HasIntValue() ||
+		!FFortItemEntryStateValue::HasStateType())
+	{
+		SDK::DbgLog(
+			"[VictoryCrown] skipped winner=%p: crown asset/state struct unavailable\n",
+			(void*)WinnerController);
+		return;
+	}
+
+	const int32 StateValueSize =
+		FFortItemEntryStateValue::Size();
+	if (StateValueSize <= 0 || StateValueSize > 0x1000)
+	{
+		SDK::DbgLog(
+			"[VictoryCrown] skipped winner=%p: invalid state value size=%d\n",
+			(void*)WinnerController, StateValueSize);
+		return;
+	}
+
+	TArray<FFortItemEntryStateValue> StateValues{};
+	auto StateValue = (FFortItemEntryStateValue*)malloc(
+		StateValueSize);
+	if (!StateValue)
+		return;
+
+	memset((PBYTE)StateValue, 0, StateValueSize);
+	StateValue->IntValue = 1;
+	StateValue->StateType = 2;
+	StateValues.Add(*StateValue, StateValueSize);
+	free(StateValue);
+
+	auto GrantedCrown = Inventory->GiveItem(
+		CrownDefinition, 1, 0, 0, true, true, 0, StateValues);
+	StateValues.Free();
+	if (!GrantedCrown)
+	{
+		SDK::DbgLog(
+			"[VictoryCrown] failed to grant crown winner=%p definition=%p\n",
+			(void*)WinnerController, (void*)CrownDefinition);
+		return;
+	}
+
+	// Winning without a crown awards one for the next match. This is distinct
+	// from Royal Royale and must not set both flags.
+	if (CrownComponent->HasbWonCrownInMatch())
+	{
+		CrownComponent->bWonCrownInMatch = true;
+		MarkVictoryCrownPropertyDirty(
+			CrownComponent,
+			L"bWonCrownInMatch");
+	}
+	if (OnRepWonCrownFunction)
+		CrownComponent->Call(OnRepWonCrownFunction);
+	WinnerController->ForceNetUpdate();
+	SDK::DbgLog(
+		"[VictoryCrown] awarded crown winner=%p item=%p\n",
+		(void*)WinnerController, (void*)GrantedCrown);
+}
+
+static std::vector<AFortPlayerControllerAthena*>
+GetHumanVictoryControllersForWinningTeam(
+	AFortPlayerControllerAthena* WinnerController)
+{
+	if (!IsHumanVictoryCrownController(WinnerController))
+		return {};
+
+	auto WinnerPlayerState =
+		WinnerController->PlayerState->Cast<AFortPlayerStateAthena>();
+	if (!WinnerPlayerState)
+		return {};
+
+	const uint8 WinnerTeam = WinnerPlayerState->TeamIndex;
+	const bool bHasUsableTeam =
+		WinnerTeam != 0 && WinnerTeam != 255;
+	std::vector<AFortPlayerControllerAthena*> WinningControllers;
+
+	auto AddWinningController =
+		[&](AFortPlayerControllerAthena* Candidate)
+		{
+			if (!IsHumanVictoryCrownController(Candidate))
+				return;
+
+			auto CandidatePlayerState =
+				Candidate->PlayerState->Cast<AFortPlayerStateAthena>();
+			if (!CandidatePlayerState ||
+				(Candidate != WinnerController &&
+					(!bHasUsableTeam ||
+						CandidatePlayerState->TeamIndex != WinnerTeam)) ||
+				std::find(
+					WinningControllers.begin(),
+					WinningControllers.end(),
+					Candidate) != WinningControllers.end())
+			{
+				return;
+			}
+
+			WinningControllers.push_back(Candidate);
+		};
+
+	AddWinningController(WinnerController);
+
+	auto World = UWorld::GetWorld();
+	auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
+	if (Driver)
+	{
+		for (int32 Index = 0;
+			Index < Driver->ClientConnections.Num(); Index++)
+		{
+			auto Connection = Driver->ClientConnections[Index];
+			AddWinningController(
+				Connection && Connection->PlayerController
+					? Connection->PlayerController
+						->Cast<AFortPlayerControllerAthena>()
+					: nullptr);
+		}
+	}
+
+	return WinningControllers;
+}
+
+static bool PrepareVictoryCrownRoyalRoyaleForWinningTeam(
+	AFortPlayerControllerAthena* WinnerController)
+{
+	bool bPreparedRoyalRoyale = false;
+	for (auto Controller :
+		GetHumanVictoryControllersForWinningTeam(
+			WinnerController))
+	{
+		bPreparedRoyalRoyale |=
+			PrepareVictoryCrownRoyalRoyaleBeforeEnd(
+				Controller);
+	}
+	return bPreparedRoyalRoyale;
+}
+
+static void ApplyVictoryCrownWinStateToWinningTeam(
+	AFortPlayerControllerAthena* WinnerController)
+{
+	for (auto Controller :
+		GetHumanVictoryControllersForWinningTeam(
+			WinnerController))
+	{
+		ApplyVictoryCrownWinState(Controller);
+	}
+}
+
+static bool HasPreparedRoyalRoyaleState(
+	AFortPlayerControllerAthena* WinnerController)
+{
+	auto CrownComponent =
+		GetVictoryCrownComponent(WinnerController);
+	return CrownComponent &&
+		CrownComponent->HasbWonRoyalRoyale() &&
+		CrownComponent->bWonRoyalRoyale;
+}
+
+static void SendOrDeferVictoryNotifications(
+	AFortPlayerControllerAthena* WinnerController,
+	AFortPlayerPawnAthena* WinnerPawn,
+	UFortWeaponItemDefinition* FinishingWeapon,
+	uint8 DeathCause,
+	bool bPlayWinEffects,
+	bool bNotifyWon,
+	bool bNotifyTeamWon)
+{
+	if (!IsHumanVictoryController(WinnerController))
+		return;
+
+	if (VersionInfo.FortniteVersion >= 19.0 &&
+		VersionInfo.FortniteVersion < 26.0 &&
+		FConfiguration::bCrownSlomo &&
+		HasPreparedRoyalRoyaleState(WinnerController))
+	{
+		auto Pending = std::find_if(
+			GPendingVictoryCrownNotifications.begin(),
+			GPendingVictoryCrownNotifications.end(),
+			[&](const FPendingVictoryCrownNotification& Entry)
+			{
+				return Entry.Controller == WinnerController;
+			});
+
+		FPendingVictoryCrownNotification Notification{};
+		Notification.World = UWorld::GetWorld();
+		Notification.NetDriver =
+			Notification.World
+				? (UNetDriver*)Notification.World->NetDriver
+				: nullptr;
+		Notification.Controller = WinnerController;
+		Notification.WinnerPawn = WinnerPawn;
+		Notification.FinishingWeapon = FinishingWeapon;
+		Notification.DeathCause = DeathCause;
+		// Waiting through the following completed TickFlush guarantees at
+		// least one full property-replication pass after crown preparation.
+		Notification.EarliestReplicationPass =
+			GVictoryCrownReplicationPass + 2;
+		Notification.bPlayWinEffects = bPlayWinEffects;
+		Notification.bNotifyWon = bNotifyWon;
+		Notification.bNotifyTeamWon = bNotifyTeamWon;
+
+		if (Pending !=
+			GPendingVictoryCrownNotifications.end())
+		{
+			Notification.bPlayWinEffects |=
+				Pending->bPlayWinEffects;
+			Notification.bNotifyWon |=
+				Pending->bNotifyWon;
+			Notification.bNotifyTeamWon |=
+				Pending->bNotifyTeamWon;
+			*Pending = Notification;
+		}
+		else
+		{
+			GPendingVictoryCrownNotifications.push_back(
+				Notification);
+		}
+
+		WinnerController->ForceNetUpdate();
+		if (IsUsableDeathObject(
+				WinnerController->PlayerState))
+		{
+			((AActor*)WinnerController->PlayerState)
+				->ForceNetUpdate();
+		}
+
+		SDK::DbgLog(
+			"[VictoryCrown] deferred win notification winner=%p untilReplicationPass=%llu currentPass=%llu\n",
+			(void*)WinnerController,
+			(unsigned long long)
+				Notification.EarliestReplicationPass,
+			(unsigned long long)
+				GVictoryCrownReplicationPass);
+		return;
+	}
+
+	if (bPlayWinEffects)
+	{
+		WinnerController->PlayWinEffects(
+			WinnerPawn, FinishingWeapon,
+			DeathCause, false);
+	}
+	if (bNotifyWon)
+	{
+		WinnerController->ClientNotifyWon(
+			WinnerPawn, FinishingWeapon,
+			DeathCause);
+	}
+	if (bNotifyTeamWon)
+	{
+		WinnerController->ClientNotifyTeamWon(
+			WinnerPawn, FinishingWeapon,
+			DeathCause);
+	}
+}
+
+void AFortPlayerControllerAthena::
+TickPendingVictoryCrownNotifications()
+{
+	if (VersionInfo.FortniteVersion < 19.0 ||
+		VersionInfo.FortniteVersion >= 26.0)
+	{
+		return;
+	}
+
+	++GVictoryCrownReplicationPass;
+
+	for (size_t Index = 0;
+		Index < GPendingVictoryCrownNotifications.size();)
+	{
+		auto Notification =
+			GPendingVictoryCrownNotifications[Index];
+		if (Notification.EarliestReplicationPass >
+			GVictoryCrownReplicationPass)
+		{
+			++Index;
+			continue;
+		}
+
+		GPendingVictoryCrownNotifications.erase(
+			GPendingVictoryCrownNotifications.begin() +
+				Index);
+
+		auto WinnerController = Notification.Controller;
+		auto CurrentWorld = UWorld::GetWorld();
+		auto CurrentDriver =
+			CurrentWorld
+				? (UNetDriver*)CurrentWorld->NetDriver
+				: nullptr;
+		if (Notification.World != CurrentWorld ||
+			Notification.NetDriver != CurrentDriver ||
+			!CurrentDriver ||
+			!IsHumanVictoryController(WinnerController))
+			continue;
+
+		bool bControllerStillConnected = false;
+		for (auto Connection :
+			CurrentDriver->ClientConnections)
+		{
+			if (Connection &&
+				Connection->PlayerController ==
+					WinnerController)
+			{
+				bControllerStillConnected = true;
+				break;
+			}
+		}
+		if (!bControllerStillConnected)
+			continue;
+
+		auto WinnerPawn =
+			IsUsableDeathObject(Notification.WinnerPawn)
+				? Notification.WinnerPawn
+				: (IsUsableDeathObject(
+						WinnerController->MyFortPawn)
+					? WinnerController->MyFortPawn
+					: nullptr);
+		auto FinishingWeapon =
+			IsUsableDeathObject(
+				Notification.FinishingWeapon)
+				? Notification.FinishingWeapon
+				: nullptr;
+
+		if (Notification.bPlayWinEffects)
+		{
+			WinnerController->PlayWinEffects(
+				WinnerPawn, FinishingWeapon,
+				Notification.DeathCause, false);
+		}
+		if (Notification.bNotifyWon)
+		{
+			WinnerController->ClientNotifyWon(
+				WinnerPawn, FinishingWeapon,
+				Notification.DeathCause);
+		}
+		if (Notification.bNotifyTeamWon)
+		{
+			WinnerController->ClientNotifyTeamWon(
+				WinnerPawn, FinishingWeapon,
+				Notification.DeathCause);
+		}
+
+		SDK::DbgLog(
+			"[VictoryCrown] sent replicated win notification winner=%p replicationPass=%llu\n",
+			(void*)WinnerController,
+			(unsigned long long)
+				GVictoryCrownReplicationPass);
+	}
+
+}
+
+static AFortPlayerControllerAthena*
+ResolveImpendingVictoryWinnerBeforeNativeDeath(
+	AFortGameMode* GameMode,
+	AFortGameStateAthena* GameState,
+	AFortPlayerControllerAthena* VictimController,
+	AFortPlayerControllerAthena* PreferredKillerController)
+{
+	if (!IsUsableDeathObject(GameMode) ||
+		!IsUsableDeathObject(GameState) ||
+		!IsUsableDeathObject(VictimController))
+	{
+		return nullptr;
+	}
+
+	bool bFoundVictim = false;
+	std::vector<AFortPlayerControllerAthena*>
+		SurvivingControllers;
+	auto AddSurvivingController =
+		[&](AActor* AliveActor)
+		{
+			if (!IsUsableDeathObject(AliveActor))
+				return;
+
+			auto Candidate =
+				AliveActor
+					->Cast<AFortPlayerControllerAthena>();
+			if (!IsUsableDeathObject(Candidate))
+				return;
+
+			if (Candidate == VictimController)
+			{
+				bFoundVictim = true;
+				return;
+			}
+
+			if (!Candidate->HasPlayerState() ||
+				!IsUsableDeathObject(
+					Candidate->PlayerState) ||
+				std::find(
+					SurvivingControllers.begin(),
+					SurvivingControllers.end(),
+					Candidate) !=
+					SurvivingControllers.end())
+			{
+				return;
+			}
+
+			SurvivingControllers.push_back(Candidate);
+		};
+
+	if (GameMode->HasAlivePlayers())
+	{
+		for (auto AliveActor : GameMode->AlivePlayers)
+			AddSurvivingController(AliveActor);
+	}
+	if (GameMode->HasAliveBots())
+	{
+		for (auto AliveActor : GameMode->AliveBots)
+			AddSurvivingController(AliveActor);
+	}
+
+	if (!bFoundVictim ||
+		SurvivingControllers.empty() ||
+		GameMode->MatchState ==
+			FName(L"WaitingPostMatch"))
+	{
+		return nullptr;
+	}
+
+	// If a controller is absent from the alive arrays, an apparently sole team
+	// is not trustworthy. Waiting for the post-native fallback is safer than
+	// marking a non-final elimination as a Crowned Victory.
+	const int32 SurvivingControllerCount =
+		(int32)SurvivingControllers.size();
+	const bool bPlayersLeftMatchesPreRemoval =
+		GameState->PlayersLeft ==
+			SurvivingControllerCount + 1;
+	const bool bPlayersLeftMatchesEarlyRemoval =
+		GameState->PlayersLeft ==
+			SurvivingControllerCount;
+	if (GameState->PlayersLeft > 0 &&
+		!bPlayersLeftMatchesPreRemoval &&
+		!bPlayersLeftMatchesEarlyRemoval)
+	{
+		SDK::DbgLog(
+			"[VictoryCrown] impending winner rejected FN=%.2f playersLeft=%d survivors=%d victimFound=%d\n",
+			VersionInfo.FortniteVersion,
+			GameState->PlayersLeft,
+			SurvivingControllerCount,
+			bFoundVictim ? 1 : 0);
+		return nullptr;
+	}
+
+	auto FirstState =
+		SurvivingControllers[0]->PlayerState
+			->Cast<AFortPlayerStateAthena>();
+	if (!FirstState)
+		return nullptr;
+
+	const uint8 SurvivingTeam = FirstState->TeamIndex;
+	const bool bHasUsableSurvivingTeam =
+		SurvivingTeam != 0 && SurvivingTeam != 255;
+	for (size_t Index = 1;
+		Index < SurvivingControllers.size(); Index++)
+	{
+		auto CandidateState =
+			SurvivingControllers[Index]->PlayerState
+				->Cast<AFortPlayerStateAthena>();
+		if (!bHasUsableSurvivingTeam ||
+			!CandidateState ||
+			CandidateState->TeamIndex !=
+				SurvivingTeam)
+		{
+			return nullptr;
+		}
+	}
+
+	if (std::find(
+			SurvivingControllers.begin(),
+			SurvivingControllers.end(),
+			PreferredKillerController) !=
+			SurvivingControllers.end() &&
+		IsHumanVictoryCrownController(
+			PreferredKillerController))
+	{
+		return PreferredKillerController;
+	}
+
+	for (auto Controller : SurvivingControllers)
+	{
+		if (IsHumanVictoryCrownController(Controller))
+			return Controller;
+	}
+
+	return nullptr;
+}
+
+static AFortPlayerControllerAthena*
+GetHumanVictoryControllerForState(
+	AFortPlayerStateAthena* PlayerState,
+	AFortPlayerControllerAthena* ExcludedController)
+{
+	if (!IsUsableDeathObject(PlayerState))
+		return nullptr;
+
+	if (PlayerState->HasOwner() &&
+		IsUsableDeathObject(PlayerState->Owner))
+	{
+		auto OwnerController =
+			PlayerState->Owner->Cast<AFortPlayerControllerAthena>();
+		if (OwnerController != ExcludedController &&
+			IsHumanVictoryController(OwnerController))
+			return OwnerController;
+	}
+
+	auto World = UWorld::GetWorld();
+	auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
+	if (!Driver)
+		return nullptr;
+
+	for (int32 Index = 0;
+		Index < Driver->ClientConnections.Num(); Index++)
+	{
+		auto Connection = Driver->ClientConnections[Index];
+		auto Candidate =
+			Connection && Connection->PlayerController
+				? Connection->PlayerController
+					->Cast<AFortPlayerControllerAthena>()
+				: nullptr;
+		if (Candidate != ExcludedController &&
+			IsHumanVictoryController(Candidate) &&
+			Candidate->PlayerState == PlayerState)
+		{
+			return Candidate;
+		}
+	}
+
+	return nullptr;
+}
+
+static AFortPlayerControllerAthena*
+ResolveNativeVictoryWinner(
+	AFortGameMode* GameMode,
+	AFortGameStateAthena* GameState,
+	AFortPlayerStateAthena* PreferredWinnerState,
+	AFortPlayerControllerAthena* ExcludedController)
+{
+	if (!IsUsableDeathObject(GameMode) ||
+		!IsUsableDeathObject(GameState))
+	{
+		return nullptr;
+	}
+
+	if (GameState->HasWinningPlayerState())
+	{
+		if (auto NativeWinner =
+			GetHumanVictoryControllerForState(
+				GameState->WinningPlayerState,
+				ExcludedController))
+		{
+			return NativeWinner;
+		}
+	}
+
+	if (GameState->HasWinningTeam() &&
+		GameState->WinningTeam > 0 &&
+		GameState->WinningTeam < 255)
+	{
+		auto World = UWorld::GetWorld();
+		auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
+		if (Driver)
+		{
+			for (int32 Index = 0;
+				Index < Driver->ClientConnections.Num(); Index++)
+			{
+				auto Connection = Driver->ClientConnections[Index];
+				auto Candidate =
+					Connection && Connection->PlayerController
+						? Connection->PlayerController
+							->Cast<AFortPlayerControllerAthena>()
+						: nullptr;
+				if (Candidate == ExcludedController ||
+					!IsHumanVictoryController(Candidate))
+					continue;
+
+				auto CandidateState =
+					Candidate->PlayerState
+						->Cast<AFortPlayerStateAthena>();
+				if (CandidateState &&
+					CandidateState->TeamIndex ==
+						(uint8)GameState->WinningTeam)
+				{
+					return Candidate;
+				}
+			}
+		}
+	}
+
+	if (IsUsableDeathObject(PreferredWinnerState) &&
+		PreferredWinnerState->HasPlace() &&
+		PreferredWinnerState->Place == 1)
+	{
+		if (auto PreferredWinner =
+			GetHumanVictoryControllerForState(
+				PreferredWinnerState,
+				ExcludedController))
+		{
+			return PreferredWinner;
+		}
+	}
+
+	if (GameMode->HasAlivePlayers())
+	{
+		for (auto AliveActor : GameMode->AlivePlayers)
+		{
+			auto Candidate =
+				AliveActor
+					? AliveActor->Cast<AFortPlayerControllerAthena>()
+					: nullptr;
+			if (Candidate != ExcludedController &&
+				IsHumanVictoryController(Candidate))
+				return Candidate;
+		}
+	}
+
+	return nullptr;
+}
+
 static bool IsLiveRemoteControlReturnPawn(AActor* Actor)
 {
 	if (!IsUsableDeathObject(Actor))
@@ -3055,6 +4201,213 @@ static void Complete172SpawnedBotVictoryAfterNative(
 		(int)WinnerPlayerState->TeamIndex);
 }
 
+static bool IsLateSeasonHumanVictoryController(
+	AFortPlayerControllerAthena* Controller,
+	AFortPlayerControllerAthena* VictimController)
+{
+	if (!Controller || Controller == VictimController ||
+		!IsUsableDeathObject(Controller) ||
+		!Controller->HasPlayerState() ||
+		!IsUsableDeathObject(Controller->PlayerState))
+	{
+		return false;
+	}
+
+	auto PlayerState =
+		(AFortPlayerStateAthena*)Controller->PlayerState;
+	if ((PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
+		GSpawnedBotControllers.contains(Controller) ||
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(Controller))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+static void CompleteLateSeasonBotVictoryAfterNative(
+	AFortGameMode* GameMode,
+	AFortGameStateAthena* GameState,
+	AFortPlayerControllerAthena* VictimController,
+	AFortPlayerPawnAthena* ReportedKillerPawn,
+	AFortPlayerControllerAthena* ReportedKillerController,
+	UFortWeaponItemDefinition* FinishingWeapon,
+	uint8 DeathCause)
+{
+	if (VersionInfo.FortniteVersion < 17.0 ||
+		VersionInfo.FortniteVersion >= 19.0 ||
+		FConfiguration::bForceRespawns ||
+		GUI::gsStatus == Ended ||
+		!IsUsableDeathObject(GameMode) ||
+		!IsUsableDeathObject(GameState) ||
+		GameMode->MatchState != FName(L"WaitingPostMatch"))
+	{
+		return;
+	}
+
+	auto WinnerController =
+		IsLateSeasonHumanVictoryController(
+			ReportedKillerController, VictimController)
+		? ReportedKillerController
+		: nullptr;
+
+	if (!WinnerController && IsUsableDeathObject(ReportedKillerPawn) &&
+		IsUsableDeathObject(ReportedKillerPawn->Controller))
+	{
+		auto PawnController =
+			ReportedKillerPawn->Controller->Cast<AFortPlayerControllerAthena>();
+		if (IsLateSeasonHumanVictoryController(
+			PawnController, VictimController))
+		{
+			WinnerController = PawnController;
+		}
+	}
+
+	if (!WinnerController && GameState->HasWinningPlayerState() &&
+		IsUsableDeathObject(GameState->WinningPlayerState))
+	{
+		auto NativeWinnerState = GameState->WinningPlayerState;
+		auto NativeWinnerController =
+			NativeWinnerState->HasOwner() &&
+			IsUsableDeathObject(NativeWinnerState->Owner)
+			? NativeWinnerState->Owner
+				->Cast<AFortPlayerControllerAthena>()
+			: nullptr;
+		if (IsLateSeasonHumanVictoryController(
+			NativeWinnerController, VictimController))
+		{
+			WinnerController = NativeWinnerController;
+		}
+	}
+
+	if (!WinnerController && GameState->HasWinningTeam() &&
+		GameState->WinningTeam >= 3 && GameState->WinningTeam <= 255)
+	{
+		const uint8 NativeWinningTeam =
+			(uint8)GameState->WinningTeam;
+		for (auto AliveActor : GameMode->AlivePlayers)
+		{
+			auto Candidate = AliveActor
+				? AliveActor->Cast<AFortPlayerControllerAthena>()
+				: nullptr;
+			if (IsLateSeasonHumanVictoryController(
+				Candidate, VictimController))
+			{
+				auto CandidateState =
+					(AFortPlayerStateAthena*)Candidate->PlayerState;
+				if (CandidateState->TeamIndex == NativeWinningTeam)
+				{
+					WinnerController = Candidate;
+					break;
+				}
+			}
+		}
+	}
+
+	if (!WinnerController || !WinnerController->PlayerState)
+		return;
+
+	auto WinnerPlayerState =
+		(AFortPlayerStateAthena*)WinnerController->PlayerState;
+	const uint8 WinnerTeam = WinnerPlayerState->TeamIndex;
+
+	if (WinnerPlayerState->HasPlace())
+	{
+		WinnerPlayerState->Place = 1;
+		WinnerPlayerState->OnRep_Place();
+	}
+
+	if (GameState->HasWinningTeam())
+	{
+		GameState->WinningTeam = WinnerTeam;
+		GameState->OnRep_WinningTeam();
+	}
+	if (GameState->HasWinningPlayerState())
+	{
+		GameState->WinningPlayerState = WinnerPlayerState;
+		GameState->OnRep_WinningPlayerState();
+	}
+
+	std::vector<AFortPlayerControllerAthena*> WinningControllers;
+	auto AddWinningController =
+		[&](AFortPlayerControllerAthena* Candidate)
+		{
+			if (!IsLateSeasonHumanVictoryController(
+				Candidate, VictimController))
+			{
+				return;
+			}
+
+			auto CandidateState =
+				(AFortPlayerStateAthena*)Candidate->PlayerState;
+			if (CandidateState->TeamIndex != WinnerTeam ||
+				std::find(
+					WinningControllers.begin(),
+					WinningControllers.end(),
+					Candidate) != WinningControllers.end())
+			{
+				return;
+			}
+
+			WinningControllers.push_back(Candidate);
+		};
+
+	AddWinningController(WinnerController);
+
+	auto World = UWorld::GetWorld();
+	auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
+	if (Driver)
+	{
+		for (int32 Index = 0;
+			Index < Driver->ClientConnections.Num(); Index++)
+		{
+			auto Connection = Driver->ClientConnections[Index];
+			AddWinningController(
+				Connection && Connection->PlayerController
+				? Connection->PlayerController
+					->Cast<AFortPlayerControllerAthena>()
+				: nullptr);
+		}
+	}
+
+	auto FinisherPawn =
+		IsUsableDeathObject(ReportedKillerPawn)
+		? ReportedKillerPawn
+		: WinnerController->MyFortPawn;
+
+	GUI::gsStatus = Ended;
+	if (FConfiguration::bUseWinLines)
+	{
+		WinnerController->PlayWinEffects(
+			FinisherPawn, FinishingWeapon, DeathCause, false);
+	}
+	WinnerController->ClientNotifyWon(
+		FinisherPawn, FinishingWeapon, DeathCause);
+
+	for (auto Controller : WinningControllers)
+	{
+		auto PlayerState =
+			(AFortPlayerStateAthena*)Controller->PlayerState;
+		if (PlayerState->HasPlace())
+		{
+			PlayerState->Place = 1;
+			PlayerState->OnRep_Place();
+		}
+
+		Controller->ClientNotifyTeamWon(
+			FinisherPawn, FinishingWeapon, DeathCause);
+		Controller->ForceNetUpdate();
+	}
+	GameState->ForceNetUpdate();
+
+	SDK::DbgLog(
+		"[Elimination] completed FN17-18 bot winner notification winner=%p playerState=%p team=%u clients=%d\n",
+		(void*)WinnerController,
+		(void*)WinnerPlayerState,
+		(unsigned)WinnerTeam,
+		(int)WinningControllers.size());
+}
+
 void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* PlayerController, FFortPlayerDeathReport& DeathReport)
 {
 	if (!PlayerController)
@@ -3075,13 +4428,17 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	GRemoteControlReturnPawn.erase(PlayerController);
 
 	RestoreRespawnHiddenWeapon(PlayerController);
-	GPendingRespawnLandingFinalization.erase(PlayerController);
-	GRespawnSkydivingObserved.erase(PlayerController);
-	GPendingLegacyAircraftLandingEquipment.erase(PlayerController);
-	GLegacyAircraftSkydivingObserved.erase(PlayerController);
+	GPendingRespawnLandingFinalization.erase(
+		PlayerController);
+	GRespawnSkydivingObserved.erase(
+		PlayerController);
+	GPendingLegacyAircraftLandingEquipment.erase(
+		PlayerController);
+	GLegacyAircraftSkydivingObserved.erase(
+		PlayerController);
 
-	// Allow the next replacement pawn to receive exactly one respawn setup even
-	// if the allocator happens to reuse the dead pawn's address.
+	// Allow the next replacement pawn to receive exactly one respawn setup
+	// even if the allocator happens to reuse the dead pawn's address.
 	GLastAcknowledgedPawn.erase(PlayerController);
 
 	auto World = UWorld::GetWorld();
@@ -3091,6 +4448,15 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 	if (!GameMode || !GameState || !PlayerState)
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
+
+	const bool bIsLateSeasonBotVictim =
+		VersionInfo.FortniteVersion >= 17.0 &&
+		VersionInfo.FortniteVersion < 19.0 &&
+		((PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
+			MagnesiumPlayerAIIntegration::IsPlayerAIController(
+				PlayerController));
+	UFortWeaponItemDefinition* LateSeasonFinishingWeapon = nullptr;
+	uint8 LateSeasonDeathCause = 0;
 
 	bool bCalledNativeDeathEarly = false;
 	const bool bIs172SpawnedBotVictim =
@@ -3170,9 +4536,19 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (FDeathInfo::HasFinisherOrDowner())
 				PlayerState->DeathInfo.FinisherOrDowner = KillerPlayerState ? KillerPlayerState : PlayerState;
 			if (FDeathInfo::HasFinisherOrDownerTags())
-				PlayerState->DeathInfo.FinisherOrDownerTags = KillerPawn ? KillerPawn->GameplayTags : PlayerController->Pawn->GameplayTags;
+				PlayerState->DeathInfo.FinisherOrDownerTags =
+					KillerPawn
+						? KillerPawn->GameplayTags
+						: (PlayerController->Pawn
+							? PlayerController->Pawn
+								->GameplayTags
+							: FGameplayTagContainer{});
 			if (FDeathInfo::HasVictimTags())
-				PlayerState->DeathInfo.VictimTags = PlayerController->Pawn->GameplayTags;
+				PlayerState->DeathInfo.VictimTags =
+					PlayerController->Pawn
+						? PlayerController->Pawn
+							->GameplayTags
+						: FGameplayTagContainer{};
 			if (FDeathInfo::HasDistance())
 				PlayerState->DeathInfo.Distance = PlayerController->Pawn ? (PlayerState->DeathInfo.DeathCause != /*EDeathCause::FallDamage*/ 1 ? (KillerPawn ? KillerPawn->GetDistanceTo(PlayerController->Pawn) : 0) : (PlayerController->MyFortPawn->HasLastFallDistance() ? PlayerController->MyFortPawn->LastFallDistance : 0)) : 0;
 			if (FDeathInfo::HasbInitialized())
@@ -3180,7 +4556,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			PlayerState->OnRep_DeathInfo();
 		}
 
-		if (KillerPlayerState && KillerPawn && KillerPawn->Controller && KillerPawn->Controller != PlayerController)
+		if (PlayerController->Pawn &&
+			KillerPlayerState && KillerPawn &&
+			KillerPawn->Controller &&
+			KillerPawn->Controller != PlayerController)
 		{
 			if (KillerPlayerState->HasKillScore())
 				KillerPlayerState->KillScore++;
@@ -3322,6 +4701,25 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					FConfiguration::ElimWeaponName = WeaponName;
 			}
 
+			// Every FN19+ build exposes the same crown component, but not every
+			// build reaches endgame through our RemoveFromAlivePlayers finder.
+			// Snapshot and prepare before either native death path can create
+			// the victory view model.
+			if (VersionInfo.FortniteVersion >= 19.0 &&
+				VersionInfo.FortniteVersion < 26.0 &&
+				FConfiguration::bCrownSlomo)
+			{
+				SnapshotVictoryCrownOwnershipBeforeNativeDeath();
+				auto ImpendingCrownWinner =
+					ResolveImpendingVictoryWinnerBeforeNativeDeath(
+						GameMode, GameState, PlayerController,
+						KillerPlayerState != PlayerState
+							? KillerPlayerController
+							: nullptr);
+				PrepareVictoryCrownRoyalRoyaleForWinningTeam(
+					ImpendingCrownWinner);
+			}
+
 			if (RemoveFromAlivePlayers_)
 			{
 				auto DamageCauserWeaponData = GetWeaponDataSafe(DamageCauser);
@@ -3345,6 +4743,23 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 						PlayerController, DeadPawn, DeadPlayerState,
 						DeadInventory);
 				}
+
+				// Native can choose a surviving winner when the final opponent
+				// dies to storm, fall damage, or another environmental cause.
+				// Resolve that result here so crown state is ready before any
+				// Magnesium victory notification below.
+				if (VersionInfo.FortniteVersion >= 19.0 &&
+					VersionInfo.FortniteVersion < 26.0 &&
+					FConfiguration::bCrownSlomo &&
+					GameMode->MatchState == FName(L"WaitingPostMatch"))
+				{
+					auto NativeCrownWinner =
+						ResolveNativeVictoryWinner(
+							GameMode, GameState,
+							KillerPlayerState, PlayerController);
+					ApplyVictoryCrownWinStateToWinningTeam(
+						NativeCrownWinner);
+				}
 			}
 
 			if (VersionInfo.FortniteVersion >= 15)
@@ -3358,57 +4773,78 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 			if (FConfiguration::bIsCustomMap && FConfiguration::AutoEndGame)
 			{
-				GUI::gsStatus = Ended;
-
-				KillerPlayerController->PlayWinEffects(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause, false);
-				KillerPlayerController->ClientNotifyWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
-				KillerPlayerController->ClientNotifyTeamWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
-
-				if (KillerPlayerState != PlayerState && VersionInfo.FortniteVersion >= 19)
+				auto CustomWinnerController =
+					KillerPlayerState != PlayerState &&
+					IsHumanVictoryController(KillerPlayerController)
+						? KillerPlayerController
+						: nullptr;
+				if (!CustomWinnerController &&
+					GameMode->MatchState == FName(L"WaitingPostMatch"))
 				{
-					auto Crown = FindObject<UFortItemDefinition>(L"/VictoryCrownsGameplay/Items/AGID_VictoryCrown.AGID_VictoryCrown");
-
-					TArray<FFortItemEntryStateValue> StateValues{};
-					auto Value = (FFortItemEntryStateValue*)malloc(FFortItemEntryStateValue::Size());
-					memset((PBYTE)Value, 0, FFortItemEntryStateValue::Size());
-
-					Value->IntValue = 1;
-					Value->StateType = 2;
-					StateValues.Add(*Value, FFortItemEntryStateValue::Size());
-
-					if (FConfiguration::bCrownSlomo)
-					{
-						free(Value);
-						KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
-						StateValues.Free();
-
-						auto CrownsComponent = KillerPlayerController->GetComponentByClass(UFortControllerComponent_VictoryCrowns::StaticClass());
-
-						if (CrownsComponent)
-						{
-							auto VictoryCrownsComp = (UFortControllerComponent_VictoryCrowns*)CrownsComponent;
-
-							VictoryCrownsComp->AuthorityHasHeldCrownItem(Crown);
-
-							VictoryCrownsComp->bWonCrownInMatch = true;
-							VictoryCrownsComp->bWonRoyalRoyale = true;
-							VictoryCrownsComp->OnRep_WonCrownInMatch();
-							VictoryCrownsComp->OnRep_WonRoyalRoyale();
-						}
-					}
+					CustomWinnerController =
+						ResolveNativeVictoryWinner(
+							GameMode, GameState,
+							KillerPlayerState, PlayerController);
 				}
 
-				GameState->WinningTeam = KillerPlayerState->TeamIndex;
-				GameState->OnRep_WinningTeam();
-
-				if (GameState->HasWinningPlayerState())
+				auto CustomWinnerState =
+					CustomWinnerController
+						? CustomWinnerController->PlayerState
+							->Cast<AFortPlayerStateAthena>()
+						: nullptr;
+				if (!CustomWinnerState)
 				{
-					GameState->WinningPlayerState = KillerPlayerState;
-					GameState->OnRep_WinningPlayerState();
+					SDK::DbgLog(
+						"[Elimination] custom AutoEndGame skipped: no verified human winner victim=%p killer=%p\n",
+						(void*)PlayerController,
+						(void*)KillerPlayerController);
+				}
+				else
+				{
+					auto CustomWinnerPawn =
+						CustomWinnerController ==
+							KillerPlayerController &&
+							IsUsableDeathObject(KillerPawn)
+								? KillerPawn
+								: CustomWinnerController->MyFortPawn;
+					auto CustomWinnerWeapon =
+						CustomWinnerController ==
+							KillerPlayerController
+								? KillerWeapon
+								: nullptr;
+
+					GameState->WinningTeam =
+						CustomWinnerState->TeamIndex;
+					GameState->OnRep_WinningTeam();
+
+					if (GameState->HasWinningPlayerState())
+					{
+						GameState->WinningPlayerState =
+							CustomWinnerState;
+						GameState->OnRep_WinningPlayerState();
+					}
+					GameState->ForceNetUpdate();
+
+					GUI::gsStatus = Ended;
+
+					PrepareVictoryCrownRoyalRoyaleForWinningTeam(
+						CustomWinnerController);
+					ApplyVictoryCrownWinStateToWinningTeam(
+						CustomWinnerController);
+
+					SendOrDeferVictoryNotifications(
+						CustomWinnerController,
+						CustomWinnerPawn,
+						CustomWinnerWeapon,
+						PlayerState->DeathInfo.DeathCause,
+						true, true, true);
 				}
 			}
 
-			if (PlayerController->Pawn && KillerPlayerState && KillerPlayerState != PlayerState && KillerPlayerState->Place == 1)
+			if (KillerPlayerState &&
+				KillerPlayerState != PlayerState &&
+				IsHumanVictoryController(KillerPlayerController) &&
+				KillerPlayerState->Place == 1)
 			{
 				/*if (PlayerState->Place == 1)
 				{
@@ -3418,13 +4854,30 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 				GUI::gsStatus = Ended;
 
+				GameState->WinningTeam = KillerPlayerState->TeamIndex;
+				GameState->OnRep_WinningTeam();
+
+				if (GameState->HasWinningPlayerState())
+				{
+					GameState->WinningPlayerState = KillerPlayerState;
+					GameState->OnRep_WinningPlayerState();
+				}
+				GameState->ForceNetUpdate();
+
+				PrepareVictoryCrownRoyalRoyaleForWinningTeam(
+					KillerPlayerController);
+				ApplyVictoryCrownWinStateToWinningTeam(
+					KillerPlayerController);
+
 				if (FConfiguration::bUseWinLines)
 				{
 					if (VersionInfo.FortniteVersion >= 16.00)
 					{
-						KillerPlayerController->PlayWinEffects(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause, false);
-						KillerPlayerController->ClientNotifyWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
-						KillerPlayerController->ClientNotifyTeamWon(KillerPawn, KillerWeapon, PlayerState->DeathInfo.DeathCause);
+						SendOrDeferVictoryNotifications(
+							KillerPlayerController,
+							KillerPawn, KillerWeapon,
+							PlayerState->DeathInfo.DeathCause,
+							true, true, true);
 					}
 				}
 
@@ -3434,35 +4887,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					{
 						KillerPawn->CharacterMovement->Velocity = FVector{};
 					}
-				}
-
-				if (KillerPlayerState != PlayerState && VersionInfo.FortniteVersion >= 19)
-				{
-					auto Crown = FindObject<UFortItemDefinition>(L"/VictoryCrownsGameplay/Items/AGID_VictoryCrown.AGID_VictoryCrown");
-
-					TArray<FFortItemEntryStateValue> StateValues{};
-					auto Value = (FFortItemEntryStateValue*)malloc(FFortItemEntryStateValue::Size());
-					memset((PBYTE)Value, 0, FFortItemEntryStateValue::Size());
-
-					Value->IntValue = 1;
-					Value->StateType = 2;
-					StateValues.Add(*Value, FFortItemEntryStateValue::Size());
-
-					if (FConfiguration::bCrownSlomo)
-					{
-						free(Value);
-						KillerPlayerController->WorldInventory->GiveItem(Crown, 1, 0, 0, true, true, 0, StateValues);
-						StateValues.Free();
-					}
-				}
-
-				GameState->WinningTeam = KillerPlayerState->TeamIndex;
-				GameState->OnRep_WinningTeam();
-
-				if (GameState->HasWinningPlayerState())
-				{
-					GameState->WinningPlayerState = KillerPlayerState;
-					GameState->OnRep_WinningPlayerState();
 				}
 			}
 		}
@@ -3758,8 +5182,42 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 	}
 
+	if (bIsLateSeasonBotVictim)
+	{
+		LateSeasonFinishingWeapon =
+			GetWeaponDataSafe(ResolveDeathReportWeapon(DeathReport));
+		if (PlayerState->HasDeathInfo())
+			LateSeasonDeathCause = PlayerState->DeathInfo.DeathCause;
+	}
+
 	if (!bCalledNativeDeathEarly)
 		ClientOnPawnDiedOG(PlayerController, DeathReport);
+
+	// Some later builds finalize the winner in native ClientOnPawnDied rather
+	// than in RemoveFromAlivePlayers. Apply the already-prepared state after
+	// that path as well; this is idempotent when the earlier path handled it.
+	if (VersionInfo.FortniteVersion >= 19.0 &&
+		VersionInfo.FortniteVersion < 26.0 &&
+		FConfiguration::bCrownSlomo &&
+		IsUsableDeathObject(GameMode) &&
+		IsUsableDeathObject(GameState) &&
+		GameMode->MatchState == FName(L"WaitingPostMatch"))
+	{
+		auto NativeCrownWinner =
+			ResolveNativeVictoryWinner(
+				GameMode, GameState,
+				KillerPlayerState, PlayerController);
+		ApplyVictoryCrownWinStateToWinningTeam(
+			NativeCrownWinner);
+	}
+
+	if (bIsLateSeasonBotVictim)
+	{
+		CompleteLateSeasonBotVictoryAfterNative(
+			GameMode, GameState, PlayerController,
+			KillerPawn, KillerPlayerController,
+			LateSeasonFinishingWeapon, LateSeasonDeathCause);
+	}
 
 	if (bIs172SpawnedBotVictim)
 	{

@@ -35,6 +35,783 @@ void ShowFoundation(const ABuildingFoundation* Foundation)
 }
 
 bool bIsLargeTeamGame = false;
+uint64_t NotifyGameMemberAdded_ = 0;
+
+namespace
+{
+    struct FLateSeasonHumanTeamState
+    {
+        AFortGameMode* GameMode = nullptr;
+        UWorld* World = nullptr;
+        const UFortPlaylistAthena* Playlist = nullptr;
+        uint8 FirstTeam = 3;
+        uint8 NextTeam = 3;
+        int32 PlayersOnTeam = 0;
+
+        struct FAssignment
+        {
+            AFortPlayerStateAthena* PlayerState = nullptr;
+            uint8 Team = 3;
+        };
+
+        std::unordered_map<AFortPlayerControllerAthena*, FAssignment> AssignedTeams;
+    };
+
+    FLateSeasonHumanTeamState GLateSeasonHumanTeams;
+
+    bool ShouldRepairLateSeasonTeams()
+    {
+        return VersionInfo.FortniteVersion >= 17.0 && VersionInfo.FortniteVersion < 19.0;
+    }
+
+    uint8 GetPlaylistFirstTeam(const UFortPlaylistAthena* Playlist)
+    {
+        if (Playlist)
+        {
+            const int32 Offset = (int32)Playlist->GetOffset("DefaultFirstTeam");
+            if (Offset >= 0 && SDK::MemReadable((const uint8*)Playlist + Offset, sizeof(uint8)))
+            {
+                const uint8 FirstTeam = GetFromOffset<uint8>(Playlist, Offset);
+                if (FirstTeam >= 3 && FirstTeam < 250)
+                    return FirstTeam;
+            }
+        }
+
+        return 3;
+    }
+
+    void ResetLateSeasonHumanTeams(AFortGameMode* GameMode, const UFortPlaylistAthena* Playlist)
+    {
+        const uint8 FirstTeam = GetPlaylistFirstTeam(Playlist);
+
+        GLateSeasonHumanTeams.GameMode = GameMode;
+        GLateSeasonHumanTeams.World = UWorld::GetWorld();
+        GLateSeasonHumanTeams.Playlist = Playlist;
+        GLateSeasonHumanTeams.FirstTeam = FirstTeam;
+        GLateSeasonHumanTeams.NextTeam = FirstTeam;
+        GLateSeasonHumanTeams.PlayersOnTeam = 0;
+        GLateSeasonHumanTeams.AssignedTeams.clear();
+
+        // Keep the legacy PickTeam fallback in sync in case a particular
+        // 17/18 build still reaches it for one of its join paths.
+        AFortGameMode::CurrentTeam = FirstTeam;
+        AFortGameMode::PlayersOnCurTeam = 0;
+    }
+
+    uint8 ReserveLateSeasonHumanTeam(
+        AFortGameMode* GameMode,
+        AFortPlayerControllerAthena* Controller,
+        AFortPlayerStateAthena* PlayerState,
+        const UFortPlaylistAthena* Playlist)
+    {
+        if (GLateSeasonHumanTeams.GameMode != GameMode ||
+            GLateSeasonHumanTeams.World != UWorld::GetWorld() ||
+            GLateSeasonHumanTeams.Playlist != Playlist)
+        {
+            ResetLateSeasonHumanTeams(GameMode, Playlist);
+        }
+
+        if (auto Existing = GLateSeasonHumanTeams.AssignedTeams.find(Controller);
+            Existing != GLateSeasonHumanTeams.AssignedTeams.end())
+        {
+            if (Existing->second.PlayerState == PlayerState)
+            {
+                AFortGameMode::CurrentTeam =
+                    GLateSeasonHumanTeams.NextTeam;
+                AFortGameMode::PlayersOnCurTeam =
+                    GLateSeasonHumanTeams.PlayersOnTeam;
+                return Existing->second.Team;
+            }
+
+            GLateSeasonHumanTeams.AssignedTeams.erase(Existing);
+        }
+
+        const uint8 AssignedTeam = GLateSeasonHumanTeams.NextTeam;
+        GLateSeasonHumanTeams.AssignedTeams.emplace(
+            Controller,
+            FLateSeasonHumanTeamState::FAssignment{ PlayerState, AssignedTeam });
+
+        if (Playlist && Playlist->HasbIsLargeTeamGame() && Playlist->bIsLargeTeamGame)
+        {
+            GLateSeasonHumanTeams.NextTeam =
+                AssignedTeam == GLateSeasonHumanTeams.FirstTeam
+                ? (uint8)(GLateSeasonHumanTeams.FirstTeam + 1)
+                : GLateSeasonHumanTeams.FirstTeam;
+        }
+        else
+        {
+            int32 SquadSize = Playlist && Playlist->HasMaxSquadSize()
+                ? Playlist->MaxSquadSize
+                : 1;
+            if (SquadSize < 1)
+                SquadSize = 1;
+            else if (SquadSize > 100)
+                SquadSize = 100;
+
+            if (++GLateSeasonHumanTeams.PlayersOnTeam >= SquadSize)
+            {
+                GLateSeasonHumanTeams.NextTeam++;
+                GLateSeasonHumanTeams.PlayersOnTeam = 0;
+            }
+        }
+
+        // PickTeam is still used directly by synthetic controllers such as
+        // `spawnbot`. Keep its legacy counters at the same position as the
+        // repaired 17/18 allocator so bots cannot be placed on a full human
+        // duo/squad merely because native human joins skipped PickTeam.
+        AFortGameMode::CurrentTeam = GLateSeasonHumanTeams.NextTeam;
+        AFortGameMode::PlayersOnCurTeam =
+            GLateSeasonHumanTeams.PlayersOnTeam;
+
+        return AssignedTeam;
+    }
+
+    bool IsSaneObject(UObject* Object)
+    {
+        if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
+            return false;
+
+        const int32 ObjectIndex = Object->Index;
+        if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
+            return false;
+
+        auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+        return Item && Item->Object == Object && !(Item->Flags & 0x20) &&
+            Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
+    }
+
+    int32 GetLateSeasonIntProperty(
+        const UObject* Object,
+        const char* Name,
+        int32 Fallback)
+    {
+        if (!Object)
+            return Fallback;
+
+        const int32 Offset = (int32)Object->GetOffset(Name);
+        if (Offset < 0 ||
+            !SDK::MemReadable((const uint8*)Object + Offset, sizeof(int32)))
+        {
+            return Fallback;
+        }
+
+        return GetFromOffset<int32>(Object, Offset);
+    }
+
+    bool SetLateSeasonIntProperty(
+        UObject* Object,
+        const char* Name,
+        int32 Value)
+    {
+        if (!IsSaneObject(Object))
+            return false;
+
+        const int32 Offset = (int32)Object->GetOffset(Name);
+        if (Offset < 0 ||
+            !SDK::MemReadable((uint8*)Object + Offset, sizeof(int32)))
+        {
+            return false;
+        }
+
+        GetFromOffset<int32>(Object, Offset) = Value;
+        return true;
+    }
+
+    void SyncLateSeasonTeamSettings(
+        AFortGameMode* GameMode,
+        AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist)
+    {
+        if (!IsSaneObject(GameMode) || !IsSaneObject(GameState) || !Playlist)
+            return;
+
+        int32 MaxSquadSize = Playlist->HasMaxSquadSize()
+            ? Playlist->MaxSquadSize
+            : 1;
+        if (MaxSquadSize < 1)
+            MaxSquadSize = 1;
+
+        int32 MaxTeamSize =
+            GetLateSeasonIntProperty(Playlist, "MaxTeamSize", MaxSquadSize);
+        if (MaxTeamSize < 1)
+            MaxTeamSize = MaxSquadSize;
+
+        int32 MaxTeamCount = GetLateSeasonIntProperty(
+            Playlist,
+            "MaxTeamCount",
+            (Playlist->MaxPlayers + MaxTeamSize - 1) / MaxTeamSize);
+        if (MaxTeamCount < 1)
+            MaxTeamCount = (Playlist->MaxPlayers + MaxTeamSize - 1) / MaxTeamSize;
+
+        const bool bSetTeamSize =
+            SetLateSeasonIntProperty(GameState, "TeamSize", MaxTeamSize);
+        const bool bSetTeamCount =
+            SetLateSeasonIntProperty(GameState, "TeamCount", MaxTeamCount);
+        const bool bSetPartySize = GameMode->GameSession &&
+            SetLateSeasonIntProperty(
+                GameMode->GameSession, "MaxPartySize", MaxTeamSize);
+
+        SDK::DbgLog(
+            "[Teams] FN17-18 playlist team settings: TeamSize=%d(%d) TeamCount=%d(%d) MaxPartySize=%d\n",
+            MaxTeamSize,
+            bSetTeamSize ? 1 : 0,
+            MaxTeamCount,
+            bSetTeamCount ? 1 : 0,
+            bSetPartySize ? 1 : 0);
+    }
+
+    bool IsLateSeasonTeamPlaylist(const UFortPlaylistAthena* Playlist)
+    {
+        return Playlist && Playlist->HasMaxSquadSize() &&
+            Playlist->MaxSquadSize > 1;
+    }
+
+    bool DoesLateSeasonPlaylistAllowDBNO(
+        const UFortPlaylistAthena* Playlist)
+    {
+        if (!Playlist)
+            return false;
+
+        const int32 DBNOTypeOffset = (int32)Playlist->GetOffset("DBNOType");
+        if (DBNOTypeOffset < 0 ||
+            !SDK::MemReadable(
+                (const uint8*)Playlist + DBNOTypeOffset, sizeof(uint8)))
+        {
+            // Older assets without DBNOType use the original Erbium rule:
+            // team playlist means DBNO is permitted.
+            return true;
+        }
+
+        const uint8 DBNOType =
+            GetFromOffset<uint8>(Playlist, DBNOTypeOffset);
+        switch (DBNOType)
+        {
+        case 0: // EDBNOType::On
+            return true;
+        case 1: // EDBNOType::Off
+            return false;
+        case 2: // EDBNOType::NotWhenRespawning
+        {
+            const bool bRespawning =
+                Playlist->HasRespawnType()
+                ? Playlist->RespawnType > 0
+                : FConfiguration::bForceRespawns;
+            return !bRespawning;
+        }
+        default:
+            return true;
+        }
+    }
+
+    void ApplyLateSeasonDBNOSettings(
+        AFortGameMode* GameMode,
+        AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist,
+        const char* Stage)
+    {
+        if (!ShouldRepairLateSeasonTeams() ||
+            !IsSaneObject(GameMode) || !IsSaneObject(GameState))
+        {
+            return;
+        }
+
+        // Native Athena only enables DBNO for actual team playlists. Keep
+        // bAlwaysDBNO disabled so the last living member of a team is
+        // eliminated instead of being knocked with nobody able to revive.
+        const bool bTeamMode = IsLateSeasonTeamPlaylist(Playlist);
+        bool bDBNOEnabled =
+            FConfiguration::bEnableDBNO && bTeamMode &&
+            DoesLateSeasonPlaylistAllowDBNO(Playlist);
+
+        if (GameMode->HasbDBNOEnabled())
+            GameMode->bDBNOEnabled = bDBNOEnabled;
+        if (GameMode->HasbAlwaysDBNO())
+            GameMode->bAlwaysDBNO = false;
+        if (GameState->HasbDBNOEnabledForGameMode())
+            GameState->bDBNOEnabledForGameMode = bDBNOEnabled;
+
+        GameState->ForceNetUpdate();
+        SDK::DbgLog(
+            "[Teams] FN17-18 DBNO %s: TeamMode=%d Enabled=%d\n",
+            Stage,
+            bTeamMode ? 1 : 0,
+            bDBNOEnabled ? 1 : 0);
+    }
+
+    UObject* FindLateSeasonTeamInfo(
+        AFortGameStateAthena* GameState,
+        uint8 TeamIndex)
+    {
+        if (!GameState)
+            return nullptr;
+
+        const int32 TeamsOffset = (int32)GameState->GetOffset("Teams");
+        if (TeamsOffset < 0 ||
+            !SDK::MemReadable((const uint8*)GameState + TeamsOffset, sizeof(TArray<UObject*>)))
+        {
+            return nullptr;
+        }
+
+        auto& Teams = GetFromOffset<TArray<UObject*>>(GameState, TeamsOffset);
+        const int32 TeamCount = Teams.Num();
+        if (TeamCount <= 0 || TeamCount > 256 ||
+            !SDK::MemReadable(Teams.GetData(), sizeof(UObject*) * TeamCount))
+        {
+            return nullptr;
+        }
+
+        // Match the replicated Team value instead of assuming an array base.
+        // Reserved team slots differ between builds.
+        for (int32 Index = 0; Index < TeamCount; Index++)
+        {
+            auto TeamInfo = Teams[Index];
+            if (!IsSaneObject(TeamInfo))
+                continue;
+
+            const int32 TeamOffset = (int32)TeamInfo->GetOffset("Team");
+            if (TeamOffset >= 0 &&
+                SDK::MemReadable((const uint8*)TeamInfo + TeamOffset, sizeof(uint8)) &&
+                GetFromOffset<uint8>(TeamInfo, TeamOffset) == TeamIndex)
+            {
+                return TeamInfo;
+            }
+        }
+
+        return nullptr;
+    }
+
+    void EnsureLateSeasonTeamObjects(
+        AFortGameMode* GameMode,
+        AFortGameStateAthena* GameState,
+        uint8 FirstTeam)
+    {
+        if (!IsSaneObject(GameMode) || !IsSaneObject(GameState) ||
+            FindLateSeasonTeamInfo(GameState, FirstTeam))
+        {
+            return;
+        }
+
+        static int32 InitializeTeamsVftIndex = -2;
+        if (InitializeTeamsVftIndex == -2)
+        {
+            InitializeTeamsVftIndex = -1;
+            auto StringRef = Memcury::Scanner::FindStringRef(
+                L"InitializeTeams()", false);
+            const uintptr_t FunctionAddress = StringRef.IsValid()
+                ? StringRef.FindFunctionBoundary(false).Get()
+                : 0;
+
+            if (FunctionAddress && GameMode->Vft)
+            {
+                for (int32 Index = 0; Index < 1024; Index++)
+                {
+                    if (!SDK::MemReadable(
+                        &GameMode->Vft[Index], sizeof(void*)))
+                    {
+                        break;
+                    }
+
+                    if ((uintptr_t)GameMode->Vft[Index] == FunctionAddress)
+                    {
+                        InitializeTeamsVftIndex = Index;
+                        break;
+                    }
+                }
+            }
+
+            SDK::DbgLog(
+                "[Teams] FN17-18 InitializeTeams resolver: Address=%p VFT=%d\n",
+                (void*)FunctionAddress,
+                InitializeTeamsVftIndex);
+        }
+
+        if (InitializeTeamsVftIndex < 0 || !GameMode->Vft ||
+            !SDK::MemReadable(
+                &GameMode->Vft[InitializeTeamsVftIndex], sizeof(void*)))
+        {
+            return;
+        }
+
+        auto InitializeTeams =
+            (void(*)(AFortGameMode*))GameMode->Vft[InitializeTeamsVftIndex];
+        if (!SDK::MemReadable((void*)InitializeTeams, 16))
+            return;
+
+        InitializeTeams(GameMode);
+        SDK::DbgLog(
+            "[Teams] FN17-18 InitializeTeams invoked: FirstTeam=%u TeamInfo=%p\n",
+            (unsigned)FirstTeam,
+            (void*)FindLateSeasonTeamInfo(GameState, FirstTeam));
+    }
+
+    TArray<AActor*>* GetLateSeasonTeamMembers(UObject* TeamInfo)
+    {
+        if (!IsSaneObject(TeamInfo))
+            return nullptr;
+
+        const int32 Offset = (int32)TeamInfo->GetOffset("TeamMembers");
+        if (Offset < 0 ||
+            !SDK::MemReadable((const uint8*)TeamInfo + Offset, sizeof(TArray<AActor*>)))
+        {
+            return nullptr;
+        }
+
+        auto& Members = GetFromOffset<TArray<AActor*>>(TeamInfo, Offset);
+        if (Members.Num() < 0 || Members.Num() > 256 ||
+            Members.Max() < Members.Num() || Members.Max() > 4096)
+        {
+            return nullptr;
+        }
+
+        if (Members.Num() > 0 &&
+            !SDK::MemReadable(Members.GetData(), sizeof(AActor*) * Members.Num()))
+        {
+            return nullptr;
+        }
+
+        return &Members;
+    }
+
+    void RemoveLateSeasonTeamMember(UObject* TeamInfo, AActor* Controller)
+    {
+        auto Members = GetLateSeasonTeamMembers(TeamInfo);
+        if (!Members)
+            return;
+
+        for (int32 Index = Members->Num() - 1; Index >= 0; Index--)
+        {
+            if ((*Members)[Index] == Controller)
+                Members->Remove(Index);
+        }
+    }
+
+    void RemoveLateSeasonMemberFromOtherTeams(
+        AFortGameStateAthena* GameState,
+        UObject* DesiredTeam,
+        AActor* Controller)
+    {
+        if (!IsSaneObject(GameState))
+            return;
+
+        const int32 TeamsOffset = (int32)GameState->GetOffset("Teams");
+        if (TeamsOffset < 0 ||
+            !SDK::MemReadable((const uint8*)GameState + TeamsOffset, sizeof(TArray<UObject*>)))
+        {
+            return;
+        }
+
+        auto& Teams = GetFromOffset<TArray<UObject*>>(GameState, TeamsOffset);
+        if (Teams.Num() <= 0 || Teams.Num() > 256 ||
+            !SDK::MemReadable(Teams.GetData(), sizeof(UObject*) * Teams.Num()))
+        {
+            return;
+        }
+
+        for (auto TeamInfo : Teams)
+        {
+            if (TeamInfo != DesiredTeam && IsSaneObject(TeamInfo))
+                RemoveLateSeasonTeamMember(TeamInfo, Controller);
+        }
+    }
+
+    bool ApplyLateSeasonHumanTeam(
+        AFortGameStateAthena* GameState,
+        AFortPlayerControllerAthena* Controller,
+        AFortPlayerStateAthena* PlayerState,
+        uint8 TeamIndex,
+        uint8 FirstTeam,
+        bool bNotify,
+        const char* Stage)
+    {
+        if (!IsSaneObject(GameState) || !IsSaneObject(Controller) ||
+            !IsSaneObject(PlayerState) ||
+            !PlayerState->HasTeamIndex())
+        {
+            return false;
+        }
+
+        UObject* TeamInfo = FindLateSeasonTeamInfo(GameState, TeamIndex);
+        auto TeamMembers = GetLateSeasonTeamMembers(TeamInfo);
+        const int32 PlayerTeamOffset = (int32)PlayerState->GetOffset("PlayerTeam");
+        const int32 PlayerTeamPrivateOffset =
+            (int32)PlayerState->GetOffset("PlayerTeamPrivate");
+        const int32 PrivateInfoOffset = TeamInfo
+            ? (int32)TeamInfo->GetOffset("PrivateInfo")
+            : -1;
+
+        if (!TeamInfo || !TeamMembers ||
+            PlayerTeamOffset < 0 || PlayerTeamPrivateOffset < 0 ||
+            PrivateInfoOffset < 0 ||
+            !SDK::MemReadable(
+                (const uint8*)PlayerState + PlayerTeamOffset,
+                sizeof(UObject*)) ||
+            !SDK::MemReadable(
+                (const uint8*)PlayerState + PlayerTeamPrivateOffset,
+                sizeof(UObject*)) ||
+            !SDK::MemReadable(
+                (const uint8*)TeamInfo + PrivateInfoOffset,
+                sizeof(UObject*)))
+        {
+            SDK::DbgLog(
+                "[Teams] FN17-18 %s could not resolve complete TeamInfo graph for Team=%u (TeamInfo=%p Members=%p)\n",
+                Stage,
+                (unsigned)TeamIndex,
+                (void*)TeamInfo,
+                (void*)TeamMembers);
+            return false;
+        }
+
+        auto PrivateInfo = GetFromOffset<UObject*>(TeamInfo, PrivateInfoOffset);
+        if (!IsSaneObject(PrivateInfo))
+        {
+            SDK::DbgLog(
+                "[Teams] FN17-18 %s rejected invalid PrivateInfo=%p for Team=%u\n",
+                Stage,
+                (void*)PrivateInfo,
+                (unsigned)TeamIndex);
+            return false;
+        }
+
+        const uint8 OldTeamIndex = PlayerState->TeamIndex;
+        uint8 SquadId = TeamIndex >= FirstTeam
+            ? (uint8)(TeamIndex - FirstTeam)
+            : 0;
+
+        auto& PlayerTeam = GetFromOffset<UObject*>(
+            PlayerState, PlayerTeamOffset);
+        auto OldPlayerTeam = PlayerTeam;
+        if (OldPlayerTeam != TeamInfo && IsSaneObject(OldPlayerTeam))
+            RemoveLateSeasonTeamMember(OldPlayerTeam, Controller);
+        if (bNotify)
+            RemoveLateSeasonMemberFromOtherTeams(GameState, TeamInfo, Controller);
+
+        PlayerState->TeamIndex = TeamIndex;
+        if (PlayerState->HasSquadId())
+            PlayerState->SquadId = SquadId;
+        PlayerTeam = TeamInfo;
+        GetFromOffset<UObject*>(PlayerState, PlayerTeamPrivateOffset) = PrivateInfo;
+
+        if (!TeamMembers->Contains((AActor*)Controller))
+            TeamMembers->Add((AActor*)Controller);
+        const int32 TeamMemberCount = TeamMembers->Num();
+
+        if (bNotify)
+        {
+            if (auto OnRepPlayerTeam =
+                PlayerState->GetFunction("OnRep_PlayerTeam"))
+            {
+                PlayerState->Call<void>(OnRepPlayerTeam);
+            }
+            if (auto OnRepPlayerTeamPrivate =
+                PlayerState->GetFunction("OnRep_PlayerTeamPrivate"))
+            {
+                PlayerState->Call<void>(OnRepPlayerTeamPrivate);
+            }
+            if (auto OnRepTeamIndex =
+                PlayerState->GetFunction("OnRep_TeamIndex"))
+            {
+                PlayerState->Call<void>(OnRepTeamIndex, OldTeamIndex);
+            }
+            if (PlayerState->HasSquadId())
+                PlayerState->OnRep_SquadId();
+
+            PlayerState->ForceNetUpdate();
+            Controller->ForceNetUpdate();
+            GameState->ForceNetUpdate();
+        }
+
+        SDK::DbgLog(
+            "[Teams] FN17-18 %s PC=%p PS=%p Team=%u Squad=%u TeamInfo=%p Members=%d\n",
+            Stage,
+            (void*)Controller,
+            (void*)PlayerState,
+            (unsigned)TeamIndex,
+            (unsigned)SquadId,
+            (void*)TeamInfo,
+            TeamMemberCount);
+        return true;
+    }
+
+    bool IsLateSeasonUniqueIdValid(const FUniqueNetIdRepl& UniqueId)
+    {
+        static bool bValidFunctionInitialized = false;
+        static UFunction* ValidFunction = nullptr;
+        auto Library = UFortKismetLibrary::GetDefaultObj();
+        if (Library)
+        {
+            if (!bValidFunctionInitialized)
+            {
+                bValidFunctionInitialized = true;
+                ValidFunction =
+                    Library->GetFunction("IsValid_UniqueNetIdRepl");
+            }
+
+            if (ValidFunction)
+                return Library->Call<bool>(ValidFunction, UniqueId);
+        }
+
+        if (FUniqueNetIdRepl::HasReplicationBytes())
+        {
+            const auto& Bytes = UniqueId.ReplicationBytes;
+            return Bytes.Num() > 0 && Bytes.Num() <= 1024 &&
+                SDK::MemReadable(Bytes.GetData(), Bytes.Num());
+        }
+
+        return true;
+    }
+
+    bool LateSeasonUniqueIdsMatch(
+        const FUniqueNetIdRepl& Left,
+        const FUniqueNetIdRepl& Right)
+    {
+        if (!IsLateSeasonUniqueIdValid(Left) ||
+            !IsLateSeasonUniqueIdValid(Right))
+        {
+            return false;
+        }
+
+        static bool bEqualFunctionInitialized = false;
+        static UFunction* EqualFunction = nullptr;
+        auto Library = UFortKismetLibrary::GetDefaultObj();
+        if (Library)
+        {
+            if (!bEqualFunctionInitialized)
+            {
+                bEqualFunctionInitialized = true;
+                EqualFunction = Library->GetFunction(
+                    "EqualEqual_UniqueNetIdReplUniqueNetIdRepl");
+            }
+
+            if (EqualFunction)
+                return Library->Call<bool>(EqualFunction, Left, Right);
+        }
+
+        if (FUniqueNetIdRepl::HasReplicationBytes())
+        {
+            const auto& LeftBytes = Left.ReplicationBytes;
+            const auto& RightBytes = Right.ReplicationBytes;
+            if (LeftBytes.Num() != RightBytes.Num())
+                return false;
+            if (LeftBytes.Num() > 0 && LeftBytes.Num() <= 1024 &&
+                SDK::MemReadable(LeftBytes.GetData(), LeftBytes.Num()) &&
+                SDK::MemReadable(RightBytes.GetData(), RightBytes.Num()))
+            {
+                return memcmp(
+                    LeftBytes.GetData(),
+                    RightBytes.GetData(),
+                    LeftBytes.Num()) == 0;
+            }
+        }
+
+        int32 IdSize = FUniqueNetIdRepl::Size();
+        if (IdSize <= 0)
+            return false;
+        if (IdSize > (int32)sizeof(FUniqueNetIdRepl))
+            IdSize = sizeof(FUniqueNetIdRepl);
+
+        return memcmp(&Left, &Right, IdSize) == 0;
+    }
+
+    void UpsertLateSeasonGameMemberInfo(
+        AFortGameStateAthena* GameState,
+        AFortPlayerStateAthena* PlayerState)
+    {
+        if (!IsSaneObject(GameState) || !IsSaneObject(PlayerState) ||
+            !GameState->HasGameMemberInfoArray())
+        {
+            return;
+        }
+
+        auto& Members = GameState->GameMemberInfoArray.Members;
+        const int32 MemberCount = Members.Num();
+        const int32 MemberSize = FGameMemberInfo::Size();
+        if (MemberCount < 0 || MemberCount > 256 || MemberSize <= 0 ||
+            Members.Max() < MemberCount || Members.Max() > 4096 ||
+            (MemberCount > 0 &&
+                !SDK::MemReadable(
+                    Members.GetData(),
+                    (size_t)MemberSize * MemberCount)))
+        {
+            return;
+        }
+
+        auto& PlayerUniqueId =
+            PlayerState->HasUniqueID() ? PlayerState->UniqueID : PlayerState->UniqueId;
+        int32 KeptIndex = -1;
+
+        for (int32 Index = 0; Index < MemberCount; Index++)
+        {
+            auto& Member = Members.Get(Index, MemberSize);
+            if (LateSeasonUniqueIdsMatch(Member.MemberUniqueId, PlayerUniqueId))
+            {
+                KeptIndex = Index;
+                break;
+            }
+        }
+
+        int32 RemovedDuplicates = 0;
+        if (KeptIndex >= 0)
+        {
+            for (int32 Index = Members.Num() - 1; Index > KeptIndex; Index--)
+            {
+                auto& Member = Members.Get(Index, MemberSize);
+                if (LateSeasonUniqueIdsMatch(
+                    Member.MemberUniqueId, PlayerUniqueId))
+                {
+                    Members.Remove(Index, MemberSize);
+                    RemovedDuplicates++;
+                }
+            }
+        }
+
+        FGameMemberInfo* StoredMember = nullptr;
+        if (KeptIndex >= 0)
+        {
+            StoredMember = &Members.Get(KeptIndex, MemberSize);
+        }
+        else
+        {
+            auto Member = (FGameMemberInfo*)malloc(MemberSize);
+            if (!Member)
+                return;
+
+            memset(Member, 0, MemberSize);
+            Member->MostRecentArrayReplicationKey = -1;
+            Member->ReplicationID = -1;
+            Member->ReplicationKey = -1;
+            Member->MemberUniqueId = PlayerUniqueId;
+            StoredMember = &Members.Add(*Member, MemberSize);
+            free(Member);
+        }
+
+        StoredMember->TeamIndex = PlayerState->TeamIndex;
+        StoredMember->SquadId = PlayerState->HasSquadId()
+            ? PlayerState->SquadId
+            : (uint8)0;
+        GameState->GameMemberInfoArray.MarkItemDirty(*StoredMember);
+        if (RemovedDuplicates > 0)
+            GameState->GameMemberInfoArray.MarkArrayDirty();
+
+        auto NotifyGameMemberAdded =
+            (void(*)(AFortGameStateAthena*, uint8_t, uint8_t, FUniqueNetIdRepl*))
+            NotifyGameMemberAdded_;
+        if (KeptIndex < 0 && NotifyGameMemberAdded)
+        {
+            NotifyGameMemberAdded(
+                GameState,
+                StoredMember->SquadId,
+                StoredMember->TeamIndex,
+                &StoredMember->MemberUniqueId);
+        }
+
+        SDK::DbgLog(
+            "[Teams] FN17-18 GameMemberInfo upsert Team=%u Squad=%u Existing=%d DuplicatesRemoved=%d\n",
+            (unsigned)StoredMember->TeamIndex,
+            (unsigned)StoredMember->SquadId,
+            KeptIndex >= 0 ? 1 : 0,
+            RemovedDuplicates);
+    }
+}
 
 void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 {
@@ -95,6 +872,11 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         {
             //if (VersionInfo.EngineVersion >= 4.27)
             GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
+            if (ShouldRepairLateSeasonTeams() &&
+                FPlaylistPropertyArray::HasOverridePlaylist())
+            {
+                GameState->CurrentPlaylistInfo.OverridePlaylist = Playlist;
+            }
             GameState->CurrentPlaylistInfo.PlaylistReplicationKey++;
             GameState->CurrentPlaylistInfo.MarkArrayDirty();
             GameState->OnRep_CurrentPlaylistInfo();
@@ -121,22 +903,49 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             GameState->CachedSafeZoneStartUp = Playlist->SafeZoneStartUp;
 
         // Configure each reflected DBNO property independently because their
-        // availability and names vary by game version.
-        bool bDBNOOn = true;
+        // availability and names vary by game version. FN17/18 is finalized
+        // below after its playlist team graph has been initialized.
+        bool bDBNOOn = ShouldRepairLateSeasonTeams()
+            ? (FConfiguration::bEnableDBNO &&
+                IsLateSeasonTeamPlaylist(Playlist) &&
+                DoesLateSeasonPlaylistAllowDBNO(Playlist))
+            : true;
         bool bAlwaysDBNO = false;
-        if (GameMode->HasbEnableDBNO())
+        if (!ShouldRepairLateSeasonTeams() &&
+            GameMode->HasbEnableDBNO())
             GameMode->bEnableDBNO = bDBNOOn;
         if (GameMode->HasbDBNOEnabled())
             GameMode->bDBNOEnabled = bDBNOOn;
         if (GameState->HasbDBNOEnabledForGameMode())
             GameState->bDBNOEnabledForGameMode = bDBNOOn;
-        if (GameState->HasbDBNODeathEnabled())
+        if (!ShouldRepairLateSeasonTeams() &&
+            GameState->HasbDBNODeathEnabled())
             GameState->bDBNODeathEnabled = bDBNOOn;
         // Let native rules decide whether a solo player can be downed.
         if (GameMode->HasbAlwaysDBNO())
             GameMode->bAlwaysDBNO = bAlwaysDBNO;
 
         bIsLargeTeamGame = Playlist->bIsLargeTeamGame;
+
+        if (ShouldRepairLateSeasonTeams())
+        {
+            SyncLateSeasonTeamSettings(GameMode, GameState, Playlist);
+            EnsureLateSeasonTeamObjects(
+                GameMode, GameState, GetPlaylistFirstTeam(Playlist));
+            ApplyLateSeasonDBNOSettings(
+                GameMode, GameState, Playlist, "playlist");
+            if (GLateSeasonHumanTeams.GameMode != GameMode ||
+                GLateSeasonHumanTeams.World != UWorld::GetWorld() ||
+                GLateSeasonHumanTeams.Playlist != Playlist)
+            {
+                ResetLateSeasonHumanTeams(GameMode, Playlist);
+            }
+            SDK::DbgLog(
+                "[Teams] FN17-18 allocator reset: FirstTeam=%u MaxSquadSize=%d LargeTeam=%d\n",
+                (unsigned)GLateSeasonHumanTeams.FirstTeam,
+                Playlist->HasMaxSquadSize() ? Playlist->MaxSquadSize : 1,
+                Playlist->HasbIsLargeTeamGame() ? (int)Playlist->bIsLargeTeamGame : 0);
+        }
 
         // if (GameState->HasAdditionalPlaylistLevelsStreamed())
             // GameState->OnRep_AdditionalPlaylistLevelsStreamed();
@@ -237,6 +1046,13 @@ static int GetLegacySafeZoneLocationCount(AFortGameMode* GameMode)
     return RequiredLocationCount;
 }
 
+static bool UsesLegacySafeZoneLocFallback()
+{
+    return VersionInfo.FortniteVersion == 1.10 ||
+        VersionInfo.FortniteVersion == 1.72 ||
+        VersionInfo.FortniteVersion == 2.50;
+}
+
 static void EnsureLegacySafeZoneDamageEffect(AFortGameMode* GameMode)
 {
     if (!GameMode || VersionInfo.FortniteVersion >= 7.00 || !FConfiguration::bLateGame)
@@ -301,13 +1117,12 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
     if (VersionInfo.FortniteVersion >= 6.00 && !bUseCustomCenter)
         return;
 
-    // 1.7.2 and 2.50 build their real indicator location only after aircraft
-    // exit. Pre-filling the empty array makes the bus use a temporary
+    // 1.10, 1.7.2 and 2.50 build their real indicator location only after
+    // aircraft exit. Pre-filling the empty array makes the bus use a temporary
     // foundation while native SafeZones later regenerates a different center.
     // Preserve the original Erbium SafeZoneLoc fallback on those exact builds.
     // Custom zones remain deliberately concentric and may seed every entry.
-    if ((VersionInfo.FortniteVersion == 1.72 ||
-         VersionInfo.FortniteVersion == 2.50) && !bUseCustomCenter)
+    if (UsesLegacySafeZoneLocFallback() && !bUseCustomCenter)
         return;
 
     // Keep any locations the build did initialize and extend from the last
@@ -2103,7 +2918,6 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
 }
 
 
-uint64_t NotifyGameMemberAdded_ = 0;
 int16_t WorldPlayerId = 0;
 void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
 {
@@ -2113,6 +2927,29 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
     auto GameMode = (AFortGameMode*)Context;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
     AFortPlayerStateAthena* PlayerState = (AFortPlayerStateAthena*)NewPlayer->PlayerState;
+    const bool bIsBot = PlayerState && PlayerState->HasbIsABot() &&
+        PlayerState->bIsABot;
+    const bool bRepairLateSeasonTeam =
+        ShouldRepairLateSeasonTeams() && !bIsBot;
+    uint8 ReservedLateSeasonTeam = 0;
+
+    if (bRepairLateSeasonTeam)
+    {
+        auto Playlist = GameState->HasCurrentPlaylistInfo()
+            ? GameState->CurrentPlaylistInfo.BasePlaylist
+            : GameState->CurrentPlaylistData;
+        ReservedLateSeasonTeam =
+            ReserveLateSeasonHumanTeam(
+                GameMode, NewPlayer, PlayerState, Playlist);
+        ApplyLateSeasonHumanTeam(
+            GameState,
+            NewPlayer,
+            PlayerState,
+            ReservedLateSeasonTeam,
+            GLateSeasonHumanTeams.FirstTeam,
+            false,
+            "pre-native");
+    }
 
     if (VersionInfo.FortniteVersion <= 2.5)
     {
@@ -2120,13 +2957,13 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
         NewPlayer->QuickBars->SetOwner(NewPlayer);
     }
 
-    if (PlayerState->HasSquadId())
+    if (!bRepairLateSeasonTeam && PlayerState->HasSquadId())
     {
         PlayerState->SquadId = PlayerState->TeamIndex - 3;
         PlayerState->OnRep_SquadId();
     }
 
-    if (GameState->HasGameMemberInfoArray())
+    if (!bRepairLateSeasonTeam && GameState->HasGameMemberInfoArray())
     {
         auto Member = (FGameMemberInfo*)malloc(FGameMemberInfo::Size());
         memset((PBYTE)Member, 0, FGameMemberInfo::Size());
@@ -2163,7 +3000,36 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
     if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2"))
         AFortAthenaCreativePortal::Create(NewPlayer);
 
-    return callOG(GameMode, Stack.GetCurrentNativeFunction(), HandleStartingNewPlayer, NewPlayer);
+    callOG(GameMode, Stack.GetCurrentNativeFunction(), HandleStartingNewPlayer, NewPlayer);
+
+    // Native 17/18 startup does not consistently call the PickTeam routine
+    // Magnesium hooks. Reapply after it returns in case it restored a default
+    // PlayerTeam, then correct any GameMemberInfo entry it created.
+    if (bRepairLateSeasonTeam && IsSaneObject(NewPlayer) &&
+        NewPlayer->PlayerState)
+    {
+        GameState = (AFortGameStateAthena*)GameMode->GameState;
+        PlayerState = (AFortPlayerStateAthena*)NewPlayer->PlayerState;
+        const bool bAppliedTeam = ApplyLateSeasonHumanTeam(
+            GameState,
+            NewPlayer,
+            PlayerState,
+            ReservedLateSeasonTeam,
+            GLateSeasonHumanTeams.FirstTeam,
+            true,
+            "post-native");
+        if (bAppliedTeam)
+        {
+            UpsertLateSeasonGameMemberInfo(GameState, PlayerState);
+            auto Playlist = GameState->HasCurrentPlaylistInfo()
+                ? GameState->CurrentPlaylistInfo.BasePlaylist
+                : GameState->CurrentPlaylistData;
+            ApplyLateSeasonDBNOSettings(
+                GameMode, GameState, Playlist, "post-native");
+        }
+    }
+
+    return;
 }
 
 
@@ -2172,8 +3038,28 @@ uint8_t AFortGameMode::PickTeam(AFortGameMode* GameMode, uint8_t PreferredTeam, 
     if (!GameMode->HasWarmupRequiredPlayerCount())
         return 0;
 
-    uint8_t ret = CurrentTeam;
     auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+
+    // FN17/18's native human join path can bypass this hook. Route any later
+    // direct PickTeam call (notably `spawnbot`) through the same idempotent
+    // allocator so every participant consumes the correct squad slot.
+    if (ShouldRepairLateSeasonTeams() && Controller &&
+        Controller->PlayerState)
+    {
+        auto PlayerState =
+            (AFortPlayerStateAthena*)Controller->PlayerState;
+        const uint8 AssignedTeam = ReserveLateSeasonHumanTeam(
+            GameMode, Controller, PlayerState, Playlist);
+        printf(
+            "Picked repaired team %d %d\n",
+            AssignedTeam,
+            Playlist && Playlist->HasMaxSquadSize()
+                ? Playlist->MaxSquadSize
+                : 1);
+        return AssignedTeam;
+    }
+
+    uint8_t ret = CurrentTeam;
 
     if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
     {
@@ -2274,8 +3160,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             // the early initialization could not find a center, leaving the
             // native state untouched is safer than creating two storm centers.
             if (VersionInfo.FortniteVersion < 6.00 &&
-                VersionInfo.FortniteVersion != 1.72 &&
-                VersionInfo.FortniteVersion != 2.50)
+                !UsesLegacySafeZoneLocFallback())
             {
                 SDK::DbgLog("[SafeZone] pre-S6 aircraft started without four native locations\n");
                 return Ret;
@@ -2315,9 +3200,6 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
         if (FConfiguration::bMovingBus)
         {
             bool IsSmallZone = FConfiguration::IsS27() ? GameMode->GetLateSafeZoneIndex() > 3 : GameMode->GetLateSafeZoneIndex() > 4;
-            auto OffsetDistance = IsSmallZone ? 10000.0f : 25000.0f;
-            auto OffsetRotation = Aircraft->FlightInfo.FlightStartRotation + FRotator(0, 180, 0);
-            auto OffsetDirection = OffsetRotation.Vector();
 
             if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
             {
@@ -2338,8 +3220,8 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             {
                 Aircraft->FlightSpeed /= IsSmallZone ? 10 : 5;
 
-                Aircraft->FlightInfo.FlightStartLocation = Loc;
-                Aircraft->FlightInfo.FlightStartLocation.Z = 25000.f;
+                Aircraft->FlightStartLocation = Loc;
+                Aircraft->FlightStartLocation.Z = 25000.f;
 
                 if (Aircraft->HasTimeTillFlightEnd())
                 {

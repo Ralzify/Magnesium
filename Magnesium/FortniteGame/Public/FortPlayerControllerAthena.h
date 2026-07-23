@@ -533,6 +533,7 @@ public:
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
     static void TickNukeRockets(float DeltaSeconds);
+    static void TickPendingVictoryCrownNotifications();
     DefHookOg(void, ClientOnPawnDied, AFortPlayerControllerAthena*, FFortPlayerDeathReport&);
     DefUHookOg(ServerAttemptInteract_);
     void InternalPickup(FFortItemEntry*);

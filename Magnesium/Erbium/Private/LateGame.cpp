@@ -3,11 +3,73 @@
 #include "../Public/Utils.h"
 #include "../../FortniteGame/Public/FortInventory.h"
 #include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
+#include "../../FortniteGame/Public/FortControllerComponent_VictoryCrowns.h"
 #include "../Magnesium/Erbium/Public/Misc.h"
 #include "../Public/Configuration.h"
 
 #include <random>
 #include <chrono>
+
+static bool IsUsableLateGameObject(const UObject* Object)
+{
+    if (!Object || IsBadReadPtr((void*)Object))
+        return false;
+
+    if (Object->Index < 0 ||
+        Object->Index >= TUObjectArray::Num())
+    {
+        return false;
+    }
+
+    auto Item = TUObjectArray::GetItemByIndex(Object->Index);
+    return Item && Item->Object == Object &&
+        !(Item->Flags & 0x20) && Object->Class &&
+        !IsBadReadPtr(Object->Class);
+}
+
+static UFortControllerComponent_VictoryCrowns*
+GetLateGameVictoryCrownComponent(
+    AFortPlayerControllerAthena* PlayerController)
+{
+    if (!IsUsableLateGameObject(PlayerController))
+        return nullptr;
+
+    auto CrownComponentClass =
+        UFortControllerComponent_VictoryCrowns::StaticClass();
+    auto RawCrownComponent =
+        IsUsableLateGameObject(CrownComponentClass)
+            ? PlayerController->GetComponentByClass(
+                CrownComponentClass)
+            : nullptr;
+    return IsUsableLateGameObject(RawCrownComponent) &&
+        RawCrownComponent->IsA(CrownComponentClass)
+            ? (UFortControllerComponent_VictoryCrowns*)
+                RawCrownComponent
+            : nullptr;
+}
+
+static const UFortWorldItemDefinition*
+ResolveLateGameVictoryCrownDefinition(
+    UFortControllerComponent_VictoryCrowns* CrownComponent)
+{
+    if (CrownComponent &&
+        CrownComponent->HasCrownInventoryItemClass())
+    {
+        auto& CrownInventoryItemClass =
+            CrownComponent->GetCrownInventoryItemClass();
+        auto ConfiguredDefinition =
+            CrownInventoryItemClass.Get();
+        if (IsUsableLateGameObject(ConfiguredDefinition))
+            return ConfiguredDefinition;
+    }
+
+    auto FallbackDefinition =
+        FindObject<UFortWorldItemDefinition>(
+            L"/VictoryCrownsGameplay/Items/AGID_VictoryCrown.AGID_VictoryCrown");
+    return IsUsableLateGameObject(FallbackDefinition)
+        ? FallbackDefinition
+        : nullptr;
+}
 
 TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
 {
@@ -2164,5 +2226,132 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
                 WorldInventory->GiveItem(ItemDef, Count, ClipSize, 0, true, true, PhantomReserveAmmo, {});
             }
         }
+    }
+
+    // Magnesium does not persist a winner's crown into the next server match.
+    // Seed one outside the randomized quickbar slots so Crown Slomo can produce
+    // the native Crowned Victory Royale presentation on the verified FN19-25
+    // implementation. FN26+ uses a different victory UI and intentionally
+    // falls back to the ordinary server victory path.
+    if (VersionInfo.FortniteVersion >= 19.0 &&
+        VersionInfo.FortniteVersion < 26.0 &&
+        FConfiguration::bCrownSlomo)
+    {
+        auto CrownComponent =
+            GetLateGameVictoryCrownComponent(PlayerController);
+        auto CrownDefinition =
+            ResolveLateGameVictoryCrownDefinition(
+                CrownComponent);
+        if (!CrownDefinition)
+        {
+            SDK::DbgLog(
+                "[LateGame] Victory Crown definition unavailable on %.2f\n",
+                VersionInfo.FortniteVersion);
+            return;
+        }
+
+        UFortWorldItem* CrownItem = nullptr;
+        for (auto ItemInstance :
+            WorldInventory->Inventory.ItemInstances)
+        {
+            if (IsUsableLateGameObject(ItemInstance) &&
+                ItemInstance->ItemEntry.ItemDefinition ==
+                    CrownDefinition)
+            {
+                CrownItem = ItemInstance;
+                break;
+            }
+        }
+
+        bool bHasReplicatedCrownEntry = false;
+        for (int32 Index = 0;
+            Index < WorldInventory->Inventory.ReplicatedEntries.Num();
+            Index++)
+        {
+            auto& Entry =
+                WorldInventory->Inventory.ReplicatedEntries.Get(
+                    Index, FFortItemEntry::Size());
+            if (Entry.ItemDefinition == CrownDefinition)
+            {
+                bHasReplicatedCrownEntry = true;
+                break;
+            }
+        }
+
+        // Let native inventory reconciliation restore a missing instance before
+        // deciding the entry is stale. Never append a duplicate replicated
+        // crown entry merely because ItemInstances was temporarily behind.
+        if (!CrownItem && bHasReplicatedCrownEntry)
+        {
+            WorldInventory->HandleInventoryLocalUpdate();
+            for (auto ItemInstance :
+                WorldInventory->Inventory.ItemInstances)
+            {
+                if (IsUsableLateGameObject(ItemInstance) &&
+                    ItemInstance->ItemEntry.ItemDefinition ==
+                        CrownDefinition)
+                {
+                    CrownItem = ItemInstance;
+                    break;
+                }
+            }
+        }
+
+        bool bAlreadyHasCrown =
+            CrownItem != nullptr ||
+            bHasReplicatedCrownEntry;
+        if (!bAlreadyHasCrown &&
+            FFortItemEntryStateValue::StaticStruct() &&
+            FFortItemEntryStateValue::HasIntValue() &&
+            FFortItemEntryStateValue::HasStateType())
+        {
+            const int32 StateValueSize =
+                FFortItemEntryStateValue::Size();
+            if (StateValueSize > 0 && StateValueSize <= 0x1000)
+            {
+                TArray<FFortItemEntryStateValue> StateValues{};
+                auto StateValue =
+                    (FFortItemEntryStateValue*)malloc(StateValueSize);
+                if (StateValue)
+                {
+                    memset((PBYTE)StateValue, 0, StateValueSize);
+                    StateValue->IntValue = 1;
+                    StateValue->StateType = 2;
+                    StateValues.Add(*StateValue, StateValueSize);
+                    free(StateValue);
+
+                    CrownItem = WorldInventory->GiveItem(
+                        CrownDefinition, 1, 0, 0, true, true, 0,
+                        StateValues);
+                    StateValues.Free();
+                }
+            }
+        }
+
+        // Confirm that the native crown component sees the actual seeded world
+        // item while the match is still running. GiveItem's item-added path is
+        // what registers it; AuthorityHasHeldCrownItem is only a query.
+        UFortWorldItem* ComponentCrown = nullptr;
+        if (CrownComponent)
+        {
+            if (auto GetCrownFunction =
+                CrownComponent->GetFunction(
+                    "GetCrownInPlayerInventory"))
+            {
+                ComponentCrown =
+                    CrownComponent->Call<UFortWorldItem*>(
+                        GetCrownFunction);
+            }
+
+            PlayerController->ForceNetUpdate();
+        }
+
+        SDK::DbgLog(
+            "[LateGame] Victory Crown seed FN=%.2f controller=%p item=%p existing=%d replicatedEntry=%d componentCrown=%p\n",
+            VersionInfo.FortniteVersion,
+            (void*)PlayerController, (void*)CrownItem,
+            bAlreadyHasCrown ? 1 : 0,
+            bHasReplicatedCrownEntry ? 1 : 0,
+            (void*)ComponentCrown);
     }
 }
