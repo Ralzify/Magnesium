@@ -888,9 +888,14 @@ void AFortPlayerPawnAthena::PostLoadHook()
 	SDK::DbgLog("  [PPA] 4 exec hooks done, pre-EndSkydiving\n");
 	auto EndSkydivingFn = GetDefaultObj()->GetFunction("EndSkydiving");
 
-	if (EndSkydivingFn)
+	// 2.50 reflects EndSkydiving, but its reported legacy vtable slot does not
+	// dispatch this hook in practice. The controller's observed-state landing
+	// poll handles that build and avoids patching an unverified slot.
+	if (EndSkydivingFn && VersionInfo.FortniteVersion != 2.50)
 		Utils::Hook<AFortPlayerPawnAthena>(EndSkydivingFn->GetVTableIndex(), EndSkydiving, EndSkydivingOG);
-	SDK::DbgLog("  [PPA] 5 EndSkydiving done\n");
+	SDK::DbgLog("  [PPA] 5 EndSkydiving done fn=%p hooked=%d\n",
+		(void*)EndSkydivingFn,
+		(int)(EndSkydivingFn && VersionInfo.FortniteVersion != 2.50));
 
 	auto ReviveFn = GetDefaultObj()->GetFunction("ServerReviveFromDBNO");
 

@@ -301,12 +301,13 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
     if (VersionInfo.FortniteVersion >= 6.00 && !bUseCustomCenter)
         return;
 
-    // 2.50 builds their real phase-location plan only after aircraft exit.
-    // Pre-filling the empty array here makes the bus use a temporary foundation
-    // while native SafeZones later regenerates a different center. Preserve the
-    // original Erbium SafeZoneLoc fallback for non-custom 2.50 instead. Custom
-    // zones remain deliberately concentric and may safely seed every entry.
-    if (VersionInfo.FortniteVersion == 2.50 && !bUseCustomCenter)
+    // 1.7.2 and 2.50 build their real indicator location only after aircraft
+    // exit. Pre-filling the empty array makes the bus use a temporary
+    // foundation while native SafeZones later regenerates a different center.
+    // Preserve the original Erbium SafeZoneLoc fallback on those exact builds.
+    // Custom zones remain deliberately concentric and may seed every entry.
+    if ((VersionInfo.FortniteVersion == 1.72 ||
+         VersionInfo.FortniteVersion == 2.50) && !bUseCustomCenter)
         return;
 
     // Keep any locations the build did initialize and extend from the last
@@ -2273,6 +2274,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             // the early initialization could not find a center, leaving the
             // native state untouched is safer than creating two storm centers.
             if (VersionInfo.FortniteVersion < 6.00 &&
+                VersionInfo.FortniteVersion != 1.72 &&
                 VersionInfo.FortniteVersion != 2.50)
             {
                 SDK::DbgLog("[SafeZone] pre-S6 aircraft started without four native locations\n");
