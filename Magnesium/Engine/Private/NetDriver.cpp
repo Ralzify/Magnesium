@@ -1002,6 +1002,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
 	SyncErbiumSafeZonePreviewPause(Driver);
+	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
 
 	if (VersionInfo.FortniteVersion >= 25.20)
@@ -1077,6 +1078,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
 	SyncErbiumSafeZonePreviewPause(Driver);
+	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
 
 	// Universal PlayerAI system (separate from the bot command and native AI).
@@ -1193,6 +1195,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
 	SyncErbiumSafeZonePreviewPause(Driver);
+	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
 
 	static int _tf = 0;

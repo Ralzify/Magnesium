@@ -894,9 +894,22 @@ uint64 FindHandlePostSafeZonePhaseChanged()
         else if (VersionInfo.EngineVersion == 4.19)
             return HandlePostSafeZonePhaseChanged = Memcury::Scanner::FindPattern("48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 70 48 8B B9 ? ? ? ? 33 DB 0F 29 74 24 ? 48 8B F1 48 85 FF 74 2C E8").Get();
         else if (VersionInfo.EngineVersion == 4.20)
-            return HandlePostSafeZonePhaseChanged = Memcury::Scanner::FindPattern("E8 ? ? ? ? EB 31 80 B9 ? ? ? ? ?").RelativeOffset(1).Get(); // 3.5
+        {
+            // This call-site is present on 3.5, but 2.50 also reports UE 4.20
+            // and does not contain it. Do not make a failed version-specialized
+            // scan prevent the generic string/prologue recovery below.
+            HandlePostSafeZonePhaseChanged = Memcury::Scanner::FindPattern("E8 ? ? ? ? EB 31 80 B9 ? ? ? ? ?").RelativeOffset(1).Get();
+            if (HandlePostSafeZonePhaseChanged)
+                return HandlePostSafeZonePhaseChanged;
+        }
         else if (VersionInfo.FortniteVersion >= 7 && VersionInfo.FortniteVersion <= 8)
-            return HandlePostSafeZonePhaseChanged = Memcury::Scanner::FindPattern("E9 ? ? ? ? 48 8B C1 40 38 B9").RelativeOffset(1).Get();
+        {
+            // 7.30 is missing this exact call-site. The generic recovery has a
+            // pre-8 prologue case specifically for this family, so let it run.
+            HandlePostSafeZonePhaseChanged = Memcury::Scanner::FindPattern("E9 ? ? ? ? 48 8B C1 40 38 B9").RelativeOffset(1).Get();
+            if (HandlePostSafeZonePhaseChanged)
+                return HandlePostSafeZonePhaseChanged;
+        }
         else if (VersionInfo.EngineVersion == 4.23)
             return HandlePostSafeZonePhaseChanged = Memcury::Scanner::FindPattern("E8 ? ? ? ? EB 42 80 BA").RelativeOffset(1).Get();
 
@@ -905,14 +918,57 @@ uint64 FindHandlePostSafeZonePhaseChanged()
         if (!sRef)
             return 0;
 
-        for (int i = 0; i < 15000; i++)
+        auto TextSection = Memcury::PE::Section::GetSection(".text");
+        const auto TextStart = TextSection.GetSectionStart().Get();
+        const auto TextEnd = TextSection.GetSectionEnd().Get();
+        if (sRef < TextStart || sRef >= TextEnd)
+            return 0;
+
+        const auto AvailableBackwards = sRef - TextStart;
+        const auto MaxScanDistance = AvailableBackwards < 15000
+            ? AvailableBackwards + 1
+            : 15000;
+
+        for (uintptr_t i = 0; i < MaxScanDistance; i++)
         {
-            if (*(uint8_t*)(sRef - i) == 0x40 && (*(uint8_t*)(sRef - i + 1) == 0x53 || *(uint8_t*)(sRef - i + 1) == 0x55))
-                return HandlePostSafeZonePhaseChanged = sRef - i;
-            else if ((VersionInfo.FortniteVersion < 8 || std::floor(VersionInfo.FortniteVersion) == 11) && *(uint8_t*)(sRef - i) == 0x48 && *(uint8_t*)(sRef - i + 1) == 0x89 && *(uint8_t*)(sRef - i + 2) == 0x5C)
-                return HandlePostSafeZonePhaseChanged = sRef - i;
-            else if (*(uint8_t*)(sRef - i) == 0x48 && *(uint8_t*)(sRef - i + 1) == 0x8B && *(uint8_t*)(sRef - i + 2) == 0xC4)
-                return HandlePostSafeZonePhaseChanged = sRef - i;
+            const auto Candidate = sRef - i;
+            if (Candidate + 6 > TextEnd || !SDK::MemReadable((void*)Candidate, 6))
+                continue;
+
+            const bool bPushPrologue =
+                *(uint8_t*)Candidate == 0x40 &&
+                (*(uint8_t*)(Candidate + 1) == 0x53 ||
+                    *(uint8_t*)(Candidate + 1) == 0x55);
+            const bool bSavedRegisterPrologue =
+                (VersionInfo.FortniteVersion < 8 ||
+                    std::floor(VersionInfo.FortniteVersion) == 11) &&
+                *(uint8_t*)Candidate == 0x48 &&
+                *(uint8_t*)(Candidate + 1) == 0x89 &&
+                *(uint8_t*)(Candidate + 2) == 0x5C;
+            const bool bFramePrologue =
+                *(uint8_t*)Candidate == 0x48 &&
+                *(uint8_t*)(Candidate + 1) == 0x8B &&
+                *(uint8_t*)(Candidate + 2) == 0xC4;
+            if (!bPushPrologue && !bSavedRegisterPrologue && !bFramePrologue)
+                continue;
+
+            // The exact local 7.30 build (CL 4834550) has a verified unwind
+            // root at this RVA. Reject a nearer incidental prologue and let the
+            // bounded phase fallback run if a different 7.30 layout is loaded.
+            const auto CandidateRva = Candidate - Memcury::PE::GetModuleBase();
+            if (VersionInfo.FortniteVersion == 7.30 && CandidateRva != 0xD33190)
+                continue;
+
+            HandlePostSafeZonePhaseChanged = Candidate;
+            if (VersionInfo.FortniteVersion == 2.50 ||
+                VersionInfo.FortniteVersion == 7.30)
+            {
+                SDK::DbgLog(
+                    "[SafeZone] recovered native phase handler version=%.2f rva=0x%llX\n",
+                    VersionInfo.FortniteVersion,
+                    (unsigned long long)CandidateRva);
+            }
+            return HandlePostSafeZonePhaseChanged;
         }
 
         return 0;

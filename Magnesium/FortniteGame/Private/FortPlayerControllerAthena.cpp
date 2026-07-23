@@ -38,6 +38,20 @@
 #include <limits>
 #include <functional>
 
+static const UClass* GetRemoteControlledPawnClass();
+
+// A guided missile's controller Pawn fields are not reliable on legacy builds:
+// Season 4 can leave both of them pointing at the character for the entire
+// remote-control session. This lifecycle map is populated by the confirmed
+// remote-pawn acknowledgement and cleared by the native return acknowledgement.
+static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GRemoteControlReturnPawn;
+
+static bool IsRemoteControlledPawn(AActor* Actor)
+{
+	auto RemoteControlledPawnClass = GetRemoteControlledPawnClass();
+	return Actor && RemoteControlledPawnClass && Actor->IsA(RemoteControlledPawnClass);
+}
+
 // Infinite Render changes every real client's replication viewpoint to the
 // newest live player-like pawn. Spawned bots do not (and must not) own a
 // UNetConnection, but they are registered in GameMode->AlivePlayers, so this
@@ -94,6 +108,32 @@ static AActor* FindInfiniteRenderViewPawn()
 
 void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena* PlayerController, FVector& Loc, FRotator& Rot)
 {
+	// A guided missile keeps MyFortPawn pointed at the character while the
+	// controller's actual Pawn/AcknowledgedPawn and camera belong to the remote
+	// projectile. Combining MyFortPawn's location with the missile's banked
+	// ControlRotation rolls the whole view sideways and bypasses its native
+	// camera/steering behavior. Let the engine camera path handle only this
+	// temporary possession; normal and Infinite Render viewpoints stay intact.
+	auto ControlledPawn = (AActor*)PlayerController->Pawn;
+	const bool bRemoteControlActive =
+		GRemoteControlReturnPawn.find(PlayerController) != GRemoteControlReturnPawn.end();
+	if (bRemoteControlActive || IsRemoteControlledPawn(ControlledPawn) ||
+		IsRemoteControlledPawn(PlayerController->AcknowledgedPawn))
+	{
+		if (GetPlayerViewPointOG)
+		{
+			GetPlayerViewPointOG(PlayerController, Loc, Rot);
+			return;
+		}
+
+		if (auto ViewTarget = PlayerController->GetViewTarget())
+		{
+			Loc = ViewTarget->K2_GetActorLocation();
+			Rot = ViewTarget->K2_GetActorRotation();
+			return;
+		}
+	}
+
 	if (FConfiguration::bInfiniteRender)
 	{
 		if (auto ViewPawn = FindInfiniteRenderViewPawn())
@@ -137,14 +177,15 @@ void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena
 }
 static std::unordered_set<AFortPlayerControllerAthena*> PlayersInitialized;
 static std::unordered_set<AFortPlayerControllerAthena*> GPendingRespawnLandingFinalization;
+static std::unordered_set<AFortPlayerControllerAthena*> GRespawnSkydivingObserved;
+// The forced post-respawn equip happens after native skydiving hid the previous
+// weapon. Hide only that newly equipped actor and keep a weak reference so a
+// destroyed/replaced weapon can never become a stale-pointer crash.
+static std::unordered_map<AFortPlayerControllerAthena*, TWeakObjectPtr<AFortWeapon>> GRespawnHiddenWeapons;
 // Custom respawn setup is per replacement pawn, not per acknowledgement. A
 // client can acknowledge the same pawn again while finishing possession; doing
 // all of the setup again reinitializes abilities and can start a restart loop.
 static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GLastAcknowledgedPawn;
-// A guided missile temporarily replaces the acknowledged pawn. Remember the
-// living player pawn independently because the missile's native teardown can
-// emit ClientOnPawnDied and clear the normal respawn identity map.
-static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GRemoteControlReturnPawn;
 static const UClass* GetRemoteControlledPawnClass()
 {
 	static auto RemoteControlledPawnClass = FindClass("FortRemoteControlledPawnAthena");
@@ -274,6 +315,19 @@ static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory)
 	if (!Inventory)
 		return nullptr;
 
+	// Prefer the actual harvesting-tool item type. A melee-class-only search can
+	// select a sword or other special melee weapon before the player's pickaxe.
+	auto HarvestingTool = Inventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
+		{
+			return Entry.ItemDefinition &&
+				Entry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest();
+		}, FFortItemEntry::Size());
+
+	if (HarvestingTool)
+		return HarvestingTool;
+
+	// Compatibility fallback for builds whose pickaxe definition does not expose
+	// the expected item type but still derives from the melee weapon class.
 	return Inventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
 		{
 			return Entry.ItemDefinition && Entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>();
@@ -544,9 +598,25 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		GRemoteControlReturnPawn.erase(RemoteReturn);
 		if (ExpectedPawn == Pawn && IsLiveRemoteControlReturnPawn(Pawn))
 		{
+			auto ReturnFortPawn = (AFortPlayerPawnAthena*)Pawn;
+			FRotator ReturnRotation = PlayerController->GetControlRotation();
+			const bool bUsedStoredRotation = ReturnFortPawn->HasStoredControlRotation();
+			if (bUsedStoredRotation)
+				ReturnRotation = ReturnFortPawn->StoredControlRotation;
+
+			// The remote projectile is allowed to bank, but a character camera is
+			// not. The old custom respawn teleport happened to clear this roll;
+			// preserve native Pitch/Yaw while explicitly restoring an upright view.
+			ReturnRotation.Roll = 0.0;
+			PlayerController->SetControlRotation(ReturnRotation);
+			PlayerController->ClientSetRotation(ReturnRotation, true);
+
 			GLastAcknowledgedPawn[PlayerController] = Pawn;
-			SDK::DbgLog("[Possession] native-only remote-control return controller=%p pawn=%p\n",
-				(void*)PlayerController, (void*)Pawn);
+			SDK::DbgLog(
+				"[Possession] native-only remote-control return controller=%p pawn=%p rotation=(%.2f,%.2f,%.2f) stored=%d\n",
+				(void*)PlayerController, (void*)Pawn,
+				(double)ReturnRotation.Pitch, (double)ReturnRotation.Yaw,
+				(double)ReturnRotation.Roll, (int)bUsedStoredRotation);
 			return;
 		}
 	}
@@ -2459,14 +2529,77 @@ static void PurgeExclusiveGadgets(AFortPlayerControllerAthena* PlayerController)
 	}
 }
 
+static void RestoreRespawnHiddenWeapon(AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController)
+		return;
+
+	auto Existing = GRespawnHiddenWeapons.find(PlayerController);
+	if (Existing == GRespawnHiddenWeapons.end())
+		return;
+
+	auto Weapon = Existing->second.Get();
+	GRespawnHiddenWeapons.erase(Existing);
+
+	if (!IsUsableDeathObject(Weapon))
+		return;
+
+	Weapon->SetActorHiddenInGame(false);
+	Weapon->ForceNetUpdate();
+	SDK::DbgLog("[Respawn] restored weapon visibility controller=%p weapon=%p\n",
+		(void*)PlayerController, (void*)Weapon);
+}
+
+static void HideRespawnWeaponForGlide(AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!PlayerController || !Pawn)
+		return;
+
+	auto Weapon = GetPawnCurrentWeaponSafe(Pawn);
+	if (!Weapon)
+		return;
+
+	auto Existing = GRespawnHiddenWeapons.find(PlayerController);
+	if (Existing != GRespawnHiddenWeapons.end())
+	{
+		auto PreviousWeapon = Existing->second.Get();
+		GRespawnHiddenWeapons.erase(Existing);
+		if (PreviousWeapon && PreviousWeapon != Weapon && IsUsableDeathObject(PreviousWeapon))
+		{
+			PreviousWeapon->SetActorHiddenInGame(false);
+			PreviousWeapon->ForceNetUpdate();
+		}
+	}
+
+	Weapon->SetActorHiddenInGame(true);
+	Weapon->ForceNetUpdate();
+	GRespawnHiddenWeapons.emplace(PlayerController, TWeakObjectPtr<AFortWeapon>(Weapon));
+	SDK::DbgLog("[Respawn] hid equipped weapon for glide controller=%p pawn=%p weapon=%p\n",
+		(void*)PlayerController, (void*)Pawn, (void*)Weapon);
+}
+
 static void RestoreEquipmentAfterRespawn(AFortPlayerControllerAthena* PlayerController)
 {
 	if (!PlayerController || !PlayerController->WorldInventory)
 		return;
 
-	// Equipping on the new pawn re-grants the item-owned gameplay abilities.
-	// Prefer a usable primary weapon, then fall back to the harvesting tool.
-	auto EntryToEquip = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
+	auto Pawn = PlayerController->MyFortPawn;
+	const bool bRespawnGlidePending =
+		GPendingRespawnLandingFinalization.find(PlayerController) !=
+		GPendingRespawnLandingFinalization.end();
+	if (!bRespawnGlidePending)
+		RestoreRespawnHiddenWeapon(PlayerController);
+
+	// Equipping on the new pawn re-grants the item-owned gameplay abilities. Start
+	// every respawn with the harvesting tool so a remembered gun/last slot is not
+	// rendered in the player's hands while their glider is active.
+	auto EntryToEquip = FindHarvestingToolEntry(PlayerController->WorldInventory);
+
+	// A malformed/custom inventory may genuinely have no harvesting tool. Keep a
+	// usable weapon fallback so the replacement pawn is never left unequipped.
+	if (!EntryToEquip)
+		EntryToEquip = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& Entry)
 		{
 			return Entry.ItemDefinition && AFortInventory::IsPrimaryQuickbar(Entry.ItemDefinition) &&
 				Entry.ItemDefinition->IsA<UFortWeaponItemDefinition>() &&
@@ -2474,16 +2607,27 @@ static void RestoreEquipmentAfterRespawn(AFortPlayerControllerAthena* PlayerCont
 		}, FFortItemEntry::Size());
 
 	if (!EntryToEquip)
-		EntryToEquip = FindHarvestingToolEntry(PlayerController->WorldInventory);
-
-	if (!EntryToEquip)
 		return;
 
 	PlayerController->ServerExecuteInventoryItem(EntryToEquip->ItemGuid);
+	if (bRespawnGlidePending)
+		HideRespawnWeaponForGlide(PlayerController, Pawn);
+
 	if (VersionInfo.FortniteVersion > 3.00)
 		PlayerController->ClientEquipItem(EntryToEquip->ItemGuid, true);
 	else if (PlayerController->QuickBars)
 		PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
+
+	if (!bRespawnGlidePending)
+	{
+		auto CurrentWeapon = GetPawnCurrentWeaponSafe(Pawn);
+		if (CurrentWeapon)
+		{
+			CurrentWeapon->SetActorHiddenInGame(false);
+			CurrentWeapon->ForceNetUpdate();
+		}
+	}
+
 }
 
 void AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(AFortPlayerControllerAthena* PlayerController,
@@ -2491,6 +2635,7 @@ void AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(AFortPlayerControl
 {
 	if (!PlayerController || !Pawn || GPendingRespawnLandingFinalization.erase(PlayerController) == 0)
 		return;
+	GRespawnSkydivingObserved.erase(PlayerController);
 
 	ClearLegacyPawnDeathFlags(Pawn);
 
@@ -2521,6 +2666,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
 	}
 	GRemoteControlReturnPawn.erase(PlayerController);
+	RestoreRespawnHiddenWeapon(PlayerController);
+	GPendingRespawnLandingFinalization.erase(PlayerController);
+	GRespawnSkydivingObserved.erase(PlayerController);
 
 	// Allow the next replacement pawn to receive exactly one respawn setup even
 	// if the allocator happens to reuse the dead pawn's address.
@@ -5455,6 +5603,62 @@ static bool ApplyGuidedNukeRocket(AActor* Rocket, AActor* InstigatorPawn, AFortP
 
 void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 {
+	// EndSkydiving is not reflected/hookable on legacy Season 4 builds. Observe
+	// the replicated skydive state here so their cosmetic weapon hide and normal
+	// post-landing respawn finalization are always released. This loop is dormant
+	// unless at least one controller is in the custom respawn glide.
+	static const bool bNeedsLegacyLandingPoll =
+		AFortPlayerPawnAthena::GetDefaultObj()->GetFunction("EndSkydiving") == nullptr;
+	if (bNeedsLegacyLandingPoll && !GPendingRespawnLandingFinalization.empty())
+	{
+		std::vector<std::pair<AFortPlayerControllerAthena*, AFortPlayerPawnAthena*>> LandedRespawns;
+		for (auto PlayerController : GPendingRespawnLandingFinalization)
+		{
+			if (!IsUsableDeathObject(PlayerController))
+				continue;
+
+			auto Pawn = PlayerController->MyFortPawn;
+			if (!IsUsableDeathObject(Pawn))
+				continue;
+
+			const bool bIsStillSkydiving =
+				(Pawn->HasbIsSkydiving() && Pawn->bIsSkydiving) ||
+				(Pawn->HasbIsSkydivingFromBus() && Pawn->bIsSkydivingFromBus);
+			if (bIsStillSkydiving)
+			{
+				GRespawnSkydivingObserved.insert(PlayerController);
+				continue;
+			}
+
+			if (GRespawnSkydivingObserved.find(PlayerController) !=
+				GRespawnSkydivingObserved.end())
+			{
+				LandedRespawns.emplace_back(PlayerController, Pawn);
+			}
+		}
+
+		for (auto& [PlayerController, Pawn] : LandedRespawns)
+		{
+			// Do not synthesize the whole EndSkydiving lifecycle on builds where
+			// the callback does not exist. Only release this cosmetic visibility
+			// state and its pending marker; the normal respawn setup already ran.
+			GPendingRespawnLandingFinalization.erase(PlayerController);
+			GRespawnSkydivingObserved.erase(PlayerController);
+			RestoreRespawnHiddenWeapon(PlayerController);
+
+			auto CurrentWeapon = GetPawnCurrentWeaponSafe(Pawn);
+			if (CurrentWeapon)
+			{
+				CurrentWeapon->SetActorHiddenInGame(false);
+				CurrentWeapon->ForceNetUpdate();
+			}
+			Pawn->ForceNetUpdate();
+			PlayerController->ForceNetUpdate();
+			SDK::DbgLog("[Respawn] legacy landing restored weapon controller=%p pawn=%p\n",
+				(void*)PlayerController, (void*)Pawn);
+		}
+	}
+
 	if (GuidedNukeRockets.empty())
 		return;
 

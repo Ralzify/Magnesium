@@ -120,6 +120,9 @@ public:
     DEFINE_PROP(AIControllerClass, TSubclassOf<AActor>);
     DEFINE_PROP(PlayerState, AActor*);
     DEFINE_PROP(BaseEyeHeight, float);
+    // Native guided-missile control stores the character camera here so it can
+    // be restored when possession returns from FortRemoteControlledPawnAthena.
+    DEFINE_PROP(StoredControlRotation, FRotator);
     DEFINE_PROP(OnHeldObjectPickedUp, TMulticastInlineDelegate<void(AActor*)>);
     DEFINE_PROP(OnHeldObjectDropped, TMulticastInlineDelegate<void(AActor*)>);
     DEFINE_PROP(OnEnteredAircraft, TMulticastInlineDelegate<void()>);

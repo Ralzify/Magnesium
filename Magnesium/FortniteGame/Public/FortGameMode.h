@@ -15,6 +15,8 @@ enum class EEvaluateCurveTableResult : uint8
     EEvaluateCurveTableResult_MAX = 2,
 };
 
+class UNetDriver;
+
 class AFortGameMode : public AActor
 {
 public:
@@ -87,6 +89,7 @@ public:
     DefUHookOg(OnAircraftExitedDropZone_);
     DefHookOg(void, FinishWorldInitialization, AFortGameMode*, AActor*);
     static int GetLateSafeZoneIndex();
+    static void TickLateGameSafeZonePhaseFallback(UNetDriver* Driver);
     
     InitHooks;
     InitPostLoadHooks;
