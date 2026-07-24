@@ -36,3 +36,20 @@ public:
     DEFINE_FUNC(ServerReleaseWeaponAbility, void);
     DEFINE_FUNC(OnRep_MountedWeaponInfoRepped, void);
 };
+
+class AFortWeaponRanged : public AFortWeapon
+{
+public:
+    UCLASS_COMMON_MEMBERS(AFortWeaponRanged);
+
+    // Chapter 5 moved ballistic hit reporting onto the ranged weapon. The
+    // exec hook routes validated reports through Fortnite's native GAS path.
+    DefUHookOg(ServerLWProjectile_SetDamageStartAndDirection_);
+    DefUHookOg(ServerLWProjectile_EndActiveAbility_);
+    DefUHookOg(ServerStopProjectileRequest_);
+    DefUHookOg(MulticastProjectileRequestUnreliable_);
+    DefUHookOg(MulticastStopProjectileRequestUnreliable_);
+    DefUHookOg(ServerNotifyPawnHit_);
+
+    InitPostLoadHooks;
+};

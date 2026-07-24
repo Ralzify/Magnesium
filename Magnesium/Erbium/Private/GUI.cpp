@@ -4616,7 +4616,7 @@ void GUI::Init()
             }
             case (int)Playlist::OneShotSquads:
             {
-                FConfiguration::Playlist = L"/Game/Athena/Playlists/Low/Playlist_Low_Squad.Playlist_Low_Squad";
+                FConfiguration::Playlist = L"/Game/Athena/Playlists/Low/Playlist_Low_Squads.Playlist_Low_Squads";
                 break;
             }
             case (int)Playlist::SiphonSolos:

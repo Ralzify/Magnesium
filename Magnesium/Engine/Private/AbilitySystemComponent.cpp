@@ -7,7 +7,7 @@ uint64 ConstructAbilitySpec;
 uint64 GiveAbility_;
 FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(const UObject* Ability, UObject* SourceObject)
 {
-    if (!this || !Ability)
+    if (!this || !Ability || !GiveAbility_)
         return {};
     // printf("GiveAbility[%s]\n", Ability->Name.ToString().c_str());
 
@@ -28,7 +28,7 @@ FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(const UObject* A
         Spec->SourceObject = SourceObject;
     }
 
-    FGameplayAbilitySpecHandle OutHandle;
+    FGameplayAbilitySpecHandle OutHandle{};
     ((FGameplayAbilitySpecHandle * (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle*, __int64)) GiveAbility_)(this, &OutHandle, __int64(Spec));
     free(Spec);
     return OutHandle;
@@ -68,6 +68,7 @@ struct _Pad_0x18
 };
 
 uint64_t InternalTryActivateAbility_ = 0;
+
 void UAbilitySystemComponent::InternalServerTryActivateAbility(
     UAbilitySystemComponent* AbilitySystemComponent, FGameplayAbilitySpecHandle Handle, bool InputPressed, FPredictionKey* PredictionKey, void* TriggerEventData)
 {

@@ -320,6 +320,9 @@
     <ClCompile Include="FortniteGame\Private\FortPhysicsPawn.cpp">
       <Filter>FortniteGame\Private</Filter>
     </ClCompile>
+    <ClCompile Include="FortniteGame\Private\FortWeaponRanged.cpp">
+      <Filter>FortniteGame\Private</Filter>
+    </ClCompile>
     <ClCompile Include="Erbium\Private\Events.cpp">
       <Filter>Magnesium\Private</Filter>
     </ClCompile>

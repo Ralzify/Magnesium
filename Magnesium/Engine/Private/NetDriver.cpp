@@ -1092,9 +1092,10 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
 
 	if (Driver->ReplicationDriver)
-	{
 		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
+	if (Driver->ReplicationDriver)
+	{
 		// this is our main netdriver
 		if (Driver->ClientConnections.Num() > 0)
 			((void (*)(UObject*, float)) ServerReplicateActors_)(Driver->ReplicationDriver, DeltaSeconds);

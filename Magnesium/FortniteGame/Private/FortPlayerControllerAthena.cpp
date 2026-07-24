@@ -535,6 +535,399 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 		RemovedEffectCount, (int)EffectsToRemove.size());
 }
 
+static bool IsConfiguredOneShotPlaylist()
+{
+	if (IsOneShot())
+		return true;
+
+	// Also recognize a playlist supplied directly through configuration instead
+	// of the GUI enum, including short paths and tournament variants.
+	const auto Playlist = FConfiguration::Playlist;
+	return Playlist &&
+		(wcsstr(Playlist, L"Playlist_Low_") ||
+			wcsstr(Playlist, L"Playlist_ShowdownTournament_Low_"));
+}
+
+static bool IsGameplayEffectClassForCommand(const UClass* Class);
+
+// One Shot's playlist already supplies its movement/gravity behavior. This
+// separate persistent effect owns the purple low-gravity leg cue and fall
+// immunity without changing jump height. Loading an absent asset can fault on
+// a few legacy builds, so keep the loader free of unwindable C++ locals.
+static const UClass* TryLoadOneShotLowGravityVfxEffectByPath()
+{
+	const UClass* Result = nullptr;
+
+	__try
+	{
+		Result = FindObject<UClass>(
+			L"/Game/Athena/Playlists/Low/GE_Low_SetFallImmune.GE_Low_SetFallImmune_C");
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		Result = nullptr;
+	}
+
+	return Result;
+}
+
+// The canonical path is shared by the known One Shot releases. A short-name
+// fallback also covers a build that has already loaded the same class from a
+// differently mounted package.
+static const UClass* TryFindLoadedOneShotLowGravityVfxEffectByName()
+{
+	// A typed object-array name lookup is required here: StaticFindObject with
+	// Outer == nullptr does not reliably accept an unqualified object name.
+	// Rescan only if the object array changed, and never more often than every
+	// five seconds, so a differently mounted late-loaded class remains
+	// discoverable without turning every pawn retry into a global scan.
+	static const UWorld* LastScannedWorld = nullptr;
+	static int32 LastScannedObjectCount = -1;
+	static ULONGLONG LastScanTime = 0;
+
+	auto CurrentWorld = UWorld::GetWorld();
+	if (CurrentWorld != LastScannedWorld)
+	{
+		LastScannedWorld = CurrentWorld;
+		LastScannedObjectCount = -1;
+		LastScanTime = 0;
+	}
+
+	const int32 ObjectCount = TUObjectArray::Num();
+	const ULONGLONG Now = GetTickCount64();
+	if (ObjectCount <= 0 || ObjectCount == LastScannedObjectCount ||
+		(LastScanTime != 0 && Now - LastScanTime < 5000))
+	{
+		return nullptr;
+	}
+
+	LastScannedObjectCount = ObjectCount;
+	LastScanTime = Now;
+
+	const UClass* Result = nullptr;
+
+	__try
+	{
+		Result =
+			TUObjectArray::FindObject<UClass>("GE_Low_SetFallImmune_C");
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		Result = nullptr;
+	}
+
+	return Result;
+}
+
+static const UClass* GetOneShotLowGravityVfxEffectClass()
+{
+	// Do not negatively cache this lookup: playlist content can finish loading
+	// after the first pawn acknowledgement on older versions.
+	static TWeakObjectPtr<UClass> CachedEffectClass;
+	static ULONGLONG NextResolveAttemptTime = 0;
+	if (auto CachedClass = CachedEffectClass.Get())
+		if (IsGameplayEffectClassForCommand(CachedClass))
+			return CachedClass;
+
+	// All pending pawns share this resolver. On a build where the asset is
+	// missing, only one guarded load is attempted per second for the lobby.
+	const ULONGLONG Now = GetTickCount64();
+	if (NextResolveAttemptTime != 0 && Now < NextResolveAttemptTime)
+		return nullptr;
+	NextResolveAttemptTime = Now + 1000;
+
+	auto EffectClass = TryLoadOneShotLowGravityVfxEffectByPath();
+	if (!EffectClass)
+		EffectClass = TryFindLoadedOneShotLowGravityVfxEffectByName();
+
+	if (!IsGameplayEffectClassForCommand(EffectClass))
+		return nullptr;
+
+	CachedEffectClass =
+		TWeakObjectPtr<UClass>(const_cast<UClass*>(EffectClass));
+	NextResolveAttemptTime = 0;
+	return CachedEffectClass.Get();
+}
+
+struct FPendingOneShotLowGravityVfxApplication
+{
+	TWeakObjectPtr<UWorld> World;
+	TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
+	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+	float RemainingSeconds = 0.25f;
+	int Attempts = 0;
+};
+
+static std::vector<FPendingOneShotLowGravityVfxApplication>
+	GPendingOneShotLowGravityVfxApplications;
+
+struct FOneShotLowGravityVfxPawnState
+{
+	TWeakObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
+	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+};
+
+static std::vector<FOneShotLowGravityVfxPawnState>
+	GOneShotLowGravityVfxPawnStates;
+
+static bool OneShotLowGravityVfxBelongsToPreviousPawn(
+	UAbilitySystemComponent* AbilitySystemComponent,
+	AFortPlayerPawnAthena* Pawn)
+{
+	for (auto It = GOneShotLowGravityVfxPawnStates.begin();
+		It != GOneShotLowGravityVfxPawnStates.end();)
+	{
+		auto ExistingAbilitySystem = It->AbilitySystemComponent.Get();
+		if (!ExistingAbilitySystem)
+		{
+			It = GOneShotLowGravityVfxPawnStates.erase(It);
+			continue;
+		}
+
+		if (ExistingAbilitySystem == AbilitySystemComponent)
+			return It->Pawn.Get() != Pawn;
+
+		++It;
+	}
+
+	return false;
+}
+
+static void RememberOneShotLowGravityVfxPawn(
+	UAbilitySystemComponent* AbilitySystemComponent,
+	AFortPlayerPawnAthena* Pawn)
+{
+	for (auto It = GOneShotLowGravityVfxPawnStates.begin();
+		It != GOneShotLowGravityVfxPawnStates.end();)
+	{
+		auto ExistingAbilitySystem = It->AbilitySystemComponent.Get();
+		if (!ExistingAbilitySystem)
+		{
+			It = GOneShotLowGravityVfxPawnStates.erase(It);
+			continue;
+		}
+
+		if (ExistingAbilitySystem == AbilitySystemComponent)
+		{
+			It->Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+			return;
+		}
+
+		++It;
+	}
+
+	FOneShotLowGravityVfxPawnState State;
+	State.AbilitySystemComponent =
+		TWeakObjectPtr<UAbilitySystemComponent>(AbilitySystemComponent);
+	State.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+	GOneShotLowGravityVfxPawnStates.emplace_back(State);
+}
+
+static bool TryEnsureOneShotLowGravityVfx(
+	AFortPlayerControllerAthena* PlayerController, AFortPlayerPawnAthena* Pawn)
+{
+	if (!IsConfiguredOneShotPlaylist() || !PlayerController || !Pawn ||
+		!PlayerController->PlayerState ||
+		!PlayerController->PlayerState->HasAbilitySystemComponent())
+	{
+		return false;
+	}
+
+	auto AbilitySystemComponent =
+		PlayerController->PlayerState->AbilitySystemComponent;
+	if (!AbilitySystemComponent)
+		return false;
+
+	auto LowGravityVfxEffectClass = GetOneShotLowGravityVfxEffectClass();
+	if (!LowGravityVfxEffectClass)
+	{
+		static bool bLoggedMissingEffect = false;
+		if (!bLoggedMissingEffect)
+		{
+			bLoggedMissingEffect = true;
+			SDK::DbgLog(
+				"[OneShot] GE_Low_SetFallImmune_C could not be resolved; "
+				"will retry shortly\n");
+		}
+		return false;
+	}
+
+	// The PlayerState ASC survives pawn replacement on several versions. Its
+	// old looping cue actor belongs to the destroyed pawn, so refresh that one
+	// effect once for a replacement pawn; otherwise retain the existing effect.
+	const bool bNeedsPawnRefresh =
+		OneShotLowGravityVfxBelongsToPreviousPawn(
+			AbilitySystemComponent, Pawn);
+	FActiveGameplayEffectHandle ExistingEffectHandle{};
+	bool bFoundExistingEffect = false;
+
+	if (AbilitySystemComponent->HasActiveGameplayEffects())
+	{
+		auto& ActiveGameplayEffects = AbilitySystemComponent->ActiveGameplayEffects;
+		if (ActiveGameplayEffects.HasGameplayEffects_Internal())
+		{
+			auto& Effects = ActiveGameplayEffects.GameplayEffects_Internal;
+			const int EffectCount = Effects.Num();
+			if (EffectCount >= 0 && EffectCount < 100000)
+			{
+				for (int EffectIndex = 0; EffectIndex < EffectCount; EffectIndex++)
+				{
+					auto& Effect = Effects.Get(
+						EffectIndex, FActiveGameplayEffect::Size());
+					if (!Effect.HasSpec())
+						break;
+
+					auto& Spec = Effect.Spec;
+					if (!Spec.HasDef())
+						break;
+
+					if (Spec.Def &&
+						Spec.Def->IsA(LowGravityVfxEffectClass))
+					{
+						if (!bNeedsPawnRefresh)
+						{
+							RememberOneShotLowGravityVfxPawn(
+								AbilitySystemComponent, Pawn);
+							return true;
+						}
+
+						ExistingEffectHandle =
+							*(FActiveGameplayEffectHandle*)((char*)&Effect + 0xc);
+						bFoundExistingEffect =
+							ExistingEffectHandle.Handle > 0;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if (bFoundExistingEffect)
+	{
+		auto RemoveActiveEffectFn =
+			AbilitySystemComponent->GetFunction("RemoveActiveGameplayEffect");
+		if (!RemoveActiveEffectFn ||
+			!AbilitySystemComponent->Call<bool>(
+				RemoveActiveEffectFn, ExistingEffectHandle, -1))
+		{
+			return false;
+		}
+	}
+
+	auto Context = AbilitySystemComponent->MakeEffectContext();
+	Context.Instigator = PlayerController;
+	Context.Causer = Pawn;
+	Context.AddSourceObject(Pawn);
+
+	auto Handle = AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(
+		LowGravityVfxEffectClass, 1.0f, Context);
+	SDK::DbgLog(
+		"[OneShot] purple-leg VFX effect %s controller=%p pawn=%p handle=%d\n",
+		Handle.bPassedFiltersAndWasExecuted ? "applied" : "rejected",
+		(void*)PlayerController, (void*)Pawn, Handle.Handle);
+	if (Handle.bPassedFiltersAndWasExecuted)
+		RememberOneShotLowGravityVfxPawn(
+			AbilitySystemComponent, Pawn);
+	return Handle.bPassedFiltersAndWasExecuted;
+}
+
+static void RemovePendingOneShotLowGravityVfxApplication(
+	AFortPlayerControllerAthena* PlayerController, AFortPlayerPawnAthena* Pawn)
+{
+	for (auto It = GPendingOneShotLowGravityVfxApplications.begin();
+		It != GPendingOneShotLowGravityVfxApplications.end();)
+	{
+		auto PendingController = It->PlayerController.Get();
+		auto PendingPawn = It->Pawn.Get();
+
+		if (!PendingController || !PendingPawn ||
+			(PendingController == PlayerController && PendingPawn == Pawn))
+		{
+			It = GPendingOneShotLowGravityVfxApplications.erase(It);
+			continue;
+		}
+
+		++It;
+	}
+}
+
+static void EnsureOneShotLowGravityVfx(
+	AFortPlayerControllerAthena* PlayerController, AFortPlayerPawnAthena* Pawn)
+{
+	if (!IsConfiguredOneShotPlaylist() || !PlayerController || !Pawn)
+		return;
+
+	if (TryEnsureOneShotLowGravityVfx(PlayerController, Pawn))
+	{
+		RemovePendingOneShotLowGravityVfxApplication(PlayerController, Pawn);
+		return;
+	}
+
+	for (auto& Pending : GPendingOneShotLowGravityVfxApplications)
+	{
+		if (Pending.PlayerController.Get() == PlayerController &&
+			Pending.Pawn.Get() == Pawn)
+		{
+			return;
+		}
+	}
+
+	FPendingOneShotLowGravityVfxApplication Pending;
+	Pending.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
+	Pending.PlayerController =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
+	Pending.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+	GPendingOneShotLowGravityVfxApplications.emplace_back(Pending);
+}
+
+static void TickOneShotLowGravityVfxRetries(float DeltaSeconds)
+{
+	for (int Index =
+		static_cast<int>(GPendingOneShotLowGravityVfxApplications.size()) - 1;
+		Index >= 0; --Index)
+	{
+		auto& Pending = GPendingOneShotLowGravityVfxApplications[Index];
+		auto PlayerController = Pending.PlayerController.Get();
+		auto Pawn = Pending.Pawn.Get();
+
+		if (!IsConfiguredOneShotPlaylist() ||
+			Pending.World.Get() != UWorld::GetWorld() ||
+			!PlayerController || !Pawn ||
+			(PlayerController->Pawn != Pawn &&
+				PlayerController->MyFortPawn != Pawn))
+		{
+			GPendingOneShotLowGravityVfxApplications.erase(
+				GPendingOneShotLowGravityVfxApplications.begin() + Index);
+			continue;
+		}
+
+		Pending.RemainingSeconds -= DeltaSeconds;
+		if (Pending.RemainingSeconds > 0.f)
+			continue;
+
+		if (TryEnsureOneShotLowGravityVfx(PlayerController, Pawn))
+		{
+			GPendingOneShotLowGravityVfxApplications.erase(
+				GPendingOneShotLowGravityVfxApplications.begin() + Index);
+			continue;
+		}
+
+		Pending.Attempts++;
+		if (Pending.Attempts >= 20)
+		{
+			SDK::DbgLog(
+				"[OneShot] stopped retrying purple-leg VFX effect "
+				"controller=%p pawn=%p\n",
+				(void*)PlayerController, (void*)Pawn);
+			GPendingOneShotLowGravityVfxApplications.erase(
+				GPendingOneShotLowGravityVfxApplications.begin() + Index);
+			continue;
+		}
+
+		Pending.RemainingSeconds = 1.f;
+	}
+}
+
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
 
@@ -1416,6 +1809,8 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 	}
+
+	EnsureOneShotLowGravityVfx(PlayerController, FortPawn);
 
 	// Mark every successful first possession, including Num == 0. Previously
 	// this happened only in the late-game/non-empty-inventory branch, causing a
@@ -5336,6 +5731,8 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 			InitializePlayerGameplayAbilities(Interface);
 		}
 
+		EnsureOneShotLowGravityVfx(PlayerController, NewPawn);
+
 		ResetLowerSeasonStormStateForRespawn(PlayerController, OldPawn, NewPawn);
 		// On the earliest clients, wait for the observed landing transition
 		// before equipping. Performing the server equip here and again through
@@ -6565,6 +6962,944 @@ static bool TryGetCrosshairGroundLocationForCommand(AFortPlayerControllerAthena*
 	return true;
 }
 
+static bool IsGameplayEffectClassForCommand(const UClass* Class)
+{
+	auto GameplayEffectClass = UGameplayEffect::StaticClass();
+
+	if (!Class || !GameplayEffectClass)
+		return false;
+
+	int SuperGuard = 0;
+
+	for (const UStruct* CurrentClass = Class;
+		CurrentClass && SuperGuard++ < 4096;
+		CurrentClass = CurrentClass->GetSuper())
+	{
+		if (CurrentClass == GameplayEffectClass)
+			return true;
+	}
+
+	return false;
+}
+
+struct FLoadedGameplayEffectCommandEntry
+{
+	TWeakObjectPtr<UClass> GameplayEffectClass;
+	std::string EffectName;
+	std::string EffectClassName;
+	std::string NormalizedEffectName;
+	std::string NormalizedEffectClassName;
+	std::string NormalizedShortClassName;
+};
+
+struct FLoadedGameplayEffectCommandCatalog
+{
+	TWeakObjectPtr<UWorld> World;
+	std::vector<FLoadedGameplayEffectCommandEntry> Entries;
+	std::vector<FLoadedGameplayEffectCommandEntry> PendingEntries;
+	std::vector<TWeakObjectPtr<AFortPlayerControllerAthena>> Requesters;
+	int32 NextObjectIndex = 0;
+	int32 ObjectCount = 0;
+	bool bBuilding = false;
+	bool bHasCompletedCatalog = false;
+};
+
+static FLoadedGameplayEffectCommandCatalog GLoadedGameplayEffectCommandCatalog;
+
+static const std::vector<FLoadedGameplayEffectCommandEntry>*
+GetLoadedGameplayEffectCatalogForCommand()
+{
+	auto CurrentWorld = UWorld::GetWorld();
+
+	if (!CurrentWorld ||
+		!GLoadedGameplayEffectCommandCatalog.bHasCompletedCatalog ||
+		GLoadedGameplayEffectCommandCatalog.World.Get() != CurrentWorld)
+	{
+		return nullptr;
+	}
+
+	return &GLoadedGameplayEffectCommandCatalog.Entries;
+}
+
+static void AddLoadedGameplayEffectCatalogRequester(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController)
+		return;
+
+	auto& Requesters = GLoadedGameplayEffectCommandCatalog.Requesters;
+
+	for (auto It = Requesters.begin(); It != Requesters.end();)
+	{
+		auto ExistingController = It->Get();
+
+		if (!ExistingController)
+		{
+			It = Requesters.erase(It);
+			continue;
+		}
+
+		if (ExistingController == PlayerController)
+			return;
+
+		++It;
+	}
+
+	Requesters.emplace_back(PlayerController);
+}
+
+static bool WriteLoadedGameplayEffectCatalogForCommand(
+	const std::vector<FLoadedGameplayEffectCommandEntry>& Entries)
+{
+	std::ostringstream Buffer;
+	Buffer << "Generated by Magnesium\n";
+	Buffer << "Loaded Gameplay Effects: " << Entries.size() << "\n\n";
+
+	for (size_t Index = 0; Index < Entries.size(); Index++)
+	{
+		auto& Entry = Entries[Index];
+		Buffer << "[" << Index << "] " << Entry.EffectName;
+
+		if (!Entry.EffectClassName.empty())
+			Buffer << " (" << Entry.EffectClassName << ")";
+
+		Buffer << "\n";
+	}
+
+	auto Contents = Buffer.str();
+	std::ofstream Output(
+		"DumpedGameplayEffects.txt",
+		std::ios::out | std::ios::binary | std::ios::trunc);
+
+	if (!Output.is_open())
+		return false;
+
+	Output.write(Contents.data(), static_cast<std::streamsize>(Contents.size()));
+	Output.close();
+	return Output.good();
+}
+
+static void CompleteLoadedGameplayEffectCatalogForCommand()
+{
+	auto& Catalog = GLoadedGameplayEffectCommandCatalog;
+	Catalog.Entries = std::move(Catalog.PendingEntries);
+	Catalog.PendingEntries.clear();
+	Catalog.bBuilding = false;
+	Catalog.bHasCompletedCatalog = true;
+
+	const bool bWroteFile =
+		WriteLoadedGameplayEffectCatalogForCommand(Catalog.Entries);
+	const auto EffectCount = Catalog.Entries.size();
+	std::wstring CompletionMessage =
+		L"Gameplay Effect catalog complete: " +
+		std::to_wstring(EffectCount) +
+		L" loaded effect(s). ";
+
+	if (bWroteFile)
+	{
+		CompletionMessage +=
+			L"Wrote DumpedGameplayEffects.txt; applyge indexes are ready.";
+	}
+	else
+	{
+		CompletionMessage +=
+			L"Applyge indexes are ready, but DumpedGameplayEffects.txt could not be written.";
+	}
+
+	for (auto& Requester : Catalog.Requesters)
+	{
+		auto PlayerController = Requester.Get();
+
+		if (PlayerController)
+		{
+			PlayerController->ClientMessage(
+				FString(CompletionMessage.c_str()),
+				FName(),
+				1.f);
+		}
+	}
+
+	Catalog.Requesters.clear();
+}
+
+static void StartLoadedGameplayEffectCatalogForCommand(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController)
+		return;
+
+	auto CurrentWorld = UWorld::GetWorld();
+	auto GameplayEffectClass = UGameplayEffect::StaticClass();
+	const int32 ObjectCount = SDK::TUObjectArray::Num();
+
+	if (!CurrentWorld || !GameplayEffectClass ||
+		ObjectCount <= 0 || ObjectCount > 50000000)
+	{
+		PlayerController->ClientMessage(
+			FString(L"Gameplay Effect catalog could not start on this version."),
+			FName(),
+			1.f);
+		return;
+	}
+
+	auto& Catalog = GLoadedGameplayEffectCommandCatalog;
+
+	if (Catalog.World.Get() != CurrentWorld)
+	{
+		Catalog = FLoadedGameplayEffectCommandCatalog();
+		Catalog.World = TWeakObjectPtr<UWorld>(CurrentWorld);
+	}
+
+	AddLoadedGameplayEffectCatalogRequester(PlayerController);
+
+	if (Catalog.bBuilding)
+	{
+		PlayerController->ClientMessage(
+			FString(L"Gameplay Effect catalog scan is already running; completion will be reported here."),
+			FName(),
+			1.f);
+		return;
+	}
+
+	Catalog.PendingEntries.clear();
+	Catalog.PendingEntries.reserve(4096);
+	Catalog.NextObjectIndex = 0;
+	Catalog.ObjectCount = ObjectCount;
+	Catalog.bBuilding = true;
+
+	PlayerController->ClientMessage(
+		FString(L"Started the non-blocking Gameplay Effect catalog scan."),
+		FName(),
+		1.f);
+}
+
+static void TickLoadedGameplayEffectCatalogForCommand()
+{
+	auto& Catalog = GLoadedGameplayEffectCommandCatalog;
+
+	if (!Catalog.bBuilding)
+		return;
+
+	auto CurrentWorld = UWorld::GetWorld();
+
+	if (!CurrentWorld || Catalog.World.Get() != CurrentWorld)
+	{
+		Catalog = FLoadedGameplayEffectCommandCatalog();
+		return;
+	}
+
+	auto GameplayEffectClass = UGameplayEffect::StaticClass();
+
+	if (!GameplayEffectClass)
+	{
+		Catalog.PendingEntries.clear();
+		Catalog.ObjectCount = Catalog.NextObjectIndex;
+		CompleteLoadedGameplayEffectCatalogForCommand();
+		return;
+	}
+
+	constexpr int32 MaxObjectsPerTick = 2048;
+	constexpr auto TimeBudget = std::chrono::microseconds(1000);
+	const auto TickStart = std::chrono::steady_clock::now();
+	const int32 SkipFlags = Offsets::bEncryptedObjects
+		? 0x10200000
+		: 0x20;
+	int32 ObjectsProcessed = 0;
+
+	while (Catalog.NextObjectIndex < Catalog.ObjectCount &&
+		ObjectsProcessed < MaxObjectsPerTick)
+	{
+		if (ObjectsProcessed > 0 &&
+			(ObjectsProcessed & 0x3f) == 0 &&
+			std::chrono::steady_clock::now() - TickStart >= TimeBudget)
+		{
+			break;
+		}
+
+		const int32 ObjectIndex = Catalog.NextObjectIndex++;
+		ObjectsProcessed++;
+
+		auto Item = SDK::TUObjectArray::GetItemByIndex(ObjectIndex);
+
+		if (!Item || (Item->GetFlags() & SkipFlags) != 0)
+			continue;
+
+		auto Object = Item->GetObject();
+
+		if (!Object || !SDK::MemReadable((void*)Object, 0x40) ||
+			!Object->Class || !SDK::MemReadable(Object->Class, 0x40) ||
+			!Object->IsA(GameplayEffectClass))
+		{
+			continue;
+		}
+
+		FLoadedGameplayEffectCommandEntry Entry;
+		Entry.GameplayEffectClass =
+			TWeakObjectPtr<UClass>(Object->Class);
+		Entry.EffectName = Object->Name.ToString().c_str();
+		Entry.EffectClassName =
+			Object->Class->GetName().ToString().c_str();
+		Entry.NormalizedEffectName =
+			NormalizePlayerCommandString(Entry.EffectName);
+		Entry.NormalizedEffectClassName =
+			NormalizePlayerCommandString(Entry.EffectClassName);
+		Entry.NormalizedShortClassName =
+			Entry.NormalizedEffectClassName;
+
+		if (Entry.NormalizedShortClassName.ends_with("_c"))
+		{
+			Entry.NormalizedShortClassName.resize(
+				Entry.NormalizedShortClassName.size() - 2);
+		}
+
+		Catalog.PendingEntries.emplace_back(std::move(Entry));
+	}
+
+	if (Catalog.NextObjectIndex >= Catalog.ObjectCount)
+		CompleteLoadedGameplayEffectCatalogForCommand();
+}
+
+// Resolves the forms people commonly copy from dump output:
+//   Default__GE_Foo_C, GE_Foo_C, and GE_Foo.
+// Full object paths continue to work, including shortened blueprint paths such
+// as /Game/Effects/GE_Foo and /Game/Effects/GE_Foo.GE_Foo.
+static const UClass* FindGameplayEffectClassByCommandArg(const std::string& EffectArg)
+{
+	auto TrimmedArg = TrimPlayerCommandString(EffectArg);
+
+	if (TrimmedArg.empty())
+		return nullptr;
+
+	auto NormalizedArg = NormalizePlayerCommandString(TrimmedArg);
+
+	auto TryFindClassByPath = [](const std::string& Value) -> const UClass*
+	{
+		if (Value.empty() ||
+			(Value.find('/') == std::string::npos &&
+				Value.find('.') == std::string::npos))
+		{
+			return nullptr;
+		}
+
+		UEAllocatedWString WideValue(Value.begin(), Value.end());
+		auto Class = FindObject<UClass>(WideValue.c_str());
+		return IsGameplayEffectClassForCommand(Class) ? Class : nullptr;
+	};
+
+	if (TrimmedArg.find('/') != std::string::npos)
+	{
+		auto DotIndex = TrimmedArg.rfind('.');
+
+		if (DotIndex == std::string::npos)
+		{
+			auto LastSlashIndex = TrimmedArg.find_last_of('/');
+			auto AssetName = LastSlashIndex == std::string::npos
+				? TrimmedArg
+				: TrimmedArg.substr(LastSlashIndex + 1);
+
+			if (auto Class = TryFindClassByPath(TrimmedArg + "." + AssetName + "_C"))
+				return Class;
+
+			// Keep the raw path as a fallback, but only after the canonical
+			// generated-class path so an incomplete package path is not sent
+			// to StaticLoadObject first.
+			if (auto Class = TryFindClassByPath(TrimmedArg))
+				return Class;
+		}
+		else if (NormalizedArg.ends_with("_c") || NormalizedArg.starts_with("/script/"))
+		{
+			if (auto Class = TryFindClassByPath(TrimmedArg))
+				return Class;
+		}
+		else
+		{
+			if (auto Class = TryFindClassByPath(TrimmedArg + "_C"))
+				return Class;
+
+			if (auto Class = TryFindClassByPath(TrimmedArg))
+				return Class;
+		}
+	}
+	else if (TrimmedArg.find('.') != std::string::npos)
+	{
+		if (auto Class = TryFindClassByPath(TrimmedArg))
+			return Class;
+
+		if (!NormalizedArg.ends_with("_c"))
+			if (auto Class = TryFindClassByPath(TrimmedArg + "_C"))
+				return Class;
+	}
+
+	auto GameplayEffects = GetLoadedGameplayEffectCatalogForCommand();
+
+	if (!GameplayEffects)
+		return nullptr;
+
+	// The catalog snapshots normalized names while it is built, so resolving a
+	// short name never has to rescan GObjects or repeatedly convert FNames.
+	for (auto& Effect : *GameplayEffects)
+	{
+		if (NormalizedArg != Effect.NormalizedEffectName &&
+			NormalizedArg != Effect.NormalizedEffectClassName &&
+			NormalizedArg != Effect.NormalizedShortClassName)
+		{
+			continue;
+		}
+
+		auto EffectClass = Effect.GameplayEffectClass.Get();
+		return IsGameplayEffectClassForCommand(EffectClass)
+			? EffectClass
+			: nullptr;
+	}
+
+	return nullptr;
+}
+
+struct FRemoveGameplayEffectsCommandResult
+{
+	int InitialEffectCount = 0;
+	int RemainingEffectCount = 0;
+	bool bRemovalApiAvailable = true;
+};
+
+static FRemoveGameplayEffectsCommandResult RemoveAllGameplayEffectsForCommand(
+	UAbilitySystemComponent* AbilitySystemComponent)
+{
+	FRemoveGameplayEffectsCommandResult Result;
+
+	if (!AbilitySystemComponent)
+	{
+		Result.bRemovalApiAvailable = false;
+		return Result;
+	}
+
+	auto& Effects =
+		AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+	const int InitialEffectCount = Effects.Num();
+	Result.InitialEffectCount = InitialEffectCount;
+	Result.RemainingEffectCount = InitialEffectCount;
+
+	if (InitialEffectCount == 0)
+		return Result;
+
+	if (InitialEffectCount < 0 || InitialEffectCount > 100000)
+	{
+		Result.bRemovalApiAvailable = false;
+		return Result;
+	}
+
+	auto RemoveActiveEffectFn =
+		AbilitySystemComponent->GetFunction("RemoveActiveGameplayEffect");
+
+	if (!RemoveActiveEffectFn)
+	{
+		Result.bRemovalApiAvailable = false;
+		return Result;
+	}
+
+	std::vector<FActiveGameplayEffectHandle> Handles;
+	Handles.reserve(InitialEffectCount);
+
+	for (int Index = 0; Index < InitialEffectCount; Index++)
+	{
+		auto& Effect = Effects.Get(Index, FActiveGameplayEffect::Size());
+		auto Handle =
+			*(FActiveGameplayEffectHandle*)((char*)&Effect + 0xc);
+
+		if (Handle.Handle > 0)
+			Handles.push_back(Handle);
+	}
+
+	// Always use the GAS removal API so attributes, tags, cues, delegates, and
+	// replication are unwound with the effect. Clearing GameplayEffects_Internal
+	// directly leaves those systems in a corrupt half-removed state.
+	for (auto& Handle : Handles)
+	{
+		AbilitySystemComponent->Call<bool>(
+			RemoveActiveEffectFn,
+			Handle,
+			-1);
+	}
+
+	const int RemainingEffectCount = Effects.Num();
+
+	if (RemainingEffectCount < 0 || RemainingEffectCount > 100000)
+		Result.bRemovalApiAvailable = false;
+	else
+		Result.RemainingEffectCount = RemainingEffectCount;
+
+	return Result;
+}
+
+static std::wstring GetRemoveGameplayEffectsCommandMessage(
+	const FRemoveGameplayEffectsCommandResult& Result)
+{
+	if (!Result.bRemovalApiAvailable)
+		return L"Gameplay Effect removal is unavailable on this version.";
+
+	if (Result.InitialEffectCount == 0)
+		return L"No active Gameplay Effects to remove.";
+
+	if (Result.RemainingEffectCount == 0)
+	{
+		return L"Removed " +
+			std::to_wstring(Result.InitialEffectCount) +
+			L" active Gameplay Effect(s)!";
+	}
+
+	const int RemovedEffectCount =
+		Result.InitialEffectCount > Result.RemainingEffectCount
+			? Result.InitialEffectCount - Result.RemainingEffectCount
+			: 0;
+
+	if (RemovedEffectCount > 0)
+	{
+		return L"Removed " +
+			std::to_wstring(RemovedEffectCount) +
+			L" active Gameplay Effect(s), but " +
+			std::to_wstring(Result.RemainingEffectCount) +
+			L" could not be removed.";
+	}
+
+	return L"Could not remove the active Gameplay Effects.";
+}
+
+struct FGameplayEffectOutputEntry
+{
+	std::string EffectName;
+	std::string EffectClassName;
+	bool bHasLevel = false;
+	float Level = 0.f;
+	bool bHasStackCount = false;
+	int32 StackCount = 0;
+	bool bHasStartTime = false;
+	float StartTime = 0.f;
+};
+
+struct FGameplayEffectOutputState
+{
+	TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+	TWeakObjectPtr<UWorld> World;
+	TWeakObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
+	std::unordered_map<int32, FGameplayEffectOutputEntry> ActiveEffects;
+	bool bHasBaseline = false;
+};
+
+static std::unordered_map<AFortPlayerControllerAthena*, FGameplayEffectOutputState>
+	GGameplayEffectOutputStates;
+
+static UAbilitySystemComponent* GetGameplayEffectOutputAbilitySystem(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController || !PlayerController->PlayerState)
+		return nullptr;
+
+	return PlayerController->PlayerState->AbilitySystemComponent;
+}
+
+template <typename T>
+static int32 ResolveGameplayEffectOutputStructPropertyOffset(
+	const UStruct* Struct,
+	const char* PropertyName,
+	uint64 PropertyFlags,
+	int32 StructSize)
+{
+	if (!Struct || StructSize < static_cast<int32>(sizeof(T)))
+		return -1;
+
+	const uint32 Offset = Struct->GetOffset(PropertyName, PropertyFlags);
+
+	if (Offset == static_cast<uint32>(-1) ||
+		Offset > static_cast<uint32>(
+			StructSize - static_cast<int32>(sizeof(T))))
+	{
+		return -1;
+	}
+
+	return static_cast<int32>(Offset);
+}
+
+static std::unordered_map<int32, FGameplayEffectOutputEntry>
+CaptureGameplayEffectOutputSnapshot(UAbilitySystemComponent* AbilitySystemComponent)
+{
+	std::unordered_map<int32, FGameplayEffectOutputEntry> Snapshot;
+
+	if (!AbilitySystemComponent)
+		return Snapshot;
+
+	auto& Effects =
+		AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+	const int EffectCount = Effects.Num();
+
+	if (EffectCount <= 0 || EffectCount > 100000)
+		return Snapshot;
+
+	Snapshot.reserve(EffectCount);
+	const bool bCanReadLevel = FGameplayEffectSpec::HasLevel();
+	static const int32 StackCountOffset =
+		ResolveGameplayEffectOutputStructPropertyOffset<int32>(
+			FGameplayEffectSpec::StaticStruct(),
+			"StackCount",
+			0x80,
+			FGameplayEffectSpec::Size());
+	static const int32 StartTimeOffset = []()
+	{
+		auto ActiveEffectStruct = FActiveGameplayEffect::StaticStruct();
+		const int32 ActiveEffectSize = FActiveGameplayEffect::Size();
+		const char* StartTimePropertyNames[] =
+		{
+			"StartServerWorldTime",
+			"StartWorldTime",
+			"CachedStartServerWorldTime"
+		};
+
+		for (auto PropertyName : StartTimePropertyNames)
+		{
+			const int32 Offset =
+				ResolveGameplayEffectOutputStructPropertyOffset<float>(
+					ActiveEffectStruct,
+					PropertyName,
+					0x100,
+					ActiveEffectSize);
+
+			if (Offset >= 0)
+				return Offset;
+		}
+
+		return -1;
+	}();
+
+	for (int Index = 0; Index < EffectCount; Index++)
+	{
+		auto& Effect = Effects.Get(Index, FActiveGameplayEffect::Size());
+		auto EffectDefinition = Effect.Spec.Def;
+
+		if (!EffectDefinition)
+			continue;
+
+		auto Handle = *(FActiveGameplayEffectHandle*)((char*)&Effect + 0xc);
+
+		if (Handle.Handle <= 0)
+			continue;
+
+		FGameplayEffectOutputEntry Entry;
+		Entry.EffectName = EffectDefinition->Name.ToString().c_str();
+
+		if (EffectDefinition->Class)
+			Entry.EffectClassName =
+				EffectDefinition->Class->GetName().ToString().c_str();
+
+		if (bCanReadLevel)
+		{
+			Entry.bHasLevel = true;
+			Entry.Level = Effect.Spec.Level;
+		}
+
+		if (StackCountOffset >= 0)
+		{
+			Entry.bHasStackCount = true;
+			Entry.StackCount =
+				GetFromOffset<int32>(&Effect.Spec, StackCountOffset);
+		}
+
+		if (StartTimeOffset >= 0)
+		{
+			Entry.bHasStartTime = true;
+			Entry.StartTime =
+				GetFromOffset<float>(&Effect, StartTimeOffset);
+		}
+
+		Snapshot.insert_or_assign(Handle.Handle, std::move(Entry));
+	}
+
+	return Snapshot;
+}
+
+static std::string GetGameplayEffectOutputPlayerName(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController)
+		return "unknown";
+
+	if (PlayerController->PlayerState)
+	{
+		auto PlayerState =
+			PlayerController->PlayerState->Cast<AFortPlayerStateAthena>();
+
+		if (PlayerState)
+		{
+			std::string PlayerName =
+				PlayerState->GetPlayerName().ToString().c_str();
+
+			if (!PlayerName.empty())
+				return PlayerName;
+		}
+	}
+
+	return PlayerController->Name.ToString().c_str();
+}
+
+static void PrintGameplayEffectOutputChange(
+	const char* Change,
+	AFortPlayerControllerAthena* PlayerController,
+	int32 Handle,
+	const FGameplayEffectOutputEntry& Entry)
+{
+	auto PlayerName = GetGameplayEffectOutputPlayerName(PlayerController);
+	std::string AvatarName = "none";
+	std::string Details;
+	auto AbilitySystemComponent =
+		GetGameplayEffectOutputAbilitySystem(PlayerController);
+
+	if (AbilitySystemComponent &&
+		AbilitySystemComponent->HasAvatarActor() &&
+		AbilitySystemComponent->AvatarActor)
+	{
+		AvatarName =
+			AbilitySystemComponent->AvatarActor->Name.ToString().c_str();
+	}
+
+	char DetailBuffer[64];
+
+	if (Entry.bHasLevel)
+	{
+		snprintf(
+			DetailBuffer,
+			sizeof(DetailBuffer),
+			" level=%.3f",
+			Entry.Level);
+		Details += DetailBuffer;
+	}
+
+	if (Entry.bHasStackCount)
+	{
+		snprintf(
+			DetailBuffer,
+			sizeof(DetailBuffer),
+			" stacks=%d",
+			Entry.StackCount);
+		Details += DetailBuffer;
+	}
+
+	if (Entry.bHasStartTime)
+	{
+		snprintf(
+			DetailBuffer,
+			sizeof(DetailBuffer),
+			" start_time=%.3f",
+			Entry.StartTime);
+		Details += DetailBuffer;
+	}
+
+	printf(
+		"[OutputGE] %s player=\"%s\" avatar=%s handle=%d effect=%s class=%s%s\n",
+		Change,
+		PlayerName.c_str(),
+		AvatarName.c_str(),
+		Handle,
+		Entry.EffectName.c_str(),
+		Entry.EffectClassName.c_str(),
+		Details.c_str());
+
+	fflush(stdout);
+}
+
+static bool HasGameplayEffectOutputFloatChanged(
+	bool bPreviousHasValue,
+	float PreviousValue,
+	bool bCurrentHasValue,
+	float CurrentValue)
+{
+	if (bPreviousHasValue != bCurrentHasValue)
+		return true;
+
+	if (!bCurrentHasValue)
+		return false;
+
+	const bool bPreviousValueFinite =
+		std::isfinite((double)PreviousValue);
+	const bool bCurrentValueFinite =
+		std::isfinite((double)CurrentValue);
+
+	if (bPreviousValueFinite != bCurrentValueFinite)
+		return true;
+
+	return bCurrentValueFinite &&
+		std::abs(CurrentValue - PreviousValue) > 0.001f;
+}
+
+static bool HasGameplayEffectOutputEntryChanged(
+	const FGameplayEffectOutputEntry& Previous,
+	const FGameplayEffectOutputEntry& Current)
+{
+	if (Previous.EffectName != Current.EffectName ||
+		Previous.EffectClassName != Current.EffectClassName ||
+		Previous.bHasStackCount != Current.bHasStackCount ||
+		(Previous.bHasStackCount &&
+			Previous.StackCount != Current.StackCount))
+	{
+		return true;
+	}
+
+	if (HasGameplayEffectOutputFloatChanged(
+			Previous.bHasLevel,
+			Previous.Level,
+			Current.bHasLevel,
+			Current.Level))
+	{
+		return true;
+	}
+
+	return HasGameplayEffectOutputFloatChanged(
+		Previous.bHasStartTime,
+		Previous.StartTime,
+		Current.bHasStartTime,
+		Current.StartTime);
+}
+
+static bool ToggleGameplayEffectOutputForCommand(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	auto Existing = GGameplayEffectOutputStates.find(PlayerController);
+
+	if (Existing != GGameplayEffectOutputStates.end())
+	{
+		// A raw address can be reused after travel. Only treat this as the same
+		// toggle when its weak object identity still resolves to the requester.
+		if (Existing->second.Controller.Get() == PlayerController)
+		{
+			GGameplayEffectOutputStates.erase(Existing);
+			printf(
+				"[OutputGE] DISABLED player=\"%s\"\n",
+				GetGameplayEffectOutputPlayerName(PlayerController).c_str());
+			fflush(stdout);
+			return false;
+		}
+
+		GGameplayEffectOutputStates.erase(Existing);
+	}
+
+	FGameplayEffectOutputState State;
+	State.Controller =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
+	State.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
+
+	auto AbilitySystemComponent =
+		GetGameplayEffectOutputAbilitySystem(PlayerController);
+
+	if (AbilitySystemComponent)
+	{
+		State.AbilitySystemComponent =
+			TWeakObjectPtr<UAbilitySystemComponent>(AbilitySystemComponent);
+		State.ActiveEffects =
+			CaptureGameplayEffectOutputSnapshot(AbilitySystemComponent);
+		State.bHasBaseline = true;
+	}
+
+	const size_t BaselineEffectCount = State.ActiveEffects.size();
+	GGameplayEffectOutputStates.emplace(PlayerController, std::move(State));
+
+	printf(
+		"[OutputGE] ENABLED player=\"%s\" baseline=%zu active effects\n",
+		GetGameplayEffectOutputPlayerName(PlayerController).c_str(),
+		BaselineEffectCount);
+	printf(
+		"[OutputGE] NOTE: tracks active duration/infinite effects; instant effects are not retained by GAS.\n");
+	fflush(stdout);
+	return true;
+}
+
+static void TickGameplayEffectOutputForCommand()
+{
+	if (GGameplayEffectOutputStates.empty())
+		return;
+
+	auto CurrentWorld = UWorld::GetWorld();
+
+	for (auto It = GGameplayEffectOutputStates.begin();
+		It != GGameplayEffectOutputStates.end();)
+	{
+		auto& State = It->second;
+		auto PlayerController = State.Controller.Get();
+
+		if (!PlayerController ||
+			PlayerController != It->first ||
+			State.World.Get() != CurrentWorld)
+		{
+			It = GGameplayEffectOutputStates.erase(It);
+			continue;
+		}
+
+		auto AbilitySystemComponent =
+			GetGameplayEffectOutputAbilitySystem(PlayerController);
+
+		if (!AbilitySystemComponent)
+		{
+			State.AbilitySystemComponent =
+				TWeakObjectPtr<UAbilitySystemComponent>();
+			State.ActiveEffects.clear();
+			State.bHasBaseline = false;
+			++It;
+			continue;
+		}
+
+		if (!State.bHasBaseline ||
+			State.AbilitySystemComponent.Get() != AbilitySystemComponent)
+		{
+			State.AbilitySystemComponent =
+				TWeakObjectPtr<UAbilitySystemComponent>(
+					AbilitySystemComponent);
+			State.ActiveEffects =
+				CaptureGameplayEffectOutputSnapshot(
+					AbilitySystemComponent);
+			State.bHasBaseline = true;
+			++It;
+			continue;
+		}
+
+		auto CurrentEffects =
+			CaptureGameplayEffectOutputSnapshot(AbilitySystemComponent);
+
+		for (auto& [Handle, CurrentEntry] : CurrentEffects)
+		{
+			auto Previous = State.ActiveEffects.find(Handle);
+
+			if (Previous == State.ActiveEffects.end())
+			{
+				PrintGameplayEffectOutputChange(
+					"APPLIED",
+					PlayerController,
+					Handle,
+					CurrentEntry);
+			}
+			else if (HasGameplayEffectOutputEntryChanged(
+				Previous->second, CurrentEntry))
+			{
+				PrintGameplayEffectOutputChange(
+					"UPDATED",
+					PlayerController,
+					Handle,
+					CurrentEntry);
+			}
+		}
+
+		for (auto& [Handle, PreviousEntry] : State.ActiveEffects)
+		{
+			if (!CurrentEffects.contains(Handle))
+			{
+				PrintGameplayEffectOutputChange(
+					"REMOVED",
+					PlayerController,
+					Handle,
+					PreviousEntry);
+			}
+		}
+
+		State.ActiveEffects = std::move(CurrentEffects);
+		++It;
+	}
+}
+
 // Collects every loaded emote definition. Used by "emoteall" when no specific
 // emote was given, so the random pick is drawn from whatever the build has
 // actually loaded instead of a hardcoded list.
@@ -7538,6 +8873,10 @@ static bool ApplyGuidedNukeRocket(AActor* Rocket, AActor* InstigatorPawn, AFortP
 
 void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 {
+	TickOneShotLowGravityVfxRetries(DeltaSeconds);
+	TickLoadedGameplayEffectCatalogForCommand();
+	TickGameplayEffectOutputForCommand();
+
 	for (int CleanupIndex =
 		static_cast<int>(GPendingSpawnedBotCleanup.size()) - 1;
 		CleanupIndex >= 0; --CleanupIndex)
@@ -7891,7 +9230,9 @@ cheat spawnbot <count> <weapon> <s[size] | s[X,Y,Z]> [X Y Z] - Spawns a player b
 cheat tpbot - Teleports the player bot to your location
 cheat delbot - Removes every spawned player bot (PlayerAI is left alone)
 cheat dumppawns - Lists every player pawn with its index and owner
-cheat dumpge - Lists every loaded gameplay effect with its index and class
+cheat dumpge - Builds an indexed gameplay-effect catalog and writes DumpedGameplayEffects.txt
+cheat applyge <index | effect name/path | remove> - Applies a gameplay effect, or removes all active effects
+cheat outputge - Toggles console logging for active Gameplay Effect changes on your pawn
 cheat possess <player name | index | pawn name | reset> - Puppet a pawn (move it around, owner watches), reset returns you to your own
 cheat tpall - Teleports all real players around your location
 cheat botemote - Plays the 'Accolades' emote to the player bot
@@ -8905,59 +10246,149 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			{
 				if (args.size() < 2)
 				{
-					PlayerController->ClientMessage(FString(L"Please provide a custom Gameplay Effect."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Usage: cheat applyge <index | effect name/path | remove>. See cheat dumpge for indexes."), FName(), 1.f);
 					return;
 				}
 
 				auto PlayerState = PlayerController->PlayerState;
 				auto Pawn = PlayerController->Pawn;
 
+				if (!PlayerState ||
+					!PlayerState->AbilitySystemComponent)
+				{
+					PlayerController->ClientMessage(
+						FString(L"No Ability System Component was found for your player."),
+						FName(),
+						1.f);
+					return;
+				}
+
 				if (UAbilitySystemComponent* AbilitySystemComponent = PlayerState->AbilitySystemComponent)
 				{
-					auto GEClass = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
+					const UClass* GEClass = nullptr;
+					int GameplayEffectIndex = 0;
+					std::string GameplayEffectArg = args[1].c_str();
 
-					if (!GEClass)
-						GEClass = FindClass(args[1].c_str());
-
-					if (!GEClass)
+					if (NormalizePlayerCommandString(GameplayEffectArg) ==
+						"remove")
 					{
-						PlayerController->ClientMessage(FString(L"Could not find a Gameplay Effect."), FName(), 1.f);
+						const auto RemovalResult =
+							RemoveAllGameplayEffectsForCommand(
+								AbilitySystemComponent);
+						auto Message =
+							GetRemoveGameplayEffectsCommandMessage(
+								RemovalResult);
+
+						PlayerController->ClientMessage(
+							FString(Message.c_str()),
+							FName(),
+							1.f);
 						return;
 					}
 
-					if (GEClass)
+					if (TryParseCommandInt(GameplayEffectArg, GameplayEffectIndex))
 					{
-						FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+						auto GameplayEffects =
+							GetLoadedGameplayEffectCatalogForCommand();
 
-						Context.Instigator = PlayerController;
-						Context.Causer = Pawn;
-						Context.AddSourceObject(Pawn);
+						if (!GameplayEffects)
+						{
+							PlayerController->ClientMessage(FString(L"No completed Gameplay Effect catalog is available. Run cheat dumpge and wait for its completion message."), FName(), 1.f);
+							return;
+						}
 
-						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(GEClass, 1.0f, Context);
-						PlayerController->ClientMessage(FString(L"Applied Gameplay Effect!"), FName(), 1.f);
+						if (GameplayEffects->empty())
+						{
+							PlayerController->ClientMessage(FString(L"The completed Gameplay Effect catalog is empty. Run cheat dumpge again after more assets have loaded."), FName(), 1.f);
+							return;
+						}
+
+						if (GameplayEffectIndex < 0 || GameplayEffectIndex >= static_cast<int>(GameplayEffects->size()))
+						{
+							wchar_t wmsg[112];
+							swprintf_s(wmsg, 112, L"Invalid index. Use 0 to %d from DumpedGameplayEffects.txt.", static_cast<int>(GameplayEffects->size()) - 1);
+							PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
+							return;
+						}
+
+						auto& GameplayEffect =
+							(*GameplayEffects)[GameplayEffectIndex];
+						GEClass =
+							GameplayEffect.GameplayEffectClass.Get();
 					}
+					else
+					{
+						GEClass = FindGameplayEffectClassByCommandArg(GameplayEffectArg);
+					}
+
+					if (!IsGameplayEffectClassForCommand(GEClass))
+					{
+						PlayerController->ClientMessage(FString(L"Could not find that Gameplay Effect. Use an index from cheat dumpge, a short name, or a full path."), FName(), 1.f);
+						return;
+					}
+
+					FGameplayEffectContextHandle Context = AbilitySystemComponent->MakeEffectContext();
+
+					Context.Instigator = PlayerController;
+					Context.Causer = Pawn;
+					Context.AddSourceObject(Pawn);
+
+					auto AppliedHandle =
+						AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(
+							GEClass,
+							1.0f,
+							Context);
+					const bool bGameplayEffectApplied =
+						AppliedHandle.bPassedFiltersAndWasExecuted;
+
+					PlayerController->ClientMessage(
+						FString(bGameplayEffectApplied
+							? L"Applied Gameplay Effect!"
+							: L"That Gameplay Effect was rejected by the Ability System."),
+						FName(),
+						1.f);
 				}
 			}
 			else if (command == "removege")
 			{
 				auto PlayerState = PlayerController->PlayerState;
+				auto AbilitySystemComponent =
+					PlayerState
+						? PlayerState->AbilitySystemComponent
+						: nullptr;
 
-				auto ASC = PlayerState->AbilitySystemComponent;
-
-				auto& Effects = ASC->ActiveGameplayEffects.GameplayEffects_Internal;
-
-				for (int i = Effects.Num() - 1; i >= 0; i--)
+				if (!AbilitySystemComponent)
 				{
-					auto& Effect = Effects.Get(i, FActiveGameplayEffect::Size());
-
-					if (!Effect.Spec.Def)
-						continue;
-
-					auto EffectName = Effect.Spec.Def->Name.ToString();
-
-					Effects.Remove(i, FActiveGameplayEffect::Size());
-					PlayerController->ClientMessage(FString(L"Removed all Gameplay Effects!"), FName(), 1.f);
+					PlayerController->ClientMessage(
+						FString(L"No Ability System Component was found for your player."),
+						FName(),
+						1.f);
+					return;
 				}
+
+				const auto RemovalResult =
+					RemoveAllGameplayEffectsForCommand(
+						AbilitySystemComponent);
+				auto Message =
+					GetRemoveGameplayEffectsCommandMessage(
+						RemovalResult);
+
+				PlayerController->ClientMessage(
+					FString(Message.c_str()),
+					FName(),
+					1.f);
+			}
+			else if (command == "outputge")
+			{
+				const bool bEnabled =
+					ToggleGameplayEffectOutputForCommand(PlayerController);
+
+				PlayerController->ClientMessage(
+					FString(bEnabled
+						? L"Active Gameplay Effect console output enabled!"
+						: L"Active Gameplay Effect console output disabled!"),
+					FName(),
+					1.f);
 			}
 			else if (command == "cipher")
 			{
@@ -9342,12 +10773,25 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					//auto PlayerState = PlayerController->PlayerState;
 
 					if (!PC || !Pawn)
+					{
+						if (Pawn)
+							Pawn->K2_DestroyActor();
+						if (PC)
+							PC->K2_DestroyActor();
 						continue;
+					}
 
 					PC->Possess(Pawn);
 					PC->MyFortPawn = Pawn; // dont't ask, crashes on 27+
 
 					auto PlayerState = (AFortPlayerStateAthena*)UWorld::SpawnActor(AFortPlayerStateAthena::StaticClass(), Transform);
+
+					if (!PlayerState)
+					{
+						Pawn->K2_DestroyActor();
+						PC->K2_DestroyActor();
+						continue;
+					}
 
 					PlayerState->SetOwner(PC);
 
@@ -9378,27 +10822,36 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					if (GameState->HasGameMemberInfoArray())
 					{
 						auto Member = (FGameMemberInfo*)malloc(FGameMemberInfo::Size());
-						memset((PBYTE)Member, 0, FGameMemberInfo::Size());
+						if (Member)
+						{
+							memset((PBYTE)Member, 0, FGameMemberInfo::Size());
+							Member->MostRecentArrayReplicationKey = -1;
+							Member->ReplicationID = -1;
+							Member->ReplicationKey = -1;
+							Member->TeamIndex = PlayerState->TeamIndex;
+							Member->SquadId = PlayerState->SquadId;
+							Member->MemberUniqueId = PlayerState->UniqueId;
 
-						Member->MostRecentArrayReplicationKey = -1;
-						Member->ReplicationID = -1;
-						Member->ReplicationKey = -1;
-						Member->TeamIndex = PlayerState->TeamIndex;
-						Member->SquadId = PlayerState->SquadId;
-						Member->MemberUniqueId = PlayerState->UniqueId;
+							GameState->GameMemberInfoArray.Members.Add(
+								*Member, FGameMemberInfo::Size());
+							GameState->GameMemberInfoArray.MarkItemDirty(*Member);
 
-						GameState->GameMemberInfoArray.Members.Add(*Member, FGameMemberInfo::Size());
-						GameState->GameMemberInfoArray.MarkItemDirty(*Member);
+							auto NotifyGameMemberAdded = (void(*)(AFortGameStateAthena*, uint8_t, uint8_t, FUniqueNetIdRepl*)) NotifyGameMemberAdded_;
+							if (NotifyGameMemberAdded)
+								NotifyGameMemberAdded(
+									GameState,
+									Member->SquadId,
+									Member->TeamIndex,
+									&Member->MemberUniqueId);
 
-						auto NotifyGameMemberAdded = (void(*)(AFortGameStateAthena*, uint8_t, uint8_t, FUniqueNetIdRepl*)) NotifyGameMemberAdded_;
-						if (NotifyGameMemberAdded)
-							NotifyGameMemberAdded(GameState, Member->SquadId, Member->TeamIndex, &Member->MemberUniqueId);
-
-						free(Member);
+							free(Member);
+						}
 					}
 
 					for (auto& AbilitySet : AFortGameMode::AbilitySets)
 						PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+
+					EnsureOneShotLowGravityVfx(PC, Pawn);
 
 					if (!PC->WorldInventory)
 					{
@@ -11483,45 +12936,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 			}
 			else if (command == "dumpge")
 			{
-				auto GameplayEffectClass = UGameplayEffect::StaticClass();
-
-				if (!GameplayEffectClass)
-				{
-					PlayerController->ClientMessage(FString(L"GameplayEffect class was not found on this version."), FName(), 1.f);
-					return;
-				}
-
-				std::vector<const UObject*> GameplayEffects;
-				const int ObjectCount = SDK::TUObjectArray::Num();
-
-				for (int i = 0; i < ObjectCount; i++)
-				{
-					auto Object = SDK::TUObjectArray::GetObjectByIndex(i);
-
-					if (!Object || !SDK::MemReadable((void*)Object, 0x40) ||
-						!Object->Class || !SDK::MemReadable(Object->Class, 0x40))
-						continue;
-
-					if (Object->IsA(GameplayEffectClass))
-						GameplayEffects.push_back(Object);
-				}
-
-				wchar_t wcount[80];
-				swprintf_s(wcount, 80, L"Found %zu loaded gameplay effects:", GameplayEffects.size());
-				PlayerController->ClientMessage(FString(wcount), FName(), 1.f);
-
-				for (size_t i = 0; i < GameplayEffects.size(); i++)
-				{
-					auto Effect = GameplayEffects[i];
-					std::string Line = "[" + std::to_string(i) + "] " +
-						std::string(Effect->Name.ToString().c_str());
-
-					if (Effect->Class)
-						Line += " (" + std::string(Effect->Class->GetName().ToString().c_str()) + ")";
-
-					auto Message = std::wstring(Line.begin(), Line.end());
-					PlayerController->ClientMessage(FString(Message.c_str()), FName(), 1.f);
-				}
+				StartLoadedGameplayEffectCatalogForCommand(PlayerController);
 			}
 			else if (command == "possess")
 			{

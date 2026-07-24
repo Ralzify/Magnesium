@@ -202,6 +202,19 @@ public:
         SDK::DbgLog("  [HealthSet] no native setter and no '%s' property on this build - writes will not apply\n", AttributeName);
     }
 
+    // Direct setters must keep the raw/unclamped GAS values coherent too.
+    // Otherwise a later aggregator recompute can restore the stale value.
+    static void WriteDirectAttributeValue(FFortGameplayAttributeData& Attribute, float NewValue)
+    {
+        Attribute.BaseValue = NewValue;
+        Attribute.CurrentValue = NewValue;
+
+        if (FFortGameplayAttributeData::HasUnclampedBaseValue())
+            Attribute.UnclampedBaseValue = NewValue;
+        if (FFortGameplayAttributeData::HasUnclampedCurrentValue())
+            Attribute.UnclampedCurrentValue = NewValue;
+    }
+
     void SetHealth(float NewValue) const
     {
         static auto Fn = GetFunction("SetHealth");
@@ -222,13 +235,11 @@ public:
         }
 
         auto& Attribute = Set->Health;
-        Attribute.BaseValue = NewValue;
-        Attribute.CurrentValue = NewValue;
+        WriteDirectAttributeValue(Attribute, NewValue);
 
         Set->OnRep_Health();
         // Re-apply after the OnRep recompute (see SetShield for why).
-        Attribute.CurrentValue = NewValue;
-        Attribute.BaseValue = NewValue;
+        WriteDirectAttributeValue(Attribute, NewValue);
 
         ForceNetUpdate();
     }
@@ -253,14 +264,12 @@ public:
         }
 
         auto& Attribute = Set->MaxHealth;
-        Attribute.BaseValue = NewValue;
-        Attribute.CurrentValue = NewValue;
+        WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
         Set->OnRep_MaxHealth();
         // Re-apply after the OnRep recompute (see SetShield for why).
-        Attribute.BaseValue = NewValue;
-        Attribute.CurrentValue = NewValue;
+        WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
         ForceNetUpdate();
@@ -304,15 +313,13 @@ public:
             Target = 0.f;
 
         auto& Attribute = Set->CurrentShield;
-        Attribute.BaseValue = Target;
-        Attribute.CurrentValue = Target;
+        WriteDirectAttributeValue(Attribute, Target);
 
         // OnRep is what makes damage read the shield on the earliest builds
         // (1.7.2) - exactly Core's path. On S4+ the same OnRep recomputes current
         // from a GAS aggregator seeded at 0 and wipes it, so we re-write after.
         Set->OnRep_CurrentShield();
-        Attribute.CurrentValue = Target;
-        Attribute.BaseValue = Target;
+        WriteDirectAttributeValue(Attribute, Target);
 
         // The raw write only ABSORBS on the earliest builds. By S4 the shield
         // lives in the ability-system aggregator that native damage reads, and a
@@ -354,14 +361,12 @@ public:
 
         // "Shield" is the max-shield attribute on these builds.
         auto& Attribute = Set->Shield;
-        Attribute.BaseValue = NewValue;
-        Attribute.CurrentValue = NewValue;
+        WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
         Set->OnRep_Shield();
         // Re-apply after the OnRep recompute (see SetShield for why).
-        Attribute.BaseValue = NewValue;
-        Attribute.CurrentValue = NewValue;
+        WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
         ForceNetUpdate();
