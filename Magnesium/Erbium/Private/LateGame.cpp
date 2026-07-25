@@ -9,6 +9,7 @@
 
 #include <random>
 #include <chrono>
+#include <vector>
 
 static bool IsUsableLateGameObject(const UObject* Object)
 {
@@ -25,6 +26,46 @@ static bool IsUsableLateGameObject(const UObject* Object)
     return Item && Item->Object == Object &&
         !(Item->Flags & 0x20) && Object->Class &&
         !IsBadReadPtr(Object->Class);
+}
+
+static bool IsPersistentLateGameInventoryItem(
+    const UFortItemDefinition* ItemDefinition)
+{
+    if (!ItemDefinition || !ItemDefinition->HasItemType())
+        return false;
+
+    const auto ItemType = ItemDefinition->ItemType;
+    return ItemType == EFortItemType::GetWeaponHarvest() ||
+        ItemType == EFortItemType::GetBuildingPiece() ||
+        ItemType == EFortItemType::GetEditTool();
+}
+
+static int32 ClearInventoryForLateGameLoadout(
+    AFortInventory* WorldInventory)
+{
+    if (!WorldInventory)
+        return 0;
+
+    std::vector<FGuid> GuidsToRemove;
+    auto& Entries = WorldInventory->Inventory.ReplicatedEntries;
+    GuidsToRemove.reserve(Entries.Num());
+
+    for (int32 Index = 0; Index < Entries.Num(); ++Index)
+    {
+        auto& Entry = Entries.Get(Index, FFortItemEntry::Size());
+        if (Entry.ItemDefinition &&
+            IsPersistentLateGameInventoryItem(Entry.ItemDefinition))
+        {
+            continue;
+        }
+
+        GuidsToRemove.push_back(Entry.ItemGuid);
+    }
+
+    for (const auto& Guid : GuidsToRemove)
+        WorldInventory->Remove(Guid);
+
+    return static_cast<int32>(GuidsToRemove.size());
 }
 
 static UFortControllerComponent_VictoryCrowns*
@@ -614,6 +655,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataShells.AthenaAmmoDataShells"), Shells(rng)));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsMedium.AthenaAmmoDataBulletsMedium"), Medium(rng)));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsLight.AthenaAmmoDataBulletsLight"), Light(rng)));
+
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AmmoDataRockets.AmmoDataRockets"), 12));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataExplosive.AmmoDataExplosive"), STW(rng))); // make these and below optional???
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataEnergyCell.AmmoDataEnergyCell"), STW(rng)));
@@ -658,7 +700,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Auto_Athena_R_Ore_T03.WID_Assault_Auto_Athena_R_Ore_T03"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 23) || (std::floor(VersionInfo.FortniteVersion) == 27) || (VersionInfo.FortniteVersion >= 28.00 /* temporary measures */))
+    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 23) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_AutoHigh_Athena_VR_Ore_T03.WID_Assault_AutoHigh_Athena_VR_Ore_T03"), 1));
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_AutoHigh_Athena_SR_Ore_T03.WID_Assault_AutoHigh_Athena_SR_Ore_T03"), 1));
@@ -805,7 +847,11 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
 
     if ((VersionInfo.FortniteVersion == 11.3) || (std::floor(VersionInfo.FortniteVersion) == 15) || (VersionInfo.FortniteVersion == 20.30) || (VersionInfo.FortniteVersion >= 21.10 && VersionInfo.FortniteVersion < 22.00) || (VersionInfo.FortniteVersion == 22.30) || (VersionInfo.FortniteVersion == 29.40))
     {
-        if (std::floor(VersionInfo.FortniteVersion) == 15)
+        if (VersionInfo.FortniteVersion == 29.40)
+        {
+            Slot1.Add(TPair<FString, int>(TEXT("/Galileo/Items/Blaster/WID_Cosmos_AR_Athena_UC.WID_Cosmos_AR_Athena_UC"), 1));
+        }
+        else if (std::floor(VersionInfo.FortniteVersion) == 15)
         {
             Slot1.Add(TPair<FString, int>(TEXT("/CosmosGameplay/Items/CosmoAssaultRifle/WID_Cosmos_AR_Athena_UC.WID_Cosmos_AR_Athena_UC"), 1));
         }
@@ -910,7 +956,71 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/HopscotchWeaponsGameplay/Items/FlipmagAR/WID_Assault_FlipMag_Athena_VR.WID_Assault_FlipMag_Athena_VR"), 1));
     }
 
-    // will add ch5 ars once the damage is fixed
+    // Chapter 5 Season 1
+    if (std::floor(VersionInfo.FortniteVersion) == 28)
+    {
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Heavy/WID_Assault_Paprika_Heavy_Athena_VR.WID_Assault_Paprika_Heavy_Athena_VR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Heavy/WID_Assault_Paprika_Heavy_Athena_SR.WID_Assault_Paprika_Heavy_Athena_SR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Heavy/WID_Assault_Paprika_Heavy_Athena_UR_Boss.WID_Assault_Paprika_Heavy_Athena_UR_Boss"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_DPS/WID_Assault_Paprika_DPS_Athena_VR.WID_Assault_Paprika_DPS_Athena_VR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_DPS/WID_Assault_Paprika_DPS_Athena_SR.WID_Assault_Paprika_DPS_Athena_SR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_DPS/WID_Assault_Paprika_DPS_Athena_UR_Boss.WID_Assault_Paprika_DPS_Athena_UR_Boss"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Infantry/WID_Assault_Paprika_Infantry_Athena_R.WID_Assault_Paprika_Infantry_Athena_R"), 1));
+
+        // The Enforcer entered the live pool during the 28.01 line.
+        if (VersionInfo.FortniteVersion >= 28.01)
+        {
+            Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Infantry/WID_Assault_Paprika_Infantry_Athena_VR.WID_Assault_Paprika_Infantry_Athena_VR"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Infantry/WID_Assault_Paprika_Infantry_Athena_SR.WID_Assault_Paprika_Infantry_Athena_SR"), 1));
+        }
+    }
+
+    // Chapter 5 Season 2
+    if (std::floor(VersionInfo.FortniteVersion) == 29)
+    {
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Heavy/WID_Assault_Paprika_Heavy_Athena_VR.WID_Assault_Paprika_Heavy_Athena_VR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Heavy/WID_Assault_Paprika_Heavy_Athena_SR.WID_Assault_Paprika_Heavy_Athena_SR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/WarforgedAR/WID_Assault_SunRose_Athena_VR.WID_Assault_SunRose_Athena_VR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/WarforgedAR/WID_Assault_SunRose_Athena_SR.WID_Assault_SunRose_Athena_SR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/WarforgedAR/WID_Assault_SunRose_Athena_UR.WID_Assault_SunRose_Athena_UR"), 1));
+
+        if (VersionInfo.FortniteVersion >= 29.30)
+        {
+            Slot1.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/TacticalAR/WID_Assault_SunRose_Tactical_Athena_VR.WID_Assault_SunRose_Tactical_Athena_VR"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/TacticalAR/WID_Assault_SunRose_Tactical_Athena_SR.WID_Assault_SunRose_Tactical_Athena_SR"), 1));
+        }
+    }
+
+    // Chapter 5 Season 3
+    if (std::floor(VersionInfo.FortniteVersion) == 30)
+    {
+        Slot1.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/TacticalAR/WID_Assault_SunRose_Tactical_Athena_VR.WID_Assault_SunRose_Tactical_Athena_VR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/TacticalAR/WID_Assault_SunRose_Tactical_Athena_SR.WID_Assault_SunRose_Tactical_Athena_SR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Infantry/WID_Assault_Paprika_Infantry_Athena_VR.WID_Assault_Paprika_Infantry_Athena_VR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaAR_Infantry/WID_Assault_Paprika_Infantry_Athena_SR.WID_Assault_Paprika_Infantry_Athena_SR"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/DurableDawnCarp/Gameplay/WID_DurableDawnCarp_HS.WID_DurableDawnCarp_HS"), 1));
+        Slot1.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/CombatAR/WID_Assault_MoonFlax_CombatAR_Athena_UR.WID_Assault_MoonFlax_CombatAR_Athena_UR"), 1));
+
+        if (VersionInfo.FortniteVersion < 30.10)
+        {
+            Slot1.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/WarforgedAR/WID_Assault_SunRose_Athena_VR.WID_Assault_SunRose_Athena_VR"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/WarforgedAR/WID_Assault_SunRose_Athena_SR.WID_Assault_SunRose_Athena_SR"), 1));
+        }
+        else
+        {
+            // Ruckus was the only remaining source after the 30.10 vault.
+            Slot1.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/WarforgedAR/WID_Assault_SunRose_Athena_R.WID_Assault_SunRose_Athena_R"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/CombatAR/WID_Assault_MoonFlax_CombatAR_Athena_VR.WID_Assault_MoonFlax_CombatAR_Athena_VR"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/CombatAR/WID_Assault_MoonFlax_CombatAR_Athena_SR.WID_Assault_MoonFlax_CombatAR_Athena_SR"), 1));
+        }
+
+        if (VersionInfo.FortniteVersion >= 30.40)
+        {
+            Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_LMG_Athena_R_Ore_T03.WID_Assault_LMG_Athena_R_Ore_T03"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_LMG_Athena_VR_Ore_T03.WID_Assault_LMG_Athena_VR_Ore_T03"), 1));
+            Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_LMG_Athena_SR_Ore_T03.WID_Assault_LMG_Athena_SR_Ore_T03"), 1));
+        }
+    }
 
     Slots.Add(Slot1);
 
@@ -1108,18 +1218,26 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         }
     }
 
+    if (std::floor(VersionInfo.FortniteVersion) == 30)
+    {
+        Slot2.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaShotgun_DPS/WID_Shotgun_Auto_Paprika_Athena_UR_Boss.WID_Shotgun_Auto_Paprika_Athena_UR_Boss"), 1));
+        Slot2.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/CombatShotgun/WID_Shotgun_Moonflax_Combat_Athena_VR.WID_Shotgun_Moonflax_Combat_Athena_VR"), 1));
+        Slot2.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/CombatShotgun/WID_Shotgun_Moonflax_Combat_Athena_SR.WID_Shotgun_Moonflax_Combat_Athena_SR"), 1));
+        Slot2.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/CombatShotgun/WID_Shotgun_Moonflax_Combat_Athena_UR.WID_Shotgun_Moonflax_Combat_Athena_UR"), 1));
+    }
+
     Slots.Add(Slot2);
     // Slot 2 End
 
-    // Slot 3 (Snipers)
+    // Slot 3 (Precision / Flex Weapons)
     TArray<TPair<FString, int>> Slot3;
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.30) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00) || (VersionInfo.FortniteVersion >= 28.00))
+    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.30) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00))
     {
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_R_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_R_Ore_T03"), 1));
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_VR_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_VR_Ore_T03"), 1));
 
-        if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 5.40) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00) || (VersionInfo.FortniteVersion >= 28.00))
+        if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 5.40) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00))
         {
             Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_SR_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_SR_Ore_T03"), 1));
         }
@@ -1219,6 +1337,95 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot3.Add(TPair<FString, int>(TEXT("/ChronoWeaponGameplay/Items/ExplosiveRepeater/WID_Sniper_ExplosiveRepeater_Athena_VR.WID_Sniper_ExplosiveRepeater_Athena_VR"), 1));
     }
 
+    // Chapter 5 Season 1: Reaper plus the season's SMG/pistol flex choices.
+    if (std::floor(VersionInfo.FortniteVersion) == 28)
+    {
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSniper/WID_Sniper_Paprika_Athena_VR.WID_Sniper_Paprika_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSniper/WID_Sniper_Paprika_Athena_SR.WID_Sniper_Paprika_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_DPS/WID_SMG_Paprika_DPS_Athena_VR.WID_SMG_Paprika_DPS_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_DPS/WID_SMG_Paprika_DPS_Athena_SR.WID_SMG_Paprika_DPS_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_DPS/WID_SMG_Paprika_DPS_Athena_UR_Boss.WID_SMG_Paprika_DPS_Athena_UR_Boss"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_Burst/WID_SMG_Paprika_Burst_Athena_VR.WID_SMG_Paprika_Burst_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_Burst/WID_SMG_Paprika_Burst_Athena_SR.WID_SMG_Paprika_Burst_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaPistol/WID_Pistol_Paprika_Auto_Athena_VR.WID_Pistol_Paprika_Auto_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaPistol/WID_Pistol_Paprika_Auto_Athena_SR.WID_Pistol_Paprika_Auto_Athena_SR"), 1));
+
+        if (VersionInfo.FortniteVersion >= 28.01)
+        {
+            Slot3.Add(TPair<FString, int>(TEXT("/Smartgun/Gameplay/StackingLockons/WID_Pistol_AutoAim.WID_Pistol_AutoAim"), 1));
+        }
+    }
+
+    // Chapter 5 Season 2
+    if (std::floor(VersionInfo.FortniteVersion) == 29)
+    {
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSniper/WID_Sniper_Paprika_Athena_VR.WID_Sniper_Paprika_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSniper/WID_Sniper_Paprika_Athena_SR.WID_Sniper_Paprika_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/ModularDMR/WID_SunRose_ModularDMR_Athena_R.WID_SunRose_ModularDMR_Athena_R"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/ModularDMR/WID_SunRose_ModularDMR_Athena_VR.WID_SunRose_ModularDMR_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/ModularDMR/WID_SunRose_ModularDMR_Athena_SR.WID_SunRose_ModularDMR_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/ModularDMR/WID_SunRose_ModularDMR_Athena_UR.WID_SunRose_ModularDMR_Athena_UR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/HarbingerSMG/WID_SMG_SunRose_DPS_Athena_VR.WID_SMG_SunRose_DPS_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/HarbingerSMG/WID_SMG_SunRose_DPS_Athena_SR.WID_SMG_SunRose_DPS_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/HarbingerSMG/WID_SMG_SunRose_DPS_Athena_UR_Boss.WID_SMG_SunRose_DPS_Athena_UR_Boss"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_Burst/WID_SMG_Paprika_Burst_Athena_VR.WID_SMG_Paprika_Burst_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_Burst/WID_SMG_Paprika_Burst_Athena_SR.WID_SMG_Paprika_Burst_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaPistol/WID_Pistol_Paprika_Auto_Athena_VR.WID_Pistol_Paprika_Auto_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaPistol/WID_Pistol_Paprika_Auto_Athena_SR.WID_Pistol_Paprika_Auto_Athena_SR"), 1));
+
+        if (VersionInfo.FortniteVersion >= 29.01)
+        {
+            Slot3.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/DrumGun/WID_SunRose_DrumGun_Athena_VR.WID_SunRose_DrumGun_Athena_VR"), 1));
+            Slot3.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/DrumGun/WID_SunRose_DrumGun_Athena_SR.WID_SunRose_DrumGun_Athena_SR"), 1));
+        }
+
+        if (VersionInfo.FortniteVersion >= 29.10)
+        {
+            Slot3.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/HandCannon/WID_SunRose_Pistol_HandCannon_Athena_VR.WID_SunRose_Pistol_HandCannon_Athena_VR"), 1));
+            Slot3.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/HandCannon/WID_SunRose_Pistol_HandCannon_Athena_SR.WID_SunRose_Pistol_HandCannon_Athena_SR"), 1));
+            Slot3.Add(TPair<FString, int>(TEXT("/KeepScoreGameplay/Items/TiredPanda/Blueprints/Lightweight/WID_TiredPanda_Lightweight.WID_TiredPanda_Lightweight"), 1));
+        }
+
+        if (VersionInfo.FortniteVersion == 29.40)
+        {
+            Slot3.Add(TPair<FString, int>(TEXT("/GuineaPig/Items/Crossbow/WID_GuineaPig_Crossbow_Charge_v1.WID_GuineaPig_Crossbow_Charge_v1"), 1));
+        }
+    }
+
+    // Chapter 5 Season 3
+    if (std::floor(VersionInfo.FortniteVersion) == 30)
+    {
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/ModularDMR/WID_SunRose_ModularDMR_Athena_R.WID_SunRose_ModularDMR_Athena_R"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/ModularDMR/WID_SunRose_ModularDMR_Athena_VR.WID_SunRose_ModularDMR_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/ModularDMR/WID_SunRose_ModularDMR_Athena_SR.WID_SunRose_ModularDMR_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/MoonFlaxWeaponGameplay/Items/Weapons/Crossbow/WID_Crossbow_MoonFlax_Athena_R.WID_Crossbow_MoonFlax_Athena_R"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/MoonFlaxWeaponGameplay/Items/Weapons/Crossbow/WID_Crossbow_MoonFlax_Athena_VR.WID_Crossbow_MoonFlax_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/MoonFlaxWeaponGameplay/Items/Weapons/Crossbow/WID_Crossbow_MoonFlax_Athena_SR.WID_Crossbow_MoonFlax_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/MoonFlaxWeaponGameplay/Items/Weapons/Crossbow/WID_Crossbow_MoonFlax_Athena_UR.WID_Crossbow_MoonFlax_Athena_UR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/HarbingerSMG/WID_SMG_SunRose_DPS_Athena_VR.WID_SMG_SunRose_DPS_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/HarbingerSMG/WID_SMG_SunRose_DPS_Athena_SR.WID_SMG_SunRose_DPS_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_Burst/WID_SMG_Paprika_Burst_Athena_VR.WID_SMG_Paprika_Burst_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaSMG_Burst/WID_SMG_Paprika_Burst_Athena_SR.WID_SMG_Paprika_Burst_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaPistol/WID_Pistol_Paprika_Auto_Athena_VR.WID_Pistol_Paprika_Auto_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaPistol/WID_Pistol_Paprika_Auto_Athena_SR.WID_Pistol_Paprika_Auto_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/HandCannon/WID_SunRose_Pistol_HandCannon_Athena_VR.WID_SunRose_Pistol_HandCannon_Athena_VR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/HandCannon/WID_SunRose_Pistol_HandCannon_Athena_SR.WID_SunRose_Pistol_HandCannon_Athena_SR"), 1));
+        Slot3.Add(TPair<FString, int>(TEXT("/WeaponsUpdated/Gameplay/HandCannon/WID_SunRose_Pistol_HandCannon_Athena_UR.WID_SunRose_Pistol_HandCannon_Athena_UR"), 1));
+
+        if (VersionInfo.FortniteVersion >= 30.20)
+        {
+            Slot3.Add(TPair<FString, int>(TEXT("/MoonFlaxWeaponGameplay/Items/Weapons/Sniper/WID_Sniper_MoonFlax_Athena_R.WID_Sniper_MoonFlax_Athena_R"), 1));
+            Slot3.Add(TPair<FString, int>(TEXT("/MoonFlaxWeaponGameplay/Items/Weapons/Sniper/WID_Sniper_MoonFlax_Athena_VR.WID_Sniper_MoonFlax_Athena_VR"), 1));
+            Slot3.Add(TPair<FString, int>(TEXT("/MoonFlaxWeaponGameplay/Items/Weapons/Sniper/WID_Sniper_MoonFlax_Athena_SR.WID_Sniper_MoonFlax_Athena_SR"), 1));
+            Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Pistol_Flintlock_Athena_UC.WID_Pistol_Flintlock_Athena_UC"), 1));
+
+            if (VersionInfo.FortniteVersion < 30.30)
+            {
+                Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Pistol_Auto_Athena_C.WID_Pistol_Auto_Athena_C"), 1));
+            }
+        }
+    }
+
     Slots.Add(Slot3);
     // Slot 3 End
 
@@ -1253,6 +1460,11 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     if ((VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 18.10 && VersionInfo.FortniteVersion < 25.00) || (VersionInfo.FortniteVersion >= 26.10 && VersionInfo.FortniteVersion < 27.00) || (VersionInfo.FortniteVersion == 27.11) || (std::floor(VersionInfo.FortniteVersion) == 29))
     {
         Slot4.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/ChillBronco/Athena_ChillBronco.Athena_ChillBronco"), 6));
+    }
+
+    if (VersionInfo.FortniteVersion >= 29.10 && VersionInfo.FortniteVersion < 30.00)
+    {
+        Slot4.Add(TPair<FString, int>(TEXT("/SunRoseConsumablesGameplay/Gameplay/GoldenFruit/WID_Athena_GoldenFruit.WID_Athena_GoldenFruit"), 4));
     }
 
     if ((VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 27.00) || (VersionInfo.FortniteVersion >= 28.00))
@@ -1309,10 +1521,20 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot4.Add(TPair<FString, int>(TEXT("/DurableDawnTuna/Gameplay/WID_DurableDawnTuna.WID_DurableDawnTuna"), 2));
     }
 
-    Slots.Add(Slot4);
-    // Slot 4 End
+    if (VersionInfo.FortniteVersion >= 30.30 && VersionInfo.FortniteVersion < 31.00)
+    {
+        Slot4.Add(TPair<FString, int>(TEXT("/FlipperGameplay/Items/HealSpray/WID_Athena_HealSpray.WID_Athena_HealSpray"), 1));
+    }
 
-    // Slot 5 (Consumables)
+    // Chapter 5 follows the established late-game order of utility immediately
+    // before heals. Delay adding the heal pool until the utility pool is built.
+    const bool bChapter5VersionizedLoadout =
+        VersionInfo.FortniteVersion >= 28.00 &&
+        VersionInfo.FortniteVersion < 31.00;
+    if (!bChapter5VersionizedLoadout)
+        Slots.Add(Slot4);
+
+    // Utility pool (slot 4 in Chapter 5, slot 5 in earlier seasons).
     TArray<TPair<FString, int>> Slot5;
 
     if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 11.10) || (VersionInfo.FortniteVersion >= 11.11 && VersionInfo.FortniteVersion < 12.00))
@@ -1368,7 +1590,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Launcher_Grenade_Athena_SR_Ore_T03.WID_Launcher_Grenade_Athena_SR_Ore_T03"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion == 11.3) || (VersionInfo.FortniteVersion == 19.01) || (VersionInfo.FortniteVersion == 23.10) || (VersionInfo.FortniteVersion == 28.0))
+    if ((VersionInfo.FortniteVersion == 11.3) || (VersionInfo.FortniteVersion == 19.01) || (VersionInfo.FortniteVersion == 23.10))
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/Seasonal/WID_Launcher_Snowball_Athena_R_Ore_T03.WID_Launcher_Snowball_Athena_R_Ore_T03"), 1));
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/Seasonal/WID_Launcher_Snowball_Athena_VR_Ore_T03.WID_Launcher_Snowball_Athena_VR_Ore_T03"), 1));
@@ -1417,7 +1639,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         }
     }
 
-    if ((VersionInfo.FortniteVersion >= 3.30 && VersionInfo.FortniteVersion < 6.00) || (std::floor(VersionInfo.FortniteVersion) == 12) || (std::floor(VersionInfo.FortniteVersion) == 20) || (VersionInfo.FortniteVersion >= 26 && VersionInfo.FortniteVersion < 28.00))
+    if ((VersionInfo.FortniteVersion >= 3.30 && VersionInfo.FortniteVersion < 6.00) || (std::floor(VersionInfo.FortniteVersion) == 12) || (std::floor(VersionInfo.FortniteVersion) == 20) || (VersionInfo.FortniteVersion >= 26 && VersionInfo.FortniteVersion < 28.00) || (VersionInfo.FortniteVersion >= 30.20 && VersionInfo.FortniteVersion < 31.00))
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/C4/Athena_C4.Athena_C4"), 6));
     }
@@ -1442,7 +1664,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/ShockwaveGrenade/Athena_ShockGrenade.Athena_ShockGrenade"), 6));
     }
 
-    if ((VersionInfo.FortniteVersion >= 5.40 && VersionInfo.FortniteVersion < 7.20) || (VersionInfo.FortniteVersion >= 18.30 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 27) || (VersionInfo.FortniteVersion == 28.01))
+    if ((VersionInfo.FortniteVersion >= 5.40 && VersionInfo.FortniteVersion < 7.20) || (VersionInfo.FortniteVersion >= 18.30 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Hook_Gun_VR_Ore_T03.WID_Hook_Gun_VR_Ore_T03"), 1));
     }
@@ -1587,7 +1809,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Launcher_Shockwave_Athena_SR.WID_Launcher_Shockwave_Athena_SR"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion >= 18.30 && VersionInfo.FortniteVersion < 19.00) || (VersionInfo.FortniteVersion == 28.01))
+    if (VersionInfo.FortniteVersion >= 18.30 && VersionInfo.FortniteVersion < 19.00)
     {
         Slot5.Add(TPair<FString, int>(TEXT("/CorruptionGameplay/Gameplay/Items/Consumables/IcyGrapple/WID_Athena_IcyGrapple.WID_Athena_IcyGrapple"), 1));
     }
@@ -1677,7 +1899,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/ChronoCloak/Cloak/WID_Chrono_Cloak_UR_JungBoss.WID_Chrono_Cloak_UR_JungBoss"), 1));
     }
 
-    if ((std::floor(VersionInfo.FortniteVersion) == 26) || (VersionInfo.FortniteVersion >= 28.01 && VersionInfo.FortniteVersion < 29.00))
+    if ((std::floor(VersionInfo.FortniteVersion) == 26) || (VersionInfo.FortniteVersion >= 28.01 && VersionInfo.FortniteVersion < 29.00) || (VersionInfo.FortniteVersion >= 30.20 && VersionInfo.FortniteVersion < 31.00))
     {
         Slot5.Add(TPair<FString, int>(TEXT("/HopscotchWeaponsGameplay/Items/Proto/WID_Athena_AppleSunSmall.WID_Athena_AppleSunSmall"), 6));
     }
@@ -1692,13 +1914,93 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/VampireKatanaGameplay/Items/VampireKatana/WID_Melee_Vampire_Katana.WID_Melee_Vampire_Katana"), 1));
     }
 
+    // Chapter 5 Season 1 utility.
+    if (std::floor(VersionInfo.FortniteVersion) == 28)
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/ClusterBombGameplay/Gameplay/WID_Paprika_ClusterBomb.WID_Paprika_ClusterBomb"), 4));
+        Slot5.Add(TPair<FString, int>(TEXT("/EMPGameplay/Items/EMPGrenade/WID_Athena_Grenade_EMP.WID_Athena_Grenade_EMP"), 6));
+        Slot5.Add(TPair<FString, int>(TEXT("/BallisticShieldGameplay/Gameplay/WID_Paprika_BallisticShield.WID_Paprika_BallisticShield"), 1));
+        Slot5.Add(TPair<FString, int>(TEXT("/GrappleWeapon/Items/GrappleKnife/V2/WID_GrappleKnife_VR.WID_GrappleKnife_VR"), 1));
+
+        if (VersionInfo.FortniteVersion >= 28.10)
+        {
+            Slot5.Add(TPair<FString, int>(TEXT("/CleanSweepChart/Gameplay/Items/AGID_CleanSweepChart.AGID_CleanSweepChart"), 1));
+            Slot5.Add(TPair<FString, int>(TEXT("/CleanSweepDiagram/Gameplay/WID_CleanSweepDiagram.WID_CleanSweepDiagram"), 1));
+            Slot5.Add(TPair<FString, int>(TEXT("/DeployableTurretGameplay/Items/DeployableTurret/WID_Athena_Sentry_Turret_Deployable.WID_Athena_Sentry_Turret_Deployable"), 2));
+        }
+    }
+
+    // The Olympian utility was temporarily removed during the Avatar event.
+    if ((VersionInfo.FortniteVersion >= 29.00 && VersionInfo.FortniteVersion < 29.20) ||
+        (VersionInfo.FortniteVersion >= 29.40 && VersionInfo.FortniteVersion < 30.00))
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/SunRoseFlyingGameplay/Items/Wings/WID_Athena_SunRose_Wings.WID_Athena_SunRose_Wings"), 1));
+        Slot5.Add(TPair<FString, int>(TEXT("/SunRoseZeusGameplay/Items/Lightning/WID_Athena_SunRose_Zeus_Lightning.WID_Athena_SunRose_Zeus_Lightning"), 1));
+    }
+
+    if ((VersionInfo.FortniteVersion >= 29.01 && VersionInfo.FortniteVersion < 29.20) ||
+        (VersionInfo.FortniteVersion >= 29.40 && VersionInfo.FortniteVersion < 30.00))
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/SunRoseChainWhipGameplay/Items/ChainWhip/WID_ChainWhip.WID_ChainWhip"), 1));
+    }
+
+    if (VersionInfo.FortniteVersion >= 29.00 && VersionInfo.FortniteVersion < 29.40)
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/ClusterBombGameplay/Gameplay/WID_Paprika_ClusterBomb.WID_Paprika_ClusterBomb"), 4));
+        Slot5.Add(TPair<FString, int>(TEXT("/EMPGameplay/Items/EMPGrenade/WID_Athena_Grenade_EMP.WID_Athena_Grenade_EMP"), 6));
+    }
+
+    // Avatar bending replaced the Olympian utility for the 29.20 event window.
+    if (VersionInfo.FortniteVersion >= 29.20 && VersionInfo.FortniteVersion < 29.40)
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/HumbleMop/Blueprints/WID_HumbleMop.WID_HumbleMop"), 1));
+        Slot5.Add(TPair<FString, int>(TEXT("/FancyMop/Blueprints/WID_FancyMop.WID_FancyMop"), 1));
+        Slot5.Add(TPair<FString, int>(TEXT("/AnnoyedMop/Gameplay/WID_AnnoyedMop.WID_AnnoyedMop"), 1));
+    }
+
+    if (VersionInfo.FortniteVersion >= 29.40 && VersionInfo.FortniteVersion < 30.00)
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/BigBushGrenade/Items/Athena_Player_BushBomb.Athena_Player_BushBomb"), 4));
+    }
+
+    // Chapter 5 Season 3 utility.
+    if (std::floor(VersionInfo.FortniteVersion) == 30)
+    {
+        Slot5.Add(TPair<FString, int>(TEXT("/NitroGauntletsGameplay/Gameplay/WID_Moonflax_NitroGauntlet.WID_Moonflax_NitroGauntlet"), 1));
+        Slot5.Add(TPair<FString, int>(TEXT("/NitroGauntletsGameplay/Gameplay/WID_Moonflax_NitroGauntlet_Mythic.WID_Moonflax_NitroGauntlet_Mythic"), 1));
+        Slot5.Add(TPair<FString, int>(TEXT("/MoonflaxNitroSplash/Gameplay/WID_Moonflax_NitroSplash.WID_Moonflax_NitroSplash"), 6));
+
+        if (VersionInfo.FortniteVersion >= 30.10)
+        {
+            Slot5.Add(TPair<FString, int>(TEXT("/TowHookWeapon/Gameplay/WID_Athena_TowHookWeapon.WID_Athena_TowHookWeapon"), 1));
+            Slot5.Add(TPair<FString, int>(TEXT("/EMPGameplay/Items/EMPGrenade/WID_Athena_Grenade_EMP.WID_Athena_Grenade_EMP"), 6));
+        }
+
+        if (VersionInfo.FortniteVersion >= 30.20)
+        {
+            Slot5.Add(TPair<FString, int>(TEXT("/TwinStretchCorn/Gameplay/WID_TwinStretchCorn.WID_TwinStretchCorn"), 1));
+        }
+
+        if (VersionInfo.FortniteVersion >= 30.20 && VersionInfo.FortniteVersion < 30.40)
+        {
+            Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Gameplay/Booty/AGID_Athena_Booty.AGID_Athena_Booty"), 1));
+        }
+    }
+
     if (VersionInfo.FortniteVersion >= 29.01)
     {
         Slot5.Add(TPair<FString, int>(TEXT("/ShieldBubble/Gameplay/ShieldBubbleJr/Athena_SilverBlazer_Mini_UC.Athena_SilverBlazer_Mini_UC"), 4));
     }
 
-    Slots.Add(Slot5);
-    // Slot 5 End
+    if (bChapter5VersionizedLoadout)
+    {
+        Slots.Add(Slot5);
+        Slots.Add(Slot4);
+    }
+    else
+    {
+        Slots.Add(Slot5);
+    }
 
     // Slot 6 (Traps)
     TArray<TPair<FString, int>> Traps;
@@ -1748,7 +2050,6 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     std::uniform_int_distribution<int> Shells(87, 576);
     std::uniform_int_distribution<int> Medium(124, 824);
     std::uniform_int_distribution<int> Light(186, 824);
-    std::uniform_int_distribution<int> Rockets(3, 12);
     std::uniform_int_distribution<int> STW(186, 999);
     std::uniform_int_distribution<int> Arrows(12, 30);
 
@@ -1757,8 +2058,9 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataShells.AthenaAmmoDataShells"), Shells(rng)));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsMedium.AthenaAmmoDataBulletsMedium"), Medium(rng)));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsLight.AthenaAmmoDataBulletsLight"), Light(rng)));
+
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Ammo/AmmoDataRockets.AmmoDataRockets"), 12));
-    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataExplosive.AmmoDataExplosive"), STW(rng))); // make these and below optional???
+    Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataExplosive.AmmoDataExplosive"), STW(rng)));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataEnergyCell.AmmoDataEnergyCell"), STW(rng)));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataBulletsHeavy.AmmoDataBulletsHeavy"), STW(rng)));
     Ammo.Add(TPair<FString, int>(TEXT("/Game/Items/Ammo/AmmoDataBulletsMedium.AmmoDataBulletsMedium"), STW(rng)));
@@ -2135,6 +2437,17 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
         Slots = LateGame::GetLoadout();
     }
 
+    // A late-game loadout is a replacement, not an additive grant. The world
+    // inventory belongs to the controller and survives aircraft pawn swaps and
+    // respawns, while Chapter 5 may also suppress death drops. Remove every
+    // gameplay entry before rerolling so lobby loot, previous rolls, resources,
+    // ammo, and non-droppable currency cannot remain hidden underneath the new
+    // quickbar. Keep only the persistent harvesting/build/edit tools.
+    const int32 EntriesBeforeReset =
+        WorldInventory->Inventory.ReplicatedEntries.Num();
+    const int32 RemovedEntryCount =
+        ClearInventoryForLateGameLoadout(WorldInventory);
+
     std::random_device rd;
     std::mt19937 rng(rd());
 
@@ -2147,8 +2460,31 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
 
         if (SlotIndex < 6)
         {
-            std::uniform_int_distribution<int> dist(0, Slot.Num() - 1);
-            int RandomIndex = dist(rng);
+            std::vector<int32> ResolvableItemIndices;
+            ResolvableItemIndices.reserve(Slot.Num());
+
+            for (int32 CandidateIndex = 0;
+                CandidateIndex < Slot.Num();
+                ++CandidateIndex)
+            {
+                const auto& Candidate = Slot[CandidateIndex];
+                if (FindObject<UFortWorldItemDefinition>(
+                    Candidate.Key().CStr()))
+                {
+                    ResolvableItemIndices.push_back(CandidateIndex);
+                }
+            }
+
+            if (ResolvableItemIndices.empty())
+            {
+                printf("Slot %d has no loadable item definitions\n",
+                    SlotIndex + 1);
+                continue;
+            }
+
+            std::uniform_int_distribution<int> dist(
+                0, static_cast<int>(ResolvableItemIndices.size()) - 1);
+            int RandomIndex = ResolvableItemIndices[dist(rng)];
             const TPair<FString, int>& RandomItem = Slot[RandomIndex];
 
             const FString& Path = RandomItem.Key();
@@ -2167,8 +2503,6 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
 
             int32 ClipSize = 0;
             int32 PhantomReserveAmmo = 0;
-
-            auto ItemEntry = WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry) { return Entry.ItemDefinition == ItemDef; }, FFortItemEntry::Size());
 
             if (auto WeaponDef = ItemDef->Cast<UFortWeaponItemDefinition>())
             {
@@ -2207,8 +2541,6 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
 
                 int32 ClipSize = 0;
                 int32 PhantomReserveAmmo = 0;
-
-                auto ItemEntry = WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry) { return Entry.ItemDefinition == ItemDef; }, FFortItemEntry::Size());
 
                 if (auto WeaponDef = ItemDef->Cast<UFortWeaponItemDefinition>())
                 {
@@ -2354,4 +2686,9 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
             bHasReplicatedCrownEntry ? 1 : 0,
             (void*)ComponentCrown);
     }
+
+    SDK::DbgLog(
+        "[LateGame] loadout replaced controller=%p entries=%d removed=%d final=%d\n",
+        (void*)PlayerController, EntriesBeforeReset, RemovedEntryCount,
+        WorldInventory->Inventory.ReplicatedEntries.Num());
 }
