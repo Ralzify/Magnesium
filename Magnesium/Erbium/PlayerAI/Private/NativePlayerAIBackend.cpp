@@ -16,6 +16,7 @@
 #include "../Public/AIDebugLogger.h"
 #include "../Public/VersionFeatureAdapter.h"
 #include "../../../FortniteGame/Public/FortKismetLibrary.h"
+#include "../../../FortniteGame/Public/FortWeaponMods.h"
 #include "../../../Engine/Public/AbilitySystemComponent.h"
 
 // ============================================================================
@@ -469,7 +470,16 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
             auto Item = Bot->Inventory->GiveItem(DefaultPickaxe);
 
             if (Item)
-                Pawn->EquipWeaponDefinition((UFortItemDefinition*)DefaultPickaxe, Item->ItemEntry.ItemGuid);
+            {
+                auto Weapon = (AFortWeapon*)Pawn->EquipWeaponDefinition(
+                    (UFortItemDefinition*)DefaultPickaxe,
+                    Item->ItemEntry.ItemGuid);
+                if (Weapon)
+                {
+                    FFortWeaponMods::ApplyEntrySlotsAfterEquip(
+                        Weapon, Item->ItemEntry);
+                }
+            }
         }
     }
 

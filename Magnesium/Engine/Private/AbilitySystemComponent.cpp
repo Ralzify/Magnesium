@@ -2,6 +2,7 @@
 #include "../Public/AbilitySystemComponent.h"
 #include "../../Erbium/Public/Finders.h"
 #include "../../FortniteGame/Public/FortKismetLibrary.h"
+#include "../../FortniteGame/Public/FortWeapon.h"
 
 uint64 ConstructAbilitySpec;
 uint64 GiveAbility_;
@@ -83,18 +84,48 @@ void UAbilitySystemComponent::InternalServerTryActivateAbility(
         return AbilitySystemComponent->ClientActivateAbilityFailed(Handle, PredictionKey->Current);
 
     Spec->InputPressed = true;
+    UObject* AbilitySourceObject =
+        Spec->HasSourceObject()
+            ? Spec->SourceObject
+            : nullptr;
+    AFortWeaponRanged::
+        NotifyServerAbilityActivationStarted(
+            AbilitySourceObject);
 
     UFortGameplayAbility* InstancedAbility = nullptr;
     auto InternalTryActivateAbility = (bool (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle, _Pad_0x10, UFortGameplayAbility**, void*, void*))InternalTryActivateAbility_;
     auto InternalTryActivateAbilityNew
         = (bool (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle, _Pad_0x18, UFortGameplayAbility**, void*, void*))InternalTryActivateAbility_;
 
-    if (!(FPredictionKey::Size() == 0x18 ? InternalTryActivateAbilityNew(AbilitySystemComponent, Handle, *(_Pad_0x18*)PredictionKey, &InstancedAbility, nullptr, TriggerEventData)
-        : InternalTryActivateAbility(AbilitySystemComponent, Handle, *(_Pad_0x10*)PredictionKey, &InstancedAbility, nullptr, TriggerEventData)))
+    const bool Activated =
+        FPredictionKey::Size() == 0x18
+            ? InternalTryActivateAbilityNew(
+                AbilitySystemComponent,
+                Handle,
+                *(_Pad_0x18*)PredictionKey,
+                &InstancedAbility,
+                nullptr,
+                TriggerEventData)
+            : InternalTryActivateAbility(
+                AbilitySystemComponent,
+                Handle,
+                *(_Pad_0x10*)PredictionKey,
+                &InstancedAbility,
+                nullptr,
+                TriggerEventData);
+    if (!Activated)
     {
+        AFortWeaponRanged::
+            NotifyServerAbilityActivationFailed(
+                AbilitySourceObject);
         AbilitySystemComponent->ClientActivateAbilityFailed(Handle, PredictionKey->Current);
         Spec->InputPressed = false;
         AbilitySystemComponent->ActivatableAbilities.MarkItemDirty(*Spec);
+    }
+    else
+    {
+        AFortWeaponRanged::NotifyServerAbilityActivated(
+            AbilitySourceObject);
     }
 }
 

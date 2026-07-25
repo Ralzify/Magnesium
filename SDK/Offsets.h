@@ -536,6 +536,10 @@ namespace SDK
 		if (VersionInfo.FortniteVersion >= 32.00)
 		{
 			Offsets::Offset_Internal = 0x64;    // encrypted with EncPropOffsetKey
+			// FBoolProperty keeps FieldMask 0x2F bytes after
+			// FProperty::Offset_Internal. The pre-32 value (0x6B) points
+			// inside unrelated metadata once Offset_Internal moves to 0x64.
+			Offsets::FieldMask = Offsets::Offset_Internal + 0x2F;
 			Offsets::FField_Next = 0x10;        // encrypted with EncFieldNextKey
 			Offsets::FField_Name = 0x18;        // INFERRED — verify
 			Offsets::Children = 0x78;           // UField/function chain head (Remix-confirmed)

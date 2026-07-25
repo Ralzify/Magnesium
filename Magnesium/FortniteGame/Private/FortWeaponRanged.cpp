@@ -5,6 +5,7 @@
 #include "../Public/FortPlayerPawnAthena.h"
 #include "../Public/FortPlayerStateAthena.h"
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
+#include "../Public/FortGameMode.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/GUI.h"
 
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <string>
 
 namespace
 {
@@ -22,6 +24,10 @@ namespace
     constexpr uint32 kMaxFrameSnapshotSize = 0x100;
     constexpr uint32 kExpectedEffectContextSize = 0x18;
     constexpr uint32 kExpectedEffectContainerSize = 0xB8;
+    constexpr uint32 kExpectedGetUnmodifiedDamageParamsSize =
+        0x20;
+    constexpr uint32 kExpectedDamageCueSharedSize = 0xA8;
+    constexpr uint32 kExpectedDamageCueNonSharedSize = 0x10;
     constexpr int32 kExpectedEffectContainerCount = 5;
     constexpr int32 kMaxEffectsPerContainer = 8;
     constexpr int32 kMaxDamageEffects =
@@ -30,22 +36,36 @@ namespace
     constexpr double kMaxRecordedOriginErrorCm = 300.0;
     constexpr double kMaxLaunchOriginDriftCm = 250.0;
     constexpr double kImpactBoundsToleranceCm = 300.0;
+    constexpr double kPlayerImpactHorizontalEnvelopeCm =
+        150.0;
+    constexpr double kPlayerImpactVerticalEnvelopeCm =
+        225.0;
     constexpr double kMaxActorBoundsExtentCm = 100000.0;
     constexpr double kMaxReportedTravelCm = 500000.0;
     constexpr double kMinLaunchCorroborationDot = 0.95;
     constexpr double kMinProjectileAzimuthDot = 0.995;
     constexpr double kMinServerAimDot = 0.80;
+    constexpr double kMinAdjustedServerAimDot = 0.50;
     // A projectile starts at the muzzle while the adjusted shot direction is
     // derived from the player's view. At contact range that camera/muzzle
     // baseline can be larger than the entire reported flight, so a fixed
     // angular cone is geometrically invalid. These corridor limits preserve
     // the old long-range angles while providing a bounded near-field offset.
     constexpr double kCompatibilityParallaxAllowanceCm = 100.0;
+    // Vehicle-mod weapons are represented by an actor near the turret pivot,
+    // while the client hit RPC starts at the moving muzzle. FN30's machine-gun
+    // mod consistently places those two authoritative points more than 100 cm
+    // apart. Keep the larger corridor exclusive to a server-validated mounted
+    // seat and bounded by the existing launch-origin drift limit.
+    constexpr double kMountedWeaponParallaxAllowanceCm =
+        kMaxLaunchOriginDriftCm;
+    constexpr double kMaxMountedTraceStartHostDistanceCm =
+        1000.0;
     constexpr double kCompatibilityRearwardSlackCm = 50.0;
     constexpr double kCompatibilityContactRangeCm = 200.0;
     constexpr double kCompatibilityContactRearwardSlackCm = 125.0;
-    constexpr double kAuthoritativeTraceBacktrackCm = 150.0;
-    constexpr double kAuthoritativeTraceForwardCm = 75.0;
+    constexpr double kAuthoritativeTraceBacktrackCm = 60.0;
+    constexpr double kAuthoritativeTraceForwardCm = 30.0;
     constexpr double kMaxAuthoritativeImpactErrorCm = 50.0;
     constexpr double kMaxAuthoritativePhysicsPointErrorCm =
         35.0;
@@ -65,6 +85,8 @@ namespace
         3000.0;
     constexpr double kMaxCurrentAimFallbackAgeSeconds =
         0.125;
+    constexpr double kMaxCachedLaunchGeometryAgeSeconds =
+        0.25;
     constexpr double kProjectileFlightTimeGraceSeconds = 0.25;
     constexpr double kAutomaticTimestampGraceSeconds = 0.10;
     constexpr float kMaxProjectileAgeSeconds = 15.f;
@@ -84,6 +106,16 @@ namespace
     constexpr float kHitRateWindowSeconds = 1.f;
     constexpr float kCompatibilityFutureFireTimeToleranceSeconds =
         0.05f;
+    constexpr float kProjectileVisualRelayFreshnessSeconds =
+        0.50f;
+    constexpr float kProjectileVisualRelayPendingSeconds =
+        3.0f;
+    constexpr float kProjectileGeometryWaitSeconds =
+        0.05f;
+    constexpr float kNativeFireTokenBindWindowSeconds =
+        0.025f;
+    constexpr float kDamageFeedbackEpsilon = 0.01f;
+    constexpr float kMaxDamageFeedbackMagnitude = 1000000.f;
 
     struct FFieldView
     {
@@ -192,6 +224,40 @@ namespace
                     static_cast<uint32>(FVector::Size()) &&
                 Timestamp.IsValid(RequestSize) &&
                 Timestamp.Size == sizeof(float);
+        }
+    };
+
+    struct FLightweightProjectileVisualSchema
+    {
+        const UClass* RangedItemDefinitionClass = nullptr;
+        UFunction* HasLightweightProjectile = nullptr;
+        uint32 HasLightweightProjectileSize = 0;
+        FFieldView HasLightweightProjectileReturn;
+        UFunction* EndActiveAbility = nullptr;
+        uint32 EndActiveAbilitySize = 0;
+        FFieldView EndFiringTimestamp;
+
+        bool CanIdentifyWeapon() const
+        {
+            return RangedItemDefinitionClass &&
+                HasLightweightProjectile &&
+                HasLightweightProjectileSize > 0 &&
+                HasLightweightProjectileSize <= 0x40 &&
+                HasLightweightProjectileReturn.IsValid(
+                    HasLightweightProjectileSize) &&
+                HasLightweightProjectileReturn.Size ==
+                    sizeof(bool);
+        }
+
+        bool CanEndStream() const
+        {
+            return EndActiveAbility &&
+                EndActiveAbilitySize > 0 &&
+                EndActiveAbilitySize <= 0x20 &&
+                EndFiringTimestamp.IsValid(
+                    EndActiveAbilitySize) &&
+                EndFiringTimestamp.Size ==
+                    sizeof(float);
         }
     };
 
@@ -376,6 +442,133 @@ namespace
         }
     };
 
+    struct FDamageFeedbackSchema
+    {
+        UObject* FortKismetLibrary = nullptr;
+        UFunction* GetUnmodifiedDamage = nullptr;
+        uint32 GetUnmodifiedDamageSize = 0;
+        FFieldView GetUnmodifiedDamageContext;
+        FFieldView GetUnmodifiedDamageReturn;
+
+        UFunction* BatchedCueFunction = nullptr;
+        uint32 BatchedCueParamsSize = 0;
+        FFieldView BatchedCueShared;
+        FFieldView BatchedCueNonShared;
+
+        UFunction* DisplayHitNotifyFunction = nullptr;
+        uint32 DisplayHitNotifyParamsSize = 0;
+        FFieldView DisplayDamageDealt;
+        FFieldView DisplayCriticalHit;
+        FFieldView DisplayHitActor;
+
+        uint32 PawnSize = 0;
+        FFieldView AccumulatedShared;
+        FFieldView AccumulatedNonShared;
+
+        const UStruct* SharedStruct = nullptr;
+        uint32 SharedSize = 0;
+        FFieldView SharedMagnitude;
+        FFieldView SharedCritical;
+        FFieldView SharedValid;
+
+        const UStruct* NonSharedStruct = nullptr;
+        uint32 NonSharedSize = 0;
+        FFieldView NonSharedHitActor;
+
+        bool IsValid() const
+        {
+            return FortKismetLibrary &&
+                GetUnmodifiedDamage &&
+                GetUnmodifiedDamageSize ==
+                    kExpectedGetUnmodifiedDamageParamsSize &&
+                GetUnmodifiedDamageContext.IsValid(
+                    GetUnmodifiedDamageSize) &&
+                GetUnmodifiedDamageContext.Offset == 0 &&
+                GetUnmodifiedDamageContext.Size ==
+                    kExpectedEffectContextSize &&
+                GetUnmodifiedDamageReturn.IsValid(
+                    GetUnmodifiedDamageSize) &&
+                GetUnmodifiedDamageReturn.Offset ==
+                    static_cast<int32>(
+                        kExpectedEffectContextSize) &&
+                GetUnmodifiedDamageReturn.Size ==
+                    sizeof(float) &&
+                PawnSize > 0 &&
+                PawnSize <= 0x100000 &&
+                AccumulatedShared.IsValid(PawnSize) &&
+                AccumulatedShared.Size ==
+                    kExpectedDamageCueSharedSize &&
+                AccumulatedNonShared.IsValid(PawnSize) &&
+                AccumulatedNonShared.Size ==
+                    kExpectedDamageCueNonSharedSize &&
+                SharedStruct &&
+                SharedSize ==
+                    kExpectedDamageCueSharedSize &&
+                SharedMagnitude.IsValid(SharedSize) &&
+                SharedMagnitude.Offset == 0x60 &&
+                SharedMagnitude.Size == sizeof(float) &&
+                SharedCritical.IsValid(SharedSize) &&
+                SharedCritical.Offset == 0x66 &&
+                SharedCritical.Size == sizeof(uint8) &&
+                SharedValid.IsValid(SharedSize) &&
+                SharedValid.Offset == 0xA6 &&
+                SharedValid.Size == sizeof(uint8) &&
+                NonSharedStruct &&
+                NonSharedSize ==
+                    kExpectedDamageCueNonSharedSize &&
+                NonSharedHitActor.IsValid(NonSharedSize) &&
+                NonSharedHitActor.Offset == 0 &&
+                NonSharedHitActor.Size == sizeof(AActor*);
+        }
+
+        bool CanRewriteBatchedCue() const
+        {
+            return IsValid() &&
+                BatchedCueFunction &&
+                BatchedCueFunction->ExecFunction &&
+                BatchedCueParamsSize ==
+                    kExpectedDamageCueSharedSize +
+                        kExpectedDamageCueNonSharedSize &&
+                BatchedCueShared.IsValid(
+                    BatchedCueParamsSize) &&
+                BatchedCueShared.Offset == 0 &&
+                BatchedCueShared.Size ==
+                    kExpectedDamageCueSharedSize &&
+                BatchedCueNonShared.IsValid(
+                    BatchedCueParamsSize) &&
+                BatchedCueNonShared.Offset ==
+                    static_cast<int32>(
+                        kExpectedDamageCueSharedSize) &&
+                BatchedCueNonShared.Size ==
+                    kExpectedDamageCueNonSharedSize;
+        }
+
+        bool CanRewriteDisplayHitNotify() const
+        {
+            return IsValid() &&
+                DisplayHitNotifyFunction &&
+                DisplayHitNotifyParamsSize > 0 &&
+                DisplayHitNotifyParamsSize <= 0x80 &&
+                DisplayDamageDealt.IsValid(
+                    DisplayHitNotifyParamsSize) &&
+                DisplayDamageDealt.Size == sizeof(float) &&
+                DisplayCriticalHit.IsValid(
+                    DisplayHitNotifyParamsSize) &&
+                DisplayCriticalHit.Size == sizeof(bool) &&
+                DisplayHitActor.IsValid(
+                    DisplayHitNotifyParamsSize) &&
+                DisplayHitActor.Size == sizeof(AActor*);
+        }
+    };
+
+    struct FDamageBatchSnapshot
+    {
+        AActor* HitActor = nullptr;
+        float Magnitude = 0.f;
+        bool Valid = false;
+        bool Critical = false;
+    };
+
     struct FLineOfSightSchema
     {
         UFunction* Function = nullptr;
@@ -397,6 +590,53 @@ namespace
                     static_cast<uint32>(FVector::Size()) &&
                 AlternateChecks.IsValid(ParamsSize) &&
                 AlternateChecks.Size == sizeof(bool) &&
+                ReturnValue.IsValid(ParamsSize) &&
+                ReturnValue.Size == sizeof(bool);
+        }
+    };
+
+    struct FWorldLineTraceSchema
+    {
+        UObject* Library = nullptr;
+        UFunction* Function = nullptr;
+        uint32 ParamsSize = 0;
+        FFieldView WorldContextObject;
+        FFieldView Start;
+        FFieldView End;
+        FFieldView TraceChannel;
+        FFieldView TraceComplex;
+        FFieldView ActorsToIgnore;
+        FFieldView OutHit;
+        FFieldView IgnoreSelf;
+        FFieldView ReturnValue;
+
+        bool IsValid() const
+        {
+            return Library &&
+                Function &&
+                Function->ExecFunction &&
+                ParamsSize > 0 &&
+                ParamsSize <= kMaxEffectCallParamsSize &&
+                WorldContextObject.IsValid(ParamsSize) &&
+                WorldContextObject.Size == sizeof(UObject*) &&
+                Start.IsValid(ParamsSize) &&
+                Start.Size ==
+                    static_cast<uint32>(FVector::Size()) &&
+                End.IsValid(ParamsSize) &&
+                End.Size ==
+                    static_cast<uint32>(FVector::Size()) &&
+                TraceChannel.IsValid(ParamsSize) &&
+                TraceChannel.Size == sizeof(uint8) &&
+                TraceComplex.IsValid(ParamsSize) &&
+                TraceComplex.Size == sizeof(bool) &&
+                ActorsToIgnore.IsValid(ParamsSize) &&
+                ActorsToIgnore.Size ==
+                    sizeof(TArray<AActor*>) &&
+                OutHit.IsValid(ParamsSize) &&
+                OutHit.Size > 0 &&
+                OutHit.Size <= kMaxHitResultSize &&
+                IgnoreSelf.IsValid(ParamsSize) &&
+                IgnoreSelf.Size == sizeof(bool) &&
                 ReturnValue.IsValid(ParamsSize) &&
                 ReturnValue.Size == sizeof(bool);
         }
@@ -526,6 +766,7 @@ namespace
     struct FResolvedHit
     {
         AActor* Target = nullptr;
+        UActorComponent* TargetComponent = nullptr;
         FVector ImpactPoint{};
     };
 
@@ -591,6 +832,7 @@ namespace
         bool ReservedInitializedTimestamp = false;
         float ReservedPreviousTimestamp = 0.f;
         bool CompatibilityFallback = false;
+        bool AuthoritativeShotSnapshot = false;
         bool Automatic = false;
         bool Active = false;
         bool Reserved = false;
@@ -611,6 +853,115 @@ namespace
         float NewestFireToken = -1.f;
     };
 
+    struct FProjectileVisualRelayState
+    {
+        TWeakObjectPtr<AFortWeaponRanged> Weapon{};
+        AFortWeaponRanged* WeaponIdentity = nullptr;
+        float LastCapturedFireToken = -1.f;
+        float LastVisualFireToken = -1.f;
+        float LastNativeMulticastFireToken = -1.f;
+        float LastNativeMulticastAt = -1.f;
+        float ActiveVisualFireToken = -1.f;
+        float PendingBaselineFireToken = -1.f;
+        float PendingStartedAt = -1.f;
+        FVector LatestDamageStart{};
+        FVector LatestAdjustedAimDirection{};
+        float LatestDamageStateAt = -1.f;
+        bool HasLatestDamageState = false;
+        bool LightweightProjectile = false;
+        bool PendingActivation = false;
+        bool CaptureActive = false;
+        bool CaptureActiveBeforePending = false;
+        bool Active = false;
+    };
+
+    struct FReflectedBoolField
+    {
+        int32 Offset = -1;
+        uint32 ContainerSize = 0;
+        uint8 Mask = 0;
+
+        bool IsValid() const
+        {
+            return Offset >= 0 &&
+                ContainerSize > 0 &&
+                static_cast<uint64>(Offset) + 1 <=
+                    ContainerSize &&
+                Mask != 0;
+        }
+    };
+
+    struct FTargetingReplicationSchema
+    {
+        FReflectedBoolField PawnIsTargeting;
+        UFunction* GetIsTargetingFunction = nullptr;
+        uint32 GetIsTargetingParamsSize = 0;
+        FFieldView GetIsTargetingReturnValue;
+        UFunction* SetTargetingFunction = nullptr;
+        uint32 SetTargetingParamsSize = 0;
+        FFieldView SetTargetingValue;
+        UFunction* FastSharedReplicationFunction = nullptr;
+        uint32 FastSharedReplicationParamsSize = 0;
+        FFieldView FastSharedMovement;
+        FReflectedBoolField
+            FastSharedMovementIsTargeting;
+
+        bool CanPoll() const
+        {
+            return PawnIsTargeting.IsValid() &&
+                GetIsTargetingFunction &&
+                GetIsTargetingFunction->ExecFunction &&
+                GetIsTargetingParamsSize > 0 &&
+                GetIsTargetingParamsSize <=
+                    kMaxFrameSnapshotSize &&
+                GetIsTargetingReturnValue.IsValid(
+                    GetIsTargetingParamsSize) &&
+                GetIsTargetingReturnValue.Size ==
+                    sizeof(bool);
+        }
+
+        bool CanPatchFastSharedMovement() const
+        {
+            return CanPoll() &&
+                FastSharedReplicationFunction &&
+                FastSharedReplicationFunction->ExecFunction &&
+                FastSharedReplicationParamsSize > 0 &&
+                FastSharedReplicationParamsSize <=
+                    kMaxNotifyParamsSize &&
+                FastSharedMovement.IsValid(
+                    FastSharedReplicationParamsSize) &&
+                FastSharedMovement.Size ==
+                    FastSharedMovementIsTargeting
+                        .ContainerSize &&
+                FastSharedMovementIsTargeting.IsValid();
+        }
+
+        bool CanHookSetTargeting() const
+        {
+            return CanPoll() &&
+                SetTargetingFunction &&
+                SetTargetingFunction->ExecFunction &&
+                SetTargetingParamsSize > 0 &&
+                SetTargetingParamsSize <=
+                    kMaxFrameSnapshotSize &&
+                SetTargetingValue.IsValid(
+                    SetTargetingParamsSize) &&
+                SetTargetingValue.Size == sizeof(bool);
+        }
+    };
+
+    struct FCompatibilityTargetingAssertion
+    {
+        AFortPlayerPawnAthena* Pawn = nullptr;
+        int32 ObjectIndex = -1;
+    };
+
+    enum class ETargetingMirrorSource : uint8
+    {
+        Poll,
+        DecodedTransition
+    };
+
     struct FHitBudgetReservation
     {
         FWeaponHitBudget* WeaponBudget = nullptr;
@@ -629,6 +980,8 @@ namespace
         UFortGameplayAbility* FireAbility = nullptr;
         AActor* Target = nullptr;
         AFortPlayerPawnAthena* TargetPlayerPawn = nullptr;
+        AFortAthenaVehicle* TargetVehicle = nullptr;
+        UActorComponent* TargetHitComponent = nullptr;
         FVector ProjectileOrigin{};
         FVector LaunchDirection{};
         FVector ImpactPoint{};
@@ -641,17 +994,47 @@ namespace
         FHitBudgetReservation HitBudgetReservation{};
     };
 
+    struct FActiveDamageFeedback
+    {
+        FActiveDamageFeedback* Previous = nullptr;
+        AFortPlayerPawnAthena* ShooterPawn = nullptr;
+        AFortPlayerPawnAthena* TargetPawn = nullptr;
+        const uint8* Context = nullptr;
+        FDamageBatchSnapshot Before{};
+        bool ReadBefore = false;
+        bool CueHandled = false;
+        bool CueRewritten = false;
+        bool ExpectedCritical = false;
+        bool DisplayNotifyHandled = false;
+        bool DisplayNotifyRewritten = false;
+    };
+
+    struct FScopedActiveDamageFeedback
+    {
+        FActiveDamageFeedback* Active = nullptr;
+
+        explicit FScopedActiveDamageFeedback(
+            FActiveDamageFeedback* InActive);
+        ~FScopedActiveDamageFeedback();
+    };
+
     FNotifyPawnHitSchema GNotifyPawnHitSchema{};
     FHitResultSchema GHitResultSchema{};
     FProjectileRequestSchema GProjectileRequestSchema{};
+    FLightweightProjectileVisualSchema
+        GLightweightProjectileVisualSchema{};
     FServerProjectileStateSchema
         GServerProjectileStateSchema{};
     FEffectApiSchema GEffectApiSchema{};
+    FDamageFeedbackSchema GDamageFeedbackSchema{};
     FLineOfSightSchema GLineOfSightSchema{};
+    FWorldLineTraceSchema GWorldLineTraceSchema{};
     FActorBoundsSchema GActorBoundsSchema{};
     FComponentLineTraceSchema GComponentLineTraceSchema{};
     FClosestPhysicsPointSchema GClosestPhysicsPointSchema{};
     FDamageZoneSchema GDamageZoneSchema{};
+    FTargetingReplicationSchema
+        GTargetingReplicationSchema{};
 
     alignas(16) std::array<uint8, 0x100> GMakeContextParams{};
     std::array<FAbilityEffectCache, 64> GEffectCache{};
@@ -675,15 +1058,71 @@ namespace
     std::array<FProjectileCompatibilityTokenState, 1024>
         GProjectileCompatibilityTokenStates{};
     size_t GProjectileCompatibilityTokenStateCursor = 0;
+    std::array<FProjectileVisualRelayState, 1024>
+        GProjectileVisualRelayStates{};
+    size_t GProjectileVisualRelayStateCursor = 0;
     size_t GProjectileLedgerCursor = 0;
     uint64 GProjectileGeneration = 1;
     UWorld* GProjectileWorldIdentity = nullptr;
     float GLastProjectileServerTime = -1.f;
     thread_local bool GInsideNotifyPawnHit = false;
+    thread_local bool GInsideProjectileVisualRelay = false;
+    thread_local bool GInsideBatchedDamageCue = false;
+    thread_local FActiveDamageFeedback*
+        GActiveDamageFeedback = nullptr;
     UFunction* GProjectileActorNotifyFunction = nullptr;
     void (*GProjectileActorNotifyOriginal)(
         UObject*,
         FFrame&) = nullptr;
+    void (*GSetTargetingOriginal)(
+        UObject*,
+        FFrame&) = nullptr;
+    void (*GFastSharedReplicationOriginal)(
+        UObject*,
+        FFrame&) = nullptr;
+    bool GTargetingReplicationResolved = false;
+    bool GTargetingSetHookInstalled = false;
+    bool GTargetingFastSharedHookInstalled = false;
+    bool GTargetingReplicationReadyLogged = false;
+    uint32 GTargetingReplicationRetryTicks = 0;
+    uint32 GTargetingReplicationFailureLogs = 0;
+    uint32 GTargetingProcessEventFailureLogs = 0;
+    double GLastTargetingPollAt = -1.0;
+    std::array<FCompatibilityTargetingAssertion, 512>
+        GCompatibilityTargetingAssertions{};
+    size_t GCompatibilityTargetingAssertionCursor = 0;
+    using FPawnProcessEvent =
+        void (*)(
+            const UObject*,
+            UFunction*,
+            void*);
+    FPawnProcessEvent GPawnProcessEventOriginal = nullptr;
+    void PawnProcessEventDamageFeedback(
+        const UObject* Context,
+        UFunction* Function,
+        void* Params);
+
+    FScopedActiveDamageFeedback::
+        FScopedActiveDamageFeedback(
+            FActiveDamageFeedback* InActive)
+        : Active(InActive)
+    {
+        if (!Active)
+            return;
+
+        Active->Previous = GActiveDamageFeedback;
+        GActiveDamageFeedback = Active;
+    }
+
+    FScopedActiveDamageFeedback::
+        ~FScopedActiveDamageFeedback()
+    {
+        if (Active &&
+            GActiveDamageFeedback == Active)
+        {
+            GActiveDamageFeedback = Active->Previous;
+        }
+    }
 
     bool IsUsableObject(const UObject* Object)
     {
@@ -1171,6 +1610,56 @@ namespace
         return Result;
     }
 
+    FLightweightProjectileVisualSchema
+        ResolveLightweightProjectileVisualSchema(
+            AFortWeaponRanged* DefaultWeapon)
+    {
+        FLightweightProjectileVisualSchema Result{};
+        if (!DefaultWeapon)
+            return Result;
+
+        Result.RangedItemDefinitionClass =
+            UFortWeaponRangedItemDefinition::StaticClass();
+        auto DefaultRangedItemDefinition =
+            Result.RangedItemDefinitionClass
+                ? Result.RangedItemDefinitionClass
+                    ->GetDefaultObj()
+                : nullptr;
+        Result.HasLightweightProjectile =
+            DefaultRangedItemDefinition
+                ? DefaultRangedItemDefinition->GetFunction(
+                    "HasLightweightProjectile")
+                : nullptr;
+        if (Result.HasLightweightProjectile)
+        {
+            const auto Params =
+                Result.HasLightweightProjectile
+                    ->GetParamsNamed();
+            Result.HasLightweightProjectileSize =
+                Params.Size;
+            Result.HasLightweightProjectileReturn =
+                GetNamedParameter(
+                    Params,
+                    "ReturnValue");
+        }
+
+        Result.EndActiveAbility =
+            DefaultWeapon->GetFunction(
+                "MulticastLWProjectile_EndActiveAbility");
+        if (Result.EndActiveAbility)
+        {
+            const auto Params =
+                Result.EndActiveAbility
+                    ->GetParamsNamed();
+            Result.EndActiveAbilitySize = Params.Size;
+            Result.EndFiringTimestamp =
+                GetNamedParameter(
+                    Params,
+                    "FiringTimestamp");
+        }
+        return Result;
+    }
+
     FServerProjectileStateSchema
         ResolveServerProjectileStateSchema(
             AFortWeaponRanged* DefaultWeapon)
@@ -1271,6 +1760,14 @@ namespace
                 GetStructField(
                     Result.ActorInstanceHandleStruct,
                     "ReferenceObject");
+            if (!Result.HandleReferenceObject.IsValid(
+                    Result.ActorInstanceHandleSize))
+            {
+                Result.HandleReferenceObject =
+                    GetStructField(
+                        Result.ActorInstanceHandleStruct,
+                        "Actor");
+            }
         }
         return Result;
     }
@@ -1436,6 +1933,7 @@ namespace
         }
 
         AActor* ComponentOwner = nullptr;
+        UActorComponent* ResolvedComponent = nullptr;
         if (GHitResultSchema.Component.IsValid(HitSize) &&
             GHitResultSchema.Component.Size ==
                 sizeof(TWeakObjectPtr<UActorComponent>))
@@ -1453,6 +1951,7 @@ namespace
                     Component->IsA(
                         UActorComponent::StaticClass()))
                 {
+                    ResolvedComponent = Component;
                     auto OwnerObject = Component->GetOwner();
                     auto Owner = IsUsableObject(OwnerObject)
                         ? OwnerObject->Cast<AActor>()
@@ -1575,6 +2074,15 @@ namespace
         }
 
         OutHit.Target = ResolvedTarget;
+        // A component can only be used for an authoritative follow-up trace
+        // when it is a live primitive owned by the exact resolved target.
+        // Proxy/shared components remain valid for actor resolution, but must
+        // never supply vehicle part or pawn damage-zone metadata.
+        OutHit.TargetComponent =
+            ResolvedComponent &&
+                ComponentOwner == ResolvedTarget
+            ? ResolvedComponent
+            : nullptr;
 
         if (!ReadValue(
                 HitMemory,
@@ -1595,8 +2103,9 @@ namespace
         return IsFiniteVector(OutHit.ImpactPoint);
     }
 
-    bool TraceAuthoritativePlayerHit(
-        AFortPlayerPawnAthena* Target,
+    bool TraceAuthoritativeOwnedComponentHit(
+        AActor* Target,
+        UActorComponent* TargetComponent,
         const FVector& LaunchOrigin,
         const FVector& LaunchDirection,
         const FVector& ImpactPoint,
@@ -1604,11 +2113,11 @@ namespace
         uint32 HitSize)
     {
         if (!IsUsableActor(Target) ||
-            !Target->HasMesh() ||
-            !IsUsableObject(Target->Mesh) ||
+            !IsUsableObject(TargetComponent) ||
             !GComponentLineTraceSchema.IsValid() ||
-            !Target->Mesh->IsA(
+            !TargetComponent->IsA(
                 GComponentLineTraceSchema.ComponentClass) ||
+            TargetComponent->GetOwner() != Target ||
             HitSize != GHitResultSchema.Size ||
             !OutHitMemory ||
             !IsFiniteVector(LaunchOrigin) ||
@@ -1618,20 +2127,22 @@ namespace
             return false;
         }
 
+        // The launch direction is only the initial ballistic tangent. At the
+        // target, bullet drop and close camera/muzzle parallax make the
+        // validated launch-to-impact chord a better local trace direction.
         FVector TraceDirection =
-            LaunchDirection.GetSafeNormal();
+            (ImpactPoint - LaunchOrigin)
+                .GetSafeNormal();
         if (TraceDirection.IsZero())
-        {
             TraceDirection =
-                (ImpactPoint - LaunchOrigin)
-                    .GetSafeNormal();
-        }
+                LaunchDirection.GetSafeNormal();
         if (TraceDirection.IsZero())
             return false;
 
-        // Trace only the server-owned target mesh, across a short segment
-        // around the validated impact. This produces authoritative component,
-        // bone and physical-material metadata without choosing a world channel.
+        // Trace only the exact server-owned target component, across a short
+        // segment around the validated impact. This produces authoritative
+        // component, bone, shape/item and physical-material metadata without
+        // choosing a world channel.
         const FVector TraceStart =
             ImpactPoint -
                 TraceDirection *
@@ -1665,19 +2176,19 @@ namespace
             return false;
         }
 
-        Target->Mesh->ProcessEvent(
+        TargetComponent->ProcessEvent(
             GComponentLineTraceSchema.Function,
             Params.data());
 
-        bool HitTargetMesh = false;
+        bool HitTargetComponent = false;
         std::array<uint8, kMaxHitResultSize>
             ServerHit{};
         if (!ReadValue(
                 Params.data(),
                 GComponentLineTraceSchema.ParamsSize,
                 GComponentLineTraceSchema.ReturnValue,
-                HitTargetMesh) ||
-            !HitTargetMesh ||
+                HitTargetComponent) ||
+            !HitTargetComponent ||
             !ReadValue(
                 Params.data(),
                 GComponentLineTraceSchema.ParamsSize,
@@ -1741,6 +2252,89 @@ namespace
             ServerHit.data(),
             HitSize);
         return true;
+    }
+
+    bool TraceAuthoritativePlayerHit(
+        AFortPlayerPawnAthena* Target,
+        const FVector& LaunchOrigin,
+        const FVector& LaunchDirection,
+        const FVector& ImpactPoint,
+        void* OutHitMemory,
+        uint32 HitSize)
+    {
+        if (!IsUsableActor(Target) ||
+            !Target->HasMesh() ||
+            !IsUsableObject(Target->Mesh))
+        {
+            return false;
+        }
+
+        return TraceAuthoritativeOwnedComponentHit(
+            Target,
+            Target->Mesh,
+            LaunchOrigin,
+            LaunchDirection,
+            ImpactPoint,
+            OutHitMemory,
+            HitSize);
+    }
+
+    void ClearUntrustedHitClassification(
+        void* HitMemory,
+        uint32 HitSize)
+    {
+        if (!HitMemory ||
+            HitSize != GHitResultSchema.Size)
+        {
+            return;
+        }
+
+        const FFieldView ZeroFields[] = {
+            GHitResultSchema.PhysicalMaterial,
+            GHitResultSchema.BoneName,
+            GHitResultSchema.MyBoneName,
+            GHitResultSchema.ElementIndex
+        };
+        for (const auto& Field : ZeroFields)
+        {
+            if (Field.IsValid(HitSize))
+            {
+                std::memset(
+                    static_cast<uint8*>(HitMemory) +
+                        Field.Offset,
+                    0,
+                    Field.Size);
+            }
+        }
+
+        const int32 InvalidIndex = -1;
+        const FFieldView IndexFields[] = {
+            GHitResultSchema.FaceIndex,
+            GHitResultSchema.MyItem,
+            GHitResultSchema.Item
+        };
+        for (const auto& Field : IndexFields)
+        {
+            if (!Field.IsValid(HitSize))
+                continue;
+
+            if (Field.Size == sizeof(InvalidIndex))
+            {
+                std::memcpy(
+                    static_cast<uint8*>(HitMemory) +
+                        Field.Offset,
+                    &InvalidIndex,
+                    sizeof(InvalidIndex));
+            }
+            else
+            {
+                std::memset(
+                    static_cast<uint8*>(HitMemory) +
+                        Field.Offset,
+                    0,
+                    Field.Size);
+            }
+        }
     }
 
     bool InitializeCanonicalPlayerHitIdentity(
@@ -2156,6 +2750,864 @@ namespace
         return Pawn->HasCurrentWeapon()
             ? Pawn->CurrentWeapon == Weapon
             : WeaponBelongsToPawn(Pawn, Weapon);
+    }
+
+    bool ResolveReflectedTargetingBool(
+        const UStruct* ContainerStruct,
+        const char* PropertyName,
+        FReflectedBoolField& OutField)
+    {
+        OutField = FReflectedBoolField{};
+        if (!IsUsableObject(ContainerStruct) ||
+            !PropertyName ||
+            Offsets::FieldMask == 0)
+        {
+            return false;
+        }
+
+        const auto Property =
+            ContainerStruct->GetProperty(
+                PropertyName,
+                0x20000);
+        const size_t RequiredMetadataSize =
+            (std::max)(
+                (std::max)(
+                    static_cast<size_t>(
+                        Offsets::Offset_Internal) +
+                        sizeof(uint32),
+                    static_cast<size_t>(
+                        Offsets::ElementSize) +
+                        sizeof(uint32)),
+                static_cast<size_t>(
+                    Offsets::FieldMask) +
+                    sizeof(uint8));
+        if (!Property ||
+            !SDK::MemReadable(
+                Property,
+                RequiredMetadataSize))
+        {
+            return false;
+        }
+
+        const uint32 ElementSize =
+            GetFromOffset<uint32>(
+                Property,
+                Offsets::ElementSize);
+        const int32 Offset =
+            static_cast<int32>(DecryptPropOffset(
+                GetFromOffset<uint32>(
+                    Property,
+                    Offsets::Offset_Internal)));
+        const uint8 Mask = Property->GetFieldMask();
+        const bool IsValidBoolMask =
+            Mask == 0xFF ||
+            (Mask != 0 &&
+                (Mask & static_cast<uint8>(Mask - 1)) == 0);
+        const int32 ContainerSize =
+            ContainerStruct->GetPropertiesSize();
+        if (ElementSize != sizeof(bool) ||
+            Offset < 0 ||
+            ContainerSize <= 0 ||
+            ContainerSize > 0x100000 ||
+            static_cast<uint64>(Offset) + 1 >
+                static_cast<uint32>(ContainerSize) ||
+            !IsValidBoolMask)
+        {
+            return false;
+        }
+
+        OutField.Offset = Offset;
+        OutField.ContainerSize =
+            static_cast<uint32>(ContainerSize);
+        OutField.Mask = Mask;
+        return true;
+    }
+
+    UFunction* ResolveBoolGetter(
+        UObject* DefaultObject,
+        uint32& OutParamsSize,
+        FFieldView& OutReturnValue)
+    {
+        OutParamsSize = 0;
+        OutReturnValue = {};
+        if (!IsUsableObject(DefaultObject))
+            return nullptr;
+
+        constexpr const char* CandidateNames[] = {
+            "GetIsTargeting",
+            "IsTargeting"
+        };
+        for (const char* CandidateName :
+            CandidateNames)
+        {
+            auto Function =
+                DefaultObject->GetFunction(
+                    CandidateName);
+            if (!Function ||
+                !Function->ExecFunction)
+            {
+                continue;
+            }
+
+            const auto Params =
+                Function->GetParamsNamed();
+            const auto ReturnValue =
+                GetNamedParameter(
+                    Params,
+                    "ReturnValue");
+            if (Params.Size > 0 &&
+                Params.Size <=
+                    kMaxFrameSnapshotSize &&
+                Params.NameOffsetMap.size() == 1 &&
+                ReturnValue.IsValid(Params.Size) &&
+                ReturnValue.Size == sizeof(bool))
+            {
+                OutParamsSize = Params.Size;
+                OutReturnValue = ReturnValue;
+                return Function;
+            }
+        }
+
+        return nullptr;
+    }
+
+    FTargetingReplicationSchema
+        ResolveTargetingReplicationSchema()
+    {
+        FTargetingReplicationSchema Result{};
+        auto WeaponClass = AFortWeapon::StaticClass();
+        auto PawnClass =
+            AFortPlayerPawnAthena::StaticClass();
+        auto DefaultWeapon =
+            WeaponClass
+                ? WeaponClass->GetDefaultObj()
+                : nullptr;
+        auto DefaultPawn =
+            PawnClass
+                ? PawnClass->GetDefaultObj()
+                : nullptr;
+        auto SharedMovementStruct =
+            FindObject<UStruct>(
+                L"/Script/FortniteGame.SharedRepMovement");
+        if (!DefaultWeapon ||
+            !DefaultPawn ||
+            !ResolveReflectedTargetingBool(
+                PawnClass,
+                "bIsTargeting",
+                Result.PawnIsTargeting))
+        {
+            return Result;
+        }
+
+        Result.GetIsTargetingFunction =
+            ResolveBoolGetter(
+                DefaultWeapon,
+                Result.GetIsTargetingParamsSize,
+                Result.GetIsTargetingReturnValue);
+
+        Result.FastSharedReplicationFunction =
+            DefaultPawn->GetFunction(
+                "FastSharedReplication");
+        if (SharedMovementStruct &&
+            Result.FastSharedReplicationFunction &&
+            Result.FastSharedReplicationFunction
+                ->ExecFunction &&
+            ResolveReflectedTargetingBool(
+                SharedMovementStruct,
+                "bIsTargeting",
+                Result.FastSharedMovementIsTargeting))
+        {
+            const auto FastSharedParams =
+                Result.FastSharedReplicationFunction
+                    ->GetParamsNamed();
+            const auto SharedMovement =
+                GetNamedParameter(
+                    FastSharedParams,
+                    "SharedRepMovement");
+            if (FastSharedParams.Size > 0 &&
+                FastSharedParams.Size <=
+                    kMaxNotifyParamsSize &&
+                FastSharedParams
+                    .NameOffsetMap.size() == 1 &&
+                SharedMovement.IsValid(
+                    FastSharedParams.Size) &&
+                SharedMovement.Size ==
+                    Result
+                        .FastSharedMovementIsTargeting
+                        .ContainerSize)
+            {
+                Result.FastSharedReplicationParamsSize =
+                    FastSharedParams.Size;
+                Result.FastSharedMovement =
+                    SharedMovement;
+            }
+        }
+
+        auto SetTargeting =
+            DefaultWeapon->GetFunction(
+                "SetTargeting");
+        if (SetTargeting &&
+            SetTargeting->ExecFunction)
+        {
+            const auto Params =
+                SetTargeting->GetParamsNamed();
+            if (Params.Size > 0 &&
+                Params.Size <=
+                    kMaxFrameSnapshotSize &&
+                Params.NameOffsetMap.size() == 1)
+            {
+                const auto& Parameter =
+                    Params.NameOffsetMap[0];
+                FFieldView Value{
+                    static_cast<int32>(
+                        Parameter.Offset),
+                    Parameter.ElementSize
+                };
+                if (Value.IsValid(Params.Size) &&
+                    Value.Size == sizeof(bool))
+                {
+                    Result.SetTargetingFunction =
+                        SetTargeting;
+                    Result.SetTargetingParamsSize =
+                        Params.Size;
+                    Result.SetTargetingValue = Value;
+                }
+            }
+        }
+
+        return Result;
+    }
+
+    bool ReadWeaponIsTargeting(
+        AFortWeaponRanged* Weapon,
+        bool& OutIsTargeting)
+    {
+        OutIsTargeting = false;
+        if (!IsUsableActor(Weapon) ||
+            !GTargetingReplicationSchema.CanPoll())
+        {
+            return false;
+        }
+
+        alignas(16) std::array<
+            uint8,
+            kMaxFrameSnapshotSize> Params{};
+        Weapon->ProcessEvent(
+            GTargetingReplicationSchema
+                .GetIsTargetingFunction,
+            Params.data());
+        return ReadValue(
+            Params.data(),
+            GTargetingReplicationSchema
+                .GetIsTargetingParamsSize,
+            GTargetingReplicationSchema
+                .GetIsTargetingReturnValue,
+            OutIsTargeting);
+    }
+
+    bool ReadReflectedBoolField(
+        const void* Container,
+        const FReflectedBoolField& Field,
+        bool& OutValue)
+    {
+        OutValue = false;
+        if (!Container || !Field.IsValid())
+            return false;
+
+        const auto Address =
+            static_cast<const uint8*>(Container) +
+            Field.Offset;
+        if (!SDK::MemReadable(Address, 1))
+            return false;
+
+        OutValue = (*Address & Field.Mask) != 0;
+        return true;
+    }
+
+    bool WriteReflectedBoolField(
+        void* Container,
+        const FReflectedBoolField& Field,
+        bool Value)
+    {
+        if (!Container || !Field.IsValid())
+            return false;
+
+        auto Address =
+            static_cast<uint8*>(Container) +
+            Field.Offset;
+        if (!SDK::MemReadable(Address, 1))
+            return false;
+
+        if (Value)
+            *Address |= Field.Mask;
+        else
+            *Address &= static_cast<uint8>(~Field.Mask);
+        return true;
+    }
+
+    bool OwnsCompatibilityTargetingAssertion(
+        AFortPlayerPawnAthena* Pawn)
+    {
+        if (!IsUsableActor(Pawn))
+            return false;
+
+        const int32 ObjectIndex =
+            static_cast<int32>(Pawn->Index);
+        for (auto& Assertion :
+            GCompatibilityTargetingAssertions)
+        {
+            if (Assertion.Pawn != Pawn)
+                continue;
+            if (Assertion.ObjectIndex == ObjectIndex)
+                return true;
+
+            // A UObject slot can be recycled after a pawn is destroyed.
+            // Never let ownership from the old object carry into the new one.
+            Assertion = {};
+            return false;
+        }
+        return false;
+    }
+
+    void SetCompatibilityTargetingAssertionOwned(
+        AFortPlayerPawnAthena* Pawn,
+        bool Owned)
+    {
+        if (!Pawn)
+            return;
+
+        const int32 ObjectIndex =
+            IsUsableActor(Pawn)
+                ? static_cast<int32>(Pawn->Index)
+                : -1;
+        for (auto& Assertion :
+            GCompatibilityTargetingAssertions)
+        {
+            if (Assertion.Pawn != Pawn)
+                continue;
+
+            if (!Owned)
+            {
+                Assertion = {};
+                return;
+            }
+            if (Assertion.ObjectIndex == ObjectIndex)
+                return;
+
+            Assertion = {};
+            break;
+        }
+
+        if (!Owned || ObjectIndex < 0)
+            return;
+
+        FCompatibilityTargetingAssertion* Slot = nullptr;
+        for (auto& Assertion :
+            GCompatibilityTargetingAssertions)
+        {
+            if (!Assertion.Pawn)
+            {
+                Slot = &Assertion;
+                break;
+            }
+        }
+        if (!Slot)
+        {
+            Slot = &GCompatibilityTargetingAssertions[
+                GCompatibilityTargetingAssertionCursor++ %
+                GCompatibilityTargetingAssertions.size()];
+        }
+
+        Slot->Pawn = Pawn;
+        Slot->ObjectIndex = ObjectIndex;
+    }
+
+    bool SetPawnIsTargeting(
+        AFortPlayerPawnAthena* Pawn,
+        bool IsTargeting,
+        ETargetingMirrorSource Source)
+    {
+        const auto& Field =
+            GTargetingReplicationSchema
+                .PawnIsTargeting;
+        if (!IsUsableActor(Pawn) ||
+            !Pawn->HasAuthority() ||
+            !Field.IsValid())
+        {
+            return false;
+        }
+
+        bool Previous = false;
+        if (!ReadReflectedBoolField(
+                Pawn,
+                Field,
+                Previous))
+        {
+            return false;
+        }
+
+        const bool OwnsAssertion =
+            OwnsCompatibilityTargetingAssertion(Pawn);
+        if (!IsTargeting &&
+            Source == ETargetingMirrorSource::Poll &&
+            !OwnsAssertion)
+        {
+            // bIsTargeting is also written by native pawn state. A sampled
+            // weapon false is not sufficient authority to erase a native
+            // assertion that this compatibility path did not create.
+            return false;
+        }
+
+        if (Previous == IsTargeting)
+        {
+            if (!IsTargeting)
+            {
+                SetCompatibilityTargetingAssertionOwned(
+                    Pawn,
+                    false);
+            }
+            return false;
+        }
+
+        if (!WriteReflectedBoolField(
+                Pawn,
+                Field,
+                IsTargeting))
+        {
+            return false;
+        }
+
+        SetCompatibilityTargetingAssertionOwned(
+            Pawn,
+            IsTargeting);
+        Pawn->FlushNetDormancy();
+        Pawn->ForceNetUpdate();
+        return true;
+    }
+
+    void MirrorWeaponTargeting(
+        AFortWeaponRanged* Weapon,
+        bool IsTargeting)
+    {
+        if (!IsUsableActor(Weapon) ||
+            !Weapon->HasAuthority())
+        {
+            return;
+        }
+
+        AFortPlayerPawnAthena* Pawn = nullptr;
+        AFortPlayerControllerAthena* Controller =
+            nullptr;
+        if (ResolveShooter(
+                Weapon,
+                Pawn,
+                Controller) &&
+            WeaponIsCurrentForPawn(
+                Pawn,
+                Weapon))
+        {
+            SetPawnIsTargeting(
+                Pawn,
+                IsTargeting,
+                ETargetingMirrorSource::
+                    DecodedTransition);
+        }
+    }
+
+    void SetTargetingHook(
+        UObject* Context,
+        FFrame& Stack)
+    {
+        auto Weapon =
+            IsUsableObject(Context)
+                ? Context->Cast<
+                    AFortWeaponRanged>()
+                : nullptr;
+        bool IsTargeting = false;
+        bool Decoded = false;
+        if (Weapon &&
+            GTargetingReplicationSchema
+                .CanHookSetTargeting())
+        {
+            alignas(16) std::array<
+                uint8,
+                kMaxFrameSnapshotSize> DecodeStorage{};
+            FFrame* DecodeStack = nullptr;
+            Decoded =
+                SnapshotFrameForDecode(
+                    Stack,
+                    DecodeStorage,
+                    DecodeStack) &&
+                DecodeFrameReference(
+                    *DecodeStack,
+                    &IsTargeting,
+                    sizeof(IsTargeting));
+        }
+
+        if (GSetTargetingOriginal)
+            GSetTargetingOriginal(Context, Stack);
+
+        if (Decoded)
+        {
+            MirrorWeaponTargeting(
+                Weapon,
+                IsTargeting);
+        }
+    }
+
+    bool ReadPawnAuthoritativeTargeting(
+        AFortPlayerPawnAthena* Pawn,
+        bool& OutIsTargeting)
+    {
+        OutIsTargeting = false;
+        if (!IsUsableActor(Pawn) ||
+            !Pawn->HasAuthority())
+        {
+            return false;
+        }
+
+        bool PawnIsTargeting = false;
+        const bool ReadPawnState =
+            ReadReflectedBoolField(
+                Pawn,
+                GTargetingReplicationSchema
+                    .PawnIsTargeting,
+                PawnIsTargeting);
+        if (ReadPawnState &&
+            PawnIsTargeting &&
+            !OwnsCompatibilityTargetingAssertion(Pawn))
+        {
+            // Native pawn targeting is authoritative. In particular, do not
+            // replace this true with a weapon getter that is one frame stale.
+            OutIsTargeting = true;
+            return true;
+        }
+
+        if (!Pawn->HasCurrentWeapon())
+        {
+            OutIsTargeting = false;
+            return true;
+        }
+
+        auto CurrentWeapon =
+            IsUsableActor(Pawn->CurrentWeapon)
+                ? Pawn->CurrentWeapon->Cast<
+                    AFortWeaponRanged>()
+                : nullptr;
+        if (!CurrentWeapon)
+        {
+            OutIsTargeting = false;
+            return true;
+        }
+        if (ReadWeaponIsTargeting(
+                CurrentWeapon,
+                OutIsTargeting))
+        {
+            return true;
+        }
+
+        OutIsTargeting = PawnIsTargeting;
+        return ReadPawnState;
+    }
+
+    bool PatchFastSharedTargeting(
+        AFortPlayerPawnAthena* Pawn,
+        void* SharedMovement)
+    {
+        bool IncomingIsTargeting = false;
+        if (!ReadReflectedBoolField(
+                SharedMovement,
+                GTargetingReplicationSchema
+                    .FastSharedMovementIsTargeting,
+                IncomingIsTargeting))
+        {
+            return false;
+        }
+
+        // The movement payload is built by native pawn code and is the newest
+        // source at this call site. Compatibility may assert a missing true,
+        // but must never erase an incoming true with a stale weapon false.
+        if (IncomingIsTargeting)
+            return true;
+
+        bool IsTargeting = false;
+        if (!ReadPawnAuthoritativeTargeting(
+                Pawn,
+                IsTargeting) ||
+            !IsTargeting)
+        {
+            return false;
+        }
+
+        return WriteReflectedBoolField(
+            SharedMovement,
+            GTargetingReplicationSchema
+                .FastSharedMovementIsTargeting,
+            true);
+    }
+
+    void FastSharedReplicationHook(
+        UObject* Context,
+        FFrame& Stack)
+    {
+        auto Pawn =
+            IsUsableObject(Context)
+                ? Context->Cast<
+                    AFortPlayerPawnAthena>()
+                : nullptr;
+        if (Pawn &&
+            GTargetingReplicationSchema
+                .CanPatchFastSharedMovement() &&
+            !Stack.Code &&
+            Stack.Locals &&
+            SDK::MemReadable(
+                Stack.Locals,
+                GTargetingReplicationSchema
+                    .FastSharedReplicationParamsSize))
+        {
+            auto SharedMovement =
+                Stack.Locals +
+                GTargetingReplicationSchema
+                    .FastSharedMovement.Offset;
+            PatchFastSharedTargeting(
+                Pawn,
+                SharedMovement);
+        }
+
+        if (GFastSharedReplicationOriginal)
+        {
+            GFastSharedReplicationOriginal(
+                Context,
+                Stack);
+        }
+    }
+
+    bool EnsureTargetingReplication()
+    {
+        if (VersionInfo.FortniteVersion < 24.00)
+            return false;
+
+        // The pawn ProcessEvent interception is the part that patches the
+        // multicast parameter buffer before Unreal routes it to observers.
+        // An ExecFunction hook alone runs after that routing point, so a
+        // resolved schema is not sufficient to declare remote glint ready.
+        if (GTargetingReplicationResolved &&
+            GPawnProcessEventOriginal)
+        {
+            return GTargetingReplicationSchema
+                .CanPatchFastSharedMovement();
+        }
+
+        if (GTargetingReplicationRetryTicks > 0)
+        {
+            --GTargetingReplicationRetryTicks;
+            return false;
+        }
+
+        if (!GTargetingReplicationResolved)
+        {
+            const auto ResolvedSchema =
+                ResolveTargetingReplicationSchema();
+            if (!ResolvedSchema.CanPatchFastSharedMovement())
+            {
+                GTargetingReplicationRetryTicks = 60;
+                if (GTargetingReplicationFailureLogs++ < 3)
+                {
+                    SDK::DbgLog(
+                        "  [SniperGlint] waiting for the Chapter 5 targeting/fast-shared schema on %.2f\n",
+                        VersionInfo.FortniteVersion);
+                }
+                return false;
+            }
+
+            GTargetingReplicationSchema =
+                ResolvedSchema;
+            GTargetingReplicationResolved = true;
+
+            if (GTargetingReplicationSchema
+                    .CanHookSetTargeting())
+            {
+                Utils::ExecHook(
+                    GTargetingReplicationSchema
+                        .SetTargetingFunction,
+                    SetTargetingHook,
+                    GSetTargetingOriginal);
+                GTargetingSetHookInstalled =
+                    GSetTargetingOriginal != nullptr;
+            }
+            if (GTargetingReplicationSchema
+                    .CanPatchFastSharedMovement())
+            {
+                // Keep the Exec hook as a local/native fallback, but do not
+                // use it as the readiness criterion for remote observers.
+                Utils::ExecHook(
+                    GTargetingReplicationSchema
+                        .FastSharedReplicationFunction,
+                    FastSharedReplicationHook,
+                    GFastSharedReplicationOriginal);
+                GTargetingFastSharedHookInstalled =
+                    GFastSharedReplicationOriginal != nullptr;
+            }
+        }
+
+        if (!GPawnProcessEventOriginal &&
+            Offsets::ProcessEventVft > 0 &&
+            Offsets::ProcessEventVft < 0x1000)
+        {
+            Utils::Hook<AFortPlayerPawnAthena>(
+                static_cast<uint32>(
+                    Offsets::ProcessEventVft),
+                PawnProcessEventDamageFeedback,
+                GPawnProcessEventOriginal);
+        }
+
+        if (!GPawnProcessEventOriginal)
+        {
+            GTargetingReplicationRetryTicks = 30;
+            if (GTargetingProcessEventFailureLogs++ < 4)
+            {
+                SDK::DbgLog(
+                    "  [SniperGlint] waiting for pre-serialization pawn ProcessEvent interception (vft=%lld) on %.2f\n",
+                    static_cast<long long>(
+                        Offsets::ProcessEventVft),
+                    VersionInfo.FortniteVersion);
+            }
+            return false;
+        }
+
+        if (!GTargetingReplicationReadyLogged)
+        {
+            GTargetingReplicationReadyLogged = true;
+            SDK::DbgLog(
+                "  [SniperGlint] targeting replication enabled on %.2f (transition-hook=%s fast-shared=rpc)\n",
+                VersionInfo.FortniteVersion,
+                GTargetingSetHookInstalled
+                    ? "yes"
+                    : "poll");
+        }
+        return true;
+    }
+
+    AFortPlayerPawnAthena* ResolveControllerPawn(
+        AFortPlayerControllerAthena* Controller)
+    {
+        if (!IsUsableActor(Controller))
+            return nullptr;
+
+        AFortPlayerPawnAthena* Pawn = nullptr;
+        if (Controller->HasMyFortPawn())
+            Pawn = Controller->MyFortPawn;
+        if (!Pawn && Controller->HasPawn())
+            Pawn = AsPlayerPawn(Controller->Pawn);
+        return IsUsableActor(Pawn)
+            ? Pawn
+            : nullptr;
+    }
+
+    void SyncControllerTargeting(
+        AFortPlayerControllerAthena* Controller)
+    {
+        auto Pawn =
+            ResolveControllerPawn(Controller);
+        if (!Pawn ||
+            !Pawn->HasAuthority())
+        {
+            return;
+        }
+        bool IsTargeting = false;
+        if (!ReadPawnAuthoritativeTargeting(
+                Pawn,
+                IsTargeting))
+        {
+            return;
+        }
+
+        // Fast shared movement serializes this transient pawn bit. It is not
+        // a normal replicated property, so ForceNetUpdate alone was never
+        // enough to make remote optic glints react.
+        SetPawnIsTargeting(
+            Pawn,
+            IsTargeting,
+            ETargetingMirrorSource::Poll);
+    }
+
+    void SyncTargetingControllerArray(
+        const TArray<AActor*>& Controllers)
+    {
+        if (Controllers.Num() < 0 ||
+            Controllers.Num() > 512 ||
+            (Controllers.Num() > 0 &&
+                (!Controllers.Data ||
+                    !SDK::MemReadable(
+                        Controllers.Data,
+                        static_cast<size_t>(
+                            Controllers.Num()) *
+                            sizeof(AActor*)))))
+        {
+            return;
+        }
+
+        for (int32 Index = 0;
+            Index < Controllers.Num();
+            Index++)
+        {
+            auto ControllerActor =
+                Controllers.Get(Index);
+            auto Controller =
+                IsUsableActor(ControllerActor)
+                    ? ControllerActor->Cast<
+                        AFortPlayerControllerAthena>()
+                    : nullptr;
+            if (Controller)
+                SyncControllerTargeting(Controller);
+        }
+    }
+
+    void TickTargetingReplication()
+    {
+        if (!EnsureTargetingReplication())
+            return;
+
+        // SetTargeting is the authoritative transition and is already hooked
+        // on FN30. Polling every player and bot at 20 Hz only duplicates that
+        // work; retain polling solely as the fallback for builds where the
+        // transition function cannot be hooked.
+        if (GTargetingSetHookInstalled)
+            return;
+
+        auto World = UWorld::GetWorld();
+        auto GameMode =
+            World &&
+                IsUsableActor(
+                    World->AuthorityGameMode)
+                ? World->AuthorityGameMode
+                    ->Cast<AFortGameMode>()
+                : nullptr;
+        if (!GameMode)
+            return;
+
+        const double Now =
+            UGameplayStatics::GetTimeSeconds(World);
+        constexpr double PollIntervalSeconds = 0.05;
+        if (GLastTargetingPollAt >= 0.0 &&
+            Now >= GLastTargetingPollAt &&
+            Now - GLastTargetingPollAt <
+                PollIntervalSeconds)
+        {
+            return;
+        }
+        GLastTargetingPollAt = Now;
+
+        if (GameMode->HasAlivePlayers())
+        {
+            SyncTargetingControllerArray(
+                GameMode->AlivePlayers);
+        }
+        if (GameMode->HasAliveBots())
+        {
+            SyncTargetingControllerArray(
+                GameMode->AliveBots);
+        }
     }
 
     bool IsAutomaticWeapon(
@@ -2658,15 +4110,6 @@ namespace
             {
                 OutLevel = Spec.Level;
             }
-            SDK::DbgLog(
-                "  [ProjectileDamage] matched %s ability=%s handle=%d source=%p level=%d\n",
-                UseImpactAbility ? "impact" : "primary",
-                OutAbility->Name.ToString().c_str(),
-                WantedHandle,
-                Spec.HasSourceObject()
-                    ? static_cast<void*>(Spec.SourceObject)
-                    : nullptr,
-                OutLevel);
             return true;
         }
 
@@ -2974,11 +4417,14 @@ namespace
         {
             Entry = FProjectileCompatibilityTokenState{};
         }
+        for (auto& Entry : GProjectileVisualRelayStates)
+            Entry = FProjectileVisualRelayState{};
         GLaunchBudgetCursor = 0;
         GIngressBudgetCursor = 0;
         GProjectileLedgerCursor = 0;
         GProjectileIngressCapabilityCursor = 0;
         GProjectileCompatibilityTokenStateCursor = 0;
+        GProjectileVisualRelayStateCursor = 0;
         // Keep the generation monotonic. A reset invalidates all retained
         // keys, but reusing generation values would make diagnostics and any
         // stale local observations unnecessarily ambiguous.
@@ -3127,6 +4573,51 @@ namespace
         return Reusable;
     }
 
+    FProjectileVisualRelayState*
+        GetProjectileVisualRelayState(
+            AFortWeaponRanged* Weapon,
+            bool Create)
+    {
+        if (!IsUsableActor(Weapon))
+            return nullptr;
+
+        FProjectileVisualRelayState* Reusable = nullptr;
+        for (auto& Entry : GProjectileVisualRelayStates)
+        {
+            if (Entry.WeaponIdentity == Weapon &&
+                ResolveWeakObject(Entry.Weapon) == Weapon)
+            {
+                return &Entry;
+            }
+
+            if (!Reusable &&
+                (!Entry.WeaponIdentity ||
+                    ResolveWeakObject(Entry.Weapon) !=
+                        Entry.WeaponIdentity))
+            {
+                Reusable = &Entry;
+            }
+        }
+
+        if (!Create)
+            return nullptr;
+
+        if (!Reusable)
+        {
+            Reusable =
+                &GProjectileVisualRelayStates[
+                    GProjectileVisualRelayStateCursor %
+                    GProjectileVisualRelayStates.size()];
+            GProjectileVisualRelayStateCursor++;
+        }
+
+        *Reusable = FProjectileVisualRelayState{};
+        Reusable->Weapon =
+            TWeakObjectPtr<AFortWeaponRanged>(Weapon);
+        Reusable->WeaponIdentity = Weapon;
+        return Reusable;
+    }
+
     bool GetServerAimDirection(
         AFortPlayerControllerAthena* Controller,
         FVector& OutDirection)
@@ -3160,7 +4651,8 @@ namespace
 
     bool ValidateLaunchAgainstServerAim(
         AFortPlayerControllerAthena* Controller,
-        const FVector& LaunchDirection)
+        const FVector& LaunchDirection,
+        double MinimumAimDot = kMinServerAimDot)
     {
         FVector AimDirection{};
         if (!GetServerAimDirection(
@@ -3173,8 +4665,11 @@ namespace
         const auto NormalizedLaunch =
             LaunchDirection.GetSafeNormal();
         return !NormalizedLaunch.IsZero() &&
+            std::isfinite(MinimumAimDot) &&
+            MinimumAimDot >= -1.0 &&
+            MinimumAimDot <= 1.0 &&
             NormalizedLaunch.Dot(AimDirection) >=
-                kMinServerAimDot;
+                MinimumAimDot;
     }
 
     bool ValidateProjectileTravelDirectionWithAzimuth(
@@ -3274,7 +4769,9 @@ namespace
         const FVector& TravelDelta,
         double& OutCorrelation,
         double RearwardSlackCm =
-            kCompatibilityRearwardSlackCm)
+            kCompatibilityRearwardSlackCm,
+        double ParallaxAllowanceCm =
+            kCompatibilityParallaxAllowanceCm)
     {
         OutCorrelation = 0.0;
         if (!IsFiniteVector(ReferenceDirection) ||
@@ -3298,6 +4795,10 @@ namespace
         if (!std::isfinite(Forward) ||
             !std::isfinite(RearwardSlackCm) ||
             RearwardSlackCm < 0.0 ||
+            !std::isfinite(ParallaxAllowanceCm) ||
+            ParallaxAllowanceCm < 0.0 ||
+            ParallaxAllowanceCm >
+                kMaxLaunchOriginDriftCm ||
             Forward < -RearwardSlackCm)
         {
             return false;
@@ -3307,15 +4808,15 @@ namespace
             (std::max)(0.0, Forward);
         const double SideLimit =
             std::hypot(
-                kCompatibilityParallaxAllowanceCm,
+                ParallaxAllowanceCm,
                 kProjectileAzimuthSlope * ForwardPath);
         const double UpwardLimit =
             std::hypot(
-                kCompatibilityParallaxAllowanceCm,
+                ParallaxAllowanceCm,
                 kProjectileUpwardSlope * ForwardPath);
         const double DownwardLimit =
             std::hypot(
-                kCompatibilityParallaxAllowanceCm,
+                ParallaxAllowanceCm,
                 kProjectileDownwardSlope * ForwardPath);
 
         const double HorizontalSquared =
@@ -3394,7 +4895,9 @@ namespace
 
     bool IsImpactWithinActorBounds(
         AActor* Target,
-        const FVector& ImpactPoint)
+        const FVector& ImpactPoint,
+        bool OnlyCollidingComponents,
+        bool IncludeFromChildActors = false)
     {
         if (!GActorBoundsSchema.IsValid() ||
             !IsUsableActor(Target) ||
@@ -3404,8 +4907,6 @@ namespace
         }
 
         alignas(16) std::array<uint8, 0x80> Params{};
-        const bool OnlyCollidingComponents = true;
-        const bool IncludeFromChildActors = false;
         if (!WriteValue(
                 Params.data(),
                 GActorBoundsSchema.ParamsSize,
@@ -3450,24 +4951,654 @@ namespace
             return false;
         }
 
-        return std::abs(ImpactPoint.X - Origin.X) <=
+        const bool DegenerateBounds =
+            BoxExtent.X <=
+                (std::numeric_limits<double>::epsilon)() &&
+            BoxExtent.Y <=
+                (std::numeric_limits<double>::epsilon)() &&
+            BoxExtent.Z <=
+                (std::numeric_limits<double>::epsilon)();
+        if (OnlyCollidingComponents &&
+            DegenerateBounds)
+        {
+            // Some Chapter 5 build pieces expose their collision through a
+            // child/proxy component and return an all-zero colliding-only box.
+            // Retry the same server-owned actor bounds without that filter.
+            return IsImpactWithinActorBounds(
+                Target,
+                ImpactPoint,
+                false,
+                true);
+        }
+
+        const bool WithinBounds =
+            std::abs(ImpactPoint.X - Origin.X) <=
                 BoxExtent.X + kImpactBoundsToleranceCm &&
             std::abs(ImpactPoint.Y - Origin.Y) <=
                 BoxExtent.Y + kImpactBoundsToleranceCm &&
             std::abs(ImpactPoint.Z - Origin.Z) <=
                 BoxExtent.Z + kImpactBoundsToleranceCm;
+        if (!WithinBounds &&
+            OnlyCollidingComponents)
+        {
+            // Build pieces commonly keep the authoritative geometry on a
+            // non-colliding child/proxy component. Retry the broader
+            // server-owned bounds whenever the narrow box misses, not only
+            // when it is exactly zero.
+            return IsImpactWithinActorBounds(
+                Target,
+                ImpactPoint,
+                false,
+                true);
+        }
+        if (!WithinBounds)
+        {
+            static int32 BoundsTraceCount = 0;
+            if (BoundsTraceCount++ < 8)
+            {
+                SDK::DbgLog(
+                    "  [ProjectileDamage] bounds-detail target=%s colliding-only=%d impact=(%.1f,%.1f,%.1f) origin=(%.1f,%.1f,%.1f) extent=(%.1f,%.1f,%.1f)\n",
+                    Target->Name.ToString().c_str(),
+                    OnlyCollidingComponents,
+                    ImpactPoint.X,
+                    ImpactPoint.Y,
+                    ImpactPoint.Z,
+                    Origin.X,
+                    Origin.Y,
+                    Origin.Z,
+                    BoxExtent.X,
+                    BoxExtent.Y,
+                    BoxExtent.Z);
+            }
+        }
+        return WithinBounds;
+    }
+
+    bool IsImpactWithinPlayerEnvelope(
+        AFortPlayerPawnAthena* Target,
+        const FVector& ImpactPoint)
+    {
+        if (!IsUsableActor(Target) ||
+            !IsFiniteVector(ImpactPoint))
+        {
+            return false;
+        }
+
+        const FVector PlayerLocation =
+            Target->K2_GetActorLocation();
+        if (!IsFiniteVector(PlayerLocation))
+            return false;
+
+        const bool WithinEnvelope =
+            std::abs(
+                ImpactPoint.X -
+                PlayerLocation.X) <=
+                    kPlayerImpactHorizontalEnvelopeCm &&
+            std::abs(
+                ImpactPoint.Y -
+                PlayerLocation.Y) <=
+                    kPlayerImpactHorizontalEnvelopeCm &&
+            std::abs(
+                ImpactPoint.Z -
+                PlayerLocation.Z) <=
+                    kPlayerImpactVerticalEnvelopeCm;
+        if (!WithinEnvelope)
+        {
+            static int32 PlayerBoundsTraceCount = 0;
+            if (PlayerBoundsTraceCount++ < 8)
+            {
+                SDK::DbgLog(
+                    "  [ProjectileDamage] player-envelope target=%s impact=(%.1f,%.1f,%.1f) location=(%.1f,%.1f,%.1f)\n",
+                    Target->Name.ToString().c_str(),
+                    ImpactPoint.X,
+                    ImpactPoint.Y,
+                    ImpactPoint.Z,
+                    PlayerLocation.X,
+                    PlayerLocation.Y,
+                    PlayerLocation.Z);
+            }
+        }
+        return WithinEnvelope;
+    }
+
+    bool IsPawnAuthoritativelySeatedInVehicle(
+        AActor* HostVehicle,
+        AFortPlayerPawnAthena* ShooterPawn,
+        int32& OutSeatIndex)
+    {
+        OutSeatIndex = -1;
+        if (!IsUsableActor(HostVehicle) ||
+            !IsUsableActor(ShooterPawn))
+        {
+            return false;
+        }
+
+        auto AthenaVehicle =
+            HostVehicle->Cast<AFortAthenaVehicle>();
+        if (!IsUsableActor(AthenaVehicle))
+            return false;
+
+        // FindSeatIndex is a native function on FortAthenaVehicle, not on
+        // FortVehicleSeatComponent. Looking it up on the component always
+        // returned null on FN30, which made every mounted weapon look
+        // unseated: the turret host then blocked the server LOS trace and the
+        // larger, vehicle-only muzzle corridor was never selected. Keep this
+        // on the live server-owned vehicle rather than decoding PlayerSlots,
+        // whose storage differs across Chapter 5 vehicle subclasses.
+        auto FindSeatIndexFunction =
+            AthenaVehicle->GetFunction("FindSeatIndex");
+        if (!IsUsableObject(FindSeatIndexFunction) ||
+            FindSeatIndexFunction->GetParamsNamed().Size != 0x10)
+        {
+            return false;
+        }
+
+        const int32 SeatIndex =
+            AthenaVehicle->Call<int32>(
+                FindSeatIndexFunction,
+                ShooterPawn);
+        if (SeatIndex < 0 || SeatIndex > 15)
+            return false;
+
+        OutSeatIndex = SeatIndex;
+        return true;
+    }
+
+    AActor* ResolveNativeOccupiedVehicleForTrace(
+        AFortPlayerPawnAthena* ShooterPawn)
+    {
+        if (!IsUsableActor(ShooterPawn))
+            return nullptr;
+
+        // The server-owned pawn/vehicle association remains valid while a
+        // passenger uses a vehicle-mod weapon. Resolve it dynamically because
+        // legacy pawn subclasses expose one of several function names.
+        UFunction* GetVehicleFunction =
+            ShooterPawn->GetFunction("GetVehicleActor");
+        if (!GetVehicleFunction)
+        {
+            GetVehicleFunction =
+                ShooterPawn->GetFunction("GetVehicle");
+        }
+        if (!GetVehicleFunction)
+        {
+            GetVehicleFunction =
+                ShooterPawn->GetFunction("BP_GetVehicle");
+        }
+        if (!GetVehicleFunction)
+            return nullptr;
+
+        auto HostVehicle =
+            ShooterPawn->Call<AActor*>(GetVehicleFunction);
+        int32 SeatIndex = -1;
+        return IsPawnAuthoritativelySeatedInVehicle(
+                HostVehicle,
+                ShooterPawn,
+                SeatIndex)
+            ? HostVehicle
+            : nullptr;
+    }
+
+    AActor* ResolveMountedHostVehicleForTrace(
+        AFortWeaponRanged* ReportingWeapon,
+        AFortPlayerPawnAthena* ShooterPawn)
+    {
+        // MountedWeaponInfoRepped is declared by
+        // FortWeaponRangedForVehicle, not AFortWeaponRanged. The generated
+        // property accessor caches one offset globally, so calling Has* on a
+        // normal rifle after a vehicle weapon was seen would incorrectly reuse
+        // the vehicle subclass offset and read beyond that rifle's object.
+        static const UClass* VehicleWeaponClass = nullptr;
+        if (!VehicleWeaponClass)
+        {
+            VehicleWeaponClass =
+                FindClass("FortWeaponRangedForVehicle");
+        }
+        if (!IsUsableActor(ReportingWeapon) ||
+            !IsUsableActor(ShooterPawn) ||
+            !IsUsableObject(VehicleWeaponClass) ||
+            !ReportingWeapon->IsA(VehicleWeaponClass) ||
+            !WeaponIsCurrentForPawn(
+                ShooterPawn,
+                ReportingWeapon))
+        {
+            return nullptr;
+        }
+
+        AActor* HostVehicle = nullptr;
+        if (ReportingWeapon->HasMountedWeaponInfoRepped())
+        {
+            const auto& MountedInfo =
+                ReportingWeapon->MountedWeaponInfoRepped;
+            if (FMountedWeaponInfoRepped::HasHostVehicleCached())
+            {
+                auto HostObject =
+                    MountedInfo.HostVehicleCached.ObjectPointer;
+                // HostVehicleCached is transient replicated/interface state.
+                // During equip/unequip it can briefly contain a non-null
+                // sentinel or stale value. Cast dereferences UObject::Class,
+                // so validate membership in the live object array first.
+                if (IsUsableObject(HostObject))
+                    HostVehicle = HostObject->Cast<AActor>();
+            }
+            else if (
+                FMountedWeaponInfoRepped::
+                    HasHostVehicleCachedActor())
+            {
+                HostVehicle =
+                    MountedInfo.HostVehicleCachedActor;
+            }
+        }
+
+        int32 AuthoritativeSeatIndex = -1;
+        if (IsPawnAuthoritativelySeatedInVehicle(
+                HostVehicle,
+                ShooterPawn,
+                AuthoritativeSeatIndex))
+        {
+            // The native occupied-seat result is authoritative. FN30's mod-seat
+            // equip RPC can update the replicated cached index one frame after
+            // firing begins, so do not reject an exact native occupancy match
+            // merely because that transient index still names the prior mode.
+            return HostVehicle;
+        }
+
+        // MountedWeaponInfoRepped is transient and its host/seat cache can lag
+        // the first rounds of a sustained FN30 mod-seat burst. Fall back only
+        // to the server-owned pawn association, and still require this exact
+        // vehicle-weapon subclass, current weapon identity, vehicle interface,
+        // and authoritative occupied seat. No client-provided actor is trusted.
+        return ResolveNativeOccupiedVehicleForTrace(
+            ShooterPawn);
+    }
+
+    bool ReadLiveWeaponTraceStart(
+        AFortWeaponRanged* ReportingWeapon,
+        const char* FunctionName,
+        uint32 ExpectedParamsSize,
+        FVector& OutStart)
+    {
+        OutStart = FVector{};
+        if (!IsUsableActor(ReportingWeapon) ||
+            !FunctionName)
+        {
+            return false;
+        }
+
+        auto Function =
+            ReportingWeapon->GetFunction(FunctionName);
+        if (!IsUsableObject(Function))
+            return false;
+
+        const auto Params = Function->GetParamsNamed();
+        const auto PatternIndex =
+            GetNamedParameter(Params, "PatternIndex");
+        const auto ReturnValue =
+            GetNamedParameter(Params, "ReturnValue");
+        if (Params.Size != ExpectedParamsSize ||
+            !PatternIndex.IsValid(Params.Size) ||
+            PatternIndex.Size != sizeof(int32) ||
+            !ReturnValue.IsValid(Params.Size) ||
+            ReturnValue.Size != FVector::Size())
+        {
+            return false;
+        }
+
+        alignas(16) std::array<uint8, 0x80> Buffer{};
+        constexpr int32 FirstMuzzlePattern = 0;
+        if (!WriteValue(
+                Buffer.data(),
+                Params.Size,
+                PatternIndex,
+                FirstMuzzlePattern))
+        {
+            return false;
+        }
+
+        ReportingWeapon->ProcessEvent(
+            Function,
+            Buffer.data());
+        return ReadValue(
+                Buffer.data(),
+                Params.Size,
+                ReturnValue,
+                OutStart,
+                FVector::Size()) &&
+            IsFiniteVector(OutStart);
+    }
+
+    bool HasExactImpactLineOfSight(
+        AFortPlayerControllerAthena* Controller,
+        AFortWeaponRanged* ReportingWeapon,
+        AActor* Target,
+        const FVector& ViewPoint,
+        const FVector& ImpactPoint)
+    {
+        if (!GWorldLineTraceSchema.IsValid() ||
+            !IsUsableActor(Controller) ||
+            !IsUsableActor(Target) ||
+            !IsFiniteVector(ViewPoint) ||
+            !IsFiniteVector(ImpactPoint))
+        {
+            return false;
+        }
+
+        FVector TraceDirection =
+            (ImpactPoint - ViewPoint)
+                .GetSafeNormal();
+        if (TraceDirection.IsZero())
+            return true;
+        const FVector TraceEnd =
+            ImpactPoint + TraceDirection * 5.0;
+
+        std::array<AActor*, 5> IgnoredData{};
+        int32 IgnoredCount = 0;
+        IgnoredData[IgnoredCount++] = Controller;
+        auto ShooterPawn =
+            ResolveControllerPawn(Controller);
+        if (ShooterPawn)
+        {
+            IgnoredData[IgnoredCount++] =
+                ShooterPawn;
+            if (IsUsableActor(ReportingWeapon))
+            {
+                IgnoredData[IgnoredCount++] =
+                    ReportingWeapon;
+            }
+            if (ShooterPawn->HasCurrentWeapon() &&
+                IsUsableActor(
+                    ShooterPawn->CurrentWeapon) &&
+                ShooterPawn->CurrentWeapon !=
+                    ReportingWeapon &&
+                IgnoredCount <
+                    static_cast<int32>(
+                        IgnoredData.size()))
+            {
+                IgnoredData[IgnoredCount++] =
+                    ShooterPawn->CurrentWeapon;
+            }
+        }
+
+        // A mounted weapon's authoritative origin is at the turret muzzle,
+        // but that point can still lie inside the host vehicle's collision.
+        // Ignore only the positively validated MountedWeaponInfoRepped host;
+        // ordinary projectile weapons retain the exact same LOS validation.
+        auto MountedHostVehicle =
+            ResolveMountedHostVehicleForTrace(
+                ReportingWeapon,
+                ShooterPawn);
+        if (MountedHostVehicle &&
+            MountedHostVehicle != Target &&
+            IgnoredCount <
+                static_cast<int32>(IgnoredData.size()))
+        {
+            IgnoredData[IgnoredCount++] =
+                MountedHostVehicle;
+        }
+
+        TArray<AActor*> IgnoredActors{};
+        IgnoredActors.Data = IgnoredData.data();
+        IgnoredActors.NumElements = IgnoredCount;
+        IgnoredActors.MaxElements = IgnoredCount;
+
+        alignas(16) std::array<
+            uint8,
+            kMaxEffectCallParamsSize> Params{};
+        UObject* WorldContext = Controller;
+        constexpr uint8 VisibilityTraceType = 0;
+        const bool TraceComplex = false;
+        const bool IgnoreSelf = true;
+        if (!WriteValue(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema
+                    .WorldContextObject,
+                WorldContext) ||
+            !WriteBytes(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.Start,
+                &ViewPoint,
+                FVector::Size()) ||
+            !WriteBytes(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.End,
+                &TraceEnd,
+                FVector::Size()) ||
+            !WriteValue(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.TraceChannel,
+                VisibilityTraceType) ||
+            !WriteValue(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.TraceComplex,
+                TraceComplex) ||
+            !WriteValue(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.ActorsToIgnore,
+                IgnoredActors) ||
+            !WriteValue(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.IgnoreSelf,
+                IgnoreSelf))
+        {
+            return false;
+        }
+
+        GWorldLineTraceSchema.Library->ProcessEvent(
+            GWorldLineTraceSchema.Function,
+            Params.data());
+
+        bool HitAnything = false;
+        if (!ReadValue(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.ReturnValue,
+                HitAnything))
+        {
+            return false;
+        }
+        if (!HitAnything)
+            return true;
+
+        std::array<uint8, kMaxHitResultSize>
+            ServerHit{};
+        FResolvedHit ResolvedHit{};
+        if (!ReadValue(
+                Params.data(),
+                GWorldLineTraceSchema.ParamsSize,
+                GWorldLineTraceSchema.OutHit,
+                ServerHit,
+                GHitResultSchema.Size) ||
+            !ResolveHit(
+                ServerHit.data(),
+                GHitResultSchema.Size,
+                ResolvedHit))
+        {
+            return false;
+        }
+
+        if (ResolvedHit.Target == Target)
+            return true;
+
+        // Some pawn meshes do not block Visibility. In that case the trace
+        // can report geometry immediately behind the validated impact. It is
+        // still clear only when the first blocking point is no earlier than
+        // that impact (within a tiny numeric tolerance); ownership alone is
+        // never sufficient because a target-owned attachment can obstruct it.
+        const double ClaimedDistance =
+            FVector::Dist(ViewPoint, ImpactPoint);
+        const double BlockingDistance =
+            FVector::Dist(
+                ViewPoint,
+                ResolvedHit.ImpactPoint);
+        return std::isfinite(ClaimedDistance) &&
+            std::isfinite(BlockingDistance) &&
+            BlockingDistance + 2.0 >=
+                ClaimedDistance;
     }
 
     bool HasServerLineOfSight(
         AFortPlayerControllerAthena* Controller,
+        AFortWeaponRanged* ReportingWeapon,
         AActor* Target,
-        const FVector& ViewPoint)
+        const FVector& ViewPoint,
+        const FVector& LaunchDirection,
+        const FVector& CorroboratedProjectileOrigin,
+        const FVector& ImpactPoint)
     {
         if (!GLineOfSightSchema.IsValid() ||
             !IsUsableActor(Controller) ||
             !IsUsableActor(Target) ||
-            !IsFiniteVector(ViewPoint))
+            !IsFiniteVector(ViewPoint) ||
+            !IsFiniteVector(LaunchDirection) ||
+            !IsFiniteVector(CorroboratedProjectileOrigin) ||
+            !IsFiniteVector(ImpactPoint))
         {
+            return false;
+        }
+
+        if (Target->Cast<AFortPlayerPawnAthena>() &&
+            GWorldLineTraceSchema.IsValid())
+        {
+            // Actor-centric LineOfSightTo aims at the pawn center and can be
+            // blocked by a ramp even when the validated head impact is
+            // exposed. Trace the exact server-validated impact instead.
+            if (HasExactImpactLineOfSight(
+                    Controller,
+                    ReportingWeapon,
+                    Target,
+                    ViewPoint,
+                    ImpactPoint))
+            {
+                return true;
+            }
+
+            auto ShooterPawn =
+                ResolveControllerPawn(Controller);
+            auto MountedHost =
+                ResolveMountedHostVehicleForTrace(
+                    ReportingWeapon,
+                    ShooterPawn);
+            if (!MountedHost)
+                return false;
+
+            // The canonical projectile ledger deliberately records a
+            // server-owned weapon/pivot origin. FN30's vehicle-mod turret
+            // rotates its physical muzzle around that pivot, though, and the
+            // pivot-to-impact ray can cross the roof or nearby cover even when
+            // the actual server muzzle ray is clear. Retry only after exact
+            // occupied-seat/current-weapon validation, and only from live
+            // server-computed weapon locations bounded to every corroborating
+            // server/client point. The target-specific visibility trace and
+            // all cover checks remain unchanged.
+            const FVector WeaponLocation =
+                ReportingWeapon->K2_GetActorLocation();
+            const FVector HostLocation =
+                MountedHost->K2_GetActorLocation();
+            if (!IsFiniteVector(WeaponLocation) ||
+                !IsFiniteVector(HostLocation))
+            {
+                return false;
+            }
+
+            struct FLiveTraceStartFunction
+            {
+                const char* Name;
+                uint32 ParamsSize;
+            };
+            constexpr std::array<
+                FLiveTraceStartFunction,
+                2> LiveStartFunctions{{
+                {"GetMuzzleLocation", 0x20},
+                {"GetDamageStartLocation", 0x38}
+            }};
+            for (const auto& CandidateFunction :
+                LiveStartFunctions)
+            {
+                FVector LiveStart{};
+                if (!ReadLiveWeaponTraceStart(
+                        ReportingWeapon,
+                        CandidateFunction.Name,
+                        CandidateFunction.ParamsSize,
+                        LiveStart))
+                {
+                    continue;
+                }
+
+                const double WeaponDistance =
+                    FVector::Dist(
+                        WeaponLocation,
+                        LiveStart);
+                const double HostDistance =
+                    FVector::Dist(
+                        HostLocation,
+                        LiveStart);
+                const double LedgerDistance =
+                    FVector::Dist(
+                        ViewPoint,
+                        LiveStart);
+                const double ReportedDistance =
+                    FVector::Dist(
+                        CorroboratedProjectileOrigin,
+                        LiveStart);
+                if (!std::isfinite(WeaponDistance) ||
+                    !std::isfinite(HostDistance) ||
+                    !std::isfinite(LedgerDistance) ||
+                    !std::isfinite(ReportedDistance) ||
+                    WeaponDistance >
+                        kMaxRecordedOriginErrorCm ||
+                    HostDistance >
+                        kMaxMountedTraceStartHostDistanceCm ||
+                    LedgerDistance >
+                        kMaxRecordedOriginErrorCm ||
+                    ReportedDistance >
+                        kMaxRecordedOriginErrorCm)
+                {
+                    continue;
+                }
+
+                const FVector LiveTravel =
+                    ImpactPoint - LiveStart;
+                double DirectionCorrelation = 0.0;
+                if (!ValidateCompatibilityTravelCorridor(
+                        LaunchDirection,
+                        LiveTravel,
+                        DirectionCorrelation,
+                        kCompatibilityRearwardSlackCm,
+                        kMountedWeaponParallaxAllowanceCm))
+                {
+                    continue;
+                }
+
+                if (HasExactImpactLineOfSight(
+                        Controller,
+                        ReportingWeapon,
+                        Target,
+                        LiveStart,
+                        ImpactPoint))
+                {
+                    static int32 MountedRetryTraceCount = 0;
+                    if (MountedRetryTraceCount++ < 8)
+                    {
+                        SDK::DbgLog(
+                            "  [ProjectileDamage] mounted-los-retry source=%s weapon=%s pivot-offset=%.1f reported-offset=%.1f correlation=%.3f\n",
+                            CandidateFunction.Name,
+                            ReportingWeapon->Name
+                                .ToString()
+                                .c_str(),
+                            WeaponDistance,
+                            ReportedDistance,
+                            DirectionCorrelation);
+                    }
+                    return true;
+                }
+            }
             return false;
         }
 
@@ -3554,7 +5685,8 @@ namespace
         AFortWeaponRanged* Weapon,
         const void* RequestMemory,
         uint32 RequestSize,
-        bool TimestampFromClient)
+        bool TimestampFromClient,
+        bool ForceSingleShot = false)
     {
         if (!IsUsableActor(Weapon))
         {
@@ -3639,7 +5771,9 @@ namespace
             return false;
         }
 
-        const bool Automatic = IsAutomaticWeapon(Weapon);
+        const bool Automatic =
+            !ForceSingleShot &&
+            IsAutomaticWeapon(Weapon);
         const double LegalShotInterval =
             GetWeaponShotInterval(Weapon);
         const double ShotInterval =
@@ -3654,8 +5788,12 @@ namespace
 
         FVector NormalizedDirection =
             Direction.GetSafeNormal();
+
         for (auto& Existing : GProjectileLedger)
         {
+            if (ForceSingleShot)
+                break;
+
             if (!Existing.Active ||
                 Existing.WeaponIdentity != Weapon ||
                 Existing.ShooterIdentity != ShooterPawn ||
@@ -3721,30 +5859,36 @@ namespace
             }
         }
 
-        // A ranged weapon has one active looping request. Preserve older
-        // generations for their in-flight projectiles, but do not let a
-        // missed stop authorize two concurrent cadence streams.
-        for (auto& Existing : GProjectileLedger)
+        // Exact per-token snapshots are independent one-shot records. The
+        // legacy stream cleanup is only needed when a looping automatic
+        // request is being created.
+        if (!ForceSingleShot)
         {
-            if (Existing.Active &&
-                IsProjectileEntryExpired(Existing, Now))
+            // A ranged weapon has one active looping request. Preserve older
+            // generations for their in-flight projectiles, but do not let a
+            // missed stop authorize two concurrent cadence streams.
+            for (auto& Existing : GProjectileLedger)
             {
-                Existing.Active = false;
-                Existing.Reserved = false;
-                continue;
-            }
+                if (Existing.Active &&
+                    IsProjectileEntryExpired(Existing, Now))
+                {
+                    Existing.Active = false;
+                    Existing.Reserved = false;
+                    continue;
+                }
 
-            if (Existing.Active &&
-                Existing.Automatic &&
-                Existing.StoppedAt < 0.f &&
-                Existing.WeaponIdentity == Weapon &&
-                Existing.ShooterIdentity == ShooterPawn &&
-                ResolveWeakObject(Existing.Weapon) ==
-                    Weapon &&
-                ResolveWeakObject(Existing.Shooter) ==
-                    ShooterPawn)
-            {
-                Existing.StoppedAt = Now;
+                if (Existing.Active &&
+                    Existing.Automatic &&
+                    Existing.StoppedAt < 0.f &&
+                    Existing.WeaponIdentity == Weapon &&
+                    Existing.ShooterIdentity == ShooterPawn &&
+                    ResolveWeakObject(Existing.Weapon) ==
+                        Weapon &&
+                    ResolveWeakObject(Existing.Shooter) ==
+                        ShooterPawn)
+                {
+                    Existing.StoppedAt = Now;
+                }
             }
         }
 
@@ -3802,12 +5946,18 @@ namespace
             ProjectileTimestamp;
         Entry->TimestampFromClient =
             TimestampFromClient;
+        Entry->ServerFireToken =
+            TimestampFromClient
+                ? -1.f
+                : ProjectileTimestamp;
         Entry->RecordedAt = Now;
         Entry->StoppedAt = -1.f;
         Entry->Generation = GProjectileGeneration++;
         if (GProjectileGeneration == 0)
             GProjectileGeneration = 1;
         Entry->ReservedShotIndex = -1;
+        Entry->AuthoritativeShotSnapshot =
+            ForceSingleShot;
         Entry->Automatic = Automatic;
         Entry->ShotInterval = ShotInterval;
         Entry->PelletsPerShot = PelletsPerShot;
@@ -3822,7 +5972,8 @@ namespace
         const FVector& DamageStart,
         const FVector& DamageDirection)
     {
-        if (!GProjectileRequestSchema.IsValid() ||
+        if (!IsUsableActor(Weapon) ||
+            !Weapon->HasAuthority() ||
             !IsFiniteVector(DamageStart) ||
             !IsFiniteVector(DamageDirection))
         {
@@ -3830,38 +5981,77 @@ namespace
         }
 
         const float ReceivedAt = GetServerTimeSeconds();
-        alignas(16) std::array<uint8, 0x100>
-            SyntheticRequest{};
         if (!std::isfinite(ReceivedAt) ||
             ReceivedAt < 0.f ||
-            GProjectileRequestSchema.RequestSize >
-                SyntheticRequest.size() ||
-            !WriteBytes(
-                SyntheticRequest.data(),
-                GProjectileRequestSchema.RequestSize,
-                GProjectileRequestSchema.StartPosition,
-                &DamageStart,
-                FVector::Size()) ||
-            !WriteBytes(
-                SyntheticRequest.data(),
-                GProjectileRequestSchema.RequestSize,
-                GProjectileRequestSchema.StartDirection,
-                &DamageDirection,
-                FVector::Size()) ||
-            !WriteValue(
-                SyntheticRequest.data(),
-                GProjectileRequestSchema.RequestSize,
-                GProjectileRequestSchema.Timestamp,
+            !SynchronizeProjectileTimeEpoch(
                 ReceivedAt))
         {
             return false;
         }
 
-        return RecordProjectileLaunch(
-            Weapon,
-            SyntheticRequest.data(),
-            GProjectileRequestSchema.RequestSize,
-            false);
+        AFortPlayerPawnAthena* ShooterPawn = nullptr;
+        AFortPlayerControllerAthena* ShooterController =
+            nullptr;
+        const double DirectionMagnitude =
+            DamageDirection.Magnitude();
+        if (!ResolveShooter(
+                Weapon,
+                ShooterPawn,
+                ShooterController) ||
+            !WeaponIsCurrentForPawn(
+                ShooterPawn,
+                Weapon) ||
+            DirectionMagnitude < 0.5 ||
+            DirectionMagnitude > 1.5 ||
+            !ValidateLaunchAgainstServerAim(
+                ShooterController,
+                DamageDirection,
+                kMinAdjustedServerAimDot))
+        {
+            return false;
+        }
+
+        const FVector ShooterLocation =
+            ShooterPawn->K2_GetActorLocation();
+        const FVector WeaponLocation =
+            Weapon->K2_GetActorLocation();
+        if (!IsFiniteVector(ShooterLocation) ||
+            !IsFiniteVector(WeaponLocation) ||
+            (std::min)(
+                FVector::Dist(
+                    ShooterLocation,
+                    DamageStart),
+                FVector::Dist(
+                    WeaponLocation,
+                    DamageStart)) >
+                kMaxLaunchOriginDriftCm)
+        {
+            return false;
+        }
+
+        auto RelayState =
+            GetProjectileVisualRelayState(
+                Weapon,
+                true);
+        if (!RelayState)
+            return false;
+
+        RelayState->LatestDamageStart =
+            FVector(
+                DamageStart.X,
+                DamageStart.Y,
+                DamageStart.Z);
+        RelayState->LatestAdjustedAimDirection =
+            DamageDirection.GetSafeNormal();
+        RelayState->LatestDamageStateAt =
+            ReceivedAt;
+        RelayState->HasLatestDamageState =
+            !RelayState
+                ->LatestAdjustedAimDirection
+                .IsZero();
+        RelayState->LightweightProjectile = true;
+        RelayState->CaptureActive = true;
+        return RelayState->HasLatestDamageState;
     }
 
     bool IsUsableCompatibilityFireToken(
@@ -3927,7 +6117,7 @@ namespace
         }
 
         static int32 TraceCount = 0;
-        if (TraceCount++ < 64)
+        if (TraceCount++ < 8)
         {
             SDK::DbgLog(
                 "  [ProjectileDamage] compatibility-fire-state weapon=%s now=%.6f verified-read=%d verified=%.6f last-read=%d last=%.6f selected=%s token=%.6f\n",
@@ -3945,6 +6135,750 @@ namespace
         return OutFireToken > 0.f;
     }
 
+    bool IsLightweightProjectileWeapon(
+        AFortWeaponRanged* Weapon)
+    {
+        if (!IsUsableActor(Weapon) ||
+            !GLightweightProjectileVisualSchema
+                .CanIdentifyWeapon() ||
+            !Weapon->HasWeaponData() ||
+            !IsUsableObject(Weapon->WeaponData) ||
+            !Weapon->WeaponData->IsA(
+                GLightweightProjectileVisualSchema
+                    .RangedItemDefinitionClass))
+        {
+            return false;
+        }
+
+        alignas(16) std::array<uint8, 0x40> Params{};
+        Weapon->WeaponData->ProcessEvent(
+            GLightweightProjectileVisualSchema
+                .HasLightweightProjectile,
+            Params.data());
+
+        bool Result = false;
+        return ReadValue(
+                Params.data(),
+                GLightweightProjectileVisualSchema
+                    .HasLightweightProjectileSize,
+                GLightweightProjectileVisualSchema
+                    .HasLightweightProjectileReturn,
+                Result) &&
+            Result;
+    }
+
+    bool WriteServerOwnedProjectileRequest(
+        void* RequestMemory,
+        uint32 RequestSize,
+        const FVector& Start,
+        const FVector& Direction,
+        float FireToken)
+    {
+        if (!GProjectileRequestSchema.IsValid() ||
+            !RequestMemory ||
+            RequestSize !=
+                GProjectileRequestSchema.RequestSize ||
+            !IsFiniteVector(Start) ||
+            !IsFiniteVector(Direction) ||
+            !std::isfinite(FireToken))
+        {
+            return false;
+        }
+
+        const FVector NormalizedDirection =
+            Direction.GetSafeNormal();
+        return !NormalizedDirection.IsZero() &&
+            WriteBytes(
+                RequestMemory,
+                RequestSize,
+                GProjectileRequestSchema.StartPosition,
+                &Start,
+                FVector::Size()) &&
+            WriteBytes(
+                RequestMemory,
+                RequestSize,
+                GProjectileRequestSchema.StartDirection,
+                &NormalizedDirection,
+                FVector::Size()) &&
+            WriteValue(
+                RequestMemory,
+                RequestSize,
+                GProjectileRequestSchema.Timestamp,
+                FireToken);
+    }
+
+    bool BroadcastProjectileVisualRequest(
+        AFortWeaponRanged* Weapon,
+        const FVector& Start,
+        const FVector& Direction,
+        float FireToken,
+        bool ForceSingleShot = false)
+    {
+        if (!IsUsableActor(Weapon) ||
+            !Weapon->HasAuthority() ||
+            !GProjectileRequestSchema.IsValid() ||
+            !IsFiniteVector(Start) ||
+            !IsFiniteVector(Direction) ||
+            !std::isfinite(FireToken))
+        {
+            return false;
+        }
+
+        alignas(16) std::array<uint8, 0x100> Params{};
+        if (GProjectileRequestSchema.ParamsSize >
+                Params.size() ||
+            !GProjectileRequestSchema.Request.IsValid(
+                GProjectileRequestSchema.ParamsSize))
+        {
+            return false;
+        }
+
+        auto RequestMemory =
+            Params.data() +
+            GProjectileRequestSchema.Request.Offset;
+        if (!WriteServerOwnedProjectileRequest(
+                RequestMemory,
+                GProjectileRequestSchema.RequestSize,
+                Start,
+                Direction,
+                FireToken))
+        {
+            return false;
+        }
+
+        // Record the exact server-owned launch before the multicast. The
+        // hooked local Exec path normally sees the same request too, but
+        // network routing order differs between minor engine builds.
+        if (!RecordProjectileLaunch(
+                Weapon,
+                RequestMemory,
+                GProjectileRequestSchema.RequestSize,
+                false,
+                ForceSingleShot))
+        {
+            return false;
+        }
+
+        const bool WasInsideRelay =
+            GInsideProjectileVisualRelay;
+        GInsideProjectileVisualRelay = true;
+        Weapon->ProcessEvent(
+            GProjectileRequestSchema.Function,
+            Params.data());
+        GInsideProjectileVisualRelay = WasInsideRelay;
+        return true;
+    }
+
+    void PrepareServerAbilityActivation(
+        UObject* AbilitySourceObject)
+    {
+        if (VersionInfo.FortniteVersion < 28.00 ||
+            VersionInfo.FortniteVersion >= 32.00 ||
+            !IsUsableObject(AbilitySourceObject))
+        {
+            return;
+        }
+
+        auto Weapon =
+            AbilitySourceObject->Cast<AFortWeaponRanged>();
+        if (!IsUsableActor(Weapon) ||
+            !Weapon->HasAuthority() ||
+            !GLightweightProjectileVisualSchema
+                .CanIdentifyWeapon() ||
+            !IsLightweightProjectileWeapon(Weapon))
+        {
+            return;
+        }
+
+        const float Now = GetServerTimeSeconds();
+        if (!SynchronizeProjectileTimeEpoch(Now))
+            return;
+
+        auto RelayState =
+            GetProjectileVisualRelayState(Weapon, true);
+        if (!RelayState)
+            return;
+        if (RelayState->CaptureActive &&
+            IsAutomaticWeapon(Weapon))
+        {
+            return;
+        }
+        RelayState->CaptureActiveBeforePending =
+            RelayState->CaptureActive;
+        RelayState->LightweightProjectile = true;
+        RelayState->CaptureActive = true;
+        RelayState->HasLatestDamageState = false;
+        RelayState->LatestDamageStateAt = -1.f;
+
+        float Verified = -1.f;
+        float Last = -1.f;
+        const bool ReadVerified =
+            ReadReflectedObjectValue(
+                Weapon,
+                "LastFireTimeVerified",
+                Verified);
+        const bool ReadLast =
+            ReadReflectedObjectValue(
+                Weapon,
+                "LastFireTime",
+                Last);
+        RelayState->PendingBaselineFireToken = -1.f;
+        if (ReadVerified &&
+            std::isfinite(Verified) &&
+            Verified >= 0.f)
+        {
+            RelayState->PendingBaselineFireToken =
+                Verified;
+        }
+        if (ReadLast &&
+            std::isfinite(Last) &&
+            Last >
+                RelayState->PendingBaselineFireToken)
+        {
+            RelayState->PendingBaselineFireToken =
+                Last;
+        }
+        RelayState->PendingActivation = true;
+        RelayState->PendingStartedAt = Now;
+    }
+
+    bool ResolveServerOwnedProjectileLaunch(
+        AFortWeaponRanged* Weapon,
+        AFortPlayerPawnAthena* ShooterPawn,
+        AFortPlayerControllerAthena* ShooterController,
+        FVector& OutStart,
+        FVector& OutDirection,
+        bool& OutUsedCachedStart,
+        bool& OutUsedCachedDirection)
+    {
+        OutUsedCachedStart = false;
+        OutUsedCachedDirection = false;
+        if (!IsUsableActor(Weapon) ||
+            !IsUsableActor(ShooterPawn) ||
+            !IsUsableActor(ShooterController))
+        {
+            return false;
+        }
+
+        const FVector PawnLocation =
+            ShooterPawn->K2_GetActorLocation();
+        const FVector WeaponLocation =
+            Weapon->K2_GetActorLocation();
+        FVector AimDirection{};
+        if (!IsFiniteVector(PawnLocation) ||
+            !IsFiniteVector(WeaponLocation) ||
+            !GetServerAimDirection(
+                ShooterController,
+                AimDirection))
+        {
+            return false;
+        }
+
+        const float Now = GetServerTimeSeconds();
+        auto RelayState =
+            GetProjectileVisualRelayState(
+                Weapon,
+                false);
+        const bool HasFreshDamageState =
+            RelayState &&
+            RelayState->HasLatestDamageState &&
+            std::isfinite(Now) &&
+            std::isfinite(
+                RelayState->LatestDamageStateAt) &&
+            (!RelayState->PendingActivation ||
+                !std::isfinite(
+                    RelayState->PendingStartedAt) ||
+                RelayState->LatestDamageStateAt +
+                        0.001f >=
+                    RelayState->PendingStartedAt) &&
+            Now >= RelayState->LatestDamageStateAt &&
+            static_cast<double>(
+                Now -
+                RelayState->LatestDamageStateAt) <=
+                kMaxCachedLaunchGeometryAgeSeconds;
+
+        FVector Start{};
+        bool ReadStart = HasFreshDamageState;
+        if (HasFreshDamageState)
+        {
+            Start = RelayState->LatestDamageStart;
+            ReadStart = IsFiniteVector(Start);
+        }
+        OutUsedCachedStart =
+            ReadStart &&
+            IsFiniteVector(Start) &&
+            (std::min)(
+                FVector::Dist(PawnLocation, Start),
+                FVector::Dist(WeaponLocation, Start)) <=
+                kMaxLaunchOriginDriftCm;
+        if (!OutUsedCachedStart)
+        {
+            Start = FVector(
+                WeaponLocation.X,
+                WeaponLocation.Y,
+                WeaponLocation.Z);
+        }
+
+        FVector Direction{};
+        bool ReadDirection = HasFreshDamageState;
+        if (HasFreshDamageState)
+        {
+            Direction =
+                RelayState->LatestAdjustedAimDirection;
+            ReadDirection =
+                IsFiniteVector(Direction);
+        }
+        const double DirectionMagnitude =
+            ReadDirection
+                ? Direction.Magnitude()
+                : 0.0;
+        const double CachedAimDot =
+            ReadDirection
+                ? Direction.GetSafeNormal().Dot(
+                    AimDirection.GetSafeNormal())
+                : -1.0;
+        OutUsedCachedDirection =
+            ReadDirection &&
+            IsFiniteVector(Direction) &&
+            DirectionMagnitude >= 0.5 &&
+            DirectionMagnitude <= 1.5 &&
+            std::isfinite(CachedAimDot) &&
+            CachedAimDot >=
+                kMinAdjustedServerAimDot;
+        if (!OutUsedCachedDirection)
+        {
+            Direction = FVector(
+                AimDirection.X,
+                AimDirection.Y,
+                AimDirection.Z);
+        }
+
+        OutStart = FVector(
+            Start.X,
+            Start.Y,
+            Start.Z);
+        OutDirection = FVector(
+            Direction.X,
+            Direction.Y,
+            Direction.Z);
+        return true;
+    }
+
+    void RelayServerAbilityActivation(
+        UObject* AbilitySourceObject)
+    {
+        if (VersionInfo.FortniteVersion < 28.00 ||
+            VersionInfo.FortniteVersion >= 32.00 ||
+            GInsideProjectileVisualRelay ||
+            !IsUsableObject(AbilitySourceObject))
+        {
+            return;
+        }
+
+        auto Weapon =
+            AbilitySourceObject->Cast<AFortWeaponRanged>();
+        if (!IsUsableActor(Weapon) ||
+            !Weapon->HasAuthority() ||
+            !GProjectileRequestSchema.IsValid() ||
+            !GLightweightProjectileVisualSchema
+                .CanIdentifyWeapon() ||
+            !IsLightweightProjectileWeapon(Weapon))
+        {
+            return;
+        }
+
+        const float Now = GetServerTimeSeconds();
+        if (!SynchronizeProjectileTimeEpoch(Now))
+            return;
+
+        auto RelayState =
+            GetProjectileVisualRelayState(
+                Weapon,
+                false);
+        if (!RelayState ||
+            !RelayState->PendingActivation)
+        {
+            return;
+        }
+        if (!std::isfinite(
+                RelayState->PendingStartedAt) ||
+            Now < RelayState->PendingStartedAt ||
+            Now - RelayState->PendingStartedAt >
+                kProjectileVisualRelayPendingSeconds)
+        {
+            RelayState->PendingActivation = false;
+            return;
+        }
+        const float BaselineFireToken =
+            RelayState->PendingBaselineFireToken;
+
+        AFortPlayerPawnAthena* ShooterPawn = nullptr;
+        AFortPlayerControllerAthena* ShooterController =
+            nullptr;
+        if (!ResolveShooter(
+                Weapon,
+                ShooterPawn,
+                ShooterController) ||
+            !WeaponIsCurrentForPawn(
+                ShooterPawn,
+                Weapon))
+        {
+            return;
+        }
+
+        float FireToken = -1.f;
+        const char* FireTokenSource = "none";
+        if (!ResolveCompatibilityFireToken(
+                Weapon,
+                Now,
+                FireToken,
+                FireTokenSource))
+        {
+            return;
+        }
+
+        const double FireAge =
+            static_cast<double>(Now) -
+            static_cast<double>(FireToken);
+        if (!std::isfinite(FireAge) ||
+            FireAge <
+                -static_cast<double>(
+                    kCompatibilityFutureFireTimeToleranceSeconds) ||
+            FireAge >
+                static_cast<double>(
+                    kProjectileVisualRelayFreshnessSeconds) ||
+            FireToken <=
+                BaselineFireToken +
+                    kProjectileTimestampToleranceSeconds ||
+            FireToken <=
+                RelayState->LastCapturedFireToken +
+                    kProjectileTimestampToleranceSeconds)
+        {
+            return;
+        }
+
+        FVector Start{};
+        FVector Direction{};
+        bool UsedCachedStart = false;
+        bool UsedCachedDirection = false;
+        if (!ResolveServerOwnedProjectileLaunch(
+                Weapon,
+                ShooterPawn,
+                ShooterController,
+                Start,
+                Direction,
+                UsedCachedStart,
+                UsedCachedDirection))
+        {
+            return;
+        }
+
+        const bool Broadcast =
+            BroadcastProjectileVisualRequest(
+                Weapon,
+                Start,
+                Direction,
+                FireToken,
+                true);
+        if (Broadcast)
+        {
+            RelayState->LastCapturedFireToken =
+                FireToken;
+            RelayState->LastVisualFireToken =
+                FireToken;
+            RelayState->ActiveVisualFireToken =
+                FireToken;
+            RelayState->Active = true;
+            RelayState->PendingActivation = false;
+        }
+
+        static int32 TraceCount = 0;
+        if (TraceCount++ < 4)
+        {
+            SDK::DbgLog(
+                "  [ProjectileDamage] visual-relay weapon=%s fire-source=%s token=%.6f age=%.3f start=%s direction=%s sent=%d\n",
+                Weapon->Name.ToString().c_str(),
+                FireTokenSource,
+                FireToken,
+                FireAge,
+                UsedCachedStart ? "cached" : "weapon",
+                UsedCachedDirection
+                    ? "cached"
+                    : "control",
+                Broadcast);
+        }
+    }
+
+    void CaptureAuthoritativeProjectileLaunch(
+        AFortWeaponRanged* Weapon)
+    {
+        if (!IsUsableActor(Weapon) ||
+            !Weapon->HasAuthority() ||
+            !GProjectileRequestSchema.IsValid())
+        {
+            return;
+        }
+
+        const float Now = GetServerTimeSeconds();
+        if (!SynchronizeProjectileTimeEpoch(Now))
+            return;
+
+        auto RelayState =
+            GetProjectileVisualRelayState(
+                Weapon,
+                false);
+        if (!RelayState ||
+            !RelayState->LightweightProjectile)
+        {
+            if (!GLightweightProjectileVisualSchema
+                    .CanIdentifyWeapon() ||
+                !IsLightweightProjectileWeapon(Weapon))
+            {
+                return;
+            }
+            RelayState =
+                GetProjectileVisualRelayState(
+                    Weapon,
+                    true);
+            if (RelayState)
+                RelayState->LightweightProjectile = true;
+        }
+        if (!RelayState)
+            return;
+
+        if (RelayState->PendingActivation &&
+            (!std::isfinite(
+                    RelayState->PendingStartedAt) ||
+                Now < RelayState->PendingStartedAt ||
+                Now - RelayState->PendingStartedAt >
+                    kProjectileVisualRelayPendingSeconds))
+        {
+            RelayState->PendingActivation = false;
+            RelayState->CaptureActive =
+                RelayState
+                    ->CaptureActiveBeforePending;
+            RelayState->CaptureActiveBeforePending =
+                false;
+            RelayState->PendingStartedAt = -1.f;
+            RelayState->PendingBaselineFireToken = -1.f;
+            RelayState->HasLatestDamageState = false;
+            RelayState->LatestDamageStateAt = -1.f;
+            if (!RelayState->CaptureActive)
+                return;
+        }
+
+        float FireToken = -1.f;
+        const char* FireTokenSource = "none";
+        if (!ResolveCompatibilityFireToken(
+                Weapon,
+                Now,
+                FireToken,
+                FireTokenSource) ||
+            (RelayState->PendingActivation &&
+                FireToken <=
+                    RelayState
+                        ->PendingBaselineFireToken +
+                        kProjectileTimestampToleranceSeconds) ||
+            FireToken <=
+                RelayState->LastCapturedFireToken +
+                    kProjectileTimestampToleranceSeconds)
+        {
+            return;
+        }
+
+        const double FireAge =
+            static_cast<double>(Now) -
+            static_cast<double>(FireToken);
+        if (!std::isfinite(FireAge) ||
+            FireAge <
+                -static_cast<double>(
+                    kCompatibilityFutureFireTimeToleranceSeconds) ||
+            FireAge >
+                static_cast<double>(
+                    kProjectileVisualRelayFreshnessSeconds))
+        {
+            return;
+        }
+
+        const bool HasActivationGeometry =
+            RelayState->HasLatestDamageState &&
+            std::isfinite(
+                RelayState->LatestDamageStateAt) &&
+            (!RelayState->PendingActivation ||
+                !std::isfinite(
+                    RelayState->PendingStartedAt) ||
+                RelayState->LatestDamageStateAt +
+                        0.001f >=
+                    RelayState->PendingStartedAt);
+        if (RelayState->PendingActivation &&
+            !HasActivationGeometry &&
+            FireAge >= 0.0 &&
+            FireAge <
+                static_cast<double>(
+                    kProjectileGeometryWaitSeconds))
+        {
+            // LastFireTime can advance a frame before the authoritative
+            // adjusted muzzle ray arrives. Briefly defer instead of
+            // multicasting the previous shot's direction.
+            return;
+        }
+
+        AFortPlayerPawnAthena* ShooterPawn = nullptr;
+        AFortPlayerControllerAthena* ShooterController =
+            nullptr;
+        if (!ResolveShooter(
+                Weapon,
+                ShooterPawn,
+                ShooterController) ||
+            !WeaponIsCurrentForPawn(
+                ShooterPawn,
+                Weapon))
+        {
+            return;
+        }
+
+        FVector Start{};
+        FVector Direction{};
+        bool UsedCachedStart = false;
+        bool UsedCachedDirection = false;
+        if (!ResolveServerOwnedProjectileLaunch(
+                Weapon,
+                ShooterPawn,
+                ShooterController,
+                Start,
+                Direction,
+                UsedCachedStart,
+                UsedCachedDirection))
+        {
+            return;
+        }
+
+        // LastFireTime advances for each physical Chapter 5 round, including
+        // the individual rounds inside a burst. Always mint one bounded local
+        // snapshot per fresh server token. If the native multicast path is
+        // absent, send that same per-shot request so observers see the round.
+        bool Relayed = false;
+        bool Recorded = false;
+        const bool NativeTokenObserved =
+            std::isfinite(
+                RelayState
+                    ->LastNativeMulticastFireToken) &&
+            std::isfinite(
+                RelayState->LastNativeMulticastAt) &&
+            Now >= RelayState->LastNativeMulticastAt &&
+            Now - RelayState->LastNativeMulticastAt <=
+                kProjectileVisualRelayFreshnessSeconds &&
+            std::abs(
+                RelayState
+                    ->LastNativeMulticastFireToken -
+                FireToken) <=
+                kProjectileTimestampToleranceSeconds;
+        if (!NativeTokenObserved)
+        {
+            Relayed =
+                BroadcastProjectileVisualRequest(
+                    Weapon,
+                    Start,
+                    Direction,
+                    FireToken,
+                    true);
+            Recorded = Relayed;
+        }
+        else
+        {
+            alignas(16) std::array<uint8, 0x100>
+                Request{};
+            Recorded =
+                WriteServerOwnedProjectileRequest(
+                    Request.data(),
+                    GProjectileRequestSchema.RequestSize,
+                    Start,
+                    Direction,
+                    FireToken) &&
+                RecordProjectileLaunch(
+                    Weapon,
+                    Request.data(),
+                    GProjectileRequestSchema.RequestSize,
+                    false,
+                    true);
+        }
+
+        if (Recorded)
+        {
+            RelayState->LastCapturedFireToken =
+                FireToken;
+            RelayState->PendingActivation = false;
+            RelayState->CaptureActive = true;
+            RelayState->CaptureActiveBeforePending =
+                false;
+            if (Relayed)
+            {
+                RelayState->LastVisualFireToken =
+                    FireToken;
+                RelayState->ActiveVisualFireToken =
+                    FireToken;
+                RelayState->Active = true;
+            }
+        }
+
+        static int32 TraceCount = 0;
+        if (TraceCount++ < 8)
+        {
+            SDK::DbgLog(
+                "  [ProjectileDamage] shot-capture weapon=%s fire-source=%s token=%.6f age=%.3f start=%s direction=%s recorded=%d relayed=%d\n",
+                Weapon->Name.ToString().c_str(),
+                FireTokenSource,
+                FireToken,
+                FireAge,
+                UsedCachedStart ? "cached" : "weapon",
+                UsedCachedDirection
+                    ? "cached"
+                    : "control",
+                Recorded,
+                Relayed);
+        }
+    }
+
+    void TickServerProjectileRelays()
+    {
+        if (VersionInfo.FortniteVersion < 28.00 ||
+            VersionInfo.FortniteVersion >= 32.00 ||
+            GInsideProjectileVisualRelay ||
+            !GProjectileRequestSchema.IsValid() ||
+            !GLightweightProjectileVisualSchema
+                .CanIdentifyWeapon())
+        {
+            return;
+        }
+
+        const float Now = GetServerTimeSeconds();
+        if (!SynchronizeProjectileTimeEpoch(Now))
+            return;
+
+        for (auto& Entry : GProjectileVisualRelayStates)
+        {
+            if (!Entry.WeaponIdentity)
+                continue;
+
+            auto Weapon = ResolveWeakObject(Entry.Weapon);
+            if (Weapon != Entry.WeaponIdentity ||
+                !IsUsableActor(Weapon) ||
+                !Weapon->HasAuthority())
+            {
+                Entry = FProjectileVisualRelayState{};
+                continue;
+            }
+
+            if (Entry.WeaponIdentity == Weapon &&
+                (Entry.CaptureActive ||
+                    Entry.PendingActivation))
+            {
+                CaptureAuthoritativeProjectileLaunch(
+                    Weapon);
+            }
+        }
+    }
+
     bool ValidateReportedCompatibilityLaunch(
         const FVector& ReportedProjectileOrigin,
         const FVector& ImpactPoint,
@@ -3958,7 +6892,9 @@ namespace
         double FireAge,
         FVector& OutStart,
         FVector& OutDirection,
-        bool& OutUsedServerDirection)
+        bool& OutUsedServerDirection,
+        double ParallaxAllowanceCm =
+            kCompatibilityParallaxAllowanceCm)
     {
         OutUsedServerDirection = false;
         if (!IsFiniteVector(ReportedProjectileOrigin) ||
@@ -4077,7 +7013,9 @@ namespace
             ValidateCompatibilityTravelCorridor(
                 NormalizedAim,
                 CanonicalTravelDelta,
-                CurrentAimCorrelation);
+                CurrentAimCorrelation,
+                kCompatibilityRearwardSlackCm,
+                ParallaxAllowanceCm);
         if (!CurrentAimValid &&
             FireAge <=
                 kMaxCurrentAimFallbackAgeSeconds &&
@@ -4091,7 +7029,8 @@ namespace
                     NormalizedAim,
                     CanonicalTravelDelta,
                     CurrentAimCorrelation,
-                    kCompatibilityContactRearwardSlackCm);
+                    kCompatibilityContactRearwardSlackCm,
+                    ParallaxAllowanceCm);
         }
 
         bool CachedDirectionValid = false;
@@ -4110,7 +7049,9 @@ namespace
                     ValidateCompatibilityTravelCorridor(
                         NormalizedServerDirection,
                         CanonicalTravelDelta,
-                        CachedDirectionCorrelation);
+                        CachedDirectionCorrelation,
+                        kCompatibilityRearwardSlackCm,
+                        ParallaxAllowanceCm);
                 if (!CachedDirectionValid &&
                     CanonicalTravelDistance <=
                         kCompatibilityContactRangeCm &&
@@ -4123,7 +7064,8 @@ namespace
                             NormalizedServerDirection,
                             CanonicalTravelDelta,
                             CachedDirectionCorrelation,
-                            kCompatibilityContactRearwardSlackCm);
+                            kCompatibilityContactRearwardSlackCm,
+                            ParallaxAllowanceCm);
                 }
             }
             else
@@ -4222,7 +7164,8 @@ namespace
                 "CurrentAdjustedAimDirection",
                 CurrentDirection,
                 FVector::Size());
-        if (ValidateReportedCompatibilityLaunch(
+        bool CompatibilityLaunchValid =
+            ValidateReportedCompatibilityLaunch(
                 ReportedProjectileOrigin,
                 ImpactPoint,
                 ReadCurrentStart,
@@ -4235,10 +7178,44 @@ namespace
                 FireAge,
                 Start,
                 Direction,
-                UsedServerDirection))
+                UsedServerDirection);
+        bool UsedMountedWeaponOrigin = false;
+        if (!CompatibilityLaunchValid &&
+            ResolveMountedHostVehicleForTrace(
+                Weapon,
+                ShooterPawn))
+        {
+            // During sustained vehicle-turret fire, FN30 can advance
+            // LastFireTime before CurrentDamageStartLocation moves to the new
+            // muzzle transform. Retry only for a positively validated mounted
+            // seat, using the authoritative weapon actor location and current
+            // server aim. The reported origin remains bounded corroboration;
+            // it never becomes the authorizing ray.
+            CompatibilityLaunchValid =
+                ValidateReportedCompatibilityLaunch(
+                    ReportedProjectileOrigin,
+                    ImpactPoint,
+                    true,
+                    CurrentWeaponLocation,
+                    false,
+                    FVector{},
+                    CurrentPawnLocation,
+                    CurrentWeaponLocation,
+                    CurrentAimDirection,
+                    FireAge,
+                    Start,
+                    Direction,
+                    UsedServerDirection,
+                    kMountedWeaponParallaxAllowanceCm);
+            UsedMountedWeaponOrigin =
+                CompatibilityLaunchValid;
+        }
+        if (CompatibilityLaunchValid)
         {
             LaunchStateSource =
-                UsedServerDirection
+                UsedMountedWeaponOrigin
+                    ? "mounted-weapon-origin-current-aim"
+                    : UsedServerDirection
                     ? "server-origin-cached-direction"
                     : "server-origin-current-aim";
         }
@@ -4253,7 +7230,7 @@ namespace
             const FVector NormalizedCurrentDirection =
                 CurrentDirection.GetSafeNormal();
             static int32 RejectTraceCount = 0;
-            if (RejectTraceCount++ < 96)
+            if (RejectTraceCount++ < 16)
             {
                 SDK::DbgLog(
                     "  [ProjectileDamage] compatibility-launch-reject weapon=%s token=%.6f age=%.3f current-read=%d/%d current-origin=%.1f current-dir-mag=%.3f reported-current=%.1f aim-dot=%.3f current-dir-dot=%.3f travel=%.1f\n",
@@ -4284,9 +7261,9 @@ namespace
             return false;
         }
 
-        // A normal launch for this weapon always wins. Also preserve an
-        // exhausted compatibility entry as a tombstone: the same server fire
-        // token must never mint another generation.
+        // A canonical launch for this exact server fire token always wins.
+        // Older live/tombstoned rounds must not block a later physical burst
+        // round whose LastFireTime has advanced.
         for (auto& Existing : GProjectileLedger)
         {
             if (!Existing.Active)
@@ -4309,8 +7286,13 @@ namespace
                 continue;
             }
 
-            if (!Existing.CompatibilityFallback ||
-                Existing.ServerFireToken == FireToken)
+            const bool SameServerFireToken =
+                Existing.ServerFireToken >= 0.f &&
+                std::abs(
+                    Existing.ServerFireToken -
+                    FireToken) <=
+                    kProjectileTimestampToleranceSeconds;
+            if (SameServerFireToken)
             {
                 return false;
             }
@@ -4404,12 +7386,36 @@ namespace
         Entry->Reserved = true;
         TokenState->NewestFireToken = FireToken;
 
+        // A positively validated mounted fallback is also a safe baseline for
+        // the existing authoritative visual relay. Seed the accepted token so
+        // the relay records only later LastFireTime advances and cannot
+        // duplicate this bounded compatibility shot.
+        if (UsedMountedWeaponOrigin &&
+            GLightweightProjectileVisualSchema.CanIdentifyWeapon() &&
+            IsLightweightProjectileWeapon(Weapon))
+        {
+            if (const auto RelayState =
+                    GetProjectileVisualRelayState(Weapon, true))
+            {
+                RelayState->LightweightProjectile = true;
+                RelayState->LastCapturedFireToken =
+                    (std::max)(
+                        RelayState->LastCapturedFireToken,
+                        FireToken);
+                RelayState->PendingActivation = false;
+                RelayState->PendingStartedAt = -1.f;
+                RelayState->PendingBaselineFireToken = -1.f;
+                RelayState->CaptureActiveBeforePending = false;
+                RelayState->CaptureActive = true;
+            }
+        }
+
         OutLaunchOrigin = Start;
         OutLaunchDirection = Direction;
         OutReservation = Entry;
 
         static int32 TraceCount = 0;
-        if (TraceCount++ < 64)
+        if (TraceCount++ < 8)
         {
             SDK::DbgLog(
                 "  [ProjectileDamage] launch-ingress source=server-state-fallback weapon=%s fire-source=%s launch-source=%s token=%.6f age=%.3f generation=%llu\n",
@@ -4468,6 +7474,10 @@ namespace
         FVector BestDirection{};
         int64 BestShotIndex = -1;
         bool BestNeedsTimestampBinding = false;
+        const bool IsValidatedMountedWeapon =
+            ResolveMountedHostVehicleForTrace(
+                Weapon,
+                ShooterPawn) != nullptr;
         double BestScore =
             (std::numeric_limits<double>::max)();
         for (auto& Entry : GProjectileLedger)
@@ -4620,6 +7630,7 @@ namespace
             FVector CandidateOrigin = Entry.Start;
             FVector CandidateDirection =
                 Entry.Direction;
+            bool UsesServerOwnedLaunchOrigin = true;
             double OriginError =
                 FVector::Dist(
                     Entry.Start,
@@ -4654,13 +7665,20 @@ namespace
                     continue;
                 }
 
+                // Never turn the client-reported origin into the authorizing
+                // ray for a later automatic slot. Use the current
+                // server-owned weapon origin and let the bounded parallax
+                // corridor absorb the normal camera/muzzle baseline.
                 CandidateOrigin = FVector(
-                    ReportedProjectileOrigin.X,
-                    ReportedProjectileOrigin.Y,
-                    ReportedProjectileOrigin.Z);
+                    CurrentWeaponLocation.X,
+                    CurrentWeaponLocation.Y,
+                    CurrentWeaponLocation.Z);
                 CandidateDirection =
                     CurrentAimDirection;
-                OriginError = CurrentOriginError;
+                OriginError =
+                    FVector::Dist(
+                        CandidateOrigin,
+                        ReportedProjectileOrigin);
             }
             else if (OriginError >
                 kMaxRecordedOriginErrorCm)
@@ -4671,19 +7689,77 @@ namespace
             double DirectionCorrelation = 0.0;
             const FVector TravelDelta =
                 ImpactPoint - CandidateOrigin;
+            const double TravelDistance =
+                TravelDelta.Magnitude();
             const FVector TravelDirection =
                 TravelDelta.GetSafeNormal();
-            if (TravelDirection.IsZero() ||
-                !ValidateProjectileTravelDirection(
+            bool DirectionValid =
+                !TravelDirection.IsZero() &&
+                ValidateProjectileTravelDirection(
                     CandidateDirection,
                     TravelDirection,
-                    DirectionCorrelation))
+                    DirectionCorrelation);
+            if (!DirectionValid &&
+                UsesServerOwnedLaunchOrigin &&
+                std::isfinite(TravelDistance))
+            {
+                // Camera aim and the physical muzzle are separated by a
+                // meaningful baseline. Use the bounded parallax corridor for
+                // every recorded one-shot origin so upper-body/ADS shots are
+                // not rejected merely because a fixed angular cone points
+                // through the lower torso at short range.
+                DirectionValid =
+                    ValidateCompatibilityTravelCorridor(
+                        CandidateDirection,
+                        TravelDelta,
+                        DirectionCorrelation);
+                if (!DirectionValid &&
+                    IsValidatedMountedWeapon)
+                {
+                    // A vehicle weapon actor is located at its turret pivot,
+                    // not at the muzzle used by the projectile RPC. Once the
+                    // authoritative host seat proves this is the shooter's
+                    // mounted weapon, allow that bounded pivot/muzzle baseline
+                    // without relaxing any ordinary weapon.
+                    DirectionValid =
+                        ValidateCompatibilityTravelCorridor(
+                            CandidateDirection,
+                            TravelDelta,
+                            DirectionCorrelation,
+                            kCompatibilityRearwardSlackCm,
+                            kMountedWeaponParallaxAllowanceCm);
+                }
+                if (!DirectionValid &&
+                    TravelDistance <=
+                        kCompatibilityContactRangeCm)
+                {
+                    // The muzzle can overlap or sit just beyond a nearby
+                    // target surface; retain a larger bounded rearward slack
+                    // only for that contact-range geometry.
+                    DirectionValid =
+                        ValidateCompatibilityTravelCorridor(
+                            CandidateDirection,
+                            TravelDelta,
+                            DirectionCorrelation,
+                            kCompatibilityContactRearwardSlackCm);
+                    if (!DirectionValid &&
+                        IsValidatedMountedWeapon)
+                    {
+                        DirectionValid =
+                            ValidateCompatibilityTravelCorridor(
+                                CandidateDirection,
+                                TravelDelta,
+                                DirectionCorrelation,
+                                kCompatibilityContactRearwardSlackCm,
+                                kMountedWeaponParallaxAllowanceCm);
+                    }
+                }
+            }
+            if (!DirectionValid)
             {
                 continue;
             }
 
-            const double TravelDistance =
-                TravelDelta.Magnitude();
             if (!std::isfinite(TravelDistance) ||
                 TravelDistance >
                     kMaxReportedTravelCm ||
@@ -4698,8 +7774,12 @@ namespace
             const double Score =
                 OriginError +
                 (1.0 - DirectionCorrelation) * 1000.0 +
-                TimestampError * 10000.0;
-            if (Score < BestScore)
+                TimestampError * 10000.0 +
+                (std::max)(0.0, FlightElapsed) * 0.1 -
+                (Entry.AuthoritativeShotSnapshot
+                    ? 0.01
+                    : 0.0);
+            if (!Best || Score < BestScore)
             {
                 Best = &Entry;
                 BestOrigin = CandidateOrigin;
@@ -4807,6 +7887,58 @@ namespace
                 Entry.StoppedAt = Now;
             }
         }
+    }
+
+    void EndProjectileVisualRelay(
+        AFortWeaponRanged* Weapon)
+    {
+        auto RelayState =
+            GetProjectileVisualRelayState(Weapon, false);
+        if (!RelayState)
+            return;
+
+        const bool HadActiveVisual =
+            RelayState->Active;
+        const float ActiveVisualFireToken =
+            RelayState->ActiveVisualFireToken;
+        RelayState->Active = false;
+        RelayState->ActiveVisualFireToken = -1.f;
+        RelayState->CaptureActive = false;
+        RelayState->CaptureActiveBeforePending = false;
+        RelayState->PendingActivation = false;
+        RelayState->PendingStartedAt = -1.f;
+        RelayState->PendingBaselineFireToken = -1.f;
+        RelayState->HasLatestDamageState = false;
+        RelayState->LatestDamageStateAt = -1.f;
+        if (!HadActiveVisual)
+            return;
+
+        if (!IsUsableActor(Weapon) ||
+            !Weapon->HasAuthority() ||
+            !GLightweightProjectileVisualSchema
+                .CanEndStream() ||
+            !std::isfinite(
+                ActiveVisualFireToken) ||
+            ActiveVisualFireToken <= 0.f)
+        {
+            return;
+        }
+
+        alignas(16) std::array<uint8, 0x20> Params{};
+        if (!WriteValue(
+                Params.data(),
+                GLightweightProjectileVisualSchema
+                    .EndActiveAbilitySize,
+                GLightweightProjectileVisualSchema
+                    .EndFiringTimestamp,
+                ActiveVisualFireToken))
+        {
+            return;
+        }
+        Weapon->ProcessEvent(
+            GLightweightProjectileVisualSchema
+                .EndActiveAbility,
+            Params.data());
     }
 
     void GetWeaponHitLimits(
@@ -5271,9 +8403,20 @@ namespace
                 Hit.Target);
             return false;
         }
-        if (!IsImpactWithinActorBounds(
-                Hit.Target,
-                Hit.ImpactPoint))
+        auto TargetPlayerPawn =
+            AsPlayerPawn(Hit.Target);
+        auto TargetVehicle =
+            Hit.Target->Cast<AFortAthenaVehicle>();
+        const bool ImpactWithinTarget =
+            TargetPlayerPawn
+                ? IsImpactWithinPlayerEnvelope(
+                    TargetPlayerPawn,
+                    Hit.ImpactPoint)
+                : IsImpactWithinActorBounds(
+                    Hit.Target,
+                    Hit.ImpactPoint,
+                    true);
+        if (!ImpactWithinTarget)
         {
             LogProjectileDiagnostic(
                 "reject",
@@ -5283,8 +8426,6 @@ namespace
             return false;
         }
 
-        auto TargetPlayerPawn =
-            AsPlayerPawn(Hit.Target);
         if (TargetPlayerPawn)
         {
             if ((TargetPlayerPawn->HasbIsDying() &&
@@ -5481,8 +8622,12 @@ namespace
         }
         if (!HasServerLineOfSight(
                 ShooterController,
+                Weapon,
                 Hit.Target,
-                LaunchOrigin))
+                LaunchOrigin,
+                LaunchDirection,
+                ProjectileOrigin,
+                Hit.ImpactPoint))
         {
             RejectReserved("line-of-sight");
             return false;
@@ -5510,6 +8655,10 @@ namespace
         OutRequest.Target = Hit.Target;
         OutRequest.TargetPlayerPawn =
             TargetPlayerPawn;
+        OutRequest.TargetVehicle =
+            TargetVehicle;
+        OutRequest.TargetHitComponent =
+            Hit.TargetComponent;
         std::memcpy(
             &OutRequest.ProjectileOrigin,
             &LaunchOrigin,
@@ -5639,11 +8788,600 @@ namespace
             OutSource);
     }
 
+    bool IsKnownNonDamageProjectileEffect(
+        UClass* EffectClass)
+    {
+        if (!IsUsableObject(EffectClass) ||
+            !EffectClass->IsA(UClass::StaticClass()))
+        {
+            return true;
+        }
+
+        const auto EffectName =
+            EffectClass->Name.ToString();
+        return EffectName.find("Impulse") !=
+                std::string::npos ||
+            EffectName.find("Knockback") !=
+                std::string::npos;
+    }
+
+    bool ReadUnmodifiedDamage(
+        const uint8* Context,
+        float& OutDamage)
+    {
+        OutDamage = 0.f;
+        alignas(16) std::array<uint8, 0x40> Params{};
+        if (!GDamageFeedbackSchema.IsValid() ||
+            !Context ||
+            GDamageFeedbackSchema.GetUnmodifiedDamageSize >
+                Params.size() ||
+            !WriteBytes(
+                Params.data(),
+                GDamageFeedbackSchema
+                    .GetUnmodifiedDamageSize,
+                GDamageFeedbackSchema
+                    .GetUnmodifiedDamageContext,
+                Context,
+                kExpectedEffectContextSize))
+        {
+            return false;
+        }
+
+        GDamageFeedbackSchema.FortKismetLibrary
+            ->ProcessEvent(
+                GDamageFeedbackSchema
+                    .GetUnmodifiedDamage,
+                Params.data());
+        if (!ReadValue(
+                Params.data(),
+                GDamageFeedbackSchema
+                    .GetUnmodifiedDamageSize,
+                GDamageFeedbackSchema
+                    .GetUnmodifiedDamageReturn,
+                OutDamage) ||
+            !std::isfinite(OutDamage) ||
+            OutDamage < 0.f ||
+            OutDamage > kMaxDamageFeedbackMagnitude)
+        {
+            OutDamage = 0.f;
+            return false;
+        }
+        return true;
+    }
+
+    void PawnProcessEventDamageFeedback(
+        const UObject* Context,
+        UFunction* Function,
+        void* Params)
+    {
+        auto CallOriginal = [&]()
+        {
+            if (GPawnProcessEventOriginal)
+            {
+                GPawnProcessEventOriginal(
+                    Context,
+                    Function,
+                    Params);
+            }
+        };
+
+        // ProcessEvent sees the multicast parameter buffer before Unreal
+        // serializes it for remote clients. Patch the reflected
+        // FSharedRepMovement bit here; an ExecFunction hook alone runs after
+        // RPC routing and therefore cannot repair optic glints.
+        if (Function ==
+                GTargetingReplicationSchema
+                    .FastSharedReplicationFunction &&
+            GTargetingReplicationSchema
+                .CanPatchFastSharedMovement() &&
+            Params &&
+            SDK::MemReadable(
+                Params,
+                GTargetingReplicationSchema
+                    .FastSharedReplicationParamsSize))
+        {
+            auto Pawn =
+                IsUsableObject(Context)
+                    ? Context->Cast<
+                        AFortPlayerPawnAthena>()
+                    : nullptr;
+            if (Pawn)
+            {
+                auto SharedMovement =
+                    static_cast<uint8*>(Params) +
+                    GTargetingReplicationSchema
+                        .FastSharedMovement.Offset;
+                PatchFastSharedTargeting(
+                    Pawn,
+                    SharedMovement);
+            }
+        }
+
+        auto Active = GActiveDamageFeedback;
+        if (Active &&
+            Context == Active->ShooterPawn &&
+            Function ==
+                GDamageFeedbackSchema
+                    .DisplayHitNotifyFunction &&
+            GDamageFeedbackSchema
+                .CanRewriteDisplayHitNotify() &&
+            Params &&
+            SDK::MemReadable(
+                Params,
+                GDamageFeedbackSchema
+                    .DisplayHitNotifyParamsSize))
+        {
+            alignas(16) std::array<uint8, 0x80>
+                ParamsCopy{};
+            std::memcpy(
+                ParamsCopy.data(),
+                Params,
+                GDamageFeedbackSchema
+                    .DisplayHitNotifyParamsSize);
+
+            AActor* HitActor = nullptr;
+            float NativeDamage = 0.f;
+            bool NativeCritical = false;
+            if (ReadValue(
+                    ParamsCopy.data(),
+                    GDamageFeedbackSchema
+                        .DisplayHitNotifyParamsSize,
+                    GDamageFeedbackSchema
+                        .DisplayHitActor,
+                    HitActor) &&
+                HitActor == Active->TargetPawn &&
+                ReadValue(
+                    ParamsCopy.data(),
+                    GDamageFeedbackSchema
+                        .DisplayHitNotifyParamsSize,
+                    GDamageFeedbackSchema
+                        .DisplayDamageDealt,
+                    NativeDamage) &&
+                ReadValue(
+                    ParamsCopy.data(),
+                    GDamageFeedbackSchema
+                        .DisplayHitNotifyParamsSize,
+                    GDamageFeedbackSchema
+                        .DisplayCriticalHit,
+                    NativeCritical) &&
+                std::isfinite(NativeDamage) &&
+                NativeDamage >= 0.f &&
+                NativeDamage <=
+                    kMaxDamageFeedbackMagnitude)
+            {
+                float UnmodifiedDamage = 0.f;
+                const bool ReadDamage =
+                    ReadUnmodifiedDamage(
+                        Active->Context,
+                        UnmodifiedDamage) &&
+                    UnmodifiedDamage >
+                        kDamageFeedbackEpsilon;
+                bool Rewritten = false;
+                if (ReadDamage &&
+                    UnmodifiedDamage >
+                        NativeDamage +
+                            kDamageFeedbackEpsilon)
+                {
+                    Rewritten =
+                        WriteValue(
+                            ParamsCopy.data(),
+                            GDamageFeedbackSchema
+                                .DisplayHitNotifyParamsSize,
+                            GDamageFeedbackSchema
+                                .DisplayDamageDealt,
+                            UnmodifiedDamage);
+                }
+
+                if (Active->ExpectedCritical &&
+                    !NativeCritical)
+                {
+                    const bool Critical = true;
+                    Rewritten =
+                        WriteValue(
+                            ParamsCopy.data(),
+                            GDamageFeedbackSchema
+                                .DisplayHitNotifyParamsSize,
+                            GDamageFeedbackSchema
+                                .DisplayCriticalHit,
+                            Critical) ||
+                        Rewritten;
+                }
+
+                Active->DisplayNotifyHandled = true;
+                Active->DisplayNotifyRewritten =
+                    Rewritten;
+                if (ReadDamage)
+                {
+                    // The original event now feeds the full value into
+                    // Fortnite's own accumulator/flush path. Do not add that
+                    // value again in the legacy post-effect fallback.
+                    Active->CueHandled = true;
+                }
+
+                if (Rewritten &&
+                    GPawnProcessEventOriginal)
+                {
+                    GPawnProcessEventOriginal(
+                        Context,
+                        Function,
+                        ParamsCopy.data());
+                    return;
+                }
+            }
+
+            CallOriginal();
+            return;
+        }
+
+        if (GInsideBatchedDamageCue ||
+            !Active ||
+            Active->CueHandled ||
+            Context != Active->ShooterPawn ||
+            Function !=
+                GDamageFeedbackSchema
+                    .BatchedCueFunction ||
+            !GDamageFeedbackSchema
+                .CanRewriteBatchedCue() ||
+            !Params ||
+            !SDK::MemReadable(
+                Params,
+                GDamageFeedbackSchema
+                    .BatchedCueParamsSize))
+        {
+            CallOriginal();
+            return;
+        }
+
+        const bool WasInside =
+            GInsideBatchedDamageCue;
+        GInsideBatchedDamageCue = true;
+
+        auto SharedMemory =
+            static_cast<uint8*>(Params) +
+            GDamageFeedbackSchema
+                .BatchedCueShared.Offset;
+        auto NonSharedMemory =
+            static_cast<uint8*>(Params) +
+            GDamageFeedbackSchema
+                .BatchedCueNonShared.Offset;
+        AActor* HitActor = nullptr;
+        float NativeMagnitude = 0.f;
+        uint8 Valid = 0;
+        float UnmodifiedDamage = 0.f;
+        bool Rewritten = false;
+        float CorrectedMagnitude = NativeMagnitude;
+        if (ReadValue(
+                NonSharedMemory,
+                GDamageFeedbackSchema.NonSharedSize,
+                GDamageFeedbackSchema
+                    .NonSharedHitActor,
+                HitActor) &&
+            HitActor == Active->TargetPawn &&
+            ReadValue(
+                SharedMemory,
+                GDamageFeedbackSchema.SharedSize,
+                GDamageFeedbackSchema
+                    .SharedMagnitude,
+                NativeMagnitude) &&
+            ReadValue(
+                SharedMemory,
+                GDamageFeedbackSchema.SharedSize,
+                GDamageFeedbackSchema.SharedValid,
+                Valid) &&
+            Valid != 0 &&
+            std::isfinite(NativeMagnitude) &&
+            NativeMagnitude >= 0.f &&
+            NativeMagnitude <=
+                kMaxDamageFeedbackMagnitude &&
+            ReadUnmodifiedDamage(
+                Active->Context,
+                UnmodifiedDamage) &&
+            UnmodifiedDamage >
+                kDamageFeedbackEpsilon)
+        {
+            float BaseMagnitude = 0.f;
+            if (Active->ReadBefore &&
+                Active->Before.Valid &&
+                Active->Before.HitActor ==
+                    Active->TargetPawn &&
+                NativeMagnitude +
+                        kDamageFeedbackEpsilon >=
+                    Active->Before.Magnitude)
+            {
+                BaseMagnitude =
+                    Active->Before.Magnitude;
+            }
+
+            const float NativeContribution =
+                NativeMagnitude - BaseMagnitude;
+            CorrectedMagnitude =
+                BaseMagnitude +
+                UnmodifiedDamage;
+            const bool AlreadyFull =
+                std::isfinite(NativeContribution) &&
+                NativeContribution >
+                    kDamageFeedbackEpsilon &&
+                UnmodifiedDamage <=
+                    NativeContribution +
+                        kDamageFeedbackEpsilon;
+            if (std::isfinite(NativeContribution) &&
+                NativeContribution >
+                    kDamageFeedbackEpsilon &&
+                UnmodifiedDamage >
+                    NativeContribution +
+                        kDamageFeedbackEpsilon &&
+                std::isfinite(CorrectedMagnitude) &&
+                CorrectedMagnitude <=
+                    kMaxDamageFeedbackMagnitude)
+            {
+                Rewritten =
+                    WriteValue(
+                        SharedMemory,
+                        GDamageFeedbackSchema
+                            .SharedSize,
+                        GDamageFeedbackSchema
+                            .SharedMagnitude,
+                        CorrectedMagnitude);
+                Active->CueRewritten = Rewritten;
+            }
+            Active->CueHandled =
+                AlreadyFull || Rewritten;
+
+            static int32 TraceCount = 0;
+            if (TraceCount++ < 4)
+            {
+                SDK::DbgLog(
+                    "  [ProjectileDamage] display-cue target=%p native=%.2f raw=%.2f corrected=%.2f rewritten=%d\n",
+                    static_cast<void*>(
+                        Active->TargetPawn),
+                    NativeMagnitude,
+                    UnmodifiedDamage,
+                    CorrectedMagnitude,
+                    Rewritten);
+            }
+        }
+
+        CallOriginal();
+        GInsideBatchedDamageCue = WasInside;
+    }
+
+    bool ReadDamageBatchSnapshot(
+        AFortPlayerPawnAthena* ShooterPawn,
+        FDamageBatchSnapshot& OutSnapshot)
+    {
+        OutSnapshot = {};
+        if (!GDamageFeedbackSchema.IsValid() ||
+            !IsUsableActor(ShooterPawn) ||
+            !SDK::MemReadable(
+                ShooterPawn,
+                GDamageFeedbackSchema.PawnSize))
+        {
+            return false;
+        }
+
+        const auto PawnMemory =
+            reinterpret_cast<const uint8*>(ShooterPawn);
+        const auto SharedMemory =
+            PawnMemory +
+            GDamageFeedbackSchema.AccumulatedShared.Offset;
+        const auto NonSharedMemory =
+            PawnMemory +
+            GDamageFeedbackSchema.AccumulatedNonShared.Offset;
+        uint8 Valid = 0;
+        uint8 Critical = 0;
+        if (!ReadValue(
+                SharedMemory,
+                GDamageFeedbackSchema.SharedSize,
+                GDamageFeedbackSchema.SharedMagnitude,
+                OutSnapshot.Magnitude) ||
+            !ReadValue(
+                SharedMemory,
+                GDamageFeedbackSchema.SharedSize,
+                GDamageFeedbackSchema.SharedCritical,
+                Critical) ||
+            !ReadValue(
+                SharedMemory,
+                GDamageFeedbackSchema.SharedSize,
+                GDamageFeedbackSchema.SharedValid,
+                Valid) ||
+            !ReadValue(
+                NonSharedMemory,
+                GDamageFeedbackSchema.NonSharedSize,
+                GDamageFeedbackSchema.NonSharedHitActor,
+                OutSnapshot.HitActor) ||
+            !std::isfinite(OutSnapshot.Magnitude) ||
+            OutSnapshot.Magnitude < 0.f ||
+            OutSnapshot.Magnitude >
+                kMaxDamageFeedbackMagnitude)
+        {
+            OutSnapshot = {};
+            return false;
+        }
+
+        OutSnapshot.Valid = Valid != 0;
+        OutSnapshot.Critical = Critical != 0;
+        return true;
+    }
+
+    bool WriteDamageBatchMagnitude(
+        AFortPlayerPawnAthena* ShooterPawn,
+        float Magnitude)
+    {
+        if (!GDamageFeedbackSchema.IsValid() ||
+            !IsUsableActor(ShooterPawn) ||
+            !std::isfinite(Magnitude) ||
+            Magnitude < 0.f ||
+            Magnitude > kMaxDamageFeedbackMagnitude ||
+            !SDK::MemReadable(
+                ShooterPawn,
+                GDamageFeedbackSchema.PawnSize))
+        {
+            return false;
+        }
+
+        auto SharedMemory =
+            reinterpret_cast<uint8*>(ShooterPawn) +
+            GDamageFeedbackSchema.AccumulatedShared.Offset;
+        auto MagnitudeMemory =
+            SharedMemory +
+            GDamageFeedbackSchema.SharedMagnitude.Offset;
+        MEMORY_BASIC_INFORMATION MemoryInfo{};
+        if (VirtualQuery(
+                MagnitudeMemory,
+                &MemoryInfo,
+                sizeof(MemoryInfo)) != sizeof(MemoryInfo) ||
+            MemoryInfo.State != MEM_COMMIT ||
+            (MemoryInfo.Protect &
+                (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+        {
+            return false;
+        }
+
+        const DWORD BaseProtection =
+            MemoryInfo.Protect & 0xFF;
+        const bool Writable =
+            BaseProtection == PAGE_READWRITE ||
+            BaseProtection == PAGE_WRITECOPY ||
+            BaseProtection == PAGE_EXECUTE_READWRITE ||
+            BaseProtection == PAGE_EXECUTE_WRITECOPY;
+        const auto RegionEnd =
+            reinterpret_cast<uintptr_t>(
+                MemoryInfo.BaseAddress) +
+            MemoryInfo.RegionSize;
+        const auto WriteEnd =
+            reinterpret_cast<uintptr_t>(
+                MagnitudeMemory) +
+            sizeof(float);
+        if (!Writable ||
+            WriteEnd < reinterpret_cast<uintptr_t>(
+                MagnitudeMemory) ||
+            WriteEnd > RegionEnd)
+        {
+            return false;
+        }
+
+        return WriteValue(
+            SharedMemory,
+            GDamageFeedbackSchema.SharedSize,
+            GDamageFeedbackSchema.SharedMagnitude,
+            Magnitude);
+    }
+
+    void CorrectDamageBatchMagnitude(
+        const FDamageRequest& Request,
+        bool ReadBefore,
+        const FDamageBatchSnapshot& Before,
+        float UnmodifiedDamage)
+    {
+        if (!Request.TargetPlayerPawn ||
+            !GDamageFeedbackSchema.IsValid() ||
+            !std::isfinite(UnmodifiedDamage) ||
+            UnmodifiedDamage <= kDamageFeedbackEpsilon ||
+            UnmodifiedDamage >
+                kMaxDamageFeedbackMagnitude)
+        {
+            return;
+        }
+
+        FDamageBatchSnapshot After{};
+        const bool ReadAfter =
+            ReadDamageBatchSnapshot(
+                Request.ShooterPawn,
+                After);
+        if (!ReadAfter ||
+            !After.Valid ||
+            After.HitActor != Request.TargetPlayerPawn)
+        {
+            static int32 MissingBatchTraceCount = 0;
+            if (MissingBatchTraceCount++ < 4)
+            {
+                SDK::DbgLog(
+                    "  [ProjectileDamage] display-batch unavailable target=%p raw=%.2f critical=%d read=%d valid=%d hit=%p magnitude=%.2f batch-critical=%d\n",
+                    static_cast<void*>(
+                        Request.TargetPlayerPawn),
+                    UnmodifiedDamage,
+                    Request.IsCriticalHit,
+                    ReadAfter,
+                    After.Valid,
+                    static_cast<void*>(
+                        After.HitActor),
+                    After.Magnitude,
+                    After.Critical);
+            }
+            return;
+        }
+
+        float BaseMagnitude = 0.f;
+        if (ReadBefore &&
+            Before.Valid &&
+            Before.HitActor == Request.TargetPlayerPawn &&
+            After.Magnitude + kDamageFeedbackEpsilon >=
+                Before.Magnitude)
+        {
+            BaseMagnitude = Before.Magnitude;
+        }
+
+        const float NativeContribution =
+            After.Magnitude - BaseMagnitude;
+        if (!std::isfinite(NativeContribution) ||
+            NativeContribution <= kDamageFeedbackEpsilon ||
+            UnmodifiedDamage <=
+                NativeContribution +
+                    kDamageFeedbackEpsilon)
+        {
+            return;
+        }
+
+        const float CorrectedMagnitude =
+            BaseMagnitude + UnmodifiedDamage;
+        if (!std::isfinite(CorrectedMagnitude) ||
+            CorrectedMagnitude >
+                kMaxDamageFeedbackMagnitude)
+        {
+            return;
+        }
+
+        // Re-read immediately before the four-byte write. This preserves a
+        // cue that was flushed or replaced reentrantly while the damage
+        // execution was returning.
+        FDamageBatchSnapshot Current{};
+        if (!ReadDamageBatchSnapshot(
+                Request.ShooterPawn,
+                Current) ||
+            !Current.Valid ||
+            Current.HitActor != Request.TargetPlayerPawn ||
+            std::fabs(
+                Current.Magnitude -
+                After.Magnitude) >
+                    kDamageFeedbackEpsilon ||
+            !WriteDamageBatchMagnitude(
+                Request.ShooterPawn,
+                CorrectedMagnitude))
+        {
+            return;
+        }
+
+        static int32 CorrectedBatchTraceCount = 0;
+        if (CorrectedBatchTraceCount++ < 4)
+        {
+            SDK::DbgLog(
+                "  [ProjectileDamage] display-batch target=%p before=%.2f native=%.2f raw=%.2f corrected=%.2f critical=%d\n",
+                static_cast<void*>(
+                    Request.TargetPlayerPawn),
+                BaseMagnitude,
+                NativeContribution,
+                UnmodifiedDamage,
+                CorrectedMagnitude,
+                Request.IsCriticalHit);
+        }
+    }
+
     bool EnrichEffectContext(
         const FDamageRequest& Request,
         const void* HitMemory,
         uint32 HitSize,
-        const uint8* Context)
+        const uint8* Context,
+        bool IsCriticalEffect)
     {
         alignas(16) std::array<
             uint8,
@@ -5696,7 +9434,7 @@ namespace
                     SetCriticalParams.data(),
                     GEffectApiSchema.SetContextCriticalSize,
                     GEffectApiSchema.SetCriticalValue,
-                    Request.IsCriticalHit))
+                    IsCriticalEffect))
             {
                 return false;
             }
@@ -5815,6 +9553,13 @@ namespace
                 break;
             }
 
+            const bool NonDamageEffect =
+                IsKnownNonDamageProjectileEffect(
+                    EffectClass);
+            const bool CriticalEffect =
+                Request.IsCriticalHit &&
+                !NonDamageEffect;
+
             // A Fort damage execution can mutate its extended context.
             // Build and enrich a fresh context for each gameplay effect,
             // matching the weapon ability's normal effect-spec path.
@@ -5827,20 +9572,21 @@ namespace
                     "context-create",
                     Request.Weapon,
                     Request.Target);
-                return AnyAccepted;
+                break;
             }
             if (!EnrichEffectContext(
                     Request,
                     HitMemory,
                     HitSize,
-                    Context))
+                    Context,
+                    CriticalEffect))
             {
                 LogProjectileDiagnostic(
                     "reject",
                     "context-enrich",
                     Request.Weapon,
                     Request.Target);
-                return AnyAccepted;
+                break;
             }
 
             alignas(16) std::array<uint8, 0x100>
@@ -5896,12 +9642,38 @@ namespace
                     "effect-pack",
                     Request.Weapon,
                     Request.Target);
-                return AnyAccepted;
+                break;
             }
 
-            Request.ShooterAbilitySystem->ProcessEvent(
-                GEffectApiSchema.ApplyFortEffect,
-                Params.data());
+            FActiveDamageFeedback ActiveFeedback{};
+            FActiveDamageFeedback* FeedbackScope = nullptr;
+            if (Request.TargetPlayerPawn &&
+                !NonDamageEffect &&
+                GDamageFeedbackSchema.IsValid())
+            {
+                ActiveFeedback.ShooterPawn =
+                    Request.ShooterPawn;
+                ActiveFeedback.TargetPawn =
+                    Request.TargetPlayerPawn;
+                ActiveFeedback.Context =
+                    Params.data() +
+                    GEffectApiSchema.ApplyContext.Offset;
+                ActiveFeedback.ExpectedCritical =
+                    CriticalEffect;
+                ActiveFeedback.ReadBefore =
+                    ReadDamageBatchSnapshot(
+                        Request.ShooterPawn,
+                        ActiveFeedback.Before);
+                FeedbackScope = &ActiveFeedback;
+            }
+
+            {
+                FScopedActiveDamageFeedback Scope(
+                    FeedbackScope);
+                Request.ShooterAbilitySystem->ProcessEvent(
+                    GEffectApiSchema.ApplyFortEffect,
+                    Params.data());
+            }
             Invoked = true;
 
             FActiveGameplayEffectHandle Result{};
@@ -5915,7 +9687,7 @@ namespace
                 ReadResult &&
                 Result.bPassedFiltersAndWasExecuted;
             static int32 EffectTraceCount = 0;
-            if (EffectTraceCount++ < 128)
+            if (EffectTraceCount++ < 8)
             {
                 SDK::DbgLog(
                     "  [ProjectileDamage] effect-result effect=%s read=%d handle=%d accepted=%d\n",
@@ -5925,7 +9697,47 @@ namespace
                     Accepted);
             }
             if (Accepted)
+            {
                 AnyAccepted = true;
+                if (Request.TargetPlayerPawn)
+                {
+                    float UnmodifiedDamage = 0.f;
+                    const auto AppliedContext =
+                        Params.data() +
+                        GEffectApiSchema
+                            .ApplyContext.Offset;
+                    const bool ReadDamage =
+                        ReadUnmodifiedDamage(
+                            AppliedContext,
+                            UnmodifiedDamage);
+                    static int32 DamageSourceTraceCount = 0;
+                    if (DamageSourceTraceCount++ < 4)
+                    {
+                        SDK::DbgLog(
+                            "  [ProjectileDamage] display-source effect=%s read=%d unmodified=%.2f critical-context=%d\n",
+                            EffectClass->Name
+                                .ToString().c_str(),
+                            ReadDamage,
+                            UnmodifiedDamage,
+                            CriticalEffect);
+                    }
+                    if (ReadDamage &&
+                        !NonDamageEffect &&
+                        UnmodifiedDamage >
+                            kDamageFeedbackEpsilon &&
+                        !ActiveFeedback.CueHandled)
+                    {
+                        // Deferred, non-fatal cues remain in the pawn's
+                        // accumulator. Correct them before the next effect can
+                        // flush and clear that native batch.
+                        CorrectDamageBatchMagnitude(
+                            Request,
+                            ActiveFeedback.ReadBefore,
+                            ActiveFeedback.Before,
+                            UnmodifiedDamage);
+                    }
+                }
+            }
         }
 
         if (Invoked && !AnyAccepted)
@@ -6123,6 +9935,152 @@ namespace
         return Result;
     }
 
+    FDamageFeedbackSchema ResolveDamageFeedbackSchema()
+    {
+        FDamageFeedbackSchema Result{};
+        auto FortKismetLibraryClass =
+            FindClass("FortKismetLibrary");
+        auto PawnClass =
+            AFortPlayerPawnAthena::StaticClass();
+        auto DefaultPawn =
+            PawnClass
+                ? PawnClass->GetDefaultObj()
+                : nullptr;
+        Result.SharedStruct =
+            FindStruct(
+                "AthenaBatchedDamageGameplayCues_Shared");
+        Result.NonSharedStruct =
+            FindStruct(
+                "AthenaBatchedDamageGameplayCues_NonShared");
+        Result.FortKismetLibrary =
+            FortKismetLibraryClass
+                ? FortKismetLibraryClass->GetDefaultObj()
+                : nullptr;
+        Result.GetUnmodifiedDamage =
+            Result.FortKismetLibrary
+                ? Result.FortKismetLibrary->GetFunction(
+                    "GetUnmodifiedDamage")
+                : nullptr;
+        Result.BatchedCueFunction =
+            DefaultPawn
+                ? DefaultPawn->GetFunction(
+                    "NetMulticast_Athena_BatchedDamageCues")
+                : nullptr;
+        Result.DisplayHitNotifyFunction =
+            DefaultPawn
+                ? DefaultPawn->GetFunction(
+                    "OnDisplayHitNotify")
+                : nullptr;
+        if (!Result.FortKismetLibrary ||
+            !Result.GetUnmodifiedDamage ||
+            !PawnClass ||
+            !Result.SharedStruct ||
+            !Result.NonSharedStruct)
+        {
+            return {};
+        }
+
+        auto Params =
+            Result.GetUnmodifiedDamage->GetParamsNamed();
+        Result.GetUnmodifiedDamageSize = Params.Size;
+        Result.GetUnmodifiedDamageContext =
+            GetNamedParameter(Params, "Context");
+        if (!Result.GetUnmodifiedDamageContext.IsValid(
+                Result.GetUnmodifiedDamageSize))
+        {
+            Result.GetUnmodifiedDamageContext =
+                GetNamedParameter(
+                    Params,
+                    "EffectContext");
+        }
+        Result.GetUnmodifiedDamageReturn =
+            GetNamedParameter(Params, "ReturnValue");
+
+        if (Result.BatchedCueFunction)
+        {
+            Params =
+                Result.BatchedCueFunction
+                    ->GetParamsNamed();
+            Result.BatchedCueParamsSize = Params.Size;
+            Result.BatchedCueShared =
+                GetNamedParameter(Params, "SharedData");
+            Result.BatchedCueNonShared =
+                GetNamedParameter(
+                    Params,
+                    "NonSharedData");
+        }
+
+        if (Result.DisplayHitNotifyFunction)
+        {
+            Params =
+                Result.DisplayHitNotifyFunction
+                    ->GetParamsNamed();
+            Result.DisplayHitNotifyParamsSize =
+                Params.Size;
+            Result.DisplayDamageDealt =
+                GetNamedParameter(
+                    Params,
+                    "DamageDealt");
+            Result.DisplayCriticalHit =
+                GetNamedParameter(
+                    Params,
+                    "bCriticalHit");
+            Result.DisplayHitActor =
+                GetNamedParameter(
+                    Params,
+                    "HitActor");
+        }
+
+        const int32 PawnSize =
+            PawnClass->GetPropertiesSize();
+        if (PawnSize > 0)
+        {
+            Result.PawnSize =
+                static_cast<uint32>(PawnSize);
+        }
+        Result.AccumulatedShared =
+            GetStructField(
+                PawnClass,
+                "AccumulatedBatchData_Shared");
+        Result.AccumulatedNonShared =
+            GetStructField(
+                PawnClass,
+                "AccumulatedBatchData_NonShared");
+
+        const int32 SharedSize =
+            Result.SharedStruct->GetPropertiesSize();
+        if (SharedSize > 0)
+        {
+            Result.SharedSize =
+                static_cast<uint32>(SharedSize);
+        }
+        Result.SharedMagnitude =
+            GetStructField(
+                Result.SharedStruct,
+                "Magnitude");
+        Result.SharedCritical =
+            GetStructField(
+                Result.SharedStruct,
+                "bIsCritical");
+        Result.SharedValid =
+            GetStructField(
+                Result.SharedStruct,
+                "bIsValid");
+
+        const int32 NonSharedSize =
+            Result.NonSharedStruct->GetPropertiesSize();
+        if (NonSharedSize > 0)
+        {
+            Result.NonSharedSize =
+                static_cast<uint32>(NonSharedSize);
+        }
+        Result.NonSharedHitActor =
+            GetStructField(
+                Result.NonSharedStruct,
+                "HitActor");
+        return Result;
+    }
+
     FLineOfSightSchema ResolveLineOfSightSchema()
     {
         FLineOfSightSchema Result{};
@@ -6151,6 +10109,57 @@ namespace
                 "bAlternateChecks");
         Result.ReturnValue =
             GetNamedParameter(Params, "ReturnValue");
+        return Result;
+    }
+
+    FWorldLineTraceSchema
+        ResolveWorldLineTraceSchema()
+    {
+        FWorldLineTraceSchema Result{};
+        Result.Library =
+            const_cast<UKismetSystemLibrary*>(
+                UKismetSystemLibrary::GetDefaultObj());
+        Result.Function =
+            Result.Library
+                ? Result.Library->GetFunction(
+                    "LineTraceSingle")
+                : nullptr;
+        if (!Result.Function)
+            return {};
+
+        const auto Params =
+            Result.Function->GetParamsNamed();
+        Result.ParamsSize = Params.Size;
+        Result.WorldContextObject =
+            GetNamedParameter(
+                Params,
+                "WorldContextObject");
+        Result.Start =
+            GetNamedParameter(Params, "Start");
+        Result.End =
+            GetNamedParameter(Params, "End");
+        Result.TraceChannel =
+            GetNamedParameter(
+                Params,
+                "TraceChannel");
+        Result.TraceComplex =
+            GetNamedParameter(
+                Params,
+                "bTraceComplex");
+        Result.ActorsToIgnore =
+            GetNamedParameter(
+                Params,
+                "ActorsToIgnore");
+        Result.OutHit =
+            GetNamedParameter(Params, "OutHit");
+        Result.IgnoreSelf =
+            GetNamedParameter(
+                Params,
+                "bIgnoreSelf");
+        Result.ReturnValue =
+            GetNamedParameter(
+                Params,
+                "ReturnValue");
         return Result;
     }
 
@@ -6237,7 +10246,7 @@ namespace
         }
 
         static int32 TraceCount = 0;
-        if (TraceCount++ < 32)
+        if (TraceCount++ < 4)
         {
             SDK::DbgLog(
                 "  [ProjectileDamage] projectile-actor-hit-ingress projectile=%s class=%s owner=%s owner-class=%s instigator=%s item=%s authority=%d fire-start=%s(%.1f,%.1f,%.1f) code=%p locals=%p\n",
@@ -6274,6 +10283,66 @@ namespace
         if (GProjectileActorNotifyOriginal)
             GProjectileActorNotifyOriginal(Context, Stack);
     }
+}
+
+void AFortWeaponRanged::NotifyServerAbilityActivated(
+    UObject* AbilitySourceObject)
+{
+    // The adjusted muzzle-to-crosshair state is commonly written by the
+    // projectile setter immediately after GAS activation. Keep the relay
+    // armed here and let that setter, TickFlush, or contact-hit ingress send
+    // it with current per-shot geometry.
+    (void)AbilitySourceObject;
+}
+
+void AFortWeaponRanged::
+    NotifyServerAbilityActivationFailed(
+        UObject* AbilitySourceObject)
+{
+    if (VersionInfo.FortniteVersion < 28.00 ||
+        VersionInfo.FortniteVersion >= 32.00 ||
+        !IsUsableObject(AbilitySourceObject))
+    {
+        return;
+    }
+
+    auto Weapon =
+        AbilitySourceObject->Cast<
+            AFortWeaponRanged>();
+    auto RelayState =
+        IsUsableActor(Weapon)
+            ? GetProjectileVisualRelayState(
+                Weapon,
+                false)
+            : nullptr;
+    if (!RelayState ||
+        !RelayState->PendingActivation)
+    {
+        return;
+    }
+
+    RelayState->PendingActivation = false;
+    RelayState->CaptureActive =
+        RelayState->CaptureActiveBeforePending;
+    RelayState->CaptureActiveBeforePending = false;
+    RelayState->PendingStartedAt = -1.f;
+    RelayState->PendingBaselineFireToken = -1.f;
+    RelayState->HasLatestDamageState = false;
+    RelayState->LatestDamageStateAt = -1.f;
+}
+
+void AFortWeaponRanged::
+    NotifyServerAbilityActivationStarted(
+        UObject* AbilitySourceObject)
+{
+    PrepareServerAbilityActivation(
+        AbilitySourceObject);
+}
+
+void AFortWeaponRanged::TickProjectileRelays()
+{
+    TickTargetingReplication();
+    TickServerProjectileRelays();
 }
 
 void AFortWeaponRanged::
@@ -6317,12 +10386,15 @@ void AFortWeaponRanged::
                 DamageStart,
                 DamageDirection);
             if (Recorded)
-                MarkNativeProjectileIngress(Weapon);
+            {
+                if (!GInsideProjectileVisualRelay)
+                    MarkNativeProjectileIngress(Weapon);
+            }
         }
     }
 
     static int32 TraceCount = 0;
-    if (TraceCount++ < 12)
+    if (TraceCount++ < 4)
     {
         SDK::DbgLog(
             "  [ProjectileDamage] launch-ingress source=server-setter weapon=%s code=%p locals=%p decoded=%d recorded=%d\n",
@@ -6341,6 +10413,12 @@ void AFortWeaponRanged::
             Context,
             Stack);
     }
+
+    if (Decoded && Recorded && Weapon)
+    {
+        CaptureAuthoritativeProjectileLaunch(
+            Weapon);
+    }
 }
 
 void AFortWeaponRanged::
@@ -6353,7 +10431,10 @@ void AFortWeaponRanged::
             ? Context->Cast<AFortWeaponRanged>()
             : nullptr;
     if (Weapon)
+    {
+        EndProjectileVisualRelay(Weapon);
         StopProjectileStreams(Weapon);
+    }
 
     if (ServerLWProjectile_EndActiveAbility_OG)
     {
@@ -6372,7 +10453,10 @@ void AFortWeaponRanged::ServerStopProjectileRequest_(
             ? Context->Cast<AFortWeaponRanged>()
             : nullptr;
     if (Weapon)
+    {
+        EndProjectileVisualRelay(Weapon);
         StopProjectileStreams(Weapon);
+    }
 
     if (ServerStopProjectileRequest_OG)
         ServerStopProjectileRequest_OG(Context, Stack);
@@ -6389,6 +10473,8 @@ void AFortWeaponRanged::
             : nullptr;
     bool Decoded = false;
     bool Recorded = false;
+    const bool NativeIngress =
+        !GInsideProjectileVisualRelay;
     if (GProjectileRequestSchema.IsValid() && Weapon)
     {
         alignas(16) std::array<uint8, 0x100>
@@ -6410,18 +10496,103 @@ void AFortWeaponRanged::
                 GProjectileRequestSchema.Request.Size);
         if (Decoded)
         {
-            Recorded = RecordProjectileLaunch(
-                Weapon,
-                RequestCopy.data(),
-                GProjectileRequestSchema.Request.Size,
-                true);
+            Recorded =
+                !NativeIngress ||
+                RecordProjectileLaunch(
+                    Weapon,
+                    RequestCopy.data(),
+                    GProjectileRequestSchema.Request.Size,
+                    true);
             if (Recorded)
-                MarkNativeProjectileIngress(Weapon);
+            {
+                if (NativeIngress)
+                {
+                    FVector Start{};
+                    FVector Direction{};
+                    float FireToken = -1.f;
+                    const float ReceivedAt =
+                        GetServerTimeSeconds();
+                    auto RelayState =
+                        GetProjectileVisualRelayState(
+                            Weapon,
+                            true);
+                    if (RelayState &&
+                        ReadValue(
+                            RequestCopy.data(),
+                            GProjectileRequestSchema
+                                .RequestSize,
+                            GProjectileRequestSchema
+                                .StartPosition,
+                            Start,
+                            FVector::Size()) &&
+                        ReadValue(
+                            RequestCopy.data(),
+                            GProjectileRequestSchema
+                                .RequestSize,
+                            GProjectileRequestSchema
+                                .StartDirection,
+                            Direction,
+                            FVector::Size()) &&
+                        ReadValue(
+                            RequestCopy.data(),
+                            GProjectileRequestSchema
+                                .RequestSize,
+                            GProjectileRequestSchema
+                                .Timestamp,
+                            FireToken) &&
+                        IsFiniteVector(Start) &&
+                        IsFiniteVector(Direction) &&
+                        std::isfinite(FireToken) &&
+                        std::isfinite(ReceivedAt))
+                    {
+                        float ServerFireToken = -1.f;
+                        const char* FireTokenSource =
+                            "none";
+                        const bool HasCurrentServerToken =
+                            ResolveCompatibilityFireToken(
+                                Weapon,
+                                ReceivedAt,
+                                ServerFireToken,
+                                FireTokenSource) &&
+                            std::abs(
+                                ReceivedAt -
+                                ServerFireToken) <=
+                                kNativeFireTokenBindWindowSeconds;
+                        RelayState
+                            ->LastNativeMulticastFireToken =
+                                HasCurrentServerToken
+                                    ? ServerFireToken
+                                    : FireToken;
+                        RelayState
+                            ->LastNativeMulticastAt =
+                                ReceivedAt;
+                        RelayState->LatestDamageStart =
+                            FVector(
+                                Start.X,
+                                Start.Y,
+                                Start.Z);
+                        RelayState
+                            ->LatestAdjustedAimDirection =
+                                Direction.GetSafeNormal();
+                        RelayState->LatestDamageStateAt =
+                            ReceivedAt;
+                        RelayState->HasLatestDamageState =
+                            !RelayState
+                                ->LatestAdjustedAimDirection
+                                .IsZero();
+                        RelayState
+                            ->LightweightProjectile =
+                                true;
+                        RelayState->CaptureActive = true;
+                    }
+                    MarkNativeProjectileIngress(Weapon);
+                }
+            }
         }
     }
 
     static int32 TraceCount = 0;
-    if (TraceCount++ < 12)
+    if (TraceCount++ < 4)
     {
         SDK::DbgLog(
             "  [ProjectileDamage] launch-ingress source=multicast weapon=%s code=%p locals=%p decoded=%d recorded=%d\n",
@@ -6440,6 +10611,12 @@ void AFortWeaponRanged::
             Context,
             Stack);
     }
+
+    if (NativeIngress && Recorded && Weapon)
+    {
+        CaptureAuthoritativeProjectileLaunch(
+            Weapon);
+    }
 }
 
 void AFortWeaponRanged::
@@ -6452,7 +10629,27 @@ void AFortWeaponRanged::
             ? Context->Cast<AFortWeaponRanged>()
             : nullptr;
     if (Weapon)
+    {
+        auto RelayState =
+            GetProjectileVisualRelayState(
+                Weapon,
+                false);
+        if (RelayState)
+        {
+            RelayState->Active = false;
+            RelayState->ActiveVisualFireToken = -1.f;
+            RelayState->CaptureActive = false;
+            RelayState->CaptureActiveBeforePending =
+                false;
+            RelayState->PendingActivation = false;
+            RelayState->PendingStartedAt = -1.f;
+            RelayState->PendingBaselineFireToken =
+                -1.f;
+            RelayState->HasLatestDamageState = false;
+            RelayState->LatestDamageStateAt = -1.f;
+        }
         StopProjectileStreams(Weapon);
+    }
 
     if (MulticastStopProjectileRequestUnreliable_OG)
     {
@@ -6529,7 +10726,7 @@ void AFortWeaponRanged::ServerNotifyPawnHit_(
     }
 
     static int32 IngressTraceCount = 0;
-    if (IngressTraceCount++ < 24)
+    if (IngressTraceCount++ < 8)
     {
         SDK::DbgLog(
             "  [ProjectileDamage] hit-ingress weapon=%s code=%p locals=%p decoded=%d origin=(%.1f,%.1f,%.1f) timestamp=%.6f\n",
@@ -6553,6 +10750,13 @@ void AFortWeaponRanged::ServerNotifyPawnHit_(
         return;
     }
 
+    // A contact-range projectile can report its hit before the next network
+    // TickFlush. Retry the already-armed, server-owned launch relay here so the
+    // canonical ledger entry exists before reservation. This never trusts hit
+    // geometry: the relay still requires an advanced LastFireTime, authority,
+    // the current weapon, and the server's own launch origin/direction.
+    CaptureAuthoritativeProjectileLaunch(Weapon);
+
     FScopedNotifyGuard Guard{};
     FDamageRequest Request{};
     bool SuppressOriginal = false;
@@ -6571,10 +10775,12 @@ void AFortWeaponRanged::ServerNotifyPawnHit_(
         return;
     }
 
-    // Player classification metadata must come from the target's server-owned
-    // mesh. If that trace is unavailable, build a clean body-hit context
-    // instead of forwarding a client-supplied bone or component.
+    // Classification metadata must come from a target-owned server component.
+    // Players trace their mesh; vehicles trace the exact component named by
+    // the validated hit. A failed trace receives a clean body/hull context
+    // instead of forwarding client-supplied bone or part metadata.
     int32 AuthoritativeHitSource = 0;
+    bool AuthoritativeVehicleHit = false;
     if (Request.TargetPlayerPawn)
     {
         if (TraceAuthoritativePlayerHit(
@@ -6601,6 +10807,40 @@ void AFortWeaponRanged::ServerNotifyPawnHit_(
                 HitCopy.data(),
                 GNotifyPawnHitSchema.Hit.Size,
                 Request.TargetPlayerPawn);
+        }
+    }
+    else if (Request.TargetVehicle)
+    {
+        AuthoritativeVehicleHit =
+            TraceAuthoritativeOwnedComponentHit(
+                Request.TargetVehicle,
+                Request.TargetHitComponent,
+                Request.ProjectileOrigin,
+                Request.LaunchDirection,
+                Request.ImpactPoint,
+                HitCopy.data(),
+                GNotifyPawnHitSchema.Hit.Size);
+        if (!AuthoritativeVehicleHit)
+        {
+            // The actor hit is still valid and may take ordinary hull damage,
+            // but a client-supplied bone/shape must never select a tire or
+            // another replicated damageable part.
+            ClearUntrustedHitClassification(
+                HitCopy.data(),
+                GNotifyPawnHitSchema.Hit.Size);
+        }
+
+        static int32 VehicleHitTraceCount = 0;
+        if (VehicleHitTraceCount++ < 16)
+        {
+            SDK::DbgLog(
+                "  [ProjectileDamage] vehicle-part-hit weapon=%s component=%s authoritative=%d\n",
+                Weapon->Name.ToString().c_str(),
+                IsUsableObject(Request.TargetHitComponent)
+                    ? Request.TargetHitComponent->Name
+                        .ToString().c_str()
+                    : "none",
+                AuthoritativeVehicleHit ? 1 : 0);
         }
     }
 
@@ -6631,7 +10871,7 @@ void AFortWeaponRanged::ServerNotifyPawnHit_(
 
     static int32 DamageZoneTraceCount = 0;
     if (Request.TargetPlayerPawn &&
-        DamageZoneTraceCount++ < 64)
+        DamageZoneTraceCount++ < 8)
     {
         SDK::DbgLog(
             "  [ProjectileDamage] damage-zone weapon=%s authoritative-source=%d classified=%d zone=%u critical=%d\n",
@@ -6686,7 +10926,7 @@ void AFortWeaponRanged::ServerNotifyPawnHit_(
         true);
 
     static int32 SuccessTraceCount = 0;
-    if (SuccessTraceCount++ < 24)
+    if (SuccessTraceCount++ < 8)
     {
         SDK::DbgLog(
             "  [ProjectileDamage] applied weapon=%s target=%s effects=%d\n",
@@ -6761,6 +11001,9 @@ void AFortWeaponRanged::PostLoadHook()
     GProjectileRequestSchema =
         ResolveProjectileRequestSchema(
             ProjectileRequestFunction);
+    GLightweightProjectileVisualSchema =
+        ResolveLightweightProjectileVisualSchema(
+            DefaultWeapon);
     if (!GHitResultSchema.IsValid() ||
         !GNotifyPawnHitSchema.IsValid() ||
         !GProjectileRequestSchema.IsValid() ||
@@ -6777,6 +11020,13 @@ void AFortWeaponRanged::PostLoadHook()
             "  [ProjectileDamage] skipped: projectile request/hit schemas are incompatible on %.2f\n",
             VersionInfo.FortniteVersion);
         return;
+    }
+    if (!GLightweightProjectileVisualSchema
+            .CanIdentifyWeapon())
+    {
+        SDK::DbgLog(
+            "  [ProjectileDamage] warning: lightweight projectile identification is unavailable; observer projectile relay is disabled\n");
+        GLightweightProjectileVisualSchema = {};
     }
     if (!GDamageZoneSchema.IsValid() ||
         GDamageZoneSchema.HitResult.Size !=
@@ -6803,6 +11053,36 @@ void AFortWeaponRanged::PostLoadHook()
         GDamageZoneSchema = {};
     }
 
+    GDamageFeedbackSchema =
+        ResolveDamageFeedbackSchema();
+    if (!GDamageFeedbackSchema.IsValid())
+    {
+        SDK::DbgLog(
+            "  [ProjectileDamage] warning: native Chapter 5 damage-feedback schema is unavailable; full pre-clamp damage-number correction is disabled\n");
+        GDamageFeedbackSchema = {};
+    }
+    else if ((GDamageFeedbackSchema
+                .CanRewriteDisplayHitNotify() ||
+            GDamageFeedbackSchema
+                .CanRewriteBatchedCue()) &&
+        Offsets::ProcessEventVft > 0 &&
+        Offsets::ProcessEventVft < 0x1000)
+    {
+        if (!GPawnProcessEventOriginal)
+        {
+            Utils::Hook<AFortPlayerPawnAthena>(
+                static_cast<uint32>(
+                    Offsets::ProcessEventVft),
+                PawnProcessEventDamageFeedback,
+                GPawnProcessEventOriginal);
+        }
+    }
+    else
+    {
+        SDK::DbgLog(
+            "  [ProjectileDamage] warning: batched damage-cue interception is unavailable; fatal full-damage number correction is disabled\n");
+    }
+
     GLineOfSightSchema = ResolveLineOfSightSchema();
     if (!GLineOfSightSchema.IsValid())
     {
@@ -6810,6 +11090,16 @@ void AFortWeaponRanged::PostLoadHook()
             "  [ProjectileDamage] skipped: server line-of-sight validation is unavailable on %.2f\n",
             VersionInfo.FortniteVersion);
         return;
+    }
+    GWorldLineTraceSchema =
+        ResolveWorldLineTraceSchema();
+    if (!GWorldLineTraceSchema.IsValid() ||
+        GWorldLineTraceSchema.OutHit.Size !=
+            GHitResultSchema.Size)
+    {
+        SDK::DbgLog(
+            "  [ProjectileDamage] warning: exact impact line trace is unavailable; using actor line-of-sight fallback\n");
+        GWorldLineTraceSchema = {};
     }
 
     GActorBoundsSchema = ResolveActorBoundsSchema();
@@ -6881,7 +11171,7 @@ void AFortWeaponRanged::PostLoadHook()
         ServerNotifyPawnHit_OG);
 
     SDK::DbgLog(
-        "  [ProjectileDamage] hooked Chapter 5 projectile ledger + native Fort GAS (hit-params=0x%X hit=0x%X origin=0x%X timestamp=%s set-state=0x%X end=%s server-stop=%s multicast-stop=%s projectile-actor=%s)\n",
+        "  [ProjectileDamage] hooked Chapter 5 projectile ledger + native Fort GAS (hit-params=0x%X hit=0x%X origin=0x%X timestamp=%s set-state=0x%X visual-relay=%s visual-end=%s damage-cue=%s end=%s server-stop=%s multicast-stop=%s projectile-actor=%s)\n",
         GNotifyPawnHitSchema.ParamsSize,
         GNotifyPawnHitSchema.Hit.Size,
         GNotifyPawnHitSchema.ProjectileOrigin.Size,
@@ -6890,6 +11180,17 @@ void AFortWeaponRanged::PostLoadHook()
             ? "yes"
             : "no",
         GServerProjectileStateSchema.SetStateParamsSize,
+        GLightweightProjectileVisualSchema
+                .CanIdentifyWeapon()
+            ? "yes"
+            : "no",
+        GLightweightProjectileVisualSchema
+                .CanEndStream()
+            ? "yes"
+            : "no",
+        GPawnProcessEventOriginal
+            ? "yes"
+            : "no",
         ServerLWProjectile_EndActiveAbility_OG
             ? "yes"
             : "no",

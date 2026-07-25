@@ -22,6 +22,7 @@ public:
 
     DEFINE_PROP(ItemEntryGuid, FGuid);
     DEFINE_PROP(WeaponData, UFortWeaponItemDefinition*);
+    DEFINE_PROP(AmmoCount, int32);
     DEFINE_PROP(ContextTrapItemDefinition, UFortItemDefinition*);
     DEFINE_PROP(PrimaryAbilitySpecHandle, FGameplayAbilitySpecHandle);
     DEFINE_PROP(SecondaryAbilitySpecHandle, FGameplayAbilitySpecHandle);
@@ -50,6 +51,14 @@ public:
     DefUHookOg(MulticastProjectileRequestUnreliable_);
     DefUHookOg(MulticastStopProjectileRequestUnreliable_);
     DefUHookOg(ServerNotifyPawnHit_);
+
+    static void NotifyServerAbilityActivationStarted(
+        UObject* AbilitySourceObject);
+    static void NotifyServerAbilityActivated(
+        UObject* AbilitySourceObject);
+    static void NotifyServerAbilityActivationFailed(
+        UObject* AbilitySourceObject);
+    static void TickProjectileRelays();
 
     InitPostLoadHooks;
 };

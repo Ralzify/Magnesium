@@ -90,6 +90,7 @@ public:
     DefHookOg(void, FinishWorldInitialization, AFortGameMode*, AActor*);
     static int GetLateSafeZoneIndex();
     static void TickLateGameSafeZonePhaseFallback(UNetDriver* Driver);
+    static void TickPendingVehicleSpawns();
     
     InitHooks;
     InitPostLoadHooks;

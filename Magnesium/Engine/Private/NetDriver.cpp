@@ -5,6 +5,10 @@
 #include "../../Erbium/Public/GUI.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
+#include "../../FortniteGame/Public/FortInventory.h"
+#include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
+#include "../../FortniteGame/Public/FortVehicleMods.h"
+#include "../../FortniteGame/Public/FortWeapon.h"
 #include "../Public/AbilitySystemComponent.h"
 #include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 
@@ -1001,6 +1005,14 @@ static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+	if (auto World = UWorld::GetWorld();
+		World && Driver == World->NetDriver)
+	{
+		AFortInventory::TickRegeneratingItems();
+		AFortWeaponRanged::TickProjectileRelays();
+		AFortGameMode::TickPendingVehicleSpawns();
+		FortVehicleMods::TickPendingConstruction();
+	}
 	SyncErbiumSafeZonePreviewPause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
@@ -1084,6 +1096,14 @@ uint64_t ServerReplicateActors_;
 void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+	if (auto World = UWorld::GetWorld();
+		World && Driver == World->NetDriver)
+	{
+		AFortInventory::TickRegeneratingItems();
+		AFortWeaponRanged::TickProjectileRelays();
+		AFortGameMode::TickPendingVehicleSpawns();
+		FortVehicleMods::TickPendingConstruction();
+	}
 	SyncErbiumSafeZonePreviewPause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
@@ -1209,6 +1229,14 @@ volatile long g_tickFlushCounter = 0;
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+	if (auto World = UWorld::GetWorld();
+		World && Driver == World->NetDriver)
+	{
+		AFortInventory::TickRegeneratingItems();
+		AFortWeaponRanged::TickProjectileRelays();
+		AFortGameMode::TickPendingVehicleSpawns();
+		FortVehicleMods::TickPendingConstruction();
+	}
 	SyncErbiumSafeZonePreviewPause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);

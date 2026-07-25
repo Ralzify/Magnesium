@@ -22,10 +22,12 @@
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
 #include "../Public/FortAthenaCreativePortal.h"
 #include "../Public/FortPhysicsPawn.h"
+#include "../Public/FortVehicleMods.h"
 
 #include <sstream>
 #include <fstream>
 #include <cmath>
+#include <vector>
 
 void ShowFoundation(const ABuildingFoundation* Foundation)
 {
@@ -1273,6 +1275,675 @@ public:
 
     DEFINE_FUNC(GetVehicleClass, UClass*);
 };
+
+namespace
+{
+    struct FDeferredVehicleSpawnState
+    {
+        TWeakObjectPtr<UWorld> World;
+        TWeakObjectPtr<UClass> ProviderClass;
+        TWeakObjectPtr<UClass> VehicleSpawnerClass;
+        std::vector<TWeakObjectPtr<UObject>> ProcessedSources;
+        ULONGLONG NextAttemptTimeMs = 0;
+        ULONGLONG DeadlineTimeMs = 0;
+        uint32 PassCount = 0;
+        int32 TotalSpawned = 0;
+        int32 ProviderCursor = 0;
+        int32 VehicleSpawnerCursor = 0;
+        bool Started = false;
+        bool Active = false;
+    };
+
+    FDeferredVehicleSpawnState GDeferredVehicleSpawnState{};
+
+    constexpr ULONGLONG VehicleSpawnRetryIntervalMs = 2000ULL;
+    constexpr ULONGLONG VehicleSpawnRetryWindowMs = 45000ULL;
+    constexpr int32 VehicleSpawnBudgetPerPass = 16;
+    constexpr ULONGLONG VehicleClassLoadRetryIntervalMs = 15000ULL;
+    constexpr float LivingWorldVehicleSpawnProbability = 0.35f;
+
+    struct FVehicleProviderClassCacheEntry
+    {
+        const wchar_t* GameplayTagName;
+        const wchar_t* ObjectPath;
+        int32 SelectionPriority = 10;
+        FName GameplayTag{};
+        TWeakObjectPtr<UClass> VehicleClass;
+        ULONGLONG NextLoadAttemptTimeMs = 0;
+        uint32 LastResolveEpoch = 0;
+        bool TagInitialized = false;
+    };
+
+    FVehicleProviderClassCacheEntry GVehicleProviderClassCache[] =
+    {
+        {
+            L"Athena.Vehicle.SpawnLocation.Motorcycle.Dirtbike",
+            L"/Dirtbike/Vehicle/Motorcycle_DirtBike_Vehicle."
+                L"Motorcycle_DirtBike_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Motorcycle.Sportbike",
+            L"/Sportbike/Vehicle/Motorcycle_Sport_Vehicle."
+                L"Motorcycle_Sport_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Base",
+            L"/Valet/BasicCar/Valet_BasicCar_Vehicle."
+                L"Valet_BasicCar_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar",
+            L"/Valet/BasicCar/Valet_BasicCar_Vehicle."
+                L"Valet_BasicCar_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Taxi",
+            L"/Valet/TaxiCab/Valet_TaxiCab_Vehicle."
+                L"Valet_TaxiCab_Vehicle_C",
+            50
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Modded",
+            L"/ModdedBasicCar/Vehicle/"
+                L"Valet_BasicCar_Vehicle_SuperSedan."
+                L"Valet_BasicCar_Vehicle_SuperSedan_C",
+            50
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicSUV",
+            L"/BasicSUV/Vehicle/Valet_BasicSUV_Vehicle."
+                L"Valet_BasicSUV_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicTruck.Base",
+            L"/Valet/BasicTruck/Valet_BasicTruck_Vehicle."
+                L"Valet_BasicTruck_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicTruck",
+            L"/Valet/BasicTruck/Valet_BasicTruck_Vehicle."
+                L"Valet_BasicTruck_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet."
+                L"BasicTruck.Upgraded",
+            L"/Valet/BasicTruck/"
+                L"Valet_BasicTruck_Vehicle_Upgrade."
+                L"Valet_BasicTruck_Vehicle_Upgrade_C",
+            10
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BigRig.Base",
+            L"/Valet/BigRig/Valet_BigRig_Vehicle."
+                L"Valet_BigRig_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BigRig",
+            L"/Valet/BigRig/Valet_BigRig_Vehicle."
+                L"Valet_BigRig_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BigRig.Upgraded",
+            L"/Valet/BigRig/Valet_BigRig_Vehicle_Upgrade."
+                L"Valet_BigRig_Vehicle_Upgrade_C",
+            10
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.SportsCar.Base",
+            L"/Valet/SportsCar/Valet_SportsCar_Vehicle."
+                L"Valet_SportsCar_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.SportsCar",
+            L"/Valet/SportsCar/Valet_SportsCar_Vehicle."
+                L"Valet_SportsCar_Vehicle_C",
+            100
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet."
+                L"SportsCar.Upgraded",
+            L"/Valet/SportsCar/"
+                L"Valet_SportsCar_Vehicle_Upgrade."
+                L"Valet_SportsCar_Vehicle_Upgrade_C",
+            10
+        },
+        {
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Upgraded",
+            L"/Valet/BasicCar/"
+                L"Valet_BasicCar_Vehicle_Upgrade."
+                L"Valet_BasicCar_Vehicle_Upgrade_C",
+            10
+        }
+    };
+    uint32 GVehicleProviderResolveEpoch = 0;
+
+    bool UsesDeferredVehicleSpawnDiscovery()
+    {
+        return VersionInfo.FortniteVersion >= 30.00 &&
+            VersionInfo.FortniteVersion < 31.00;
+    }
+
+    bool IsVehicleSpawnSourceProcessed(const UObject* Source)
+    {
+        if (!Source)
+            return true;
+
+        for (const auto& Processed :
+            GDeferredVehicleSpawnState.ProcessedSources)
+        {
+            if (Processed.Get() == Source)
+                return true;
+        }
+        return false;
+    }
+
+    void MarkVehicleSpawnSourceProcessed(UObject* Source)
+    {
+        if (!Source || IsVehicleSpawnSourceProcessed(Source))
+            return;
+
+        GDeferredVehicleSpawnState.ProcessedSources.emplace_back(
+            TWeakObjectPtr<UObject>(Source));
+    }
+
+    bool ResolveVehicleProviderClass(
+        const FName& GameplayTag,
+        uint32 ResolveEpoch,
+        const UClass*& OutVehicleClass,
+        int32& OutSelectionPriority)
+    {
+        OutVehicleClass = nullptr;
+        OutSelectionPriority = 0;
+        for (auto& Entry : GVehicleProviderClassCache)
+        {
+            if (!Entry.TagInitialized)
+            {
+                Entry.GameplayTag =
+                    FName(Entry.GameplayTagName);
+                Entry.TagInitialized = true;
+            }
+            if (Entry.GameplayTag != GameplayTag)
+                continue;
+
+            OutSelectionPriority = Entry.SelectionPriority;
+            if (auto* CachedClass = Entry.VehicleClass.Get())
+            {
+                OutVehicleClass = CachedClass;
+                return true;
+            }
+            if (Entry.LastResolveEpoch == ResolveEpoch)
+                return true;
+
+            Entry.LastResolveEpoch = ResolveEpoch;
+            const ULONGLONG CurrentTimeMs = GetTickCount64();
+            auto* FoundClass = static_cast<const UClass*>(
+                SDK::StaticFindObject(
+                    Entry.ObjectPath,
+                    UClass::StaticClass()));
+            if (!FoundClass &&
+                CurrentTimeMs >=
+                    Entry.NextLoadAttemptTimeMs)
+            {
+                // Only a tag that actually exists in this world may trigger
+                // a load, and a missing path is retried sparsely. Routine
+                // two-second discovery passes remain lookup-only.
+                FoundClass =
+                    FindObject<UClass>(Entry.ObjectPath);
+                Entry.NextLoadAttemptTimeMs =
+                    CurrentTimeMs +
+                        VehicleClassLoadRetryIntervalMs;
+            }
+            if (FoundClass)
+            {
+                Entry.VehicleClass =
+                    TWeakObjectPtr<UClass>(
+                        const_cast<UClass*>(FoundClass));
+                OutVehicleClass = FoundClass;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    int32 RunVehicleSpawnDiscoveryPass()
+    {
+        auto* World = UWorld::GetWorld();
+        if (!World ||
+            GDeferredVehicleSpawnState.World.Get() != World)
+        {
+            return 0;
+        }
+
+        int32 SpawnedThisPass = 0;
+        int32 ProviderCount = 0;
+        int32 MappedProviderCount = 0;
+        int32 ProviderSpawnFailureCount = 0;
+        int32 UnresolvedProviderCount = 0;
+        int32 ProviderDensitySkippedCount = 0;
+        int32 SpawnAttemptsThisPass = 0;
+        const uint32 ResolveEpoch =
+            ++GVehicleProviderResolveEpoch;
+        const bool LimitSpawnWork =
+            UsesDeferredVehicleSpawnDiscovery();
+
+        // Resolve these dynamically on every bounded retry. SDK StaticClass
+        // helpers permanently cache an early miss, while FN30 can stream the
+        // provider class and its vehicle assets well after world init.
+        const UClass* ProviderClass =
+            GDeferredVehicleSpawnState.ProviderClass.Get();
+        if (!ProviderClass)
+        {
+            ProviderClass =
+                SDK::FindClass(
+                    LimitSpawnWork
+                        ? "FortAthenaLivingWorldVehiclePointProvider"
+                        : "FortAthenaLivingWorldStaticPointProvider");
+            if (ProviderClass)
+            {
+                GDeferredVehicleSpawnState.ProviderClass =
+                    TWeakObjectPtr<UClass>(
+                        const_cast<UClass*>(ProviderClass));
+            }
+        }
+        if (ProviderClass)
+        {
+            TArray<AFortAthenaLivingWorldStaticPointProvider*>
+                Providers{};
+            Utils::GetAll(ProviderClass, Providers);
+            ProviderCount = Providers.Num();
+
+            const int32 ProviderStartIndex =
+                ProviderCount > 0
+                    ? GDeferredVehicleSpawnState.ProviderCursor %
+                        ProviderCount
+                    : 0;
+            constexpr int32 ReservedClassicSpawnAttempts = 4;
+            const int32 ProviderAttemptLimit =
+                VehicleSpawnBudgetPerPass -
+                    ReservedClassicSpawnAttempts;
+            for (int32 Visited = 0;
+                Visited < ProviderCount;
+                ++Visited)
+            {
+                if (LimitSpawnWork &&
+                    SpawnAttemptsThisPass >=
+                        ProviderAttemptLimit)
+                {
+                    break;
+                }
+                const int32 ProviderIndex =
+                    (ProviderStartIndex + Visited) %
+                        ProviderCount;
+                auto* Provider = Providers[ProviderIndex];
+                if (!Provider ||
+                    IsVehicleSpawnSourceProcessed(Provider))
+                {
+                    continue;
+                }
+
+                const UClass* VehicleClass = nullptr;
+                int32 VehicleClassPriority = 0;
+                int32 HighestRecognizedPriority = 0;
+                bool ForceSpawn = false;
+                bool RecognizedTag = false;
+                static const FName AlwaysSpawnTag(
+                    L"Athena.Vehicle.SpawnLocation.AlwaysSpawn");
+                for (int32 TagIndex = 0;
+                    TagIndex <
+                        Provider->FiltersTags.GameplayTags.Num();
+                    ++TagIndex)
+                {
+                    auto& Tag =
+                        Provider->FiltersTags.GameplayTags.Get(
+                            TagIndex,
+                            FGameplayTag::Size());
+                    if (Tag.TagName == AlwaysSpawnTag)
+                        ForceSpawn = true;
+
+                    const UClass* CandidateClass = nullptr;
+                    int32 CandidatePriority = 0;
+                    if (!ResolveVehicleProviderClass(
+                            Tag.TagName,
+                            ResolveEpoch,
+                            CandidateClass,
+                            CandidatePriority))
+                    {
+                        continue;
+                    }
+
+                    RecognizedTag = true;
+                    if (CandidatePriority >
+                        HighestRecognizedPriority)
+                    {
+                        HighestRecognizedPriority =
+                            CandidatePriority;
+                    }
+                    if (CandidateClass &&
+                        CandidatePriority >
+                            VehicleClassPriority)
+                    {
+                        VehicleClass = CandidateClass;
+                        VehicleClassPriority =
+                            CandidatePriority;
+                    }
+                }
+
+                // FN30's upgraded Lager event requires both the Base and
+                // Upgraded location tags. The old first-match map omitted
+                // Base entirely, which turned practically every compatible
+                // point into the fixed red/blue Whiplash VR-1. Wait for and
+                // prefer the ordinary gameplay class whenever a Base tag is
+                // present.
+                if (VehicleClassPriority <
+                    HighestRecognizedPriority)
+                {
+                    VehicleClass = nullptr;
+                }
+                if (!RecognizedTag || !VehicleClass)
+                {
+                    ++UnresolvedProviderCount;
+                    continue;
+                }
+
+                // These actors are candidate points consumed by Lager, not a
+                // list of vehicles that all exist simultaneously. Since the
+                // private server has to replace the unavailable Lager spawn
+                // action, preserve AlwaysSpawn points and make one bounded,
+                // one-shot density decision for every other point. This
+                // avoids constructing and replicating all 220+ candidates
+                // during the opening seconds of a match.
+                if (!ForceSpawn &&
+                    (rand() / static_cast<float>(RAND_MAX)) >
+                        LivingWorldVehicleSpawnProbability)
+                {
+                    MarkVehicleSpawnSourceProcessed(Provider);
+                    ++ProviderDensitySkippedCount;
+                    continue;
+                }
+
+                ++MappedProviderCount;
+                ++SpawnAttemptsThisPass;
+                GDeferredVehicleSpawnState.ProviderCursor =
+                    (ProviderIndex + 1) % ProviderCount;
+                auto* Vehicle =
+                    UWorld::SpawnActor<AFortAthenaVehicle>(
+                        VehicleClass,
+                        Provider->K2_GetActorLocation(),
+                        Provider->K2_GetActorRotation());
+                if (!Vehicle)
+                {
+                    ++ProviderSpawnFailureCount;
+                    continue;
+                }
+
+                MarkVehicleSpawnSourceProcessed(Provider);
+                FortVehicleMods::RegisterSpawnedVehicle(
+                    Vehicle,
+                    Provider);
+                ++SpawnedThisPass;
+            }
+            Providers.Free();
+        }
+
+        int32 SpawnerCount = 0;
+        int32 MissingClassCount = 0;
+        int32 ChanceSkippedCount = 0;
+        int32 SpawnFailureCount = 0;
+        const bool UsesClassicVehicleSpawners =
+            VersionInfo.EngineVersion >= 4.23 &&
+            std::floor(VersionInfo.FortniteVersion) != 20 &&
+            std::floor(VersionInfo.FortniteVersion) != 21 &&
+            std::floor(VersionInfo.FortniteVersion) != 22;
+        const UClass* VehicleSpawnerClass =
+            UsesClassicVehicleSpawners
+                ? GDeferredVehicleSpawnState
+                    .VehicleSpawnerClass.Get()
+                : nullptr;
+        if (UsesClassicVehicleSpawners &&
+            !VehicleSpawnerClass)
+        {
+            VehicleSpawnerClass =
+                SDK::FindClass("FortAthenaVehicleSpawner");
+            if (VehicleSpawnerClass)
+            {
+                GDeferredVehicleSpawnState.VehicleSpawnerClass =
+                    TWeakObjectPtr<UClass>(
+                        const_cast<UClass*>(
+                            VehicleSpawnerClass));
+            }
+        }
+        if (VehicleSpawnerClass)
+        {
+            TArray<AFortAthenaVehicleSpawner*> Spawners{};
+            Utils::GetAll(VehicleSpawnerClass, Spawners);
+            SpawnerCount = Spawners.Num();
+
+            const int32 SpawnerStartIndex =
+                SpawnerCount > 0
+                    ? GDeferredVehicleSpawnState
+                        .VehicleSpawnerCursor % SpawnerCount
+                    : 0;
+            for (int32 Visited = 0;
+                Visited < SpawnerCount;
+                ++Visited)
+            {
+                if (LimitSpawnWork &&
+                    SpawnAttemptsThisPass >=
+                        VehicleSpawnBudgetPerPass)
+                {
+                    break;
+                }
+                const int32 SpawnerIndex =
+                    (SpawnerStartIndex + Visited) %
+                        SpawnerCount;
+                auto* Spawner = Spawners[SpawnerIndex];
+                if (!Spawner ||
+                    IsVehicleSpawnSourceProcessed(Spawner))
+                {
+                    continue;
+                }
+
+                auto* VehicleClass = Spawner->GetVehicleClass();
+                if (!VehicleClass)
+                {
+                    ++MissingClassCount;
+                    continue;
+                }
+
+                if (Spawner->HasCachedFortVehicleItemDef() &&
+                    (!Spawner->HasbForceSpawnAlways() ||
+                        !Spawner->bForceSpawnAlways))
+                {
+                    auto* VehicleDef =
+                        Spawner->CachedFortVehicleItemDef;
+                    if (!VehicleDef)
+                    {
+                        ++MissingClassCount;
+                        continue;
+                    }
+
+                    const double Min = std::clamp(
+                        VehicleDef->VehicleMinSpawnPercent
+                            .Evaluate() * 0.01f,
+                        0.0f,
+                        1.0f);
+                    const double Max = std::clamp(
+                        VehicleDef->VehicleMaxSpawnPercent
+                            .Evaluate() * 0.01f,
+                        0.0f,
+                        1.0f);
+                    const auto SpawnPercent =
+                        Min + (Max - Min) *
+                            (rand() / (float)RAND_MAX);
+                    const bool ShouldSpawn =
+                        (rand() / (float)RAND_MAX) <=
+                            SpawnPercent;
+                    if (!ShouldSpawn)
+                    {
+                        // Preserve the original one-shot probability
+                        // decision; retries must not eventually turn every
+                        // rejected source into a guaranteed vehicle.
+                        MarkVehicleSpawnSourceProcessed(Spawner);
+                        ++ChanceSkippedCount;
+                        continue;
+                    }
+                }
+
+                ++SpawnAttemptsThisPass;
+                GDeferredVehicleSpawnState.VehicleSpawnerCursor =
+                    (SpawnerIndex + 1) % SpawnerCount;
+                auto* Vehicle =
+                    UWorld::SpawnActor<AFortAthenaVehicle>(
+                        VehicleClass,
+                        Spawner->K2_GetActorLocation(),
+                        Spawner->K2_GetActorRotation());
+                if (!Vehicle)
+                {
+                    ++SpawnFailureCount;
+                    continue;
+                }
+
+                MarkVehicleSpawnSourceProcessed(Spawner);
+                FortVehicleMods::RegisterSpawnedVehicle(
+                    Vehicle,
+                    Spawner);
+                ++SpawnedThisPass;
+
+                if (auto* Car =
+                    Vehicle->Cast<AFortDagwoodVehicle>())
+                {
+                    Car->SetFuel(100.f);
+                }
+            }
+            Spawners.Free();
+        }
+
+        ++GDeferredVehicleSpawnState.PassCount;
+        GDeferredVehicleSpawnState.TotalSpawned +=
+            SpawnedThisPass;
+        const uint32 Pass =
+            GDeferredVehicleSpawnState.PassCount;
+        if (Pass <= 2 ||
+            SpawnedThisPass > 0 ||
+            Pass % 5 == 0)
+        {
+            SDK::DbgLog(
+                "[VehicleSpawn] pass=%u providers=%d mapped=%d "
+                "provider-unresolved=%d density-skipped=%d "
+                "provider-failed=%d "
+                "spawners=%d missing-class=%d chance-skipped=%d "
+                "spawner-failed=%d attempts=%d new=%d total=%d "
+                "processed=%d\n",
+                Pass,
+                ProviderCount,
+                MappedProviderCount,
+                UnresolvedProviderCount,
+                ProviderDensitySkippedCount,
+                ProviderSpawnFailureCount,
+                SpawnerCount,
+                MissingClassCount,
+                ChanceSkippedCount,
+                SpawnFailureCount,
+                SpawnAttemptsThisPass,
+                SpawnedThisPass,
+                GDeferredVehicleSpawnState.TotalSpawned,
+                static_cast<int32>(
+                    GDeferredVehicleSpawnState
+                        .ProcessedSources.size()));
+        }
+        return SpawnedThisPass;
+    }
+
+    void BeginDeferredVehicleSpawnDiscovery()
+    {
+        auto* World = UWorld::GetWorld();
+        if (!World)
+            return;
+
+        if (GDeferredVehicleSpawnState.World.Get() != World)
+        {
+            GDeferredVehicleSpawnState.ProcessedSources.clear();
+            GDeferredVehicleSpawnState.World =
+                TWeakObjectPtr<UWorld>(World);
+            GDeferredVehicleSpawnState.NextAttemptTimeMs = 0;
+            GDeferredVehicleSpawnState.DeadlineTimeMs = 0;
+            GDeferredVehicleSpawnState.PassCount = 0;
+            GDeferredVehicleSpawnState.TotalSpawned = 0;
+            GDeferredVehicleSpawnState.ProviderCursor = 0;
+            GDeferredVehicleSpawnState.VehicleSpawnerCursor = 0;
+            GDeferredVehicleSpawnState.Started = false;
+            GDeferredVehicleSpawnState.Active = false;
+        }
+
+        if (GDeferredVehicleSpawnState.Started)
+            return;
+
+        const ULONGLONG CurrentTimeMs = GetTickCount64();
+        GDeferredVehicleSpawnState.Started = true;
+        GDeferredVehicleSpawnState.Active =
+            UsesDeferredVehicleSpawnDiscovery();
+        GDeferredVehicleSpawnState.NextAttemptTimeMs =
+            CurrentTimeMs + VehicleSpawnRetryIntervalMs;
+        GDeferredVehicleSpawnState.DeadlineTimeMs =
+            CurrentTimeMs + VehicleSpawnRetryWindowMs;
+        RunVehicleSpawnDiscoveryPass();
+    }
+}
+
+void AFortGameMode::TickPendingVehicleSpawns()
+{
+    if (!UsesDeferredVehicleSpawnDiscovery() ||
+        !GDeferredVehicleSpawnState.Started ||
+        !GDeferredVehicleSpawnState.Active)
+    {
+        return;
+    }
+
+    auto* World = UWorld::GetWorld();
+    if (!World ||
+        GDeferredVehicleSpawnState.World.Get() != World)
+    {
+        GDeferredVehicleSpawnState.Active = false;
+        return;
+    }
+
+    const ULONGLONG CurrentTimeMs = GetTickCount64();
+    if (CurrentTimeMs <
+        GDeferredVehicleSpawnState.NextAttemptTimeMs)
+    {
+        return;
+    }
+    const bool FinalPass =
+        CurrentTimeMs >=
+            GDeferredVehicleSpawnState.DeadlineTimeMs;
+    RunVehicleSpawnDiscoveryPass();
+    if (FinalPass)
+    {
+        GDeferredVehicleSpawnState.Active = false;
+        SDK::DbgLog(
+            "[VehicleSpawn] discovery complete passes=%u "
+            "spawned=%d processed=%d\n",
+            GDeferredVehicleSpawnState.PassCount,
+            GDeferredVehicleSpawnState.TotalSpawned,
+            static_cast<int32>(
+                GDeferredVehicleSpawnState
+                    .ProcessedSources.size()));
+        return;
+    }
+
+    GDeferredVehicleSpawnState.NextAttemptTimeMs =
+        CurrentTimeMs + VehicleSpawnRetryIntervalMs;
+}
 
 void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Ret)
 {
@@ -3837,86 +4508,11 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
 
     ConsumableSpawners.Free();
 
-    if (AFortAthenaLivingWorldStaticPointProvider::StaticClass())
-    {
-        TArray<AFortAthenaLivingWorldStaticPointProvider*> Spawners;
-        Utils::GetAll<AFortAthenaLivingWorldStaticPointProvider>(Spawners);
-        UEAllocatedMap<FName, const UClass*> VehicleSpawnerMap =
-        {
-            { FName(L"Athena.Vehicle.SpawnLocation.Motorcycle.Dirtbike"), FindObject<UClass>(L"/Dirtbike/Vehicle/Motorcycle_DirtBike_Vehicle.Motorcycle_DirtBike_Vehicle_C") },
-            { FName(L"Athena.Vehicle.SpawnLocation.Motorcycle.Sportbike"), FindObject<UClass>(L"/Sportbike/Vehicle/Motorcycle_Sport_Vehicle.Motorcycle_Sport_Vehicle_C") },
-            { FName(L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Taxi"), FindObject<UClass>(L"/Valet/TaxiCab/Valet_TaxiCab_Vehicle.Valet_TaxiCab_Vehicle_C") },
-            { FName(L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Modded"), FindObject<UClass>(L"/ModdedBasicCar/Vehicle/Valet_BasicCar_Vehicle_SuperSedan.Valet_BasicCar_Vehicle_SuperSedan_C") },
-            { FName(L"Athena.Vehicle.SpawnLocation.Valet.BasicTruck.Upgraded"), FindObject<UClass>(L"/Valet/BasicTruck/Valet_BasicTruck_Vehicle_Upgrade.Valet_BasicTruck_Vehicle_Upgrade_C") },
-            { FName(L"Athena.Vehicle.SpawnLocation.Valet.BigRig.Upgraded"), FindObject<UClass>(L"/Valet/BigRig/Valet_BigRig_Vehicle_Upgrade.Valet_BigRig_Vehicle_Upgrade_C") },
-            { FName(L"Athena.Vehicle.SpawnLocation.Valet.SportsCar.Upgraded"), FindObject<UClass>(L"/Valet/SportsCar/Valet_SportsCar_Vehicle_Upgrade.Valet_SportsCar_Vehicle_Upgrade_C") },
-            { FName(L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Upgraded"), FindObject<UClass>(L"/Valet/BasicCar/Valet_BasicCar_Vehicle_Upgrade.Valet_BasicCar_Vehicle_Upgrade_C") }
-        };
-
-        for (auto& Spawner : Spawners)
-        {
-            const UClass* VehicleClass = nullptr;
-            for (int i = 0; i < Spawner->FiltersTags.GameplayTags.Num(); i++)
-            {
-                auto& Tag = Spawner->FiltersTags.GameplayTags.Get(i, FGameplayTag::Size());
-
-                if (VehicleSpawnerMap.contains(Tag.TagName))
-                {
-                    VehicleClass = VehicleSpawnerMap[Tag.TagName];
-                    break;
-                }
-            }
-
-            if (VehicleClass)
-            {
-                auto Vehicle = UWorld::SpawnActor<AFortAthenaVehicle>(VehicleClass, Spawner->K2_GetActorLocation(), Spawner->K2_GetActorRotation());
-
-                if (auto Car = Vehicle->Cast<AFortDagwoodVehicle>())
-                    Car->SetFuel(100.f);
-                //printf("Spawned a %s\n", Spawner->Name.ToString().c_str());
-            }
-            else
-            {
-                for (auto& Tag : Spawner->FiltersTags.GameplayTags)
-                    printf("Fix: Tag: %s\n", Tag.TagName.ToString().c_str());
-            }
-        }
-        Spawners.Free();
-    }
-    // not an else here because they still use spawners for boats, and fully on s27
-    if (VersionInfo.EngineVersion >= 4.23 && std::floor(VersionInfo.FortniteVersion) != 20 && std::floor(VersionInfo.FortniteVersion) != 21 && std::floor(VersionInfo.FortniteVersion) != 22) // its auto on s20, s21, and s22
-    {
-        TArray<AFortAthenaVehicleSpawner*> Spawners{};
-        Utils::GetAll<AFortAthenaVehicleSpawner>(Spawners);
-
-        for (auto& Spawner : Spawners)
-        {
-            auto VehicleClass = Spawner->GetVehicleClass();
-
-            if (Spawner->HasCachedFortVehicleItemDef() && (!Spawner->HasbForceSpawnAlways() || !Spawner->bForceSpawnAlways))
-            {
-                auto VehicleDef = Spawner->CachedFortVehicleItemDef;
-                if (!VehicleDef)
-                    continue;
-
-                double Min = std::clamp(VehicleDef->VehicleMinSpawnPercent.Evaluate() * 0.01f, 0.0f, 1.0f);
-                double Max = std::clamp(VehicleDef->VehicleMaxSpawnPercent.Evaluate() * 0.01f, 0.0f, 1.0f);
-
-                auto SpawnPercent = Min + (Max - Min) * (rand() / (float)RAND_MAX);
-                auto bShouldSpawn = (rand() / (float)RAND_MAX) <= SpawnPercent;
-
-                if (!bShouldSpawn)
-                    continue;
-            }
-
-            auto Vehicle = UWorld::SpawnActor<AFortAthenaVehicle>(Spawner->GetVehicleClass(), Spawner->K2_GetActorLocation(), Spawner->K2_GetActorRotation());
-
-            if (auto Car = Vehicle->Cast<AFortDagwoodVehicle>())
-                Car->SetFuel(100.f);
-        }
-
-        Spawners.Free();
-    }
+    // FN30 streams its Living World vehicle providers asynchronously. On
+    // some starts UpdateVehicleSpawns runs around eleven seconds after this
+    // callback, so a one-shot scan permanently misses every source. Begin an
+    // immediate pass plus bounded, per-source-idempotent game-thread retries.
+    BeginDeferredVehicleSpawnDiscovery();
 
     if (VersionInfo.FortniteVersion > 3.4)
     {

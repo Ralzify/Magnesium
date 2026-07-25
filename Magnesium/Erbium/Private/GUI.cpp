@@ -2262,8 +2262,6 @@ namespace SafeZoneMap
         if (aspect < 0.4f || aspect > 2.5f)
             return useFallbackTransform();
 
-        SDK::DbgLog("[SafeZoneMap] normalized samples C=(%.6f, %.6f) X=(%.6f, %.6f) Y=(%.6f, %.6f)\n",
-            p0.U, p0.V, px.U, px.V, py.U, py.V);
         out = candidate;
         managerOut = manager;
         return true;

@@ -5,9 +5,469 @@
 #include "../Public/FortKismetLibrary.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../Public/FortWeapon.h"
+#include "../Public/FortWeaponMods.h"
 #include <ShlObj.h>
+#include <cmath>
+#include <vector>
 
 uint32_t OnItemInstanceAddedVft;
+
+namespace
+{
+    struct FRegeneratingInventoryItem
+    {
+        TWeakObjectPtr<AFortPlayerControllerAthena> Owner;
+        TWeakObjectPtr<UFortAmmoItemDefinition> AmmoDefinition;
+        FGuid ItemGuid{};
+        int32 MaxCount = 0;
+        double CooldownSeconds = 0.0;
+        double NextRefillTime = 0.0;
+    };
+
+    struct FRechargingWeaponAmmo
+    {
+        TWeakObjectPtr<AFortPlayerControllerAthena> Owner;
+        TWeakObjectPtr<UFortWeaponItemDefinition> WeaponDefinition;
+        FGuid ItemGuid{};
+        int32 MaxLoadedAmmo = 0;
+        int32 RechargeAmount = 0;
+        int32 LastObservedLoadedAmmo = 0;
+        double RechargeIntervalSeconds = 0.0;
+        double NextRefillTime = 0.0;
+    };
+
+    std::vector<FRegeneratingInventoryItem> RegeneratingInventoryItems;
+    std::vector<FRechargingWeaponAmmo> RechargingWeaponAmmo;
+
+    constexpr size_t MaxTrackedRechargingWeapons = 128;
+    constexpr double NativeRechargeGraceSeconds = 0.10;
+
+    bool AreGuidsEqual(const FGuid& Left, const FGuid& Right)
+    {
+        return Left.A == Right.A &&
+            Left.B == Right.B &&
+            Left.C == Right.C &&
+            Left.D == Right.D;
+    }
+
+    bool IsSameRegenItem(
+        const FRegeneratingInventoryItem& State,
+        const AFortPlayerControllerAthena* Owner,
+        const FGuid& ItemGuid)
+    {
+        return State.Owner.Get() == Owner &&
+            AreGuidsEqual(State.ItemGuid, ItemGuid);
+    }
+
+    void RemoveRegenItemAt(size_t Index)
+    {
+        if (Index + 1 != RegeneratingInventoryItems.size())
+        {
+            RegeneratingInventoryItems[Index] =
+                RegeneratingInventoryItems.back();
+        }
+        RegeneratingInventoryItems.pop_back();
+    }
+
+    void RemoveRechargingWeaponAt(size_t Index)
+    {
+        if (Index + 1 != RechargingWeaponAmmo.size())
+        {
+            RechargingWeaponAmmo[Index] =
+                RechargingWeaponAmmo.back();
+        }
+        RechargingWeaponAmmo.pop_back();
+    }
+
+    bool IsNitroFistsDefinition(
+        const UFortWeaponItemDefinition* WeaponDefinition)
+    {
+        if (!WeaponDefinition ||
+            VersionInfo.FortniteVersion < 30.0 ||
+            VersionInfo.FortniteVersion >= 31.0)
+        {
+            return false;
+        }
+
+        const auto DefinitionName =
+            WeaponDefinition->Name.ToString();
+        return DefinitionName.rfind(
+            "WID_Moonflax_NitroGauntlet", 0) == 0;
+    }
+
+    bool NotifyNitroFistsRechargeStarted(
+        AFortPlayerControllerAthena* Owner,
+        const FGuid& ItemGuid,
+        double ServerStartTime)
+    {
+        if (!Owner || !std::isfinite(ServerStartTime))
+            return false;
+
+        auto RechargeComponentClass =
+            FindClass("FortControllerComponent_RechargeWeapons");
+        auto RechargeComponent =
+            RechargeComponentClass
+                ? Owner->GetComponentByClass(
+                    RechargeComponentClass)
+                : nullptr;
+        auto ClientStartedFunction =
+            RechargeComponent
+                ? RechargeComponent->GetFunction(
+                    "ClientItemStartedRecharging")
+                : nullptr;
+        if (!ClientStartedFunction)
+            return false;
+
+        // This native client RPC seeds the same server-time countdown used
+        // by WBP_NitroGautletReticle's GetRemainingCooldownTimer path. The
+        // client component also keeps a pending-GUID map, so this remains
+        // valid while the equipped weapon is being constructed.
+        RechargeComponent->Call<void>(
+            ClientStartedFunction,
+            ItemGuid,
+            static_cast<float>(ServerStartTime));
+        return true;
+    }
+
+    bool SyncEquippedNitroFistsAmmo(
+        AFortPlayerControllerAthena* Owner,
+        UFortWeaponItemDefinition* WeaponDefinition,
+        const FGuid& ItemGuid,
+        int32 NewLoadedAmmo)
+    {
+        if (!Owner || !WeaponDefinition ||
+            !Owner->HasMyFortPawn() || !Owner->MyFortPawn ||
+            !Owner->MyFortPawn->HasCurrentWeapon())
+        {
+            return false;
+        }
+
+        auto WeaponActor = Owner->MyFortPawn->CurrentWeapon;
+        auto FortWeaponClass = AFortWeapon::StaticClass();
+        if (!WeaponActor || !FortWeaponClass ||
+            !WeaponActor->IsA(FortWeaponClass))
+        {
+            return false;
+        }
+
+        auto Weapon = static_cast<AFortWeapon*>(WeaponActor);
+        if (!Weapon->HasItemEntryGuid() ||
+            !AreGuidsEqual(Weapon->ItemEntryGuid, ItemGuid) ||
+            (Weapon->HasWeaponData() &&
+                Weapon->WeaponData != WeaponDefinition) ||
+            !Weapon->HasAmmoCount())
+        {
+            return false;
+        }
+
+        const int32 OldAmmoCount = Weapon->AmmoCount;
+        if (OldAmmoCount == NewLoadedAmmo)
+            return true;
+
+        // The equipped actor owns the authoritative/live magazine used by
+        // Nitro abilities. Updating only FFortItemEntry explains why the
+        // restored charge became usable after re-equipping: equip copied
+        // the entry back into this field. Keep both representations in step
+        // and drive the normal rep-notify/delegate path for HUD listeners.
+        Weapon->AmmoCount = NewLoadedAmmo;
+        if (auto OnRepAmmoCount =
+            Weapon->GetFunction("OnRep_AmmoCount"))
+        {
+            Weapon->Call<void>(
+                OnRepAmmoCount, OldAmmoCount);
+        }
+        Weapon->ForceNetUpdate();
+        return true;
+    }
+
+    bool ResolveNitroFistsRechargeSettings(
+        UFortWeaponItemDefinition* WeaponDefinition,
+        int32 ItemLevel,
+        int32& MaxLoadedAmmo,
+        int32& RechargeAmount,
+        double& RechargeIntervalSeconds)
+    {
+        if (!IsNitroFistsDefinition(WeaponDefinition))
+            return false;
+
+        const auto DefinitionName =
+            WeaponDefinition->Name.ToString();
+        // Do not reinterpret a gauntlet stat row as ranged-weapon stats.
+        // FN30 defines four charges on the regular fists and five on the
+        // mythic variant.
+        MaxLoadedAmmo =
+            DefinitionName.find("_Mythic") !=
+                std::string::npos
+            ? 5
+            : 4;
+
+        float RechargeQuantityValue = 0.0f;
+        if (WeaponDefinition->HasWeaponRechargeAmmoQuantity())
+        {
+            RechargeQuantityValue =
+                WeaponDefinition->WeaponRechargeAmmoQuantity.Evaluate(
+                    static_cast<float>(max(ItemLevel, 1)));
+        }
+        RechargeAmount =
+            static_cast<int32>(std::round(RechargeQuantityValue));
+
+        float RechargeRateValue = 0.0f;
+        if (WeaponDefinition->HasWeaponRechargeAmmoRate())
+        {
+            RechargeRateValue =
+                WeaponDefinition->WeaponRechargeAmmoRate.Evaluate(
+                    static_cast<float>(max(ItemLevel, 1)));
+        }
+        RechargeIntervalSeconds =
+            static_cast<double>(RechargeRateValue);
+
+        // These are the authoritative FN30 curve-table defaults:
+        // Moonflax.NitroGauntlets.RechargeQuantity = 1 and both
+        // RechargeRate rows = 8. The fallback is limited to the exact
+        // Nitro Fists definitions in case a server-only asset load cannot
+        // evaluate the scalable-float curve.
+        if (RechargeAmount <= 0 || RechargeAmount > MaxLoadedAmmo)
+            RechargeAmount = 1;
+        if (!std::isfinite(RechargeIntervalSeconds) ||
+            RechargeIntervalSeconds <= 0.0 ||
+            RechargeIntervalSeconds > 300.0)
+        {
+            RechargeIntervalSeconds = 8.0;
+        }
+
+        return MaxLoadedAmmo > 0 &&
+            RechargeAmount > 0;
+    }
+
+    void ObserveRechargingWeaponAmmo(
+        AFortPlayerControllerAthena* Owner,
+        UFortWeaponItemDefinition* WeaponDefinition,
+        const FGuid& ItemGuid,
+        int32 ItemLevel,
+        int32 PreviousLoadedAmmo,
+        int32 NewLoadedAmmo)
+    {
+        if (!Owner || !Owner->WorldInventory ||
+            !WeaponDefinition)
+        {
+            return;
+        }
+
+        int32 MaxLoadedAmmo = 0;
+        int32 RechargeAmount = 0;
+        double RechargeIntervalSeconds = 0.0;
+        if (!ResolveNitroFistsRechargeSettings(
+                WeaponDefinition,
+                ItemLevel,
+                MaxLoadedAmmo,
+                RechargeAmount,
+                RechargeIntervalSeconds))
+        {
+            return;
+        }
+
+        auto World = UWorld::GetWorld();
+        if (!World)
+            return;
+
+        const double NowSeconds =
+            UGameplayStatics::GetTimeSeconds(World);
+        for (size_t Index = 0;
+            Index < RechargingWeaponAmmo.size();
+            ++Index)
+        {
+            auto& State = RechargingWeaponAmmo[Index];
+            if (State.Owner.Get() != Owner ||
+                !AreGuidsEqual(State.ItemGuid, ItemGuid))
+            {
+                continue;
+            }
+
+            State.WeaponDefinition =
+                TWeakObjectPtr<UFortWeaponItemDefinition>(
+                    WeaponDefinition);
+            State.MaxLoadedAmmo = MaxLoadedAmmo;
+            State.RechargeAmount = RechargeAmount;
+            State.RechargeIntervalSeconds =
+                RechargeIntervalSeconds;
+            State.LastObservedLoadedAmmo =
+                std::clamp(
+                    NewLoadedAmmo, 0, MaxLoadedAmmo);
+            bool bStartedRechargeCycle = false;
+
+            // A native recharge is an increase. Give its controller
+            // component a complete interval before the watchdog can add
+            // another charge. Further consumption does not reset an
+            // already-running interval.
+            if (NewLoadedAmmo >= MaxLoadedAmmo)
+            {
+                State.NextRefillTime = 0.0;
+            }
+            else if (NewLoadedAmmo > PreviousLoadedAmmo)
+            {
+                State.NextRefillTime =
+                    NowSeconds +
+                    RechargeIntervalSeconds +
+                    NativeRechargeGraceSeconds;
+                bStartedRechargeCycle = true;
+            }
+            else if (NewLoadedAmmo < PreviousLoadedAmmo &&
+                State.NextRefillTime <= 0.0)
+            {
+                State.NextRefillTime =
+                    NowSeconds +
+                    RechargeIntervalSeconds +
+                    NativeRechargeGraceSeconds;
+                bStartedRechargeCycle = true;
+            }
+            if (bStartedRechargeCycle)
+            {
+                NotifyNitroFistsRechargeStarted(
+                    Owner, ItemGuid, NowSeconds);
+            }
+            return;
+        }
+
+        if (RechargingWeaponAmmo.size() >=
+                MaxTrackedRechargingWeapons)
+        {
+            return;
+        }
+
+        FRechargingWeaponAmmo State{};
+        State.Owner =
+            TWeakObjectPtr<AFortPlayerControllerAthena>(Owner);
+        State.WeaponDefinition =
+            TWeakObjectPtr<UFortWeaponItemDefinition>(
+                WeaponDefinition);
+        State.ItemGuid = ItemGuid;
+        State.MaxLoadedAmmo = MaxLoadedAmmo;
+        State.RechargeAmount = RechargeAmount;
+        State.LastObservedLoadedAmmo =
+            std::clamp(
+                NewLoadedAmmo, 0, MaxLoadedAmmo);
+        State.RechargeIntervalSeconds =
+            RechargeIntervalSeconds;
+        if (NewLoadedAmmo < MaxLoadedAmmo)
+        {
+            State.NextRefillTime =
+                NowSeconds +
+                RechargeIntervalSeconds +
+                NativeRechargeGraceSeconds;
+        }
+        RechargingWeaponAmmo.push_back(State);
+
+        const bool bClientTimerStarted =
+            NewLoadedAmmo < MaxLoadedAmmo &&
+            NotifyNitroFistsRechargeStarted(
+                Owner, ItemGuid, NowSeconds);
+
+        auto RechargeComponentClass =
+            FindClass("FortControllerComponent_RechargeWeapons");
+        auto RechargeComponent =
+            RechargeComponentClass
+                ? Owner->GetComponentByClass(
+                    RechargeComponentClass)
+                : nullptr;
+        SDK::DbgLog(
+            "[WeaponRecharge] registered definition=%s ammo=%d/%d "
+            "amount=%d interval=%.2f nativeComponent=%s\n",
+            WeaponDefinition->Name.ToString().c_str(),
+            NewLoadedAmmo,
+            MaxLoadedAmmo,
+            RechargeAmount,
+            RechargeIntervalSeconds,
+            RechargeComponent ? "present" : "missing");
+        if (NewLoadedAmmo < MaxLoadedAmmo)
+        {
+            SDK::DbgLog(
+                "[WeaponRecharge] client-timer definition=%s "
+                "started=%d serverStart=%.3f\n",
+                WeaponDefinition->Name.ToString().c_str(),
+                bClientTimerStarted ? 1 : 0,
+                NowSeconds);
+        }
+    }
+
+    void BroadcastWorldItemAmmoChanged(UFortWorldItem* Item)
+    {
+        if (!Item)
+            return;
+
+        static auto BroadcastFunction =
+            Item->GetFunction("BroadcastOnItemChanged");
+        if (BroadcastFunction)
+        {
+            Item->Call<void>(
+                BroadcastFunction,
+                false,
+                true,
+                false,
+                false);
+        }
+    }
+
+    void ScheduleRegeneratingInventoryItem(
+        AFortPlayerControllerAthena* Owner,
+        UFortAmmoItemDefinition* AmmoDefinition,
+        const FGuid& ItemGuid,
+        int32 MaxCount,
+        double CooldownSeconds)
+    {
+        if (!Owner || !Owner->WorldInventory || !AmmoDefinition ||
+            MaxCount <= 0 || !std::isfinite(CooldownSeconds) ||
+            CooldownSeconds <= 0.0 || CooldownSeconds > 3600.0)
+        {
+            return;
+        }
+
+        auto ReplicatedEntry =
+            Owner->WorldInventory->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(Candidate.ItemGuid, ItemGuid) &&
+                        Candidate.ItemDefinition == AmmoDefinition;
+                },
+                FFortItemEntry::Size());
+        if (!ReplicatedEntry || ReplicatedEntry->Count >= MaxCount)
+            return;
+
+        for (auto& State : RegeneratingInventoryItems)
+        {
+            if (!IsSameRegenItem(State, Owner, ItemGuid))
+                continue;
+
+            State.AmmoDefinition =
+                TWeakObjectPtr<UFortAmmoItemDefinition>(AmmoDefinition);
+            State.MaxCount = max(State.MaxCount, MaxCount);
+            State.CooldownSeconds = CooldownSeconds;
+            return;
+        }
+
+        auto World = UWorld::GetWorld();
+        if (!World)
+            return;
+
+        FRegeneratingInventoryItem State{};
+        State.Owner =
+            TWeakObjectPtr<AFortPlayerControllerAthena>(Owner);
+        State.AmmoDefinition =
+            TWeakObjectPtr<UFortAmmoItemDefinition>(AmmoDefinition);
+        State.ItemGuid = ItemGuid;
+        State.MaxCount = MaxCount;
+        State.CooldownSeconds = CooldownSeconds;
+        State.NextRefillTime =
+            UGameplayStatics::GetTimeSeconds(World) + CooldownSeconds;
+        RegeneratingInventoryItems.push_back(State);
+
+        SDK::DbgLog(
+            "[ItemRegen] scheduled definition=%s count=%d max=%d cooldown=%.2f\n",
+            AmmoDefinition->Name.ToString().c_str(),
+            ReplicatedEntry->Count,
+            MaxCount,
+            CooldownSeconds);
+    }
+}
 
 bool UFortWorldItemDefinition::ServerExecute(UFortItem* Item, AFortPlayerControllerAthena* Instigator) const
 {
@@ -22,7 +482,7 @@ bool UFortWorldItemDefinition::ServerExecute(UFortItem* Item, AFortPlayerControl
         this, Item, Instigator);
 }
 
-UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Count, int LoadedAmmo, int Level, bool ShowPickupNoti, bool updateInventory, int PhantomReserveAmmo, TArray<FFortItemEntryStateValue> StateValues)
+UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Count, int LoadedAmmo, int Level, bool ShowPickupNoti, bool updateInventory, int PhantomReserveAmmo, TArray<FFortItemEntryStateValue> StateValues, bool bNotifyItemInstanceAdded)
 {
     if (!this || !Def || !Count)
         return nullptr;
@@ -77,8 +537,10 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
     if (Item->ItemEntry.HasPhantomReserveAmmo())
         Item->ItemEntry.PhantomReserveAmmo = PhantomReserveAmmo;
     if (auto WeaponDef = Def->Cast<UFortWeaponItemDefinition>())
-        if (WeaponDef->HasWeaponModSlots() && FFortItemEntry::HasWeaponModSlots())
-            Item->ItemEntry.WeaponModSlots = WeaponDef->WeaponModSlots;
+        FFortWeaponMods::CopyDefinitionSlotsToEntry(
+            WeaponDef, Item->ItemEntry);
+    const bool bHasWeaponModSlots =
+        FFortWeaponMods::HasEntrySlots(Item->ItemEntry);
     if (Item->ItemEntry.HasStateValues() && StateValues.Num() > 0)
     {
         auto NewData = FMemory::Malloc(FFortItemEntryStateValue::Size() * StateValues.Num());
@@ -97,8 +559,16 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
     }
 
 
-    auto& repEntry = this->Inventory.ReplicatedEntries.Add(Item->ItemEntry, FFortItemEntry::Size());
-    repEntry.bIsReplicatedCopy = true;
+    auto& AddedReplicatedEntry =
+        this->Inventory.ReplicatedEntries.Add(
+            Item->ItemEntry, FFortItemEntry::Size());
+    auto* ReplicatedEntry = &AddedReplicatedEntry;
+    ReplicatedEntry->bIsReplicatedCopy = true;
+    if (bHasWeaponModSlots)
+    {
+        FFortWeaponMods::CopyEntrySlots(
+            Item->ItemEntry, *ReplicatedEntry);
+    }
     this->Inventory.ItemInstances.Add(Item);
 
     /*if (Item->ItemEntry.ItemDefinition->bForceFocusWhenAdded)
@@ -128,13 +598,33 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
 
         HandleInventoryLocalUpdate(); // calls UpdateItemInstances, the func we actually want
 
-        repEntry.bIsDirty = false;
-        Inventory.MarkItemDirty(repEntry);
+        // Native inventory work can move the fast-array allocation. Never
+        // retain the Add() reference across HandleInventoryLocalUpdate.
+        ReplicatedEntry = Inventory.ReplicatedEntries.Search(
+            [&](FFortItemEntry& Candidate)
+            {
+                return Candidate.ItemGuid ==
+                    Item->ItemEntry.ItemGuid;
+            },
+            FFortItemEntry::Size());
+        if (ReplicatedEntry)
+        {
+            ReplicatedEntry->bIsDirty = false;
+            Inventory.MarkItemDirty(*ReplicatedEntry);
+        }
         ForceNetUpdate();
         Item->ItemEntry.bIsDirty = true;
     }
 
-    if (OnItemInstanceAddedVft && Owner)
+    // HandleInventoryLocalUpdate may copy the replicated array header back to
+    // the item instance. Detach it so bench changes cannot mutate both entries.
+    if (bHasWeaponModSlots && ReplicatedEntry)
+    {
+        FFortWeaponMods::CopyEntrySlots(
+            *ReplicatedEntry, Item->ItemEntry);
+    }
+
+    if (bNotifyItemInstanceAdded && OnItemInstanceAddedVft && Owner)
         ((bool(*)(const UFortWorldItem*, const IInterface*)) Item->Vft[OnItemInstanceAddedVft])(Item, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()));
 
     // The S4 gauntlet is force-focused when collected. Route that focus through
@@ -147,6 +637,26 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
         PlayerController->ClientEquipItem(Item->ItemEntry.ItemGuid, true);
     }
 
+    auto RechargingWeaponDefinition =
+        Item->ItemEntry.ItemDefinition
+            ? Item->ItemEntry.ItemDefinition->Cast<
+                UFortWeaponItemDefinition>()
+            : nullptr;
+    if (PlayerController &&
+        IsNitroFistsDefinition(RechargingWeaponDefinition))
+    {
+        // Register at grant time as well as at the loaded-ammo setter.
+        // This keeps the repair event-bound and still detects FN30 paths
+        // that mutate the replicated entry without calling that setter.
+        ObserveRechargingWeaponAmmo(
+            PlayerController,
+            RechargingWeaponDefinition,
+            Item->ItemEntry.ItemGuid,
+            Item->ItemEntry.Level,
+            Item->ItemEntry.LoadedAmmo,
+            Item->ItemEntry.LoadedAmmo);
+    }
+
     return Item;
 }
 
@@ -155,7 +665,83 @@ UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool 
     if (Count == -1)
         Count = entry.Count;
 
-    return GiveItem(entry.ItemDefinition, Count, entry.LoadedAmmo, entry.Level, ShowPickupNoti, updateInventory, entry.HasPhantomReserveAmmo() ? entry.PhantomReserveAmmo : 0, entry.HasStateValues() ? entry.StateValues : TArray<FFortItemEntryStateValue>{});
+    // Preserve the original inventory/callback/force-focus ordering outside
+    // Chapter 5. Deferred notification is needed only while copying the
+    // attachment slots that native item listeners consume.
+    if (!FFortWeaponMods::HasEntrySlots(entry))
+    {
+        return GiveItem(
+            entry.ItemDefinition,
+            Count,
+            entry.LoadedAmmo,
+            entry.Level,
+            ShowPickupNoti,
+            updateInventory,
+            entry.HasPhantomReserveAmmo()
+                ? entry.PhantomReserveAmmo
+                : 0,
+            entry.HasStateValues()
+                ? entry.StateValues
+                : TArray<FFortItemEntryStateValue>{});
+    }
+
+    auto Item = GiveItem(
+        entry.ItemDefinition,
+        Count,
+        entry.LoadedAmmo,
+        entry.Level,
+        ShowPickupNoti,
+        false,
+        entry.HasPhantomReserveAmmo() ? entry.PhantomReserveAmmo : 0,
+        entry.HasStateValues()
+            ? entry.StateValues
+            : TArray<FFortItemEntryStateValue>{},
+        false);
+    if (!Item)
+        return nullptr;
+
+    auto ReplicatedEntry = Inventory.ReplicatedEntries.Search(
+        [&](FFortItemEntry& Candidate)
+        {
+            return Candidate.ItemGuid == Item->ItemEntry.ItemGuid;
+        },
+        FFortItemEntry::Size());
+
+    FFortWeaponMods::CopyEntrySlots(entry, Item->ItemEntry);
+    if (ReplicatedEntry)
+        FFortWeaponMods::CopyEntrySlots(entry, *ReplicatedEntry);
+
+    if (updateInventory)
+    {
+        bRequiresLocalUpdate = true;
+        bRequiresSaving = true;
+        HandleInventoryLocalUpdate();
+
+        ReplicatedEntry = Inventory.ReplicatedEntries.Search(
+            [&](FFortItemEntry& Candidate)
+            {
+                return Candidate.ItemGuid == Item->ItemEntry.ItemGuid;
+            },
+            FFortItemEntry::Size());
+        if (ReplicatedEntry)
+        {
+            ReplicatedEntry->bIsDirty = false;
+            Inventory.MarkItemDirty(*ReplicatedEntry);
+            FFortWeaponMods::CopyEntrySlots(
+                *ReplicatedEntry, Item->ItemEntry);
+        }
+
+        ForceNetUpdate();
+        Item->ItemEntry.bIsDirty = true;
+    }
+
+    // Pickup/custom entries must expose their source attachment set before
+    // inventory listeners initialize the item's abilities and equipped state.
+    // The definition overload deliberately deferred this one notification.
+    if (OnItemInstanceAddedVft && Owner)
+        ((bool(*)(const UFortWorldItem*, const IInterface*)) Item->Vft[OnItemInstanceAddedVft])(Item, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()));
+
+    return Item;
 }
 
 void AFortInventory::SetRequiresUpdate()
@@ -175,9 +761,29 @@ void AFortInventory::Update(FFortItemEntry* Entry)
 
     if (Entry->bIsReplicatedCopy)
     {
+        FGuid UpdatedGuid = Entry->ItemGuid;
         Entry->bIsDirty = false;
         Inventory.MarkItemDirty(*Entry);
         SetRequiresUpdate();
+
+        auto UpdatedReplicatedEntry = Inventory.ReplicatedEntries.Search(
+            [&](FFortItemEntry& Candidate)
+            {
+                return Candidate.ItemGuid == UpdatedGuid;
+            },
+            FFortItemEntry::Size());
+        auto ItemInstance = Inventory.ItemInstances.Search(
+            [&](UFortWorldItem* Candidate)
+            {
+                return Candidate &&
+                    Candidate->ItemEntry.ItemGuid == UpdatedGuid;
+            });
+        if (UpdatedReplicatedEntry && ItemInstance && *ItemInstance)
+        {
+            FFortWeaponMods::CopyEntrySlots(
+                *UpdatedReplicatedEntry,
+                (*ItemInstance)->ItemEntry);
+        }
         goto _out;
     }
 
@@ -190,10 +796,42 @@ void AFortInventory::Update(FFortItemEntry* Entry)
 
         if (repEntry.ItemGuid == Entry->ItemGuid)
         {
+            FGuid UpdatedGuid = Entry->ItemGuid;
+            TArray<void*> PreviousWeaponModSlots{};
+            const bool bPreserveWeaponModAllocation =
+                FFortWeaponMods::IsSupported() &&
+                FFortItemEntry::HasWeaponModSlots();
+            if (bPreserveWeaponModAllocation)
+            {
+                PreviousWeaponModSlots =
+                    repEntry.WeaponModSlots;
+            }
+
+            // Preserve the destination's owned nested buffer across the
+            // outer entry assignment. CopyEntrySlots can then replace and
+            // release it safely instead of losing the allocation header.
             repEntry = *Entry;
+            if (bPreserveWeaponModAllocation)
+            {
+                repEntry.WeaponModSlots =
+                    PreviousWeaponModSlots;
+            }
+            FFortWeaponMods::CopyEntrySlots(*Entry, repEntry);
             repEntry.bIsDirty = false;
             Inventory.MarkItemDirty(repEntry);
             SetRequiresUpdate();
+
+            auto UpdatedReplicatedEntry = Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return Candidate.ItemGuid == UpdatedGuid;
+                },
+                FFortItemEntry::Size());
+            if (UpdatedReplicatedEntry)
+            {
+                FFortWeaponMods::CopyEntrySlots(
+                    *UpdatedReplicatedEntry, *Entry);
+            }
             break;
         }
     }
@@ -287,7 +925,9 @@ void AFortInventory::Remove(FGuid Guid)
     if (ItemEntryIdx == -1)
         return;
 
-    auto EntryDef = Inventory.ReplicatedEntries.Get(ItemEntryIdx, FFortItemEntry::Size()).ItemDefinition;
+    auto& RemovedEntry = Inventory.ReplicatedEntries.Get(
+        ItemEntryIdx, FFortItemEntry::Size());
+    auto EntryDef = RemovedEntry.ItemDefinition;
 
     auto ItemInstanceIdx = Inventory.ItemInstances.SearchIndex([&](UFortWorldItem* entry)
         { return entry->ItemEntry.ItemGuid == Guid; });
@@ -298,6 +938,27 @@ void AFortInventory::Remove(FGuid Guid)
     // storage owned by the array, which is invalid after Remove.
     auto Instance = ItemInstanceResult ? *ItemInstanceResult : nullptr;
 
+    // TArray::Remove performs a raw element shift and does not destruct nested
+    // arrays. Release the attachment buffers explicitly. If a native inventory
+    // update ever left the two entries sharing a header, clear one owner first
+    // so the allocation is released exactly once.
+    if (FFortWeaponMods::IsSupported() &&
+        FFortItemEntry::HasWeaponModSlots())
+    {
+        if (Instance &&
+            RemovedEntry.WeaponModSlots.Data &&
+            RemovedEntry.WeaponModSlots.Data ==
+                Instance->ItemEntry.WeaponModSlots.Data)
+        {
+            Instance->ItemEntry.WeaponModSlots.Data = nullptr;
+            Instance->ItemEntry.WeaponModSlots.NumElements = 0;
+            Instance->ItemEntry.WeaponModSlots.MaxElements = 0;
+        }
+
+        FFortWeaponMods::FreeEntrySlots(RemovedEntry);
+        if (Instance)
+            FFortWeaponMods::FreeEntrySlots(Instance->ItemEntry);
+    }
 
     if (ItemEntryIdx != -1)
         Inventory.ReplicatedEntries.Remove(ItemEntryIdx, FFortItemEntry::Size());
@@ -421,8 +1082,17 @@ FFortItemEntry* AFortInventory::MakeItemEntry(const UFortItemDefinition* ItemDef
         }
     }
     if (auto WeaponDef = ItemDef->Cast<UFortWeaponItemDefinition>())
-        if (WeaponDef->HasWeaponModSlots() && FFortItemEntry::HasWeaponModSlots())
+    {
+        if (FFortWeaponMods::IsSupported() &&
+            WeaponDef->HasWeaponModSlots() &&
+            FFortItemEntry::HasWeaponModSlots())
+        {
+            // MakeItemEntry returns a short-lived, caller-owned entry. Keep a
+            // read-only view here; every durable destination (pickup or
+            // inventory entry) deep-copies it before this temporary is freed.
             ItemEntry->WeaponModSlots = WeaponDef->WeaponModSlots;
+        }
+    }
     if (ItemEntry->HasPickupVariantIndex())
         ItemEntry->PickupVariantIndex = -1;
     if (ItemEntry->HasItemVariantDataMappingIndex())
@@ -452,6 +1122,18 @@ AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entr
     static auto HasPhantomReserveAmmo = Entry.HasPhantomReserveAmmo();
     if (HasPhantomReserveAmmo)
         NewPickup->PrimaryPickupItemEntry.PhantomReserveAmmo = Entry.PhantomReserveAmmo;
+
+    bool bAllowRandomMods = false;
+    if (FFortWeaponMods::IsSupported())
+    {
+        bAllowRandomMods =
+            SourceTypeFlag != EFortPickupSourceTypeFlag::GetPlayer() &&
+            SourceTypeFlag != EFortPickupSourceTypeFlag::GetTossed() &&
+            SpawnSource != EFortPickupSpawnSource::GetPlayerElimination() &&
+            SpawnSource != EFortPickupSpawnSource::GetTossedByPlayer();
+    }
+    FFortWeaponMods::InitializePickup(
+        NewPickup, Entry, bAllowRandomMods);
 
     if (SetPickupItems)
     {
@@ -487,6 +1169,7 @@ AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, const UFortItemDefin
         ItemEntry->LoadedAmmo = LoadedAmmo;
 
     auto Pickup = SpawnPickup(Loc, *ItemEntry, SourceTypeFlag, SpawnSource, Pawn, -1, Toss, true, bRandomRotation, OverrideClass);
+    FFortWeaponMods::FreeEntrySlots(*ItemEntry);
     free(ItemEntry);
     return Pickup;
 }
@@ -522,6 +1205,9 @@ AFortPickupAthena* AFortInventory::SpawnPickup(ABuildingContainer* Container, FF
     static auto HasPhantomReserveAmmo = Entry.HasPhantomReserveAmmo();
     if (HasPhantomReserveAmmo)
         NewPickup->PrimaryPickupItemEntry.PhantomReserveAmmo = Entry.PhantomReserveAmmo;
+
+    FFortWeaponMods::InitializePickup(
+        NewPickup, Entry, true);
 
     if (SetPickupItems)
     {
@@ -576,6 +1262,289 @@ bool AFortInventory::IsPrimaryQuickbar(const UFortItemDefinition* ItemDefinition
         ? false : true;
 }
 
+void AFortInventory::TickRegeneratingItems()
+{
+    if (RegeneratingInventoryItems.empty() &&
+        RechargingWeaponAmmo.empty())
+        return;
+
+    auto World = UWorld::GetWorld();
+    if (!World)
+        return;
+
+    const double NowSeconds =
+        UGameplayStatics::GetTimeSeconds(World);
+
+    for (size_t Index = 0;
+        Index < RegeneratingInventoryItems.size();)
+    {
+        auto& State = RegeneratingInventoryItems[Index];
+        auto Owner = State.Owner.Get();
+        auto AmmoDefinition = State.AmmoDefinition.Get();
+
+        if (!Owner || !Owner->WorldInventory || !AmmoDefinition ||
+            State.MaxCount <= 0 ||
+            !std::isfinite(State.CooldownSeconds) ||
+            State.CooldownSeconds <= 0.0)
+        {
+            RemoveRegenItemAt(Index);
+            continue;
+        }
+
+        auto Inventory = Owner->WorldInventory;
+        auto ReplicatedEntry =
+            Inventory->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(
+                            Candidate.ItemGuid,
+                            State.ItemGuid) &&
+                        Candidate.ItemDefinition == AmmoDefinition;
+                },
+                FFortItemEntry::Size());
+        auto ItemInstance =
+            Inventory->Inventory.ItemInstances.Search(
+                [&](UFortWorldItem* Candidate)
+                {
+                    return Candidate &&
+                        AreGuidsEqual(
+                            Candidate->ItemEntry.ItemGuid,
+                            State.ItemGuid) &&
+                        Candidate->ItemEntry.ItemDefinition ==
+                            AmmoDefinition;
+                });
+
+        if (!ReplicatedEntry || !ItemInstance || !*ItemInstance)
+        {
+            RemoveRegenItemAt(Index);
+            continue;
+        }
+
+        if (ReplicatedEntry->Count >= State.MaxCount)
+        {
+            RemoveRegenItemAt(Index);
+            continue;
+        }
+
+        if (NowSeconds < State.NextRefillTime)
+        {
+            ++Index;
+            continue;
+        }
+
+        int32 NewCount = min(
+            max(ReplicatedEntry->Count, 0) + 1,
+            State.MaxCount);
+        ReplicatedEntry->Count = NewCount;
+        (*ItemInstance)->ItemEntry.Count = NewCount;
+        (*ItemInstance)->ItemEntry.bIsDirty = true;
+
+        const bool bReachedMaximum =
+            NewCount >= State.MaxCount;
+        const int32 MaximumCount = State.MaxCount;
+        const auto DefinitionName =
+            AmmoDefinition->Name.ToString();
+        if (bReachedMaximum)
+        {
+            RemoveRegenItemAt(Index);
+        }
+        else
+        {
+            // One charge is restored per complete cooldown. Starting the
+            // next interval from the current server time prevents a hitch
+            // from granting several queued charges in a single frame.
+            State.NextRefillTime =
+                NowSeconds + State.CooldownSeconds;
+            ++Index;
+        }
+
+        Inventory->UpdateEntry(*ReplicatedEntry);
+        SDK::DbgLog(
+            "[ItemRegen] refilled definition=%s count=%d max=%d\n",
+            DefinitionName.c_str(),
+            NewCount,
+            MaximumCount);
+    }
+
+    for (size_t Index = 0;
+        Index < RechargingWeaponAmmo.size();)
+    {
+        auto& State = RechargingWeaponAmmo[Index];
+        auto Owner = State.Owner.Get();
+        auto WeaponDefinition =
+            State.WeaponDefinition.Get();
+        if (!Owner || !Owner->WorldInventory ||
+            !WeaponDefinition ||
+            State.MaxLoadedAmmo <= 0 ||
+            State.RechargeAmount <= 0 ||
+            !std::isfinite(State.RechargeIntervalSeconds) ||
+            State.RechargeIntervalSeconds <= 0.0)
+        {
+            RemoveRechargingWeaponAt(Index);
+            continue;
+        }
+
+        auto Inventory = Owner->WorldInventory;
+        auto ReplicatedEntry =
+            Inventory->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(
+                            Candidate.ItemGuid,
+                            State.ItemGuid) &&
+                        Candidate.ItemDefinition ==
+                            WeaponDefinition;
+                },
+                FFortItemEntry::Size());
+        auto ItemInstance =
+            Inventory->Inventory.ItemInstances.Search(
+                [&](UFortWorldItem* Candidate)
+                {
+                    return Candidate &&
+                        AreGuidsEqual(
+                            Candidate->ItemEntry.ItemGuid,
+                            State.ItemGuid) &&
+                        Candidate->ItemEntry.ItemDefinition ==
+                            WeaponDefinition;
+                });
+        if (!ReplicatedEntry || !ItemInstance ||
+            !*ItemInstance)
+        {
+            RemoveRechargingWeaponAt(Index);
+            continue;
+        }
+
+        int32 CurrentLoadedAmmo =
+            std::clamp(
+                ReplicatedEntry->LoadedAmmo,
+                0,
+                State.MaxLoadedAmmo);
+        if (CurrentLoadedAmmo >= State.MaxLoadedAmmo)
+        {
+            if (State.LastObservedLoadedAmmo !=
+                State.MaxLoadedAmmo)
+            {
+                SyncEquippedNitroFistsAmmo(
+                    Owner,
+                    WeaponDefinition,
+                    State.ItemGuid,
+                    State.MaxLoadedAmmo);
+            }
+            State.LastObservedLoadedAmmo =
+                State.MaxLoadedAmmo;
+            State.NextRefillTime = 0.0;
+            ++Index;
+            continue;
+        }
+
+        // The native FN30 recharge component normally wins this race.
+        // If it restored a charge, observe the increase and defer this
+        // watchdog for another full interval instead of double-granting.
+        if (CurrentLoadedAmmo >
+            State.LastObservedLoadedAmmo)
+        {
+            SyncEquippedNitroFistsAmmo(
+                Owner,
+                WeaponDefinition,
+                State.ItemGuid,
+                CurrentLoadedAmmo);
+            State.LastObservedLoadedAmmo =
+                CurrentLoadedAmmo;
+            State.NextRefillTime =
+                NowSeconds +
+                State.RechargeIntervalSeconds +
+                NativeRechargeGraceSeconds;
+            NotifyNitroFistsRechargeStarted(
+                Owner, State.ItemGuid, NowSeconds);
+            ++Index;
+            continue;
+        }
+        bool bStartedRechargeCycle = false;
+        if (CurrentLoadedAmmo <
+            State.LastObservedLoadedAmmo)
+        {
+            State.LastObservedLoadedAmmo =
+                CurrentLoadedAmmo;
+            if (State.NextRefillTime <= 0.0)
+            {
+                State.NextRefillTime =
+                    NowSeconds +
+                    State.RechargeIntervalSeconds +
+                    NativeRechargeGraceSeconds;
+                bStartedRechargeCycle = true;
+            }
+        }
+        else if (State.NextRefillTime <= 0.0)
+        {
+            State.NextRefillTime =
+                NowSeconds +
+                State.RechargeIntervalSeconds +
+                NativeRechargeGraceSeconds;
+            bStartedRechargeCycle = true;
+        }
+        if (bStartedRechargeCycle)
+        {
+            NotifyNitroFistsRechargeStarted(
+                Owner, State.ItemGuid, NowSeconds);
+        }
+
+        if (NowSeconds < State.NextRefillTime)
+        {
+            ++Index;
+            continue;
+        }
+
+        int32 NewLoadedAmmo =
+            min(
+                CurrentLoadedAmmo +
+                    State.RechargeAmount,
+                State.MaxLoadedAmmo);
+        ReplicatedEntry->LoadedAmmo = NewLoadedAmmo;
+        auto WorldItem = *ItemInstance;
+        WorldItem->ItemEntry.LoadedAmmo =
+            NewLoadedAmmo;
+        WorldItem->ItemEntry.bIsDirty = true;
+        State.LastObservedLoadedAmmo =
+            NewLoadedAmmo;
+
+        const int32 MaximumLoadedAmmo =
+            State.MaxLoadedAmmo;
+        const auto DefinitionName =
+            WeaponDefinition->Name.ToString();
+        if (NewLoadedAmmo >= State.MaxLoadedAmmo)
+        {
+            State.NextRefillTime = 0.0;
+            ++Index;
+        }
+        else
+        {
+            State.NextRefillTime =
+                NowSeconds +
+                State.RechargeIntervalSeconds +
+                NativeRechargeGraceSeconds;
+            NotifyNitroFistsRechargeStarted(
+                Owner, State.ItemGuid, NowSeconds);
+            ++Index;
+        }
+
+        Inventory->UpdateEntry(*ReplicatedEntry);
+        BroadcastWorldItemAmmoChanged(WorldItem);
+        const bool bEquippedWeaponSynced =
+            SyncEquippedNitroFistsAmmo(
+                Owner,
+                WeaponDefinition,
+                State.ItemGuid,
+                NewLoadedAmmo);
+        SDK::DbgLog(
+            "[WeaponRecharge] fallback-refilled "
+            "definition=%s ammo=%d/%d equipped-sync=%d\n",
+            DefinitionName.c_str(),
+            NewLoadedAmmo,
+            MaximumLoadedAmmo,
+            bEquippedWeaponSynced ? 1 : 0);
+    }
+}
+
 
 void AFortInventory::UpdateEntry(FFortItemEntry& Entry)
 {
@@ -613,10 +1582,43 @@ bool RemoveInventoryItem(IInterface* Interface, FGuid& ItemGuid, int Count, bool
     auto itemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
         { return entry.ItemGuid == ItemGuid; }, FFortItemEntry::Size());
 
-    if (ItemP)
+    if (ItemP && *ItemP && itemEntry)
     {
-
         auto Item = *ItemP;
+        auto AmmoDefinition =
+            Item->ItemEntry.ItemDefinition
+                ? Item->ItemEntry.ItemDefinition->Cast<
+                    UFortAmmoItemDefinition>()
+                : nullptr;
+        const float ItemLevel =
+            Item->ItemEntry.Level > 0
+                ? static_cast<float>(Item->ItemEntry.Level)
+                : 1.0f;
+        double RegenCooldownSeconds = 0.0;
+        int32 RegenMaximumCount = 0;
+        if (Count > 0 && !bForceRemoval && AmmoDefinition &&
+            AmmoDefinition->HasRegenCooldown())
+        {
+            RegenCooldownSeconds =
+                AmmoDefinition->RegenCooldown.Evaluate(ItemLevel);
+
+            // GetMaxStackSize can depend on an attribute set for some item
+            // types. The pre-consumption count is an authoritative lower
+            // bound and preserves the full charge capacity if that lookup
+            // is unavailable in a server-only session.
+            RegenMaximumCount = max(
+                AmmoDefinition->GetMaxStackSize(),
+                itemEntry->Count);
+            if (RegenMaximumCount <= 0 ||
+                RegenMaximumCount > 10000 ||
+                !std::isfinite(RegenCooldownSeconds) ||
+                RegenCooldownSeconds <= 0.0 ||
+                RegenCooldownSeconds > 3600.0)
+            {
+                RegenCooldownSeconds = 0.0;
+                RegenMaximumCount = 0;
+            }
+        }
 
         /*for (int i = 0; i < itemEntry->StateValues.Num(); i++)
         {
@@ -678,6 +1680,16 @@ bool RemoveInventoryItem(IInterface* Interface, FGuid& ItemGuid, int Count, bool
             Item->ItemEntry.bIsDirty = true;
         }
 
+        if (RegenMaximumCount > 0)
+        {
+            ScheduleRegeneratingInventoryItem(
+                PlayerController,
+                AmmoDefinition,
+                ItemGuid,
+                RegenMaximumCount,
+                RegenCooldownSeconds);
+        }
+
         return true;
     }
 
@@ -686,15 +1698,44 @@ bool RemoveInventoryItem(IInterface* Interface, FGuid& ItemGuid, int Count, bool
 
 void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
 {
+    if (!Item)
+        return;
+
     auto PlayerController = (AFortPlayerControllerAthena*)Item->GetOwningController();
+    if (!PlayerController || !PlayerController->WorldInventory)
+        return;
+
     //PlayerController->WorldInventory->UpdateEntry(Item->ItemEntry);
     auto repEnt = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& item)
         { return item.ItemGuid == Item->ItemEntry.ItemGuid; }, FFortItemEntry::Size());
+    if (!repEnt)
+        return;
 
+    const int32 PreviousLoadedAmmo = repEnt->LoadedAmmo;
     repEnt->LoadedAmmo = LoadedAmmo;
     Item->ItemEntry.LoadedAmmo = LoadedAmmo;
     PlayerController->WorldInventory->UpdateEntry(*repEnt);
     Item->ItemEntry.bIsDirty = true;
+
+    auto WeaponDefinition =
+        Item->ItemEntry.ItemDefinition
+            ? Item->ItemEntry.ItemDefinition->Cast<
+                UFortWeaponItemDefinition>()
+            : nullptr;
+    if (IsNitroFistsDefinition(WeaponDefinition))
+    {
+        // The original native setter broadcasts this signal. The custom
+        // inventory setter must preserve it so FN30's
+        // FortControllerComponent_RechargeWeapons sees charge use.
+        BroadcastWorldItemAmmoChanged(Item);
+        ObserveRechargingWeaponAmmo(
+            PlayerController,
+            WeaponDefinition,
+            Item->ItemEntry.ItemGuid,
+            Item->ItemEntry.Level,
+            PreviousLoadedAmmo,
+            LoadedAmmo);
+    }
 }
 
 void SetPhantomReserveAmmo(UFortWorldItem* Item, unsigned int PhantomReserveAmmo)
@@ -778,11 +1819,38 @@ void AFortInventory::PostLoadHook()
         if (SetOwningInventoryIdx)
         {
             auto HasPhantomReserveAmmo = FFortItemEntry::HasPhantomReserveAmmo();
+            const uint32 LoadedAmmoSetterIndex =
+                uint32(
+                    SetOwningInventoryIdx -
+                    (HasPhantomReserveAmmo
+                        ? (VersionInfo.EngineVersion < 4.27
+                            ? 2
+                            : 3)
+                        : 1));
 
-            Utils::Hook<UFortWorldItem>(uint32(SetOwningInventoryIdx - (HasPhantomReserveAmmo ? (VersionInfo.EngineVersion < 4.27 ? 2 : 3) : 1)), SetLoadedAmmo);
+            Utils::Hook<UFortWorldItem>(
+                LoadedAmmoSetterIndex,
+                SetLoadedAmmo);
             if (HasPhantomReserveAmmo)
                 Utils::Hook<UFortWorldItem>(uint32(SetOwningInventoryIdx - (VersionInfo.EngineVersion < 4.27 ? 1 : 2)), SetPhantomReserveAmmo);
+
+            SDK::DbgLog(
+                "[WeaponRecharge] loaded-ammo setter hook "
+                "installed index=%u\n",
+                LoadedAmmoSetterIndex);
         }
+        else
+        {
+            SDK::DbgLog(
+                "[WeaponRecharge] loaded-ammo setter hook "
+                "unavailable: owner setter vft index missing\n");
+        }
+    }
+    else
+    {
+        SDK::DbgLog(
+            "[WeaponRecharge] loaded-ammo setter hook "
+            "unavailable: owner setter signature missing\n");
     }
 
     SDK::DbgLog("  [FI] 3 SetOwningInventory block done\n");

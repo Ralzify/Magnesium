@@ -20,6 +20,8 @@
 #include "../../Engine/Public/NetDriver.h"
 #include "../../Erbium/Public/Misc.h"
 #include "../Public/FortControllerComponent_VictoryCrowns.h"
+#include "../Public/FortWeaponMods.h"
+#include "../Public/FortVehicleMods.h"
 
 #include <d3d11.h>
 #include <sstream>
@@ -39,12 +41,330 @@
 #include <functional>
 
 static const UClass* GetRemoteControlledPawnClass();
+static bool IsNativeVehiclePossessionPawn(AActor* Actor);
+static bool IsUsableDeathObject(const UObject* Object);
 
 // A guided missile's controller Pawn fields are not reliable on legacy builds:
 // Season 4 can leave both of them pointing at the character for the entire
 // remote-control session. This lifecycle map is populated by the confirmed
 // remote-pawn acknowledgement and cleared by the native return acknowledgement.
 static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GRemoteControlReturnPawn;
+// Character vehicles (notably the B.R.U.T.E. on legacy builds) temporarily
+// replace Controller->Pawn just like a guided missile does. Keep that
+// possession separate from real player-pawn replacement so entering/exiting a
+// vehicle cannot run spawn/respawn initialization.
+static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GVehiclePossessionReturnPawn;
+// Keep the authoritative host actor as well as the return pawn. A B.R.U.T.E.
+// driver-to-gunner transition returns controller possession to the character
+// while that character is still occupying the vehicle, so the return pawn by
+// itself cannot distinguish a seat change from a real exit.
+static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GVehiclePossessionVehicle;
+
+static AActor* ResolveVehicleForPawn(AActor* Pawn)
+{
+	if (!IsUsableDeathObject(Pawn))
+		return nullptr;
+
+	// Controller possession alternates between the character and the mech.
+	// Resolve the function on the current object every time; caching a UFunction
+	// from one of those classes and invoking it on the other is invalid.
+	auto GetVehicleFunction = Pawn->GetFunction("GetVehicleActor");
+	if (!GetVehicleFunction)
+		GetVehicleFunction = Pawn->GetFunction("GetVehicle");
+	if (!GetVehicleFunction)
+		GetVehicleFunction = Pawn->GetFunction("BP_GetVehicle");
+
+	return GetVehicleFunction
+		? Pawn->Call<AActor*>(GetVehicleFunction) : nullptr;
+}
+
+static AFortPlayerPawnAthena* ResolveVehicleRiderPawn(
+	AFortPlayerControllerAthena* PlayerController,
+	AActor* FallbackPawn = nullptr)
+{
+	if (!PlayerController)
+		return nullptr;
+
+	auto PlayerPawnClass = AFortPlayerPawnAthena::StaticClass();
+	if (!PlayerPawnClass)
+		return nullptr;
+
+	auto ReturnPawn =
+		GVehiclePossessionReturnPawn.find(PlayerController);
+	if (ReturnPawn != GVehiclePossessionReturnPawn.end() &&
+		IsUsableDeathObject(ReturnPawn->second) &&
+		ReturnPawn->second->IsA(PlayerPawnClass))
+	{
+		return (AFortPlayerPawnAthena*)ReturnPawn->second;
+	}
+
+	auto MyFortPawn = (AActor*)PlayerController->MyFortPawn;
+	if (IsUsableDeathObject(MyFortPawn) &&
+		MyFortPawn->IsA(PlayerPawnClass))
+		return (AFortPlayerPawnAthena*)MyFortPawn;
+
+	auto ControlledPawn = (AActor*)PlayerController->Pawn;
+	if (IsUsableDeathObject(ControlledPawn) &&
+		ControlledPawn->IsA(PlayerPawnClass))
+		return (AFortPlayerPawnAthena*)ControlledPawn;
+
+	return IsUsableDeathObject(FallbackPawn) &&
+		FallbackPawn->IsA(PlayerPawnClass)
+		? (AFortPlayerPawnAthena*)FallbackPawn : nullptr;
+}
+
+static int32 FindTrackedVehicleSeat(
+	AActor* Vehicle, AFortPlayerPawnAthena* RiderPawn)
+{
+	if (!IsUsableDeathObject(Vehicle) ||
+		!IsUsableDeathObject(RiderPawn))
+		return -1;
+
+	auto SeatComponent = (UFortVehicleSeatComponent*)
+		Vehicle->GetComponentByClass(
+			UFortVehicleSeatComponent::StaticClass());
+	return SeatComponent
+		? SeatComponent->FindSeatIndex(RiderPawn) : -1;
+}
+
+static bool IsControllerStillUsingTrackedVehicle(
+	AFortPlayerControllerAthena* PlayerController,
+	AActor* FallbackRider = nullptr)
+{
+	if (!PlayerController)
+		return false;
+
+	auto VehicleState =
+		GVehiclePossessionVehicle.find(PlayerController);
+	if (VehicleState == GVehiclePossessionVehicle.end() ||
+		!IsUsableDeathObject(VehicleState->second))
+	{
+		return false;
+	}
+
+	auto Vehicle = VehicleState->second;
+	if ((AActor*)PlayerController->Pawn == Vehicle)
+		return true;
+
+	auto RiderPawn = ResolveVehicleRiderPawn(
+		PlayerController, FallbackRider);
+	if (!RiderPawn)
+		return false;
+
+	// The replicated slot is authoritative when present. GetVehicle can lag
+	// behind a successful ordinary-car exit, so only use it as a fallback for
+	// vehicle classes that do not expose the common seat component.
+	auto SeatComponent = (UFortVehicleSeatComponent*)
+		Vehicle->GetComponentByClass(
+			UFortVehicleSeatComponent::StaticClass());
+	if (SeatComponent)
+		return SeatComponent->FindSeatIndex(RiderPawn) >= 0;
+
+	return ResolveVehicleForPawn(RiderPawn) == Vehicle;
+}
+
+struct FTrackedVehicleLoadout
+{
+	bool bHasOriginalEquippedItem = false;
+	FGuid OriginalEquippedItem{};
+	std::vector<FGuid> TemporaryItemGuids;
+};
+
+static std::unordered_map<AFortPlayerControllerAthena*,
+	FTrackedVehicleLoadout> GTrackedVehicleLoadouts;
+
+static bool VehicleLoadoutGuidsEqual(
+	const FGuid& Left, const FGuid& Right)
+{
+	return Left.A == Right.A && Left.B == Right.B &&
+		Left.C == Right.C && Left.D == Right.D;
+}
+
+static bool VehicleLoadoutContainsGuid(
+	const std::vector<FGuid>& Guids, const FGuid& Guid)
+{
+	return std::any_of(
+		Guids.begin(), Guids.end(),
+		[&](const FGuid& Existing)
+		{
+			return VehicleLoadoutGuidsEqual(Existing, Guid);
+		});
+}
+
+static bool VehicleInventoryContainsGuid(
+	AFortInventory* Inventory, const FGuid& Guid)
+{
+	if (!Inventory)
+		return false;
+
+	for (int32 Index = 0;
+		Index < Inventory->Inventory.ReplicatedEntries.Num(); ++Index)
+	{
+		auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(
+			Index, FFortItemEntry::Size());
+		if (VehicleLoadoutGuidsEqual(Entry.ItemGuid, Guid))
+			return true;
+	}
+
+	return false;
+}
+
+static std::vector<FGuid> SnapshotVehicleInventoryGuids(
+	AFortInventory* Inventory)
+{
+	std::vector<FGuid> Guids;
+	if (!Inventory)
+		return Guids;
+
+	Guids.reserve(
+		Inventory->Inventory.ReplicatedEntries.Num());
+	for (int32 Index = 0;
+		Index < Inventory->Inventory.ReplicatedEntries.Num(); ++Index)
+	{
+		auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(
+			Index, FFortItemEntry::Size());
+		Guids.push_back(Entry.ItemGuid);
+	}
+
+	return Guids;
+}
+
+static FTrackedVehicleLoadout CaptureVehicleLoadout(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* RiderPawn)
+{
+	FTrackedVehicleLoadout State{};
+	if (!PlayerController || !PlayerController->WorldInventory ||
+		!RiderPawn || !RiderPawn->HasCurrentWeapon() ||
+		!RiderPawn->CurrentWeapon)
+	{
+		return State;
+	}
+
+	auto CurrentWeapon =
+		RiderPawn->CurrentWeapon->Cast<AFortWeapon>();
+	if (!CurrentWeapon ||
+		!VehicleInventoryContainsGuid(
+			PlayerController->WorldInventory,
+			CurrentWeapon->ItemEntryGuid))
+	{
+		return State;
+	}
+
+	State.bHasOriginalEquippedItem = true;
+	State.OriginalEquippedItem = CurrentWeapon->ItemEntryGuid;
+	return State;
+}
+
+static void TrackNewVehicleItems(
+	FTrackedVehicleLoadout& State,
+	AFortInventory* Inventory,
+	const std::vector<FGuid>& BeforeGuids,
+	const UFortItemDefinition* RequiredDefinition = nullptr)
+{
+	if (!Inventory)
+		return;
+
+	for (int32 Index = 0;
+		Index < Inventory->Inventory.ReplicatedEntries.Num(); ++Index)
+	{
+		auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(
+			Index, FFortItemEntry::Size());
+		if ((RequiredDefinition &&
+				Entry.ItemDefinition != RequiredDefinition) ||
+			VehicleLoadoutContainsGuid(BeforeGuids, Entry.ItemGuid) ||
+			VehicleLoadoutContainsGuid(
+				State.TemporaryItemGuids, Entry.ItemGuid))
+		{
+			continue;
+		}
+
+		State.TemporaryItemGuids.push_back(Entry.ItemGuid);
+	}
+}
+
+static void RemoveTrackedVehicleItems(
+	AFortPlayerControllerAthena* PlayerController,
+	FTrackedVehicleLoadout& State)
+{
+	if (!PlayerController || !PlayerController->WorldInventory)
+		return;
+
+	for (const auto& Guid : State.TemporaryItemGuids)
+	{
+		if (VehicleInventoryContainsGuid(
+			PlayerController->WorldInventory, Guid))
+		{
+			PlayerController->WorldInventory->Remove(Guid);
+		}
+	}
+	State.TemporaryItemGuids.clear();
+}
+
+static bool EquipTrackedVehicleOriginalItem(
+	AFortPlayerControllerAthena* PlayerController,
+	const FTrackedVehicleLoadout& State)
+{
+	if (!State.bHasOriginalEquippedItem ||
+		!PlayerController || !PlayerController->WorldInventory ||
+		!VehicleInventoryContainsGuid(
+			PlayerController->WorldInventory,
+			State.OriginalEquippedItem))
+	{
+		return false;
+	}
+
+	PlayerController->ServerExecuteInventoryItem(
+		State.OriginalEquippedItem);
+	PlayerController->ClientEquipItem(
+		State.OriginalEquippedItem, true);
+	return true;
+}
+
+void AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController)
+		return;
+
+	// ServerOnExitVehicle can be rejected, and returning possession to the
+	// B.R.U.T.E. gunner is a seat transition rather than an exit. In both cases
+	// the character remains in the stored vehicle slot, so retain the temporary
+	// Ostrich weapon and the original-loadout snapshot.
+	if (IsControllerStillUsingTrackedVehicle(PlayerController))
+	{
+		SDK::DbgLog(
+			"[Vehicles] deferred loadout restore for occupied vehicle "
+			"controller=%p vehicle=%p\n",
+			(void*)PlayerController,
+			(void*)GVehiclePossessionVehicle[PlayerController]);
+		return;
+	}
+
+	GVehiclePossessionReturnPawn.erase(PlayerController);
+	GVehiclePossessionVehicle.erase(PlayerController);
+
+	auto Tracked = GTrackedVehicleLoadouts.find(PlayerController);
+	if (Tracked == GTrackedVehicleLoadouts.end())
+		return;
+
+	auto State = std::move(Tracked->second);
+	GTrackedVehicleLoadouts.erase(Tracked);
+	RemoveTrackedVehicleItems(PlayerController, State);
+
+	if (!EquipTrackedVehicleOriginalItem(
+		PlayerController, State))
+		return;
+
+	SDK::DbgLog(
+		"[Vehicles] restored exact pre-entry equipped item "
+		"controller=%p guid=%08x-%08x-%08x-%08x\n",
+		(void*)PlayerController,
+		(unsigned)State.OriginalEquippedItem.A,
+		(unsigned)State.OriginalEquippedItem.B,
+		(unsigned)State.OriginalEquippedItem.C,
+		(unsigned)State.OriginalEquippedItem.D);
+}
 
 static bool IsRemoteControlledPawn(AActor* Actor)
 {
@@ -117,7 +437,11 @@ void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena
 	auto ControlledPawn = (AActor*)PlayerController->Pawn;
 	const bool bRemoteControlActive =
 		GRemoteControlReturnPawn.find(PlayerController) != GRemoteControlReturnPawn.end();
-	if (bRemoteControlActive || IsRemoteControlledPawn(ControlledPawn) ||
+	const bool bVehiclePossessionActive =
+		GVehiclePossessionReturnPawn.find(PlayerController) !=
+		GVehiclePossessionReturnPawn.end();
+	if (bRemoteControlActive || bVehiclePossessionActive ||
+		IsRemoteControlledPawn(ControlledPawn) ||
 		IsRemoteControlledPawn(PlayerController->AcknowledgedPawn))
 	{
 		if (GetPlayerViewPointOG)
@@ -220,8 +544,31 @@ static std::unordered_map<AFortPlayerControllerAthena*, TWeakObjectPtr<AFortWeap
 static std::unordered_map<AFortPlayerControllerAthena*, AActor*> GLastAcknowledgedPawn;
 static const UClass* GetRemoteControlledPawnClass()
 {
-	static auto RemoteControlledPawnClass = FindClass("FortRemoteControlledPawnAthena");
+	static auto RemoteControlledPawnClass =
+		FindClass("FortRemoteControlledPawnAthena");
 	return RemoteControlledPawnClass;
+}
+static bool IsNativeVehiclePossessionPawn(AActor* Actor)
+{
+	if (!Actor)
+		return false;
+
+	// Do not use the generated StaticClass helpers here. They negatively cache a
+	// lookup made before a version-specific vehicle package is loaded. This is a
+	// cold possession path, so retrying a missing class is safe.
+	static const UClass* CharacterVehicleClass = nullptr;
+	static const UClass* AthenaVehicleClass = nullptr;
+	static const UClass* PhysicsPawnClass = nullptr;
+	if (!CharacterVehicleClass)
+		CharacterVehicleClass = FindClass("FortCharacterVehicle");
+	if (!AthenaVehicleClass)
+		AthenaVehicleClass = FindClass("FortAthenaVehicle");
+	if (!PhysicsPawnClass)
+		PhysicsPawnClass = FindClass("FortPhysicsPawn");
+
+	return (CharacterVehicleClass && Actor->IsA(CharacterVehicleClass)) ||
+		(AthenaVehicleClass && Actor->IsA(AthenaVehicleClass)) ||
+		(PhysicsPawnClass && Actor->IsA(PhysicsPawnClass));
 }
 static bool IsLiveRemoteControlReturnPawn(AActor* Actor);
 // A late-game aircraft jump replaces the lobby pawn with the real match pawn.
@@ -986,6 +1333,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	auto RemoteControlledPawnClass = GetRemoteControlledPawnClass();
 	if (RemoteControlledPawnClass && Pawn->IsA(RemoteControlledPawnClass))
 	{
+		// A command-triggered temporary possession may have queued the normal
+		// possess fixups. This acknowledgement is handled natively instead, so
+		// do not let those one-shot flags leak into a later real respawn.
+		GSkipPossessRespawnControllers.erase(PlayerController);
+		GFinalizePossessTakeover.erase(PlayerController);
+
 		AActor* ReturnPawn = nullptr;
 		auto ExistingReturn = GRemoteControlReturnPawn.find(PlayerController);
 		if (ExistingReturn != GRemoteControlReturnPawn.end())
@@ -1010,6 +1363,52 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		}
 
 		SDK::DbgLog("[Possession] native-only remote-control acknowledgement controller=%p pawn=%p return=%p\n",
+			(void*)PlayerController, (void*)Pawn, (void*)ReturnPawn);
+		return;
+	}
+
+	// Legacy character vehicles, including the B.R.U.T.E., are true temporary
+	// possessions: the controller acknowledges the vehicle on entry and the
+	// original character again on exit. Treating the vehicle as a fresh
+	// AFortPlayerPawnAthena below clamps its health to 100, teleports it to the
+	// configured respawn point, and may rebuild the player's inventory.
+	if (IsNativeVehiclePossessionPawn(Pawn))
+	{
+		GSkipPossessRespawnControllers.erase(PlayerController);
+		GFinalizePossessTakeover.erase(PlayerController);
+
+		AActor* ReturnPawn = nullptr;
+		auto ExistingReturn =
+			GVehiclePossessionReturnPawn.find(PlayerController);
+		if (ExistingReturn != GVehiclePossessionReturnPawn.end())
+			ReturnPawn = ExistingReturn->second;
+		else
+		{
+			auto LastAcknowledged =
+				GLastAcknowledgedPawn.find(PlayerController);
+			if (LastAcknowledged != GLastAcknowledgedPawn.end() &&
+				LastAcknowledged->second != Pawn &&
+				IsLiveRemoteControlReturnPawn(LastAcknowledged->second))
+			{
+				ReturnPawn = LastAcknowledged->second;
+			}
+			else if (PlayerController->MyFortPawn != Pawn &&
+				IsLiveRemoteControlReturnPawn(
+					PlayerController->MyFortPawn))
+			{
+				ReturnPawn = PlayerController->MyFortPawn;
+			}
+
+			if (ReturnPawn)
+				GVehiclePossessionReturnPawn[PlayerController] =
+					ReturnPawn;
+		}
+
+		GVehiclePossessionVehicle[PlayerController] = Pawn;
+
+		SDK::DbgLog(
+			"[Possession] native-only vehicle acknowledgement "
+			"controller=%p vehicle=%p return=%p\n",
 			(void*)PlayerController, (void*)Pawn, (void*)ReturnPawn);
 		return;
 	}
@@ -1045,6 +1444,70 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				(double)ReturnRotation.Roll, (int)bUsedStoredRotation);
 			return;
 		}
+	}
+
+	// Exiting a character vehicle returns to the same live character, not to a
+	// newly spawned pawn. Leave location, health, abilities, equipped item, and
+	// every inventory entry to the native vehicle exit path.
+	auto VehicleReturn =
+		GVehiclePossessionReturnPawn.find(PlayerController);
+	if (VehicleReturn != GVehiclePossessionReturnPawn.end())
+	{
+		auto ExpectedPawn = VehicleReturn->second;
+		if (ExpectedPawn == Pawn &&
+			IsLiveRemoteControlReturnPawn(Pawn))
+		{
+			GLastAcknowledgedPawn[PlayerController] = Pawn;
+
+			// The B.R.U.T.E. gives the gunner back their character pawn while
+			// retaining that pawn in its passenger slot. Preserve the vehicle
+			// session and its Ostrich weapon until the slot is actually cleared.
+			if (IsControllerStillUsingTrackedVehicle(
+				PlayerController, Pawn))
+			{
+				SDK::DbgLog(
+					"[Possession] native-only vehicle gunner return "
+					"controller=%p pawn=%p vehicle=%p seat=%d\n",
+					(void*)PlayerController, (void*)Pawn,
+					(void*)GVehiclePossessionVehicle[PlayerController],
+					(int)FindTrackedVehicleSeat(
+						GVehiclePossessionVehicle[PlayerController],
+						(AFortPlayerPawnAthena*)Pawn));
+				return;
+			}
+
+			GVehiclePossessionReturnPawn.erase(VehicleReturn);
+			GVehiclePossessionVehicle.erase(PlayerController);
+			RestoreVehicleLoadoutAfterExit(PlayerController);
+			SDK::DbgLog(
+				"[Possession] native-only vehicle return "
+				"controller=%p pawn=%p\n",
+				(void*)PlayerController, (void*)Pawn);
+			return;
+		}
+
+		// The controller returned to a different pawn, so this is a real pawn
+		// replacement rather than a vehicle exit. Do not let entry bookkeeping
+		// survive into a later, unrelated vehicle lifecycle.
+		GVehiclePossessionReturnPawn.erase(VehicleReturn);
+		GVehiclePossessionVehicle.erase(PlayerController);
+		GTrackedVehicleLoadouts.erase(PlayerController);
+	}
+
+	// ServerAcknowledgePossession is also used for AI, wildlife, and other
+	// object-pawn takeovers. The custom block below is exclusively player spawn
+	// initialization and must never reinterpret an arbitrary pawn as an
+	// AFortPlayerPawnAthena.
+	auto PlayerPawnClass = AFortPlayerPawnAthena::StaticClass();
+	if (!PlayerPawnClass || !Pawn->IsA(PlayerPawnClass))
+	{
+		SDK::DbgLog(
+			"[Possession] native-only non-player acknowledgement "
+			"controller=%p pawn=%p class=%s\n",
+			(void*)PlayerController, (void*)Pawn,
+			Pawn->Class ? Pawn->Class->Name.ToString().c_str() :
+				"<null>");
+		return;
 	}
 
 	const bool bPendingLateGameAircraftLoadout =
@@ -1967,6 +2430,9 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 	if (!Weapon)
 		return;
 
+	FFortWeaponMods::ApplyEntrySlotsAfterEquip(
+		(AFortWeapon*)Weapon, *entry);
+
 	if (VersionInfo.FortniteVersion <= 2.5)
 	{
 		static auto BuildingToolClass = FindClass("FortWeap_BuildingTool");
@@ -2030,7 +2496,7 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryWeapon(UObject* Context,
 	Stack.IncrementCode();
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
-	if (!PlayerController)
+	if (!PlayerController || !Weapon || !PlayerController->WorldInventory)
 		return;
 
 	auto entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
@@ -2051,7 +2517,16 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryWeapon(UObject* Context,
 	if (!ItemDefinition)
 		return;
 
-	PlayerController->MyFortPawn->EquipWeaponDefinition(ItemDefinition, entry->ItemGuid, entry->HasTrackerGuid() ? entry->TrackerGuid : FGuid(), false);
+	auto EquippedWeapon = (AFortWeapon*)PlayerController->MyFortPawn->EquipWeaponDefinition(
+		ItemDefinition,
+		entry->ItemGuid,
+		entry->HasTrackerGuid() ? entry->TrackerGuid : FGuid(),
+		false);
+	if (!EquippedWeapon)
+		return;
+
+	Weapon = EquippedWeapon;
+	FFortWeaponMods::ApplyEntrySlotsAfterEquip(Weapon, *entry);
 
 	if (auto DecoTool = Weapon->Cast<AFortDecoTool>())
 	{
@@ -2347,7 +2822,14 @@ void AFortPlayerControllerAthena::ServerBeginEditingBuildingActor(UObject* Conte
 				return entry.ItemDefinition->Class == UFortEditToolItemDefinition::StaticClass();
 			}, FFortItemEntry::Size());
 
-		PlayerController->MyFortPawn->EquipWeaponDefinition((UFortWeaponItemDefinition*)EditToolEntry->ItemDefinition, EditToolEntry->ItemGuid, EditToolEntry->HasTrackerGuid() ? EditToolEntry->TrackerGuid : FGuid(), false);
+		auto EditWeapon = (AFortWeapon*)PlayerController->MyFortPawn->EquipWeaponDefinition(
+			(UFortWeaponItemDefinition*)EditToolEntry->ItemDefinition,
+			EditToolEntry->ItemGuid,
+			EditToolEntry->HasTrackerGuid() ? EditToolEntry->TrackerGuid : FGuid(),
+			false);
+		if (EditWeapon)
+			FFortWeaponMods::ApplyEntrySlotsAfterEquip(
+				EditWeapon, *EditToolEntry);
 	}
 
 	if (auto EditTool = PlayerController->MyFortPawn->CurrentWeapon->Cast<AFortWeap_EditingTool>())
@@ -3992,6 +4474,9 @@ static bool IsLiveRemoteControlReturnPawn(AActor* Actor)
 {
 	if (!IsUsableDeathObject(Actor))
 		return false;
+	if (IsRemoteControlledPawn(Actor) ||
+		IsNativeVehiclePossessionPawn(Actor))
+		return false;
 
 	auto Pawn = Actor->Cast<AFortPlayerPawnAthena>();
 	if (!Pawn || Pawn->GetHealth() <= 0.f)
@@ -4821,6 +5306,21 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
 	}
 	GRemoteControlReturnPawn.erase(PlayerController);
+
+	auto VehicleReturn =
+		GVehiclePossessionReturnPawn.find(PlayerController);
+	if (VehicleReturn != GVehiclePossessionReturnPawn.end() &&
+		IsLiveRemoteControlReturnPawn(VehicleReturn->second))
+	{
+		SDK::DbgLog(
+			"[Possession] vehicle pawn death left to native "
+			"controller=%p return=%p\n",
+			(void*)PlayerController, (void*)VehicleReturn->second);
+		return ClientOnPawnDiedOG(PlayerController, DeathReport);
+	}
+	GVehiclePossessionReturnPawn.erase(PlayerController);
+	GVehiclePossessionVehicle.erase(PlayerController);
+	GTrackedVehicleLoadouts.erase(PlayerController);
 
 	RestoreRespawnHiddenWeapon(PlayerController);
 	GPendingRespawnLandingFinalization.erase(
@@ -8901,6 +9401,9 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 			GRespawnHiddenWeapons.erase(PlayerController);
 			GLastAcknowledgedPawn.erase(PlayerController);
 			GRemoteControlReturnPawn.erase(PlayerController);
+			GVehiclePossessionReturnPawn.erase(PlayerController);
+			GVehiclePossessionVehicle.erase(PlayerController);
+			GTrackedVehicleLoadouts.erase(PlayerController);
 			GPendingLateGameAircraftLoadout.erase(PlayerController);
 			PlayersInitialized.erase(PlayerController);
 		}
@@ -12364,7 +12867,10 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						continue;
 
 					if (auto Car = Actor->Cast<AFortDagwoodVehicle>())
+					{
+						FortVehicleMods::RegisterSpawnedVehicle(Car);
 						Car->SetFuel(100.f);
+					}
 
 					if (HasExplicitHealth)
 						TryApplySummonHealth(Actor, SummonHealth);
@@ -13069,7 +13575,10 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				// possessed - only the Fortnite-specific steps below are gated on
 				// this, so their properties are never touched. See
 				// IsFortPlayerPawnForCommand for why that guard matters.
-				bool bTargetIsFortPawn = IsFortPlayerPawnForCommand(TargetPawn);
+				bool bTargetIsFortPawn =
+					IsFortPlayerPawnForCommand(TargetPawn) &&
+					!IsRemoteControlledPawn(TargetPawn) &&
+					!IsNativeVehiclePossessionPawn(TargetPawn);
 
 				// Only remember the pawn we started on, not each hop, so
 				// repeated possessions still return to the real one.
@@ -13422,9 +13931,296 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 	}
 }
 
+static UFortVehicleSeatWeaponComponent*
+ResolveVehicleSeatWeaponComponent(
+	AActor* Vehicle,
+	int32 SeatIndex)
+{
+	if (!Vehicle || SeatIndex < 0)
+		return nullptr;
+
+	// FN30 vehicle mods can add several dynamic weapon-seat components. The
+	// generic component lookup returns the first one, which is not necessarily
+	// the component assigned to this passenger seat. Ask the vehicle interface
+	// for its authoritative seat mapping and validate the exact reflected ABI
+	// before invoking it.
+	static UFunction* GetSeatWeaponComponentFunction = nullptr;
+	static bool bResolvedGetSeatWeaponComponent = false;
+	if (!bResolvedGetSeatWeaponComponent)
+	{
+		bResolvedGetSeatWeaponComponent = true;
+		GetSeatWeaponComponentFunction =
+			const_cast<UFunction*>(FindObject<UFunction>(
+				L"/Script/FortniteGame.FortVehicleInterface."
+				L"GetSeatWeaponComponent"));
+
+		bool bSeatIndexValid = false;
+		bool bReturnValueValid = false;
+		if (GetSeatWeaponComponentFunction)
+		{
+			auto Params =
+				GetSeatWeaponComponentFunction->GetParamsNamed();
+			if (Params.Size == 0x10)
+			{
+				for (const auto& Param : Params.NameOffsetMap)
+				{
+					if (Param.Name == "SeatIndex")
+					{
+						bSeatIndexValid =
+							Param.Offset == 0x0 &&
+							Param.ElementSize == sizeof(int32) &&
+							(Param.PropertyFlags & 0x82) == 0x82 &&
+							(Param.PropertyFlags & 0x500) == 0;
+					}
+					else if (Param.Name == "ReturnValue")
+					{
+						bReturnValueValid =
+							Param.Offset == 0x8 &&
+							Param.ElementSize == sizeof(void*) &&
+							(Param.PropertyFlags & 0x580) == 0x580;
+					}
+				}
+			}
+		}
+
+		if (!bSeatIndexValid || !bReturnValueValid)
+			GetSeatWeaponComponentFunction = nullptr;
+	}
+
+	if (GetSeatWeaponComponentFunction)
+	{
+		struct alignas(8) FGetSeatWeaponComponentParams
+		{
+			int32 SeatIndex = -1;
+			uint8 Pad[4]{};
+			UFortVehicleSeatWeaponComponent* ReturnValue = nullptr;
+		} Params;
+		static_assert(
+			sizeof(FGetSeatWeaponComponentParams) == 0x10,
+			"FN30 GetSeatWeaponComponent ABI changed");
+
+		Params.SeatIndex = SeatIndex;
+		Vehicle->ProcessEvent(
+			GetSeatWeaponComponentFunction, &Params);
+		auto SeatWeaponClass =
+			UFortVehicleSeatWeaponComponent::StaticClass();
+		if (Params.ReturnValue && SeatWeaponClass &&
+			Params.ReturnValue->IsA(SeatWeaponClass))
+		{
+			return Params.ReturnValue;
+		}
+	}
+
+	// Preserve legacy vehicle behavior when the interface method does not
+	// exist. Season 30 modded cars normally return above.
+	return static_cast<UFortVehicleSeatWeaponComponent*>(
+		Vehicle->GetComponentByClass(
+			UFortVehicleSeatWeaponComponent::StaticClass()));
+}
+
+static bool ConfigureVehicleSeatWeapon(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* RiderPawn,
+	AActor* Vehicle,
+	UFortVehicleSeatWeaponComponent* SeatWeaponComponent,
+	FWeaponSeatDefinition& WeaponDefinition,
+	int32 SeatIndex,
+	AActor* WeaponToRestore)
+{
+	if (!PlayerController || !PlayerController->WorldInventory ||
+		!RiderPawn || !Vehicle || !SeatWeaponComponent ||
+		SeatIndex < 0 || WeaponDefinition.SeatIndex != SeatIndex ||
+		!WeaponDefinition.VehicleWeapon)
+	{
+		return false;
+	}
+
+	// MountedWeaponInfoRepped stores a real interface pointer on FN30. Validate
+	// it before granting anything so a non-vehicle actor can never leave an
+	// unusable temporary weapon in the player's inventory.
+	const IInterface* VehicleInterface = nullptr;
+	if (FMountedWeaponInfoRepped::HasHostVehicleCached())
+	{
+		auto VehicleInterfaceClass =
+			IFortVehicleInterface::StaticClass();
+		if (!VehicleInterfaceClass)
+			return false;
+
+		VehicleInterface = Vehicle->GetInterface(
+			VehicleInterfaceClass);
+		if (!VehicleInterface)
+			return false;
+	}
+	else if (!FMountedWeaponInfoRepped::HasHostVehicleCachedActor())
+	{
+		return false;
+	}
+
+	auto Tracked = GTrackedVehicleLoadouts.find(PlayerController);
+	if (Tracked == GTrackedVehicleLoadouts.end())
+	{
+		Tracked = GTrackedVehicleLoadouts.emplace(
+			PlayerController,
+			CaptureVehicleLoadout(PlayerController, RiderPawn)).first;
+	}
+
+	// A native seat transition may already have granted the exact weapon.
+	// Reuse only an entry that this vehicle lifecycle tracked; never select an
+	// arbitrary player-owned duplicate merely because its definition matches.
+	auto ItemEntry =
+		PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search(
+			[&](FFortItemEntry& Candidate)
+			{
+				return Candidate.ItemDefinition ==
+						WeaponDefinition.VehicleWeapon &&
+					VehicleLoadoutContainsGuid(
+						Tracked->second.TemporaryItemGuids,
+						Candidate.ItemGuid);
+			},
+			FFortItemEntry::Size());
+	if (!ItemEntry)
+	{
+		const auto InventoryBefore =
+			SnapshotVehicleInventoryGuids(
+				PlayerController->WorldInventory);
+		auto Stats = AFortInventory::GetStats(
+			WeaponDefinition.VehicleWeapon);
+		auto Item = PlayerController->WorldInventory->GiveItem(
+			WeaponDefinition.VehicleWeapon,
+			1,
+			Stats ? Stats->ClipSize : 0);
+		if (!Item)
+			return false;
+
+		TrackNewVehicleItems(
+			Tracked->second,
+			PlayerController->WorldInventory,
+			InventoryBefore,
+			WeaponDefinition.VehicleWeapon);
+		ItemEntry = &Item->ItemEntry;
+	}
+
+	const auto ItemGuid = ItemEntry->ItemGuid;
+	const auto TrackerGuid = FFortItemEntry::HasTrackerGuid()
+		? ItemEntry->TrackerGuid : FGuid();
+	const int32 ItemLevel = ItemEntry->Level;
+	PlayerController->ServerExecuteInventoryItem(ItemGuid);
+	PlayerController->ClientEquipItem(ItemGuid, true);
+
+	auto MountedWeapon = RiderPawn->CurrentWeapon
+		? RiderPawn->CurrentWeapon->Cast<AFortWeapon>()
+		: nullptr;
+	if (!MountedWeapon ||
+		!VehicleLoadoutGuidsEqual(
+			MountedWeapon->ItemEntryGuid, ItemGuid))
+	{
+		MountedWeapon = (AFortWeapon*)RiderPawn->EquipWeaponDefinition(
+			WeaponDefinition.VehicleWeapon,
+			ItemGuid,
+			TrackerGuid,
+			false);
+	}
+	if (!MountedWeapon)
+		return false;
+
+	if (RiderPawn->HasPreviousWeapon() &&
+		WeaponToRestore &&
+		WeaponToRestore != MountedWeapon)
+	{
+		RiderPawn->PreviousWeapon = WeaponToRestore;
+	}
+
+	// A mod-created seat component can miss the pawn-enter callback when the
+	// turret is attached to an occupied car. Re-run its retained lifecycle
+	// setup so targeting/input delegates are bound for this exact definition.
+	if (SeatWeaponComponent->GetFunction("EquipVehicleWeapon"))
+	{
+		SeatWeaponComponent->EquipVehicleWeapon(
+			RiderPawn,
+			WeaponDefinition,
+			ItemLevel);
+	}
+
+	// EquipVehicleWeapon can replace both the dynamic component and the weapon
+	// actor. Re-resolve the seat-specific component and retain the weapon that
+	// native actually left equipped before publishing any transient state.
+	auto FinalSeatWeaponComponent =
+		ResolveVehicleSeatWeaponComponent(Vehicle, SeatIndex);
+	if (FinalSeatWeaponComponent)
+		SeatWeaponComponent = FinalSeatWeaponComponent;
+
+	auto FinalMountedWeapon = RiderPawn->CurrentWeapon
+		? RiderPawn->CurrentWeapon->Cast<AFortWeapon>()
+		: nullptr;
+	if (FinalMountedWeapon &&
+		((FinalMountedWeapon->HasWeaponData() &&
+			FinalMountedWeapon->WeaponData ==
+				WeaponDefinition.VehicleWeapon) ||
+			VehicleLoadoutGuidsEqual(
+				FinalMountedWeapon->ItemEntryGuid, ItemGuid)))
+	{
+		MountedWeapon = FinalMountedWeapon;
+	}
+	// MountedWeaponInfoRepped belongs to FortWeaponRangedForVehicle, not
+	// AFortWeapon. Its generated accessor caches one reflected offset globally;
+	// never let a normal/dual ranged weapon seed or reuse that subclass offset.
+	static const UClass* VehicleWeaponClass = nullptr;
+	if (!VehicleWeaponClass)
+		VehicleWeaponClass =
+			FindClass("FortWeaponRangedForVehicle");
+	if (!MountedWeapon ||
+		!VehicleWeaponClass ||
+		!MountedWeapon->IsA(VehicleWeaponClass) ||
+		!MountedWeapon->HasMountedWeaponInfoRepped())
+	{
+		return false;
+	}
+
+	if (RiderPawn->HasPreviousWeapon() &&
+		WeaponToRestore &&
+		WeaponToRestore != MountedWeapon)
+	{
+		RiderPawn->PreviousWeapon = WeaponToRestore;
+	}
+
+	// Preserve the camera/aim cache populated by the final native transition.
+	// Clearing the full structure detaches a mounted projectile ray from its
+	// passenger camera and leaves only the host fields valid.
+	FMountedWeaponInfoRepped MountedInfo =
+		MountedWeapon->MountedWeaponInfoRepped;
+	if (FMountedWeaponInfoRepped::HasHostVehicleCached())
+	{
+		MountedInfo.HostVehicleCached.ObjectPointer = Vehicle;
+		MountedInfo.HostVehicleCached.InterfacePointer =
+			VehicleInterface;
+	}
+	else
+	{
+		MountedInfo.HostVehicleCachedActor = Vehicle;
+	}
+	MountedInfo.HostVehicleSeatIndexCached = SeatIndex;
+	MountedWeapon->MountedWeaponInfoRepped = MountedInfo;
+	MountedWeapon->OnRep_MountedWeaponInfoRepped();
+
+	// The enhanced-input F toggle passes this transient value to SeatIsTurret.
+	// Publish it only after the native equip path has settled, on the exact
+	// component mapped to the occupied passenger seat.
+	if (SeatWeaponComponent->HasActiveSeatIdx())
+		SeatWeaponComponent->ActiveSeatIdx = SeatIndex;
+
+	MountedWeapon->ForceNetUpdate();
+	RiderPawn->ForceNetUpdate();
+	return true;
+}
+
 extern bool bDidntFind;
 void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFrame& Stack)
 {
+	// The weapon-mod runtime package can stream in after the global post-load
+	// pass. Interaction is a natural, non-ticking retry point before a player
+	// can submit a workbench purchase.
+	FFortWeaponMods::EnsureBenchHooks();
+
 	AActor* ReceivingActor = *(AActor**)Stack.Locals;
 	/*AActor* ReceivingActor;
 	UObject* InteractComponent;
@@ -13450,6 +14246,10 @@ void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFram
 		PlayerController = (AFortPlayerControllerAthena*)Context;
 
 	auto Pawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
+	auto Vehicle = ReceivingActor
+		? ReceivingActor->Cast<AFortAthenaVehicle>() : nullptr;
+	auto CharacterVehicle = ReceivingActor
+		? ReceivingActor->Cast<AFortCharacterVehicle>() : nullptr;
 
 	auto sendStat = [&]()
 	{
@@ -13474,91 +14274,87 @@ void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFram
 
 	if (auto Container = bDidntFind ? ReceivingActor->Cast<ABuildingContainer>() : nullptr)
 		UFortLootPackage::SpawnLootHook(Container);
-	else if (auto Vehicle = ReceivingActor->Cast<AFortAthenaVehicle>())
+	else if (Vehicle || CharacterVehicle)
 	{
+		auto RiderPawn = PlayerController->MyFortPawn
+			? PlayerController->MyFortPawn : Pawn;
+		auto TrackedLoadout =
+			CaptureVehicleLoadout(PlayerController, RiderPawn);
+		auto InventoryBeforeEntry = SnapshotVehicleInventoryGuids(
+			PlayerController->WorldInventory);
+
 		ServerAttemptInteract_OG(Context, Stack);
 		sendStat();
 
-		UFortVehicleSeatWeaponComponent* SeatWeaponComponent = nullptr;
+		auto VehicleActor = Vehicle
+			? (AActor*)Vehicle : (AActor*)CharacterVehicle;
+		auto SeatComponent =
+			(UFortVehicleSeatComponent*)
+			VehicleActor->GetComponentByClass(
+				UFortVehicleSeatComponent::StaticClass());
 
-		if (Vehicle)
-			SeatWeaponComponent = (UFortVehicleSeatWeaponComponent*)Vehicle->GetComponentByClass(UFortVehicleSeatWeaponComponent::StaticClass());
-		else if (auto CharacterVehicle = Pawn->Cast<AFortCharacterVehicle>())
-			SeatWeaponComponent = (UFortVehicleSeatWeaponComponent*)CharacterVehicle->GetComponentByClass(UFortVehicleSeatWeaponComponent::StaticClass());
+		int32 SeatIdx = SeatComponent && RiderPawn
+			? SeatComponent->FindSeatIndex(RiderPawn) : -1;
+		auto SeatWeaponComponent =
+			ResolveVehicleSeatWeaponComponent(
+				VehicleActor, SeatIdx);
+		const bool bPossessedVehicle =
+			(AActor*)PlayerController->Pawn == VehicleActor;
+		const bool bEnteredVehicle =
+			bPossessedVehicle || SeatIdx >= 0;
 
-		if (SeatWeaponComponent)
+		if (!bEnteredVehicle)
+			return;
+
+		GVehiclePossessionVehicle[PlayerController] =
+			VehicleActor;
+
+		// Save the exact live rider while it is still known here. Some legacy
+		// CharacterVehicle builds update MyFortPawn before the later possession
+		// acknowledgement, so that acknowledgement alone cannot always discover
+		// which character native exit must return to.
+		if (bPossessedVehicle &&
+			IsLiveRemoteControlReturnPawn(RiderPawn))
 		{
-			UFortVehicleSeatComponent* SeatComponent = nullptr;
+			GVehiclePossessionReturnPawn[PlayerController] =
+				RiderPawn;
+		}
 
-			if (Vehicle)
-				SeatComponent = (UFortVehicleSeatComponent*)Vehicle->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
-			else if (auto CharacterVehicle = Pawn->Cast<AFortCharacterVehicle>())
-				SeatComponent = (UFortVehicleSeatComponent*)CharacterVehicle->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
+		TrackNewVehicleItems(
+			TrackedLoadout,
+			PlayerController->WorldInventory,
+			InventoryBeforeEntry);
+		GTrackedVehicleLoadouts[PlayerController] =
+			std::move(TrackedLoadout);
 
-			auto SeatIdx = SeatComponent->FindSeatIndex(Pawn);
-			UFortWeaponItemDefinition* Weapon = nullptr;
+		if (SeatIdx < 0 || !SeatWeaponComponent ||
+			!PlayerController->WorldInventory || !RiderPawn)
+		{
+			return;
+		}
 
-			for (int i = 0; i < SeatWeaponComponent->WeaponSeatDefinitions.Num(); i++)
-			{
-				auto& WeaponDefinition = SeatWeaponComponent->WeaponSeatDefinitions.Get(i, FWeaponSeatDefinition::Size());
+		// The CharacterVehicle ability set drives the mech itself, but the
+		// dedicated server must still grant/configure the Ostrich ranged weapon
+		// when interaction places this rider directly in the gunner seat.
+		for (int32 Index = 0;
+			Index < SeatWeaponComponent->WeaponSeatDefinitions.Num();
+			++Index)
+		{
+			auto& WeaponDefinition =
+				SeatWeaponComponent->WeaponSeatDefinitions.Get(
+					Index, FWeaponSeatDefinition::Size());
+			if (WeaponDefinition.SeatIndex != SeatIdx)
+				continue;
 
-				if (WeaponDefinition.SeatIndex != SeatIdx)
-					continue;
-
-				Weapon = WeaponDefinition.VehicleWeapon;
-				break;
-			}
-
-			if (Weapon)
-			{
-				printf("Weapon: %s\n", Weapon->Name.ToString().c_str());
-				auto Item = PlayerController->WorldInventory->GiveItem(Weapon, 1, AFortInventory::GetStats(Weapon)->ClipSize);
-				auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-					{ return entry.ItemDefinition == Weapon; }, FFortItemEntry::Size());
-
-				auto OldWeapon = Pawn->CurrentWeapon;
-
-				PlayerController->ServerExecuteInventoryItem(ItemEntry->ItemGuid);
-				PlayerController->ClientEquipItem(ItemEntry->ItemGuid, true);
-				if (Pawn->HasPreviousWeapon())
-					Pawn->PreviousWeapon = OldWeapon;
-
-				auto Weapon = (AFortWeapon*)Pawn->CurrentWeapon;
-
-				if (Weapon)
-				{
-					printf("[Vehicles] Setting up MountedWeaponInfoRepped\n");
-					auto RepWeaponInfo = (FMountedWeaponInfoRepped*)malloc(FMountedWeaponInfoRepped::Size());
-
-					if (RepWeaponInfo->HasHostVehicleCached())
-					{
-						RepWeaponInfo->HostVehicleCached.ObjectPointer = Vehicle;
-						RepWeaponInfo->HostVehicleCached.InterfacePointer = Vehicle->GetInterface(IFortVehicleInterface::StaticClass());
-					}
-					else
-						RepWeaponInfo->HostVehicleCachedActor = Vehicle;
-					RepWeaponInfo->HostVehicleSeatIndexCached = SeatIdx;
-
-					static auto DualClass = FindClass("FortWeaponRangedDualForVehicle");
-
-					if (Weapon->IsA(DualClass))
-					{
-						static auto MountedWeaponInfoReppedOff = Weapon->GetOffset("MountedWeaponInfoRepped");
-						static auto OnRep_MountedWeaponInfoRepped = Weapon->GetFunction("OnRep_MountedWeaponInfoRepped");
-						*(FMountedWeaponInfoRepped*)(__int64(Weapon) + MountedWeaponInfoReppedOff) = *RepWeaponInfo;
-						Weapon->Call(OnRep_MountedWeaponInfoRepped);
-					}
-					else
-					{
-						static auto MountedWeaponInfoReppedOff = Weapon->GetOffset("MountedWeaponInfoRepped");
-						static auto OnRep_MountedWeaponInfoRepped = Weapon->GetFunction("OnRep_MountedWeaponInfoRepped");
-						*(FMountedWeaponInfoRepped*)(__int64(Weapon) + MountedWeaponInfoReppedOff) = *RepWeaponInfo;
-						Weapon->Call(OnRep_MountedWeaponInfoRepped);
-					}
-
-					free(RepWeaponInfo);
-				}
-			}
+			ConfigureVehicleSeatWeapon(
+				PlayerController,
+				RiderPawn,
+				VehicleActor,
+				SeatWeaponComponent,
+				WeaponDefinition,
+				SeatIdx,
+				RiderPawn->CurrentWeapon);
+			break;
 		}
 		return;
 	}
@@ -13788,6 +14584,8 @@ void PickupHeldObject(UObject* Context, FFrame& Stack)
 
 		if (!Weapon)
 			return;
+		FFortWeaponMods::ApplyEntrySlotsAfterEquip(
+			Weapon, Item->ItemEntry);
 		PlayerController->ClientEquipItem(Item->ItemEntry.ItemGuid, true);
 
 		HeldObjectComponent->GrantedWeapon = Weapon;
@@ -13863,7 +14661,13 @@ void DropHeldObject(UObject* Context, FFrame& Stack)
 		{
 			auto Weapon = (AFortWeapon*)OldPawn->EquipWeaponDefinition(PreviousIns->ItemDefinition, PreviousIns->ItemGuid, FFortItemEntry::HasTrackerGuid() ? PreviousIns->TrackerGuid : FGuid(), false);
 
-			PlayerController->ClientEquipItem(Weapon->ItemEntryGuid, true);
+			if (Weapon)
+			{
+				FFortWeaponMods::ApplyEntrySlotsAfterEquip(
+					Weapon, *PreviousIns);
+				PlayerController->ClientEquipItem(
+					Weapon->ItemEntryGuid, true);
+			}
 		}
 	}
 	else
@@ -13881,7 +14685,13 @@ void DropHeldObject(UObject* Context, FFrame& Stack)
 		{
 			auto Weapon = (AFortWeapon*)OwningPawn->EquipWeaponDefinition(PreviousIns->ItemDefinition, PreviousIns->ItemGuid, FFortItemEntry::HasTrackerGuid() ? PreviousIns->TrackerGuid : FGuid(), false);
 
-			PlayerController->ClientEquipItem(Weapon->ItemEntryGuid, true);
+			if (Weapon)
+			{
+				FFortWeaponMods::ApplyEntrySlotsAfterEquip(
+					Weapon, *PreviousIns);
+				PlayerController->ClientEquipItem(
+					Weapon->ItemEntryGuid, true);
+			}
 		}
 	}
 
@@ -14170,136 +14980,467 @@ void AFortPlayerControllerAthena::ServerRequestSeatChange_(UObject* Context, FFr
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
-	auto Pawn = PlayerController->Pawn;
+	if (!PlayerController || !PlayerController->WorldInventory ||
+		!PlayerController->Pawn)
+		return;
 
-	static auto GetVehicleFunc = Pawn->GetFunction("GetVehicleActor");
-	if (!GetVehicleFunc)
-		GetVehicleFunc = Pawn->GetFunction("GetVehicle");
-	auto Vehicle = Pawn->Call<AActor*>(GetVehicleFunc);
+	auto Pawn = (AActor*)PlayerController->Pawn;
+	auto Vehicle = ResolveVehicleForPawn(Pawn);
 
-	if (!Vehicle && Pawn->IsA<AFortCharacterVehicle>())
+	if (!Vehicle && IsNativeVehiclePossessionPawn(Pawn))
 		Vehicle = Pawn;
+
+	// FN10.40's gunner pawn can report a null local vehicle even though its
+	// authoritative mech seat is still occupied. Retain the actor discovered at
+	// interaction/driver possession so F can switch back in either direction.
+	if (!Vehicle)
+	{
+		auto TrackedVehicle =
+			GVehiclePossessionVehicle.find(PlayerController);
+		if (TrackedVehicle != GVehiclePossessionVehicle.end() &&
+			IsUsableDeathObject(TrackedVehicle->second))
+			Vehicle = TrackedVehicle->second;
+		else if (TrackedVehicle != GVehiclePossessionVehicle.end())
+			GVehiclePossessionVehicle.erase(TrackedVehicle);
+	}
 
 	if (!Vehicle)
 		return callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerRequestSeatChange, TargetSeatIndex);
 
-	UFortVehicleSeatWeaponComponent* SeatWeaponComponent = (UFortVehicleSeatWeaponComponent*)Vehicle->GetComponentByClass(UFortVehicleSeatWeaponComponent::StaticClass());
-	if (!SeatWeaponComponent)
+	auto RiderPawn = ResolveVehicleRiderPawn(
+		PlayerController, Pawn);
+	if (!RiderPawn)
 		return callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerRequestSeatChange, TargetSeatIndex);
 
+	UFortVehicleSeatWeaponComponent* SeatWeaponComponent =
+		ResolveVehicleSeatWeaponComponent(
+			Vehicle, TargetSeatIndex);
+
 	UFortVehicleSeatComponent* SeatComponent = (UFortVehicleSeatComponent*)Vehicle->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
+	if (!SeatComponent)
+		return callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerRequestSeatChange, TargetSeatIndex);
 
-	auto SeatIdx = SeatComponent->FindSeatIndex(PlayerController->MyFortPawn);
+	GVehiclePossessionVehicle[PlayerController] = Vehicle;
 
-	UFortWeaponItemDefinition* OldWeapon = nullptr;
-	UFortWeaponItemDefinition* NewWeapon = nullptr;
-	if (SeatWeaponComponent)
+	auto Tracked = GTrackedVehicleLoadouts.find(PlayerController);
+	if (Tracked == GTrackedVehicleLoadouts.end())
 	{
-		for (int i = 0; i < SeatWeaponComponent->WeaponSeatDefinitions.Num(); i++)
+		Tracked = GTrackedVehicleLoadouts.emplace(
+			PlayerController,
+			CaptureVehicleLoadout(
+				PlayerController, RiderPawn)).first;
+	}
+
+	AActor* WeaponToRestore =
+		RiderPawn ? RiderPawn->CurrentWeapon : nullptr;
+	auto CurrentRiderWeapon = WeaponToRestore
+		? WeaponToRestore->Cast<AFortWeapon>() : nullptr;
+	if ((!CurrentRiderWeapon ||
+			VehicleLoadoutContainsGuid(
+				Tracked->second.TemporaryItemGuids,
+				CurrentRiderWeapon->ItemEntryGuid)) &&
+		RiderPawn->HasPreviousWeapon() &&
+		RiderPawn->PreviousWeapon)
+	{
+		// Prefer the currently equipped player item. PreviousWeapon is only a
+		// fallback while the current actor is a tracked mech weapon; otherwise
+		// repeated driver/gunner toggles can carry a removed Ostrich actor
+		// forward as the next restore target.
+		WeaponToRestore = RiderPawn->PreviousWeapon;
+	}
+	auto InventoryBeforeSeatChange =
+		SnapshotVehicleInventoryGuids(
+			PlayerController->WorldInventory);
+	callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerRequestSeatChange, TargetSeatIndex);
+
+	// A rejected seat-change RPC must not receive a weapon configured for a
+	// seat the pawn never entered. The old path also stored the pre-change
+	// SeatIdx in MountedWeaponInfoRepped, which left passenger firing detached
+	// from the actual seat.
+	const int32 ActualSeatIndex =
+		SeatComponent->FindSeatIndex(RiderPawn);
+	if (ActualSeatIndex != TargetSeatIndex)
+		return;
+
+	// The native seat change may replace a dynamic mod component. Resolve the
+	// final authoritative seat mapping after the transition as well.
+	SeatWeaponComponent =
+		ResolveVehicleSeatWeaponComponent(
+			Vehicle, ActualSeatIndex);
+
+	RemoveTrackedVehicleItems(
+		PlayerController, Tracked->second);
+	TrackNewVehicleItems(
+		Tracked->second,
+		PlayerController->WorldInventory,
+		InventoryBeforeSeatChange);
+
+	if (!SeatWeaponComponent)
+	{
+		EquipTrackedVehicleOriginalItem(
+			PlayerController, Tracked->second);
+		return;
+	}
+
+	FWeaponSeatDefinition* NewWeaponDefinition = nullptr;
+	for (int32 Index = 0;
+		Index < SeatWeaponComponent->WeaponSeatDefinitions.Num();
+		++Index)
+	{
+		auto& Candidate =
+			SeatWeaponComponent->WeaponSeatDefinitions.Get(
+				Index, FWeaponSeatDefinition::Size());
+		if (Candidate.SeatIndex != ActualSeatIndex)
+			continue;
+
+		NewWeaponDefinition = &Candidate;
+		break;
+	}
+
+	if (!NewWeaponDefinition ||
+		!NewWeaponDefinition->VehicleWeapon)
+	{
+		EquipTrackedVehicleOriginalItem(
+			PlayerController, Tracked->second);
+		return;
+	}
+
+	TrackNewVehicleItems(
+		Tracked->second,
+		PlayerController->WorldInventory,
+		InventoryBeforeSeatChange,
+		NewWeaponDefinition->VehicleWeapon);
+	ConfigureVehicleSeatWeapon(
+		PlayerController,
+		RiderPawn,
+		Vehicle,
+		SeatWeaponComponent,
+		*NewWeaponDefinition,
+		ActualSeatIndex,
+		WeaponToRestore);
+}
+
+static bool IsCompatibleVehicleModSeatRpc(UFunction* Function)
+{
+	if (!Function)
+		return false;
+
+	const auto Params = Function->GetParamsNamed();
+	if (Params.Size != 0x18)
+		return false;
+
+	bool bRequestTypeValid = false;
+	bool bModInstanceValid = false;
+	bool bSeatIndexValid = false;
+	for (const auto& Param : Params.NameOffsetMap)
+	{
+		if (Param.Name == "RequestType")
 		{
-			auto& WeaponDefinition = SeatWeaponComponent->WeaponSeatDefinitions.Get(i, FWeaponSeatDefinition::Size());
-
-			if (WeaponDefinition.SeatIndex != SeatIdx)
-				continue;
-
-			OldWeapon = WeaponDefinition.VehicleWeapon;
-			break;
+			bRequestTypeValid =
+				Param.Offset == 0x0 &&
+				Param.ElementSize == 0x4 &&
+				(Param.PropertyFlags & 0x80) != 0 &&
+				(Param.PropertyFlags & 0x500) == 0;
 		}
-
-		if (OldWeapon)
+		else if (Param.Name == "ModInstance")
 		{
-			auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-				{ return entry.ItemDefinition == OldWeapon; }, FFortItemEntry::Size());
-
-			if (ItemEntry)
-				PlayerController->WorldInventory->Remove(ItemEntry->ItemGuid);
+			bModInstanceValid =
+				Param.Offset == 0x8 &&
+				Param.ElementSize == sizeof(void*) &&
+				(Param.PropertyFlags & 0x80) != 0 &&
+				(Param.PropertyFlags & 0x500) == 0;
 		}
-
-		for (int i = 0; i < SeatWeaponComponent->WeaponSeatDefinitions.Num(); i++)
+		else if (Param.Name == "SeatIndex")
 		{
-			auto& WeaponDefinition = SeatWeaponComponent->WeaponSeatDefinitions.Get(i, FWeaponSeatDefinition::Size());
-
-			if (WeaponDefinition.SeatIndex != TargetSeatIndex)
-				continue;
-
-			NewWeapon = WeaponDefinition.VehicleWeapon;
-			break;
+			bSeatIndexValid =
+				Param.Offset == 0x10 &&
+				Param.ElementSize == sizeof(int32) &&
+				(Param.PropertyFlags & 0x82) == 0x82 &&
+				(Param.PropertyFlags & 0x500) == 0;
 		}
 	}
 
-	callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerRequestSeatChange, TargetSeatIndex);
+	return bRequestTypeValid &&
+		bModInstanceValid &&
+		bSeatIndexValid;
+}
 
-	if (OldWeapon && !NewWeapon)
+static bool IsVehicleModSeatWeaponEquipped(
+	AFortPlayerPawnAthena* RiderPawn)
+{
+	if (!RiderPawn || !RiderPawn->HasCurrentWeapon() ||
+		!RiderPawn->CurrentWeapon)
 	{
-		auto LastItem = Pawn->HasPreviousWeapon() ? (AFortWeapon*)Pawn->PreviousWeapon : nullptr;
+		return false;
+	}
 
-		if (LastItem)
+	// This subclass is unique to the FN30 mod-seat lifecycle. Do not use the
+	// broader vehicle-weapon class: ordinary fixed turrets must continue using
+	// physical seat changes rather than the same-seat inventory toggle.
+	static const UClass* VehicleModWeaponClass = nullptr;
+	if (!VehicleModWeaponClass)
+		VehicleModWeaponClass =
+			FindClass("FortWeaponRangedForVehicleMod");
+
+	return VehicleModWeaponClass &&
+		RiderPawn->CurrentWeapon->IsA(VehicleModWeaponClass);
+}
+
+void AFortPlayerControllerAthena::ServerVehicleModSeatRpc_(
+	UObject* Context, FFrame& Stack)
+{
+	FGameplayTag RequestType{};
+	UObject* ModInstanceObject = nullptr;
+	int32 SeatIndex = -1;
+
+	Stack.StepCompiledIn(&RequestType);
+	Stack.StepCompiledIn(&ModInstanceObject);
+	Stack.StepCompiledIn(&SeatIndex);
+	Stack.IncrementCode();
+
+	auto* PlayerController =
+		(AFortPlayerControllerAthena*)Context;
+	auto* NativeFunction = Stack.GetCurrentNativeFunction();
+	auto CallOriginal = [&]()
+	{
+		if (PlayerController && NativeFunction &&
+			ServerVehicleModSeatRpc_OG)
 		{
-			PlayerController->ServerExecuteInventoryItem(LastItem->ItemEntryGuid);
-			PlayerController->ClientEquipItem(LastItem->ItemEntryGuid, true);
+			callOG(
+				PlayerController,
+				NativeFunction,
+				ServerVehicleModSeatRpc,
+				RequestType,
+				ModInstanceObject,
+				SeatIndex);
+		}
+	};
+
+	if (VersionInfo.FortniteVersion < 30.00 ||
+		VersionInfo.FortniteVersion >= 31.00)
+	{
+		CallOriginal();
+		return;
+	}
+
+	// Network object references are normally validated by the engine. Retain
+	// that boundary here as well: the fallback may invoke protected authority
+	// methods only on a live FN30 mod component owned by the occupied vehicle.
+	static const UClass* VehicleModComponentClass = nullptr;
+	if (!VehicleModComponentClass)
+		VehicleModComponentClass =
+			FindClass("FortVehicleModComponent");
+
+	if (!PlayerController ||
+		!PlayerController->WorldInventory ||
+		!ModInstanceObject ||
+		!SDK::MemReadable(
+			ModInstanceObject, sizeof(UObject)) ||
+		!ModInstanceObject->Class ||
+		!VehicleModComponentClass ||
+		!ModInstanceObject->IsA(
+			VehicleModComponentClass) ||
+		SeatIndex < 0)
+	{
+		CallOriginal();
+		return;
+	}
+
+	auto* ModInstance =
+		(UFortVehicleModComponent*)ModInstanceObject;
+	auto* OwnerObject = ModInstance->GetOwner();
+	auto* Vehicle = OwnerObject
+		? OwnerObject->Cast<AFortAthenaVehicle>()
+		: nullptr;
+	auto* RiderPawn = ResolveVehicleRiderPawn(
+		PlayerController,
+		(AActor*)PlayerController->Pawn);
+	auto* SeatComponent = Vehicle
+		? (UFortVehicleSeatComponent*)
+			Vehicle->GetComponentByClass(
+				UFortVehicleSeatComponent::StaticClass())
+		: nullptr;
+
+	if (!Vehicle || !RiderPawn || !SeatComponent ||
+		!Vehicle->HasRole() || !Vehicle->HasAuthority() ||
+		SeatComponent->FindSeatIndex(RiderPawn) != SeatIndex)
+	{
+		CallOriginal();
+		return;
+	}
+
+	GVehiclePossessionVehicle[PlayerController] = Vehicle;
+	const bool bWasMounted =
+		IsVehicleModSeatWeaponEquipped(RiderPawn);
+
+	auto Tracked =
+		GTrackedVehicleLoadouts.find(PlayerController);
+	if (Tracked == GTrackedVehicleLoadouts.end())
+	{
+		FTrackedVehicleLoadout InitialState{};
+		if (!bWasMounted)
+		{
+			InitialState = CaptureVehicleLoadout(
+				PlayerController, RiderPawn);
 		}
 		else
 		{
-			printf("yo\n");
-			auto pickaxeEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& entry)
-				{ return entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>(); }, FFortItemEntry::Size());
-
-			if (pickaxeEntry)
+			// If this server was attached after vehicle entry, the current
+			// mod weapon is temporary; the previous inventory weapon is the
+			// best exact restoration target.
+			auto* PreviousWeapon =
+				RiderPawn->HasPreviousWeapon()
+				? RiderPawn->PreviousWeapon
+					? RiderPawn->PreviousWeapon->Cast<AFortWeapon>()
+					: nullptr
+				: nullptr;
+			if (PreviousWeapon &&
+				VehicleInventoryContainsGuid(
+					PlayerController->WorldInventory,
+					PreviousWeapon->ItemEntryGuid))
 			{
-				printf("yo2\n");
-				PlayerController->ServerExecuteInventoryItem(pickaxeEntry->ItemGuid);
-				PlayerController->ClientEquipItem(pickaxeEntry->ItemGuid, true);
+				InitialState.bHasOriginalEquippedItem = true;
+				InitialState.OriginalEquippedItem =
+					PreviousWeapon->ItemEntryGuid;
+			}
+
+			auto* CurrentWeapon =
+				RiderPawn->CurrentWeapon
+				? RiderPawn->CurrentWeapon->Cast<AFortWeapon>()
+				: nullptr;
+			if (CurrentWeapon &&
+				VehicleInventoryContainsGuid(
+					PlayerController->WorldInventory,
+					CurrentWeapon->ItemEntryGuid))
+			{
+				InitialState.TemporaryItemGuids.push_back(
+					CurrentWeapon->ItemEntryGuid);
 			}
 		}
+
+		Tracked = GTrackedVehicleLoadouts.emplace(
+			PlayerController, std::move(InitialState)).first;
 	}
 
-	if (NewWeapon)
+	AActor* WeaponToRestore = RiderPawn->CurrentWeapon;
+	if (bWasMounted && RiderPawn->HasPreviousWeapon() &&
+		RiderPawn->PreviousWeapon)
 	{
-		auto NewItem = PlayerController->WorldInventory->GiveItem(NewWeapon, 1, AFortInventory::GetStats(NewWeapon)->ClipSize);
-		auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-			{ return entry.ItemDefinition == NewWeapon; }, FFortItemEntry::Size());
-		auto CurrentWeapon = Pawn->CurrentWeapon;
+		WeaponToRestore = RiderPawn->PreviousWeapon;
+	}
+	const auto InventoryBeforeToggle =
+		SnapshotVehicleInventoryGuids(
+			PlayerController->WorldInventory);
+	TWeakObjectPtr<UFortVehicleModComponent> WeakModInstance(
+		ModInstance);
 
-		PlayerController->ServerExecuteInventoryItem(ItemEntry->ItemGuid);
-		PlayerController->ClientEquipItem(ItemEntry->ItemGuid, true);
-		if (Pawn->HasPreviousWeapon())
-			Pawn->PreviousWeapon = CurrentWeapon;
+	// Preserve Epic's request-tag handling first. Raw-spawned/mod-replayed
+	// vehicles can leave its internal seat-input state incomplete, in which
+	// case the native RPC returns without changing the equipped mode.
+	CallOriginal();
 
-		auto Weapon = (AFortWeapon*)Pawn->CurrentWeapon;
-
-		if (Weapon)
+	bool bIsMounted =
+		IsVehicleModSeatWeaponEquipped(RiderPawn);
+	auto* LiveModInstance = WeakModInstance.Get();
+	if (bIsMounted == bWasMounted &&
+		LiveModInstance &&
+		SDK::MemReadable(
+			LiveModInstance, sizeof(UObject)))
+	{
+		const char* AuthorityAction = bWasMounted
+			? "AuthorityTryUnequipModSeatWeapon"
+			: "AuthorityTryEquipModSeatWeapon";
+		if (auto* Action =
+				LiveModInstance->GetFunction(AuthorityAction))
 		{
-			auto RepWeaponInfo = (FMountedWeaponInfoRepped*)malloc(FMountedWeaponInfoRepped::Size());
+			LiveModInstance->Call<void>(
+				Action, SeatIndex);
+		}
+		bIsMounted =
+			IsVehicleModSeatWeaponEquipped(RiderPawn);
+	}
 
-			if (RepWeaponInfo->HasHostVehicleCached())
+	if (bWasMounted)
+	{
+		// Native mod-seat unequip can destroy its granted inventory entry.
+		// Removing only GUIDs recorded by this vehicle lifecycle is idempotent
+		// and never touches a player's similarly named normal weapon.
+		RemoveTrackedVehicleItems(
+			PlayerController, Tracked->second);
+		EquipTrackedVehicleOriginalItem(
+			PlayerController, Tracked->second);
+		bIsMounted =
+			IsVehicleModSeatWeaponEquipped(RiderPawn);
+	}
+	else
+	{
+		TrackNewVehicleItems(
+			Tracked->second,
+			PlayerController->WorldInventory,
+			InventoryBeforeToggle);
+
+		// If both FN30 authority paths were no-ops, complete the transition
+		// through the already validated exact-seat weapon lifecycle.
+		if (!bIsMounted)
+		{
+			auto* SeatWeaponComponent =
+				ResolveVehicleSeatWeaponComponent(
+					Vehicle, SeatIndex);
+			if (SeatWeaponComponent)
 			{
-				RepWeaponInfo->HostVehicleCached.ObjectPointer = Vehicle;
-				RepWeaponInfo->HostVehicleCached.InterfacePointer = Vehicle->GetInterface(IFortVehicleInterface::StaticClass());
-			}
-			else
-				RepWeaponInfo->HostVehicleCachedActor = Vehicle;
-			RepWeaponInfo->HostVehicleSeatIndexCached = SeatIdx;
+				for (int32 Index = 0;
+					Index <
+						SeatWeaponComponent->
+							WeaponSeatDefinitions.Num();
+					++Index)
+				{
+					auto& WeaponDefinition =
+						SeatWeaponComponent->
+							WeaponSeatDefinitions.Get(
+								Index,
+								FWeaponSeatDefinition::Size());
+					if (WeaponDefinition.SeatIndex !=
+						SeatIndex ||
+						!WeaponDefinition.VehicleWeapon)
+					{
+						continue;
+					}
 
-			static auto DualClass = FindClass("FortWeaponRangedDualForVehicle");
-
-			if (Weapon->IsA(DualClass))
-			{
-				static auto MountedWeaponInfoReppedOff = Weapon->GetOffset("MountedWeaponInfoRepped");
-				static auto OnRep_MountedWeaponInfoRepped = Weapon->GetFunction("OnRep_MountedWeaponInfoRepped");
-				*(FMountedWeaponInfoRepped*)(__int64(Weapon) + MountedWeaponInfoReppedOff) = *RepWeaponInfo;
-				Weapon->Call(OnRep_MountedWeaponInfoRepped);
+					ConfigureVehicleSeatWeapon(
+						PlayerController,
+						RiderPawn,
+						Vehicle,
+						SeatWeaponComponent,
+						WeaponDefinition,
+						SeatIndex,
+						WeaponToRestore);
+					break;
+				}
 			}
-			else
-			{
-				static auto MountedWeaponInfoReppedOff = Weapon->GetOffset("MountedWeaponInfoRepped");
-				static auto OnRep_MountedWeaponInfoRepped = Weapon->GetFunction("OnRep_MountedWeaponInfoRepped");
-				*(FMountedWeaponInfoRepped*)(__int64(Weapon) + MountedWeaponInfoReppedOff) = *RepWeaponInfo;
-				Weapon->Call(OnRep_MountedWeaponInfoRepped);
-			}
-
-			free(RepWeaponInfo);
+			bIsMounted =
+				IsVehicleModSeatWeaponEquipped(RiderPawn);
 		}
 	}
+
+	static uint32 ToggleLogCount = 0;
+	if (ToggleLogCount++ < 32)
+	{
+		SDK::DbgLog(
+			"[VehicleMods] mod-seat toggle request-name-index=%u "
+			"controller=%p vehicle=%p mod=%p seat=%d "
+			"mounted=%d->%d\n",
+			(unsigned)RequestType.TagName.ComparisonIndex,
+			PlayerController,
+			Vehicle,
+			LiveModInstance,
+			SeatIndex,
+			bWasMounted,
+			bIsMounted);
+	}
+
+	Vehicle->FlushNetDormancy();
+	Vehicle->ForceNetUpdate();
+	RiderPawn->ForceNetUpdate();
 }
 
 void AFortPlayerControllerAthena::ServerLoadingScreenDropped_(UObject* Context, FFrame& Stack)
@@ -15643,6 +16784,32 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerGiveCreativeItem"), ServerGiveCreativeItem);
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerRequestSeatChange"), ServerRequestSeatChange_, ServerRequestSeatChange_OG);
+	if (VersionInfo.FortniteVersion >= 30.00 &&
+		VersionInfo.FortniteVersion < 31.00)
+	{
+		auto* VehicleModSeatRpc =
+			GetDefaultObj()->GetFunction(
+				"ServerVehicleModSeatRpc");
+		if (IsCompatibleVehicleModSeatRpc(
+			VehicleModSeatRpc))
+		{
+			Utils::ExecHook(
+				VehicleModSeatRpc,
+				ServerVehicleModSeatRpc_,
+				ServerVehicleModSeatRpc_OG);
+			SDK::DbgLog(
+				"[VehicleMods] installed FN30 "
+				"ServerVehicleModSeatRpc hook function=%p\n",
+				VehicleModSeatRpc);
+		}
+		else
+		{
+			SDK::DbgLog(
+				"[VehicleMods] skipped incompatible FN30 "
+				"ServerVehicleModSeatRpc function=%p\n",
+				VehicleModSeatRpc);
+		}
+	}
 
 	//Utils::ExecHook(GetDefaultObj()->GetFunction("ServerLoadingScreenDropped"), ServerLoadingScreenDropped_, ServerLoadingScreenDropped_OG);
 

@@ -493,6 +493,7 @@ public:
     DEFINE_FUNC(OnRep_CreativePlotLinkedVolume, void);
     DEFINE_FUNC(ClientRemoveItemAbilitySet, void);
     DEFINE_FUNC(ServerRequestSeatChange, void);
+    DEFINE_FUNC(ServerVehicleModSeatRpc, void);
     DEFINE_FUNC(OnRep_IsCreativeModeEnabled, void);
     DEFINE_FUNC(ServerLoadingScreenDropped, void);
     DEFINE_FUNC(GetCurrentVolume, AFortVolume*);
@@ -530,6 +531,7 @@ public:
     static void PlayEmoteInternal(AFortPlayerControllerAthena* PC, UObject* Asset);
     static void ServerClientIsReadyToRespawn(UObject*, FFrame&);
     static void FinalizeRespawnAfterLanding(AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
+    static void RestoreVehicleLoadoutAfterExit(AFortPlayerControllerAthena*);
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
     static void TickNukeRockets(float DeltaSeconds);
@@ -544,6 +546,7 @@ public:
     static void ServerCraftSchematic(UObject*, FFrame&);
     static void ServerGiveCreativeItem(UObject*, FFrame&);
     DefUHookOg(ServerRequestSeatChange_);
+    DefUHookOg(ServerVehicleModSeatRpc_);
     DefUHookOg(ServerLoadingScreenDropped_);
     static void ServerCreativeSetFlightSpeedIndex(UObject*, FFrame&);
     static void ServerCreativeSetFlightSprint(UObject*, FFrame&);

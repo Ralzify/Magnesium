@@ -432,7 +432,7 @@ public:
     DEFINE_FUNC(OnRep_IsDBNO, void);
     DEFINE_FUNC(ServerSetAttachment, void);
     DEFINE_FUNC(GetActiveZipline, AFortAscenderZipline*);
-    DEFINE_FUNC(ServerOnExitVehicle, void);
+    DEFINE_FUNC(ServerOnExitVehicle, AActor*);
     DEFINE_FUNC(SetInVortex, void);
     DEFINE_FUNC(ClientInternalEquipWeapon, void);
     DEFINE_FUNC(ServerInternalEquipWeapon, void);
@@ -454,7 +454,7 @@ public:
     static void MovingEmoteStopped(UObject*, FFrame&);
     static void ServerNotifyPawnHit(UObject* Context, FFrame& Stack);
     DefUHookOg(Athena_MedConsumable_Triggered);
-    DefUHookOg(ServerOnExitVehicle_);
+    DefUHookOgRet(AActor*, ServerOnExitVehicle_);
     DefUHookOg(EmoteStopped_);
     static void ServerHandlePickupWithRequestedSwap(UObject*, FFrame&);
     DefHookOg(void, EndSkydiving, AFortPlayerPawnAthena*);

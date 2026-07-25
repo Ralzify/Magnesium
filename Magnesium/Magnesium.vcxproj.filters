@@ -168,6 +168,12 @@
     <ClInclude Include="FortniteGame\Public\FortPhysicsPawn.h">
       <Filter>FortniteGame\Public</Filter>
     </ClInclude>
+    <ClInclude Include="FortniteGame\Public\FortVehicleMods.h">
+      <Filter>FortniteGame\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="FortniteGame\Public\FortWeaponMods.h">
+      <Filter>FortniteGame\Public</Filter>
+    </ClInclude>
     <ClInclude Include="Erbium\Public\GUI.h">
       <Filter>Magnesium\Public</Filter>
     </ClInclude>
@@ -318,6 +324,12 @@
       <Filter>Magnesium\Private</Filter>
     </ClCompile>
     <ClCompile Include="FortniteGame\Private\FortPhysicsPawn.cpp">
+      <Filter>FortniteGame\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="FortniteGame\Private\FortVehicleMods.cpp">
+      <Filter>FortniteGame\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="FortniteGame\Private\FortWeaponMods.cpp">
       <Filter>FortniteGame\Private</Filter>
     </ClCompile>
     <ClCompile Include="FortniteGame\Private\FortWeaponRanged.cpp">

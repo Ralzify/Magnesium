@@ -1618,6 +1618,11 @@ namespace SDK
 						Offsets::FField_Name = NM;
 						Offsets::FField_Next = NX;
 						Offsets::Offset_Internal = OI;
+						// FBoolProperty appends FieldSize/ByteOffset/
+						// ByteMask/FieldMask after the FProperty base.
+						// Preserve the relationship whenever the live
+						// resolver moves Offset_Internal (notably FN32+).
+						Offsets::FieldMask = OI + 0x2F;
 						Offsets::bEncChildProperties = headEnc;
 
 						// Resolve ElementSize (FProperty): the uint32 that equals each property's

@@ -3,6 +3,7 @@
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
+#include "../Public/FortVehicleMods.h"
 
 struct FReplicatedPhysicsPawnState
 {
@@ -445,6 +446,8 @@ void AFortWeaponRangedMountedCannon::ServerFireActorInCannon(UObject* Context, F
 
 void AFortPhysicsPawn::Hook()
 {
+    FortVehicleMods::InstallHooks();
+
     auto DefaultPhysPawn = GetDefaultObj();
     if (DefaultPhysPawn)
     {

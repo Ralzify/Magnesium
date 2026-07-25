@@ -29,6 +29,7 @@
 #include "../Public/NativePlayerAIBackend.h"
 #include "../Public/PlayerAIFaultGuard.h"
 #include "../../../FortniteGame/Public/FortLootPackage.h"
+#include "../../../FortniteGame/Public/FortWeaponMods.h"
 #include <unordered_map>
 #include <algorithm>
 
@@ -1270,7 +1271,16 @@ static void PlayerAIEquipEntry(PlayerAIController& AI, FFortItemEntry* Entry)
         auto Pawn = AI.GetPawn();
 
         if (Pawn)
-            Pawn->EquipWeaponDefinition((UFortItemDefinition*)Entry->ItemDefinition, Entry->ItemGuid);
+        {
+            auto Weapon = (AFortWeapon*)Pawn->EquipWeaponDefinition(
+                (UFortItemDefinition*)Entry->ItemDefinition,
+                Entry->ItemGuid);
+            if (Weapon)
+            {
+                FFortWeaponMods::ApplyEntrySlotsAfterEquip(
+                    Weapon, *Entry);
+            }
+        }
         return;
     }
 

@@ -36,6 +36,8 @@ public:
     UCLASS_COMMON_MEMBERS(UFortVehicleSeatWeaponComponent);
 
     DEFINE_PROP(WeaponSeatDefinitions, TArray<FWeaponSeatDefinition>);
+    DEFINE_PROP(ActiveSeatIdx, int32);
+    DEFINE_FUNC(EquipVehicleWeapon, void);
 };
 
 class UFortVehicleSeatComponent : public UActorComponent
@@ -57,6 +59,44 @@ public:
 
         return -1;
     }
+};
+
+struct FRuntimeFuelUsageInfo
+{
+public:
+    float FuelPerSecondIdle = 0.f;
+    float FuelPerSecondDriving = 0.f;
+    float FuelPerSecondBoosting = 0.f;
+};
+
+class UFortVehicleFuelComponent : public UActorComponent
+{
+public:
+    UCLASS_COMMON_MEMBERS(UFortVehicleFuelComponent);
+
+    DEFINE_PROP(ServerFuel, float);
+    DEFINE_PROP(UsesFuelSystem, FScalableFloat);
+    DEFINE_PROP(FuelTankCapacity, FScalableFloat);
+    DEFINE_PROP(FuelPerSecondIdle, FScalableFloat);
+    DEFINE_PROP(FuelPerSecondDriving, FScalableFloat);
+    DEFINE_PROP(FuelPerSecondBoosting, FScalableFloat);
+    DEFINE_PROP(InfiniteFuel, FScalableFloat);
+
+    DEFINE_FUNC(GetFuelUsageInfo, FRuntimeFuelUsageInfo);
+    DEFINE_FUNC(ReinitializeFuelUsageInfo, void);
+    DEFINE_FUNC(SetFuel, void);
+    DEFINE_FUNC(SetFuelUsageInfo, void);
+    DEFINE_FUNC(GetFuelCapacity, float);
+    DEFINE_FUNC(OnRep_ServerFuel, void);
+};
+
+class UFortVehicleModComponent : public UActorComponent
+{
+public:
+    UCLASS_COMMON_MEMBERS(UFortVehicleModComponent);
+
+    DEFINE_FUNC(AuthorityTryEquipModSeatWeapon, void);
+    DEFINE_FUNC(AuthorityTryUnequipModSeatWeapon, void);
 };
 
 class UPrimitiveComponent : public UObject
@@ -119,6 +159,9 @@ public:
     DEFINE_FUNC(FindSeatIndex, int32);
     DEFINE_FUNC(OnRep_HealthSet, void);
     DEFINE_FUNC(DestroyVehicle, void);
+    DEFINE_FUNC(GetVehicleFuelComponent, UFortVehicleFuelComponent*);
+    DEFINE_FUNC(HasInfiniteFuel, bool);
+    DEFINE_FUNC(SetForceInfiniteFuel, void);
 };
 
 class AFortAthenaSKPushCannon : public AFortAthenaVehicle

@@ -543,19 +543,46 @@ void AFortPlayerPawnAthena::Athena_MedConsumable_Triggered(UObject* Context, FFr
 	return Athena_MedConsumable_TriggeredOG(Context, Stack);
 }
 
-void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack)
+void AFortPlayerPawnAthena::ServerOnExitVehicle_(
+	UObject* Context, FFrame& Stack, AActor** Ret)
 {
 	struct FVehicleExitData { uint8_t Pad[0x30]; };
 
-	FVehicleExitData VehicleExitData;  
-	uint8_t ExitForceBehavior;
-	bool bDestroyVehicleWhenForced;
+	FVehicleExitData VehicleExitData{};
+	uint8_t ExitForceBehavior = 0;
+	bool bDestroyVehicleWhenForced = false;
+	bool bHasDestroyVehicleWhenForced = false;
+	bool bHasReturnValue = false;
+
+	auto ExitFunction = Stack.GetCurrentNativeFunction();
+	if (!ExitFunction)
+	{
+		if (Ret)
+			*Ret = nullptr;
+		return;
+	}
+
+	{
+		auto Params = ExitFunction->GetParamsNamed();
+		for (const auto& Param : Params.NameOffsetMap)
+		{
+			if (Param.Name == "bDestroyVehicleWhenForced")
+				bHasDestroyVehicleWhenForced = true;
+			if (Param.Name == "ReturnValue" ||
+				(Param.PropertyFlags & 0x400) != 0)
+			{
+				bHasReturnValue = true;
+			}
+		}
+	}
+
 	if (VersionInfo.FortniteVersion >= 29)
 		Stack.StepCompiledIn(&VehicleExitData);
 	else
 	{
 		Stack.StepCompiledIn(&ExitForceBehavior);
-		Stack.StepCompiledIn(&bDestroyVehicleWhenForced);
+		if (bHasDestroyVehicleWhenForced)
+			Stack.StepCompiledIn(&bDestroyVehicleWhenForced);
 	}
 
 	Stack.IncrementCode();
@@ -563,106 +590,48 @@ void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack
 	auto Pawn = (AFortPlayerPawnAthena*)Context;
 
 	if (!Pawn)
+	{
+		if (Ret)
+			*Ret = nullptr;
 		return;
-
-	static auto GetVehicleFunc = Pawn->GetFunction("GetVehicleActor");
-	if (!GetVehicleFunc)
-		GetVehicleFunc = Pawn->GetFunction("GetVehicle");
-	auto Vehicle = Pawn->Call<AActor*>(GetVehicleFunc);
-
-	if (!Vehicle && Pawn->IsA<AFortCharacterVehicle>())
-		Vehicle = Pawn;
-
-	if (!Vehicle)
-	{
-		if (VersionInfo.FortniteVersion >= 29)
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
-		else
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
 	}
-
-	UFortVehicleSeatWeaponComponent* SeatWeaponComponent = (UFortVehicleSeatWeaponComponent*)Vehicle->GetComponentByClass(UFortVehicleSeatWeaponComponent::StaticClass());
-
-	if (!SeatWeaponComponent)
-	{
-		printf("nop %s\n", Pawn ? Pawn->Class->Name.ToString().c_str() : nullptr);
-		if (VersionInfo.FortniteVersion >= 29)
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
-		else
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
-	}
-
-	UFortVehicleSeatComponent* SeatComponent = (UFortVehicleSeatComponent*)Vehicle->GetComponentByClass(UFortVehicleSeatComponent::StaticClass());
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Pawn->Controller;
+	AActor* ExitedVehicle = nullptr;
 
-	if (!PlayerController || !PlayerController->WorldInventory)
-	{
-		if (VersionInfo.FortniteVersion >= 29)
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
-		else
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
-	}
-
-	if (!SeatComponent)
-	{
-		if (VersionInfo.FortniteVersion >= 29)
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
-		else
-			return callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
-	}
-
-	auto SeatIdx = SeatComponent->FindSeatIndex(Pawn);
-
-	UFortWeaponItemDefinition* Weapon = nullptr;
-	if (SeatWeaponComponent)
-	{
-		for (int i = 0; i < SeatWeaponComponent->WeaponSeatDefinitions.Num(); i++)
-		{
-			auto& WeaponDefinition = SeatWeaponComponent->WeaponSeatDefinitions.Get(i, FWeaponSeatDefinition::Size());
-
-			if (WeaponDefinition.SeatIndex != SeatIdx)
-				continue;
-
-			Weapon = WeaponDefinition.VehicleWeapon;
-			break;
-		}
-
-		//printf("Weapon: %s\n", Weapon ? Weapon->Name.ToString().c_str() : "<null>");
-		if (Weapon)
-		{
-			auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([Weapon](FFortItemEntry& entry)
-				{ return entry.ItemDefinition == Weapon; }, FFortItemEntry::Size());
-
-			if (ItemEntry)
-				PlayerController->WorldInventory->Remove(ItemEntry->ItemGuid);
-		}
-	}
 	if (VersionInfo.FortniteVersion >= 29)
-		callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, VehicleExitData);
-	else
-		callOG(Pawn, Stack.GetCurrentNativeFunction(), ServerOnExitVehicle, ExitForceBehavior, bDestroyVehicleWhenForced);
-
-	if (Weapon)
 	{
-		auto LastItem = Pawn->HasPreviousWeapon() ? (AFortWeapon*)Pawn->PreviousWeapon : nullptr;
+		ExitedVehicle = callOGWithRet(
+			Pawn, ExitFunction, ServerOnExitVehicle,
+			VehicleExitData);
+	}
+	else if (bHasDestroyVehicleWhenForced)
+	{
+		ExitedVehicle = callOGWithRet(
+			Pawn, ExitFunction, ServerOnExitVehicle,
+			ExitForceBehavior, bDestroyVehicleWhenForced);
+	}
+	else
+	{
+		// FN10.40 has one legacy input plus an object ReturnValue. Stepping or
+		// forwarding a second bool consumes bytecode that belongs to the caller
+		// and discards native's authoritative exit-success result.
+		ExitedVehicle = callOGWithRet(
+			Pawn, ExitFunction, ServerOnExitVehicle,
+			ExitForceBehavior);
+	}
 
-		if (LastItem)
-		{
-			PlayerController->ServerExecuteInventoryItem(LastItem->ItemEntryGuid);
-			PlayerController->ClientEquipItem(LastItem->ItemEntryGuid, true);
-		}
-		else
-		{
-			auto pickaxeEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([](FFortItemEntry& entry)
-				{ return entry.ItemDefinition->IsA<UFortWeaponMeleeItemDefinition>(); }, FFortItemEntry::Size());
+	if (Ret)
+		*Ret = ExitedVehicle;
 
-			if (pickaxeEntry)
-			{
-				PlayerController->ServerExecuteInventoryItem(pickaxeEntry->ItemGuid);
-				PlayerController->ClientEquipItem(pickaxeEntry->ItemGuid, true);
-			}
-		}
+	// Native can reject this RPC (notably while the FN10.40 B.R.U.T.E. swaps
+	// driver/gunner possession). When this build exposes the returned vehicle,
+	// null is an explicit rejection. The controller helper then verifies that
+	// the rider's authoritative slot was actually cleared.
+	if (!bHasReturnValue || ExitedVehicle)
+	{
+		AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(
+			PlayerController);
 	}
 }
 

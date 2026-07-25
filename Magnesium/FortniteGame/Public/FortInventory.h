@@ -315,6 +315,8 @@ class UFortWeaponItemDefinition : public UFortWorldItemDefinition
 public:
     UCLASS_COMMON_MEMBERS(UFortWeaponItemDefinition);
 
+    DEFINE_PROP(WeaponRechargeAmmoRate, FScalableFloat);
+    DEFINE_PROP(WeaponRechargeAmmoQuantity, FScalableFloat);
     DEFINE_BITFIELD_PROP(bUsesPhantomReserveAmmo);
     DEFINE_PROP(WeaponStatHandle, FDataTableRowHandle);
     DEFINE_PROP(PrimaryFireAbility, TSoftClassPtr<UClass>);
@@ -469,7 +471,7 @@ public:
 
     DEFINE_FUNC(HandleInventoryLocalUpdate, void);
 
-    UFortWorldItem* GiveItem(const UFortItemDefinition*, int = 1, int = 0, int = 0, bool = true, bool = true, int = 0, TArray<FFortItemEntryStateValue> = {});
+    UFortWorldItem* GiveItem(const UFortItemDefinition*, int = 1, int = 0, int = 0, bool = true, bool = true, int = 0, TArray<FFortItemEntryStateValue> = {}, bool = true);
     UFortWorldItem* GiveItem(FFortItemEntry&, int = -1, bool = true, bool = true);
     void Update(FFortItemEntry*);
     void Remove(FGuid);
@@ -480,6 +482,7 @@ public:
     static FFortRangedWeaponStats* GetStats(const UFortWeaponItemDefinition*);
     static FFortRangedWeaponStats* CloneStats(const UFortWeaponItemDefinition* Def);
     static bool IsPrimaryQuickbar(const UFortItemDefinition*);
+    static void TickRegeneratingItems();
     void UpdateEntry(FFortItemEntry&);
     void SetRequiresUpdate();
     static void RemoveWeaponAbilities(AActor*);
