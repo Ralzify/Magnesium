@@ -53,6 +53,7 @@ public:
     UCLASS_COMMON_MEMBERS(UFortGameplayModifierItemDefinition);
 
     DEFINE_PROP(PersistentAbilitySets, TArray<FFortAbilitySetDeliveryInfo>);
+    DEFINE_PROP(Mutators, TArray<TSoftClassPtr<UClass>>);
 };
 
 class UFortPlaylistAthena : public UObject

@@ -73,6 +73,7 @@ public:
     DEFINE_PROP(HeroType, const UObject*);
     DEFINE_BITFIELD_PROP(bIsABot);
     DEFINE_BITFIELD_PROP(bIsSpectator);
+    DEFINE_BITFIELD_PROP(bHasWonAGame);
     DEFINE_PROP(WorldPlayerId, int16);
     DEFINE_PROP(TeamMemberState, uint8);
     DEFINE_PROP(ReplicatedTeamMemberState, uint8);

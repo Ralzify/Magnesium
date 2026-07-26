@@ -98,6 +98,17 @@ struct FConfiguration
     static inline auto bInfiniteMats = true;
     static inline auto bInfiniteAmmo = true;
 
+    static inline void SetLateGameEnabled(bool bEnabled)
+    {
+        if (bLateGame && !bEnabled)
+        {
+            bInfiniteMats = false;
+            bInfiniteAmmo = false;
+        }
+
+        bLateGame = bEnabled;
+    }
+
     static inline auto bUseVersionizedLoadout = true;
     static inline auto bUseCustomLoadout = false;
     static inline FString Primary;

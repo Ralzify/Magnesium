@@ -5,6 +5,7 @@
 #include "../../Erbium/Public/GUI.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
+#include "../../FortniteGame/Public/FortAthenaMutator.h"
 #include "../../FortniteGame/Public/FortInventory.h"
 #include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
 #include "../../FortniteGame/Public/FortVehicleMods.h"
@@ -1013,6 +1014,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		FortVehicleMods::TickPendingConstruction();
 	}
+	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	SyncErbiumSafeZonePreviewPause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
@@ -1104,6 +1106,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		FortVehicleMods::TickPendingConstruction();
 	}
+	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	SyncErbiumSafeZonePreviewPause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
@@ -1237,6 +1240,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		FortVehicleMods::TickPendingConstruction();
 	}
+	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	SyncErbiumSafeZonePreviewPause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);

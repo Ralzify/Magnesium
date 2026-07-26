@@ -432,7 +432,60 @@ class UFortAmmoItemDefinition : public UFortWorldItemDefinition
 public:
     UCLASS_COMMON_MEMBERS(UFortAmmoItemDefinition);
 
-    DEFINE_PROP(RegenCooldown, FScalableFloat);
+    static inline int32 RegenCooldown__Offset = -2;
+    static inline bool RegenCooldown__IsFloat = false;
+
+    void ResolveRegenCooldown() const
+    {
+        if (RegenCooldown__Offset != -2)
+            return;
+
+        auto Property = GetProperty("RegenCooldown");
+        RegenCooldown__Offset =
+            Property
+                ? static_cast<int32>(GetOffset("RegenCooldown"))
+                : -1;
+
+        // RegenCooldown is a FloatProperty in the older builds (including
+        // 4.20) and becomes an FScalableFloat in later builds. The generic
+        // FScalableFloat accessor cannot distinguish those layouts.
+        if (Property && VersionInfo.FortniteVersion < 32.00)
+        {
+            auto FloatProperty =
+                GetProperty("RegenCooldown", 0x100);
+            auto StructProperty =
+                GetProperty("RegenCooldown", 0x100000);
+            RegenCooldown__IsFloat =
+                FloatProperty == Property;
+            if (!RegenCooldown__IsFloat &&
+                StructProperty != Property)
+            {
+                RegenCooldown__Offset = -1;
+            }
+        }
+    }
+
+    bool HasRegenCooldown() const
+    {
+        ResolveRegenCooldown();
+        return RegenCooldown__Offset >= 0;
+    }
+
+    float EvaluateRegenCooldown(float ItemLevel) const
+    {
+        ResolveRegenCooldown();
+        if (RegenCooldown__Offset < 0)
+            return 0.0f;
+
+        if (RegenCooldown__IsFloat)
+        {
+            return GetFromOffset<float>(
+                this, RegenCooldown__Offset);
+        }
+
+        return GetFromOffset<FScalableFloat>(
+            this, RegenCooldown__Offset).Evaluate(ItemLevel);
+    }
 };
 
 class UFortDecoItemDefinition : public UFortWorldItemDefinition
@@ -475,6 +528,7 @@ public:
     UFortWorldItem* GiveItem(FFortItemEntry&, int = -1, bool = true, bool = true);
     void Update(FFortItemEntry*);
     void Remove(FGuid);
+    int32 RemoveItem(FGuid, int32, bool = false);
     static AFortPickupAthena* SpawnPickup(FVector, FFortItemEntry&, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, int = -1, bool = true, bool = true, bool = true, const UClass* = nullptr, FVector = FVector());
     static AFortPickupAthena* SpawnPickup(FVector, const UFortItemDefinition*, int, int, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, bool = true, bool = true, const UClass* = nullptr);
     static AFortPickupAthena* SpawnPickup(ABuildingContainer*, FFortItemEntry&, AFortPlayerPawnAthena* = nullptr, int = -1);

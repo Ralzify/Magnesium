@@ -930,9 +930,9 @@ void AFortInventory::Remove(FGuid Guid)
     auto EntryDef = RemovedEntry.ItemDefinition;
 
     auto ItemInstanceIdx = Inventory.ItemInstances.SearchIndex([&](UFortWorldItem* entry)
-        { return entry->ItemEntry.ItemGuid == Guid; });
+        { return entry && entry->ItemEntry.ItemGuid == Guid; });
     auto ItemInstanceResult = Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
-        { return entry->ItemEntry.ItemGuid == Guid; });
+        { return entry && entry->ItemEntry.ItemGuid == Guid; });
 
     // Save the object before mutating either replicated array. Search returns
     // storage owned by the array, which is invalid after Remove.
@@ -1023,6 +1023,60 @@ _Skip:
     }
     //HandleInventoryLocalUpdate();
     //Update(nullptr);
+}
+
+int32 AFortInventory::RemoveItem(
+    FGuid Guid,
+    int32 Count,
+    bool bKeepFinalStackEmpty)
+{
+    auto ItemEntry =
+        Inventory.ReplicatedEntries.Search(
+            [&](FFortItemEntry& Entry)
+            {
+                return Entry.ItemGuid == Guid;
+            },
+            FFortItemEntry::Size());
+    if (!ItemEntry || Count == 0)
+        return 0;
+
+    const bool bRemoveAll = Count < 0;
+    const int32 ExistingCount = max(ItemEntry->Count, 0);
+    const int32 RemovedCount =
+        bRemoveAll ? ExistingCount : min(ExistingCount, Count);
+
+    // Remove zero/negative terminal stacks too. They are invalid unless the
+    // definition explicitly asked the caller to preserve the final empty
+    // stack.
+    if (bRemoveAll ||
+        (!bKeepFinalStackEmpty &&
+            (ExistingCount <= 0 || Count >= ExistingCount)))
+    {
+        Remove(Guid);
+        return RemovedCount;
+    }
+
+    int32 NewCount =
+        bKeepFinalStackEmpty && Count >= ExistingCount
+            ? 0
+            : ExistingCount - RemovedCount;
+    ItemEntry->Count = NewCount;
+
+    auto ItemInstance =
+        Inventory.ItemInstances.Search(
+            [&](UFortWorldItem* Item)
+            {
+                return Item &&
+                    Item->ItemEntry.ItemGuid == Guid;
+            });
+    if (ItemInstance && *ItemInstance)
+    {
+        (*ItemInstance)->ItemEntry.Count = NewCount;
+        (*ItemInstance)->ItemEntry.bIsDirty = true;
+    }
+
+    UpdateEntry(*ItemEntry);
+    return RemovedCount;
 }
 
 FFortRangedWeaponStats* AFortInventory::GetStats(const UFortWeaponItemDefinition* Def)
@@ -1566,134 +1620,432 @@ void AFortInventory::UpdateEntry(FFortItemEntry& Entry)
     Update(&Entry);
 }
 
-bool RemoveInventoryItem(IInterface* Interface, FGuid& ItemGuid, int Count, bool bForceRemoval)
+using RemoveInventoryItemWithQuickBarFn = bool(*)(
+    IInterface*,
+    FGuid&,
+    int32,
+    bool,
+    bool);
+
+using RemoveInventoryItemSingleFlagFn = bool(*)(
+    IInterface*,
+    FGuid&,
+    int32,
+    bool);
+
+enum class ERemoveInventoryItemAbi
+{
+    None,
+    QuickBarFlagOnly,
+    WithoutQuickBarFlag,
+    WithQuickBarFlag
+};
+
+RemoveInventoryItemWithQuickBarFn
+    RemoveInventoryItemWithQuickBarOG = nullptr;
+RemoveInventoryItemSingleFlagFn
+    RemoveInventoryItemQuickBarOnlyOG = nullptr;
+RemoveInventoryItemSingleFlagFn
+    RemoveInventoryItemWithoutQuickBarOG = nullptr;
+ERemoveInventoryItemAbi RemoveInventoryItemAbi =
+    ERemoveInventoryItemAbi::None;
+
+bool CallRemoveInventoryItemOriginal(
+    IInterface* Interface,
+    FGuid& ItemGuid,
+    int32 Count,
+    bool bForceRemoveFromQuickBars,
+    bool bForceRemoval)
+{
+    if (RemoveInventoryItemAbi ==
+            ERemoveInventoryItemAbi::WithQuickBarFlag &&
+        RemoveInventoryItemWithQuickBarOG)
+    {
+        return RemoveInventoryItemWithQuickBarOG(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
+    }
+
+    if (RemoveInventoryItemAbi ==
+            ERemoveInventoryItemAbi::QuickBarFlagOnly &&
+        RemoveInventoryItemQuickBarOnlyOG)
+    {
+        return RemoveInventoryItemQuickBarOnlyOG(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars);
+    }
+
+    if (RemoveInventoryItemAbi ==
+            ERemoveInventoryItemAbi::WithoutQuickBarFlag &&
+        RemoveInventoryItemWithoutQuickBarOG)
+    {
+        return RemoveInventoryItemWithoutQuickBarOG(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoval);
+    }
+
+    return false;
+}
+
+bool RemoveInventoryItemInternal(
+    IInterface* Interface,
+    FGuid& ItemGuid,
+    int32 Count,
+    bool bForceRemoveFromQuickBars,
+    bool bForceRemoval)
 {
     if (FConfiguration::bInfiniteAmmo)
         return true;
 
-    static auto InterfaceOffset = FindClass("FortPlayerController")->GetSuper()->GetPropertiesSize() + (VersionInfo.EngineVersion >= 4.27 ? 16 : 8);
-    auto PlayerController = (AFortPlayerControllerAthena*)(__int64(Interface) - InterfaceOffset);
-
-    if (PlayerController->bInfiniteAmmo)
-        return true;
-
-    auto ItemP = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
-        { return entry->ItemEntry.ItemGuid == ItemGuid; });
-    auto itemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-        { return entry.ItemGuid == ItemGuid; }, FFortItemEntry::Size());
-
-    if (ItemP && *ItemP && itemEntry)
+    if (!Interface)
     {
-        auto Item = *ItemP;
-        auto AmmoDefinition =
-            Item->ItemEntry.ItemDefinition
-                ? Item->ItemEntry.ItemDefinition->Cast<
-                    UFortAmmoItemDefinition>()
-                : nullptr;
-        const float ItemLevel =
-            Item->ItemEntry.Level > 0
-                ? static_cast<float>(Item->ItemEntry.Level)
-                : 1.0f;
-        double RegenCooldownSeconds = 0.0;
-        int32 RegenMaximumCount = 0;
-        if (Count > 0 && !bForceRemoval && AmmoDefinition &&
-            AmmoDefinition->HasRegenCooldown())
-        {
-            RegenCooldownSeconds =
-                AmmoDefinition->RegenCooldown.Evaluate(ItemLevel);
-
-            // GetMaxStackSize can depend on an attribute set for some item
-            // types. The pre-consumption count is an authoritative lower
-            // bound and preserves the full charge capacity if that lookup
-            // is unavailable in a server-only session.
-            RegenMaximumCount = max(
-                AmmoDefinition->GetMaxStackSize(),
-                itemEntry->Count);
-            if (RegenMaximumCount <= 0 ||
-                RegenMaximumCount > 10000 ||
-                !std::isfinite(RegenCooldownSeconds) ||
-                RegenCooldownSeconds <= 0.0 ||
-                RegenCooldownSeconds > 3600.0)
-            {
-                RegenCooldownSeconds = 0.0;
-                RegenMaximumCount = 0;
-            }
-        }
-
-        /*for (int i = 0; i < itemEntry->StateValues.Num(); i++)
-        {
-            auto& StateValue = itemEntry->StateValues.Get(i, FFortItemEntryStateValue::Size());
-
-            if (StateValue.StateType != 2)
-                continue;
-
-            StateValue.IntValue = 0;
-        }*/
-
-
-        itemEntry->Count -= max(Count, 0);
-        if (Count < 0 || itemEntry->Count <= 0 || bForceRemoval)
-        {
-            if (Item->ItemEntry.ItemDefinition->HasbPersistInInventoryWhenFinalStackEmpty() && Item->ItemEntry.ItemDefinition->bPersistInInventoryWhenFinalStackEmpty && Count > 0)
-            {
-                auto OtherStack = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& item)
-                    { return item.ItemDefinition == Item->ItemEntry.ItemDefinition && item.ItemGuid != ItemGuid; }, FFortItemEntry::Size());
-
-                if (!OtherStack)
-                {
-                    /*for (int i = 0; i < itemEntry->StateValues.Num(); i++)
-                    {
-                        auto& StateValue = itemEntry->StateValues.Get(i, FFortItemEntryStateValue::Size());
-
-                        if (StateValue.StateType != 2)
-                            continue;
-
-                        StateValue.IntValue = 0;
-                        break;
-                    }*/
-
-                    Item->ItemEntry.Count = itemEntry->Count;
-                    PlayerController->WorldInventory->UpdateEntry(*itemEntry);
-                    Item->ItemEntry.bIsDirty = true;
-                }
-                else
-                    PlayerController->WorldInventory->Remove(ItemGuid);
-            }
-            else
-                PlayerController->WorldInventory->Remove(ItemGuid);
-        }
-        else
-        {
-            /*for (int i = 0; i < itemEntry->StateValues.Num(); i++)
-            {
-                auto& StateValue = itemEntry->StateValues.Get(i, FFortItemEntryStateValue::Size());
-
-                if (StateValue.StateType != 2)
-                    continue;
-
-                StateValue.IntValue = 0;
-                break;
-            }*/
-
-            Item->ItemEntry.Count = itemEntry->Count;
-            PlayerController->WorldInventory->UpdateEntry(*itemEntry);
-            Item->ItemEntry.bIsDirty = true;
-        }
-
-        if (RegenMaximumCount > 0)
-        {
-            ScheduleRegeneratingInventoryItem(
-                PlayerController,
-                AmmoDefinition,
-                ItemGuid,
-                RegenMaximumCount,
-                RegenCooldownSeconds);
-        }
-
-        return true;
+        return CallRemoveInventoryItemOriginal(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
     }
 
-    return false;
+    auto PlayerControllerClass = FindClass("FortPlayerController");
+    auto PlayerControllerSuper =
+        PlayerControllerClass
+            ? PlayerControllerClass->GetSuper()
+            : nullptr;
+    if (!PlayerControllerSuper)
+    {
+        return CallRemoveInventoryItemOriginal(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
+    }
+
+    const uint64 InterfaceOffset =
+        static_cast<uint64>(
+            PlayerControllerSuper->GetPropertiesSize()) +
+        (VersionInfo.EngineVersion >= 4.27 ? 16ull : 8ull);
+    const uint64 InterfaceAddress =
+        reinterpret_cast<uint64>(Interface);
+    if (InterfaceAddress < InterfaceOffset)
+    {
+        return CallRemoveInventoryItemOriginal(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
+    }
+
+    auto PlayerController =
+        reinterpret_cast<AFortPlayerControllerAthena*>(
+            InterfaceAddress - InterfaceOffset);
+    if (!SDK::MemReadable(PlayerController, sizeof(void*)))
+    {
+        return CallRemoveInventoryItemOriginal(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
+    }
+
+    if (PlayerController->HasbInfiniteAmmo() &&
+        PlayerController->bInfiniteAmmo)
+        return true;
+
+    auto WorldInventory = PlayerController->WorldInventory;
+    if (!WorldInventory ||
+        !SDK::MemReadable(WorldInventory, sizeof(void*)) ||
+        Count == 0)
+    {
+        return CallRemoveInventoryItemOriginal(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
+    }
+
+    auto ItemInstance =
+        WorldInventory->Inventory.ItemInstances.Search(
+            [&](UFortWorldItem* Item)
+            {
+                return Item &&
+                    Item->ItemEntry.ItemGuid == ItemGuid;
+            });
+    auto ItemEntry =
+        WorldInventory->Inventory.ReplicatedEntries.Search(
+            [&](FFortItemEntry& Entry)
+            {
+                return Entry.ItemGuid == ItemGuid;
+            },
+            FFortItemEntry::Size());
+    if (!ItemInstance || !*ItemInstance || !ItemEntry)
+    {
+        return CallRemoveInventoryItemOriginal(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
+    }
+
+    auto Item = *ItemInstance;
+    auto ItemDefinition = ItemEntry->ItemDefinition;
+    const bool bForceRemoveItem =
+        bForceRemoveFromQuickBars || bForceRemoval;
+
+    auto AmmoDefinition =
+        ItemDefinition
+            ? ItemDefinition->Cast<UFortAmmoItemDefinition>()
+            : nullptr;
+    const float ItemLevel =
+        Item->ItemEntry.Level > 0
+            ? static_cast<float>(Item->ItemEntry.Level)
+            : 1.0f;
+    double RegenCooldownSeconds = 0.0;
+    int32 RegenMaximumCount = 0;
+    if (Count > 0 && !bForceRemoveItem && AmmoDefinition &&
+        AmmoDefinition->HasRegenCooldown())
+    {
+        RegenCooldownSeconds =
+            AmmoDefinition->EvaluateRegenCooldown(ItemLevel);
+
+        // GetMaxStackSize can depend on an attribute set for some item
+        // types. The pre-consumption count is an authoritative lower
+        // bound and preserves the full charge capacity if that lookup is
+        // unavailable in a server-only session.
+        RegenMaximumCount = max(
+            AmmoDefinition->GetMaxStackSize(),
+            ItemEntry->Count);
+        if (RegenMaximumCount <= 0 ||
+            RegenMaximumCount > 10000 ||
+            !std::isfinite(RegenCooldownSeconds) ||
+            RegenCooldownSeconds <= 0.0 ||
+            RegenCooldownSeconds > 3600.0)
+        {
+            RegenCooldownSeconds = 0.0;
+            RegenMaximumCount = 0;
+        }
+    }
+
+    bool bKeepFinalStackEmpty = false;
+    if (Count > 0 &&
+        !bForceRemoveItem &&
+        ItemDefinition &&
+        ItemDefinition->HasbPersistInInventoryWhenFinalStackEmpty() &&
+        ItemDefinition->bPersistInInventoryWhenFinalStackEmpty)
+    {
+        auto OtherStack =
+            WorldInventory->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Entry)
+                {
+                    return Entry.ItemDefinition == ItemDefinition &&
+                        Entry.ItemGuid != ItemGuid &&
+                        Entry.Count > 0;
+                },
+                FFortItemEntry::Size());
+        bKeepFinalStackEmpty = !OtherStack;
+    }
+
+    const int32 RemovedCount =
+        WorldInventory->RemoveItem(
+            ItemGuid,
+            Count,
+            bKeepFinalStackEmpty);
+
+    if (RemovedCount > 0 && RegenMaximumCount > 0)
+    {
+        ScheduleRegeneratingInventoryItem(
+            PlayerController,
+            AmmoDefinition,
+            ItemGuid,
+            RegenMaximumCount,
+            RegenCooldownSeconds);
+    }
+
+    // Reaching a persistent empty stack or removing an already-empty stale
+    // entry can legitimately remove zero units while still succeeding.
+    return true;
+}
+
+bool RemoveInventoryItemWithQuickBar(
+    IInterface* Interface,
+    FGuid& ItemGuid,
+    int32 Count,
+    bool bForceRemoveFromQuickBars,
+    bool bForceRemoval)
+{
+    return RemoveInventoryItemInternal(
+        Interface,
+        ItemGuid,
+        Count,
+        bForceRemoveFromQuickBars,
+        bForceRemoval);
+}
+
+bool RemoveInventoryItemWithoutQuickBar(
+    IInterface* Interface,
+    FGuid& ItemGuid,
+    int32 Count,
+    bool bForceRemoval)
+{
+    return RemoveInventoryItemInternal(
+        Interface,
+        ItemGuid,
+        Count,
+        false,
+        bForceRemoval);
+}
+
+bool RemoveInventoryItemQuickBarOnly(
+    IInterface* Interface,
+    FGuid& ItemGuid,
+    int32 Count,
+    bool bForceRemoveFromQuickBars)
+{
+    return RemoveInventoryItemInternal(
+        Interface,
+        ItemGuid,
+        Count,
+        bForceRemoveFromQuickBars,
+        false);
+}
+
+ERemoveInventoryItemAbi ResolveRemoveInventoryItemAbi()
+{
+    // The reflected RPC is a separate function, but its named flag changes
+    // track the three interface layouts seen in the supported binaries.
+    // Treat that correlation as a selector, never as permission to guess an
+    // unfamiliar native ABI.
+    const auto ControllerClass =
+        AFortPlayerControllerAthena::StaticClass();
+    const auto ControllerDefault =
+        ControllerClass
+            ? ControllerClass->GetDefaultObj()
+            : nullptr;
+    const auto ServerRemoveInventoryItem =
+        ControllerDefault
+            ? ControllerDefault->GetFunction(
+                "ServerRemoveInventoryItem")
+            : nullptr;
+
+    if (ServerRemoveInventoryItem)
+    {
+        constexpr uint64 CPF_Parm =
+            0x0000000000000080;
+        constexpr uint64 CPF_ReturnParm =
+            0x0000000000000400;
+        const auto Parameters =
+            ServerRemoveInventoryItem->GetParamsNamed();
+        const bool bHasMetadata =
+            !Parameters.NameOffsetMap.empty();
+        bool bHasItemGuid = false;
+        bool bHasCount = false;
+        bool bHasForceRemoval = false;
+        bool bHasQuickBarFlag = false;
+        bool bHasUnknownParameter = false;
+
+        for (const auto& Parameter :
+            Parameters.NameOffsetMap)
+        {
+            if (!(Parameter.PropertyFlags & CPF_Parm) ||
+                (Parameter.PropertyFlags & CPF_ReturnParm))
+            {
+                continue;
+            }
+
+            if (Parameter.Name == "ItemGuid" ||
+                Parameter.Name == "ItemGUID")
+            {
+                bHasItemGuid = true;
+            }
+            else if (Parameter.Name == "Count")
+            {
+                bHasCount = true;
+            }
+            else if (
+                Parameter.Name ==
+                    "bForceRemoveFromQuickBars" ||
+                Parameter.Name ==
+                    "bForceRemoveFromQuickbars")
+            {
+                bHasQuickBarFlag = true;
+            }
+            else if (Parameter.Name == "bForceRemoval")
+            {
+                bHasForceRemoval = true;
+            }
+            else if (Parameter.Name != "bForcePersistWhenEmpty")
+            {
+                bHasUnknownParameter = true;
+            }
+        }
+
+        if (bHasItemGuid && bHasCount &&
+            bHasForceRemoval && bHasQuickBarFlag &&
+            !bHasUnknownParameter)
+        {
+            return ERemoveInventoryItemAbi::
+                WithQuickBarFlag;
+        }
+
+        if (bHasItemGuid && bHasCount &&
+            bHasQuickBarFlag && !bHasForceRemoval &&
+            !bHasUnknownParameter)
+        {
+            return ERemoveInventoryItemAbi::
+                QuickBarFlagOnly;
+        }
+
+        if (bHasItemGuid && bHasCount &&
+            bHasForceRemoval && !bHasQuickBarFlag &&
+            !bHasUnknownParameter)
+        {
+            return ERemoveInventoryItemAbi::
+                WithoutQuickBarFlag;
+        }
+
+        // A partial or unfamiliar reflected layout is evidence that this
+        // build should not receive a guessed native detour.
+        if (bHasMetadata)
+            return ERemoveInventoryItemAbi::None;
+    }
+
+    // These fallbacks are only for an empty reflected layout and only where
+    // the native interface form is independently evidenced. Do not turn an
+    // unknown or zero version into a guessed detour.
+    const double FortniteVersion =
+        VersionInfo.FortniteVersion;
+    if (FortniteVersion == 1.72)
+    {
+        return ERemoveInventoryItemAbi::
+            QuickBarFlagOnly;
+    }
+
+    const bool bKnownFiveArgumentBuild =
+        (FortniteVersion >= 1.91 &&
+            FortniteVersion <= 6.00) ||
+        FortniteVersion == 1.10 ||
+        FortniteVersion == 1.11 ||
+        FortniteVersion == 10.40 ||
+        FortniteVersion == 13.40;
+    if (bKnownFiveArgumentBuild)
+    {
+        return ERemoveInventoryItemAbi::
+            WithQuickBarFlag;
+    }
+
+    return ERemoveInventoryItemAbi::None;
 }
 
 void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
@@ -1790,8 +2142,70 @@ void AFortInventory::PostLoadHook()
     ClearAbility_ = FindClearAbility();
     SDK::DbgLog("  [FI] 1 finds done\n");
 
-    Utils::Hook(FindRemoveInventoryItem(), RemoveInventoryItem);
-    SDK::DbgLog("  [FI] 2 RemoveInventoryItem hooked\n");
+    const auto RemoveInventoryItemAddress =
+        FindRemoveInventoryItem();
+    RemoveInventoryItemAbi =
+        ResolveRemoveInventoryItemAbi();
+
+    bool bRemoveInventoryItemHooked = false;
+    if (RemoveInventoryItemAddress &&
+        RemoveInventoryItemAbi ==
+            ERemoveInventoryItemAbi::WithQuickBarFlag)
+    {
+        Utils::Hook(
+            RemoveInventoryItemAddress,
+            RemoveInventoryItemWithQuickBar,
+            RemoveInventoryItemWithQuickBarOG);
+        bRemoveInventoryItemHooked =
+            RemoveInventoryItemWithQuickBarOG != nullptr;
+    }
+    else if (RemoveInventoryItemAddress &&
+        RemoveInventoryItemAbi ==
+            ERemoveInventoryItemAbi::QuickBarFlagOnly)
+    {
+        Utils::Hook(
+            RemoveInventoryItemAddress,
+            RemoveInventoryItemQuickBarOnly,
+            RemoveInventoryItemQuickBarOnlyOG);
+        bRemoveInventoryItemHooked =
+            RemoveInventoryItemQuickBarOnlyOG != nullptr;
+    }
+    else if (RemoveInventoryItemAddress &&
+        RemoveInventoryItemAbi ==
+            ERemoveInventoryItemAbi::WithoutQuickBarFlag)
+    {
+        Utils::Hook(
+            RemoveInventoryItemAddress,
+            RemoveInventoryItemWithoutQuickBar,
+            RemoveInventoryItemWithoutQuickBarOG);
+        bRemoveInventoryItemHooked =
+            RemoveInventoryItemWithoutQuickBarOG != nullptr;
+    }
+
+    const char* RemoveInventoryItemAbiName = "unresolved";
+    switch (RemoveInventoryItemAbi)
+    {
+    case ERemoveInventoryItemAbi::QuickBarFlagOnly:
+        RemoveInventoryItemAbiName = "quickbar-only";
+        break;
+    case ERemoveInventoryItemAbi::WithoutQuickBarFlag:
+        RemoveInventoryItemAbiName = "force-removal-only";
+        break;
+    case ERemoveInventoryItemAbi::WithQuickBarFlag:
+        RemoveInventoryItemAbiName = "quickbar-and-force-removal";
+        break;
+    default:
+        break;
+    }
+    SDK::DbgLog(
+        "  [FI] 2 RemoveInventoryItem %s "
+        "(abi=%s target=%p)\n",
+        bRemoveInventoryItemHooked
+            ? "hooked"
+            : "unavailable",
+        RemoveInventoryItemAbiName,
+        reinterpret_cast<void*>(
+            RemoveInventoryItemAddress));
     // need to see if these are used
     //Utils::Hook(FindRemoveInventoryStateValue(), RemoveInventoryStateValue);
     //Utils::Hook(FindSetInventoryStateValue(), SetInventoryStateValue);

@@ -1114,7 +1114,7 @@ void MagnesiumPlayerAIIntegration::OnServerTickInternal(UNetDriver* Driver, floa
     // system plays through - it is forced off while Enable AIs is on.
     if (MagnesiumPlayerAISettings::bEnableAIs && FConfiguration::bLateGame)
     {
-        FConfiguration::bLateGame = false;
+        FConfiguration::SetLateGameEnabled(false);
         AIDebugLogger::Log("Integration", "Lategame was enabled - forced OFF because Enable AIs is on");
     }
 

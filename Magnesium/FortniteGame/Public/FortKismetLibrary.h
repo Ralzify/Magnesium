@@ -62,6 +62,7 @@ public:
 
 	static void K2_SpawnPickupInWorld(UObject*, FFrame&, AFortPickupAthena**);
 	static void GiveItemToInventoryOwner(UObject*, FFrame&);
+	static void K2_GetItemQuantityOnPlayer(UObject*, FFrame&, int32*);
 	static void K2_RemoveItemFromPlayer(UObject*, FFrame&, int32*);
 	static void K2_RemoveItemFromPlayerByGuid(UObject*, FFrame&, int32*);
 	static void SpawnItemVariantPickupInWorld(UObject*, FFrame&, AFortPickupAthena**);

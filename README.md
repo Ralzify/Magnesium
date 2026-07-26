@@ -10,7 +10,7 @@ Magnesium is a fork of [Erbium](https://github.com/plooshi/Erbium), an OGFN game
 - Infinite Render : Want to hit a trickshot, but you seem to find yourself too far out of render distance to kill the player? Try turning this on! Extends the player render distance for the last player to join, so they won't go out of render!
 - Arena Support : Proper Placement Points, Kill Points, and saving support.
 - Many more commands added : When in game, run "cheat help" to see the full list!
-- Default Settings Changes : Stuff like Infinite Ammo & Infinite Materials are already on by default now!
+- Default Settings Changes : Infinite Ammo & Infinite Materials default on for Late Game and switch off when Late Game is disabled; specialized modes can still override them.
 
 # TODO:
 - Fix 22.40 lategame crash

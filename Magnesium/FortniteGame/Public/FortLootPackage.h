@@ -122,12 +122,31 @@ public:
     DEFINE_PROP(ConsumableClass, TSoftClassPtr<UClass>);
 };
 
-class ABGAConsumableSpawner : public AActor
+class ABuildingActor : public AActor
+{
+public:
+    UCLASS_COMMON_MEMBERS(ABuildingActor);
+
+    DEFINE_BITFIELD_PROP(bDestroyed);
+};
+
+class ABuildingGameplayActorConsumable : public ABuildingActor
+{
+public:
+    UCLASS_COMMON_MEMBERS(ABuildingGameplayActorConsumable);
+
+    DEFINE_BITFIELD_PROP(bSpawnerCalculateRandomRotation);
+};
+
+class ABGAConsumableSpawner : public ABuildingActor
 {
 public:
     UCLASS_COMMON_MEMBERS(ABGAConsumableSpawner);
 
     DEFINE_PROP(SpawnLootTierGroup, FName);
+    DEFINE_PROP(AssociatedBuildingActor, ABuildingActor*);
+    DEFINE_PROP(ConsumablesToSpawn, TArray<FFortItemEntry>);
+    DEFINE_BITFIELD_PROP(bAlignSpawnedActorsToSurface);
 };
 
 class UFortLootPackage
@@ -138,7 +157,7 @@ public:
     static void SpawnFloorLootForContainer(const UClass*);
     static bool SpawnLootHook(ABuildingContainer*);
     static void SpawnLoot(FName&, FVector);
-    static void SpawnConsumableActor(ABGAConsumableSpawner*);
+    static bool SpawnConsumableActor(ABGAConsumableSpawner*);
 
     InitHooks;
 };

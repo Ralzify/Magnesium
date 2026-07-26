@@ -21,6 +21,7 @@
 #include "../../Erbium/Public/Events.h"
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
 #include "../Public/FortAthenaCreativePortal.h"
+#include "../Public/FortAthenaMutator.h"
 #include "../Public/FortPhysicsPawn.h"
 #include "../Public/FortVehicleMods.h"
 
@@ -219,7 +220,7 @@ namespace
         return true;
     }
 
-    void SyncLateSeasonTeamSettings(
+    void SyncPlaylistTeamSettings(
         AFortGameMode* GameMode,
         AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist)
@@ -254,7 +255,8 @@ namespace
                 GameMode->GameSession, "MaxPartySize", MaxTeamSize);
 
         SDK::DbgLog(
-            "[Teams] FN17-18 playlist team settings: TeamSize=%d(%d) TeamCount=%d(%d) MaxPartySize=%d\n",
+            "[Teams] playlist team settings: "
+            "TeamSize=%d(%d) TeamCount=%d(%d) MaxPartySize=%d\n",
             MaxTeamSize,
             bSetTeamSize ? 1 : 0,
             MaxTeamCount,
@@ -268,7 +270,7 @@ namespace
             Playlist->MaxSquadSize > 1;
     }
 
-    bool DoesLateSeasonPlaylistAllowDBNO(
+    bool DoesPlaylistAllowDBNO(
         const UFortPlaylistAthena* Playlist)
     {
         if (!Playlist)
@@ -279,9 +281,35 @@ namespace
             !SDK::MemReadable(
                 (const uint8*)Playlist + DBNOTypeOffset, sizeof(uint8)))
         {
-            // Older assets without DBNOType use the original Erbium rule:
-            // team playlist means DBNO is permitted.
-            return true;
+            // Older playlists use an inverse reflected bit instead of
+            // DBNOType. Read its field mask: treating the containing byte as
+            // a bool would make adjacent playlist flags affect DBNO.
+            auto MutablePlaylist =
+                const_cast<UFortPlaylistAthena*>(Playlist);
+            auto NoDBNOProperty =
+                MutablePlaylist->GetProperty("bNoDBNO", 0x20000);
+            if (!NoDBNOProperty)
+                return true;
+
+            const uint32 NoDBNOOffset =
+                GetFromOffset<uint32>(
+                    NoDBNOProperty, Offsets::Offset_Internal);
+            if (NoDBNOOffset == uint32(-1) ||
+                !SDK::MemReadable(
+                    (const uint8*)Playlist + NoDBNOOffset,
+                    sizeof(uint8)))
+            {
+                return true;
+            }
+
+            const uint8 FieldMask =
+                NoDBNOProperty->GetFieldMask();
+            const uint8 Value =
+                GetFromOffset<uint8>(Playlist, NoDBNOOffset);
+            const bool bNoDBNO = FieldMask
+                ? (Value & FieldMask) != 0
+                : Value != 0;
+            return !bNoDBNO;
         }
 
         const uint8 DBNOType =
@@ -323,7 +351,7 @@ namespace
         const bool bTeamMode = IsLateSeasonTeamPlaylist(Playlist);
         bool bDBNOEnabled =
             FConfiguration::bEnableDBNO && bTeamMode &&
-            DoesLateSeasonPlaylistAllowDBNO(Playlist);
+            DoesPlaylistAllowDBNO(Playlist);
 
         if (GameMode->HasbDBNOEnabled())
             GameMode->bDBNOEnabled = bDBNOEnabled;
@@ -813,6 +841,761 @@ namespace
             KeptIndex >= 0 ? 1 : 0,
             RemovedDuplicates);
     }
+
+    using FHeistStartEndGamePhase =
+        bool(*)(
+            AFortGameModeAthena*,
+            AFortPlayerControllerAthena*,
+            AActor*,
+            const UFortWeaponItemDefinition*,
+            uint8);
+
+    FHeistStartEndGamePhase GHeistStartEndGamePhaseOG = nullptr;
+
+    struct FHeistTeamWinNotificationState
+    {
+        UWorld* World = nullptr;
+        AFortGameModeAthena* GameMode = nullptr;
+        AFortPlayerControllerAthena* WinningPlayer = nullptr;
+        std::vector<AFortPlayerControllerAthena*> NotifiedControllers;
+    };
+
+    FHeistTeamWinNotificationState GHeistTeamWinNotifications;
+
+    bool IsActiveHeistMatch(AFortGameModeAthena* GameMode)
+    {
+        if (!FFortAthenaHeistCompatibility::IsSupportedBuild() ||
+            !IsSaneObject(GameMode) ||
+            !IsSaneObject(GameMode->GameState))
+        {
+            return false;
+        }
+
+        auto GameState = GameMode->GameState;
+        if (GameState->HasCurrentPlaylistInfo())
+        {
+            const UFortPlaylistAthena* OverridePlaylist =
+                FPlaylistPropertyArray::HasOverridePlaylist()
+                    ? GameState->CurrentPlaylistInfo.OverridePlaylist
+                    : nullptr;
+            const UFortPlaylistAthena* BasePlaylist =
+                FPlaylistPropertyArray::HasBasePlaylist()
+                    ? GameState->CurrentPlaylistInfo.BasePlaylist
+                    : nullptr;
+            if ((IsSaneObject(
+                     const_cast<UFortPlaylistAthena*>(
+                         OverridePlaylist)) &&
+                    FFortAthenaHeistCompatibility::IsHeistPlaylist(
+                        OverridePlaylist)) ||
+                (IsSaneObject(
+                     const_cast<UFortPlaylistAthena*>(
+                         BasePlaylist)) &&
+                    FFortAthenaHeistCompatibility::IsHeistPlaylist(
+                        BasePlaylist)))
+            {
+                return true;
+            }
+        }
+
+        if (GameState->HasCurrentPlaylistData())
+        {
+            const UFortPlaylistAthena* Playlist =
+                GameState->CurrentPlaylistData;
+            return IsSaneObject(
+                       const_cast<UFortPlaylistAthena*>(Playlist)) &&
+                FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist);
+        }
+
+        return false;
+    }
+
+    std::vector<AFortPlayerControllerAthena*>
+    CaptureConnectedHeistTeammates(
+        AFortPlayerControllerAthena* WinningPlayer)
+    {
+        std::vector<AFortPlayerControllerAthena*> Teammates;
+        if (!IsSaneObject(WinningPlayer) ||
+            !IsSaneObject(WinningPlayer->PlayerState))
+        {
+            return Teammates;
+        }
+
+        auto WinningPlayerState =
+            static_cast<AFortPlayerStateAthena*>(
+                WinningPlayer->PlayerState);
+        if (!WinningPlayerState->HasTeamIndex() ||
+            WinningPlayerState->TeamIndex < 3 ||
+            WinningPlayerState->TeamIndex >= 250)
+        {
+            return Teammates;
+        }
+
+        auto World = UWorld::GetWorld();
+        if (!IsSaneObject(World))
+            return Teammates;
+
+        auto Driver =
+            static_cast<UNetDriver*>(World->NetDriver);
+        if (!IsSaneObject(Driver))
+            return Teammates;
+
+        auto& Connections = Driver->ClientConnections;
+        if (Connections.Num() < 0 || Connections.Num() > 256 ||
+            Connections.Max() < Connections.Num() ||
+            Connections.Max() > 4096 ||
+            (Connections.Num() > 0 &&
+                !SDK::MemReadable(
+                    Connections.GetData(),
+                    sizeof(UNetConnection*) * Connections.Num())))
+        {
+            return Teammates;
+        }
+
+        for (int32 Index = 0; Index < Connections.Num(); ++Index)
+        {
+            auto Connection = Connections[Index];
+            if (!IsSaneObject(Connection))
+                continue;
+
+            auto Controller = Connection->PlayerController;
+            if (Controller == WinningPlayer ||
+                !IsSaneObject(Controller) ||
+                !IsSaneObject(Controller->PlayerState))
+            {
+                continue;
+            }
+
+            auto PlayerState =
+                static_cast<AFortPlayerStateAthena*>(
+                    Controller->PlayerState);
+            if (!PlayerState->HasTeamIndex() ||
+                PlayerState->TeamIndex !=
+                    WinningPlayerState->TeamIndex)
+            {
+                continue;
+            }
+
+            if (std::find(
+                    Teammates.begin(), Teammates.end(), Controller) ==
+                Teammates.end())
+            {
+                Teammates.push_back(Controller);
+            }
+        }
+
+        return Teammates;
+    }
+
+    bool NotifyHeistTeammateOfWin(
+        AFortPlayerControllerAthena* Controller,
+        AActor* FinisherPawn,
+        const UFortWeaponItemDefinition* FinishingWeapon,
+        uint8 DeathCause)
+    {
+        if (!IsSaneObject(Controller))
+            return false;
+
+        UFunction* Function =
+            Controller->GetFunction("ClientNotifyTeamWon");
+        if (!Function)
+            return false;
+
+        const auto Parameters = Function->GetParamsNamed();
+        if (Parameters.Size == 0 || Parameters.Size > 0x100 ||
+            Parameters.NameOffsetMap.size() != 3)
+        {
+            return false;
+        }
+
+        constexpr uint64 CPF_Parm = 0x0000000000000080;
+        constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+        uint32 FinisherPawnOffset = uint32(-1);
+        uint32 FinishingWeaponOffset = uint32(-1);
+        uint32 DeathCauseOffset = uint32(-1);
+
+        for (const auto& Parameter : Parameters.NameOffsetMap)
+        {
+            if (!(Parameter.PropertyFlags & CPF_Parm) ||
+                (Parameter.PropertyFlags & CPF_ReturnParm))
+            {
+                return false;
+            }
+
+            uint32 ExpectedSize = 0;
+            uint32* DestinationOffset = nullptr;
+            if (Parameter.Name == "FinisherPawn")
+            {
+                ExpectedSize = sizeof(AActor*);
+                DestinationOffset = &FinisherPawnOffset;
+            }
+            else if (Parameter.Name == "FinishingWeapon")
+            {
+                ExpectedSize = sizeof(UFortWeaponItemDefinition*);
+                DestinationOffset = &FinishingWeaponOffset;
+            }
+            else if (Parameter.Name == "DeathCause")
+            {
+                ExpectedSize = sizeof(uint8);
+                DestinationOffset = &DeathCauseOffset;
+            }
+            else
+            {
+                return false;
+            }
+
+            if (*DestinationOffset != uint32(-1) ||
+                Parameter.ElementSize != ExpectedSize ||
+                Parameter.Offset > Parameters.Size ||
+                ExpectedSize > Parameters.Size - Parameter.Offset)
+            {
+                return false;
+            }
+
+            *DestinationOffset = Parameter.Offset;
+        }
+
+        if (FinisherPawnOffset == uint32(-1) ||
+            FinishingWeaponOffset == uint32(-1) ||
+            DeathCauseOffset == uint32(-1))
+        {
+            return false;
+        }
+
+        void* Memory = FMemory::Malloc(Parameters.Size);
+        if (!Memory)
+            return false;
+
+        memset(Memory, 0, Parameters.Size);
+        auto MutableFinishingWeapon =
+            const_cast<UFortWeaponItemDefinition*>(FinishingWeapon);
+        memcpy(
+            static_cast<uint8*>(Memory) + FinisherPawnOffset,
+            &FinisherPawn,
+            sizeof(FinisherPawn));
+        memcpy(
+            static_cast<uint8*>(Memory) + FinishingWeaponOffset,
+            &MutableFinishingWeapon,
+            sizeof(MutableFinishingWeapon));
+        memcpy(
+            static_cast<uint8*>(Memory) + DeathCauseOffset,
+            &DeathCause,
+            sizeof(DeathCause));
+
+        Controller->ProcessEvent(Function, Memory);
+        FMemory::Free(Memory);
+        return true;
+    }
+
+    bool HeistStartEndGamePhase(
+        AFortGameModeAthena* GameMode,
+        AFortPlayerControllerAthena* WinningPlayer,
+        AActor* FinisherPawn,
+        const UFortWeaponItemDefinition* FinishingWeapon,
+        uint8 DeathCause)
+    {
+        if (!GHeistStartEndGamePhaseOG)
+            return false;
+
+        const bool bActiveHeistMatch =
+            IsActiveHeistMatch(GameMode);
+        static const FName WaitingPostMatchState(L"WaitingPostMatch");
+        const bool bBeginningEndGame =
+            IsSaneObject(GameMode) &&
+            GameMode->HasMatchState() &&
+            GameMode->MatchState != WaitingPostMatchState;
+        auto MatchWorld = UWorld::GetWorld();
+        auto Teammates = bActiveHeistMatch
+            ? CaptureConnectedHeistTeammates(WinningPlayer)
+            : std::vector<AFortPlayerControllerAthena*>{};
+
+        const bool bResult = GHeistStartEndGamePhaseOG(
+            GameMode,
+            WinningPlayer,
+            FinisherPawn,
+            FinishingWeapon,
+            DeathCause);
+
+        if (!bActiveHeistMatch)
+            return bResult;
+
+        auto World = UWorld::GetWorld();
+        if (World != MatchWorld || !IsSaneObject(World))
+            return bResult;
+
+        auto MarkControllerWon =
+            [](AFortPlayerControllerAthena* Controller)
+            {
+                if (!IsSaneObject(Controller) ||
+                    !IsSaneObject(Controller->PlayerState))
+                {
+                    return;
+                }
+
+                auto PlayerState =
+                    static_cast<AFortPlayerStateAthena*>(
+                        Controller->PlayerState);
+                if (PlayerState->HasbHasWonAGame())
+                {
+                    PlayerState->bHasWonAGame = true;
+                    PlayerState->ForceNetUpdate();
+                }
+            };
+
+        MarkControllerWon(WinningPlayer);
+        for (auto Controller : Teammates)
+            MarkControllerWon(Controller);
+
+        if (Teammates.empty())
+            return bResult;
+
+        if (GHeistTeamWinNotifications.World != World ||
+            GHeistTeamWinNotifications.GameMode != GameMode ||
+            GHeistTeamWinNotifications.WinningPlayer != WinningPlayer ||
+            bBeginningEndGame)
+        {
+            GHeistTeamWinNotifications.World = World;
+            GHeistTeamWinNotifications.GameMode = GameMode;
+            GHeistTeamWinNotifications.WinningPlayer = WinningPlayer;
+            GHeistTeamWinNotifications.NotifiedControllers.clear();
+        }
+
+        int32 NotifiedCount = 0;
+        for (auto Controller : Teammates)
+        {
+            if (!IsSaneObject(Controller) ||
+                !IsSaneObject(Controller->PlayerState) ||
+                std::find(
+                    GHeistTeamWinNotifications.NotifiedControllers.begin(),
+                    GHeistTeamWinNotifications.NotifiedControllers.end(),
+                    Controller) !=
+                    GHeistTeamWinNotifications.NotifiedControllers.end())
+            {
+                continue;
+            }
+
+            if (NotifyHeistTeammateOfWin(
+                    Controller,
+                    FinisherPawn,
+                    FinishingWeapon,
+                    DeathCause))
+            {
+                GHeistTeamWinNotifications.NotifiedControllers.push_back(
+                    Controller);
+                ++NotifiedCount;
+            }
+        }
+
+        SDK::DbgLog(
+            "[Heist] StartEndGamePhase notified %d/%d connected teammate(s)\n",
+            NotifiedCount,
+            static_cast<int32>(Teammates.size()));
+        return bResult;
+    }
+
+    struct FHeistUnwindInfoHeader
+    {
+        uint8 VersionAndFlags;
+        uint8 PrologSize;
+        uint8 CodeCount;
+        uint8 FrameRegisterAndOffset;
+    };
+
+    static_assert(
+        sizeof(FHeistUnwindInfoHeader) == 4,
+        "Unexpected x64 unwind header size");
+
+    uintptr_t FindHeistRuntimeFunctionStart(
+        uintptr_t ControlPc,
+        uintptr_t TextStart,
+        uintptr_t TextEnd)
+    {
+        if (!ControlPc || ControlPc < TextStart || ControlPc >= TextEnd)
+            return 0;
+
+        DWORD64 RuntimeImageBase = 0;
+        PRUNTIME_FUNCTION Entry = RtlLookupFunctionEntry(
+            static_cast<DWORD64>(ControlPc),
+            &RuntimeImageBase,
+            nullptr);
+        const uintptr_t ExpectedImageBase =
+            Memcury::PE::GetModuleBase();
+        if (!Entry ||
+            !RuntimeImageBase ||
+            static_cast<uintptr_t>(RuntimeImageBase) !=
+                ExpectedImageBase)
+        {
+            return 0;
+        }
+
+        constexpr uint8 UnwindFlagChainInfo = 0x4;
+        struct FRuntimeFunctionIdentity
+        {
+            DWORD BeginAddress;
+            DWORD EndAddress;
+            DWORD UnwindData;
+        };
+        FRuntimeFunctionIdentity VisitedEntries[16]{};
+        int32 VisitedEntryCount = 0;
+
+        for (int32 Depth = 0; Depth < 16; ++Depth)
+        {
+            if (!SDK::MemReadable(Entry, sizeof(*Entry)))
+                return 0;
+
+            const FRuntimeFunctionIdentity Identity{
+                Entry->BeginAddress,
+                Entry->EndAddress,
+                Entry->UnwindData};
+            for (int32 Index = 0; Index < VisitedEntryCount; ++Index)
+            {
+                const auto& Visited = VisitedEntries[Index];
+                if (Visited.BeginAddress == Identity.BeginAddress &&
+                    Visited.EndAddress == Identity.EndAddress &&
+                    Visited.UnwindData == Identity.UnwindData)
+                {
+                    return 0;
+                }
+            }
+            VisitedEntries[VisitedEntryCount++] = Identity;
+
+            if (Identity.BeginAddress >= Identity.EndAddress)
+                return 0;
+
+            const uintptr_t BeginAddress =
+                ExpectedImageBase + Identity.BeginAddress;
+            const uintptr_t EndAddress =
+                ExpectedImageBase + Identity.EndAddress;
+            if (BeginAddress < ExpectedImageBase ||
+                EndAddress < ExpectedImageBase ||
+                BeginAddress < TextStart ||
+                EndAddress > TextEnd)
+            {
+                return 0;
+            }
+
+            const uintptr_t UnwindInfoAddress =
+                ExpectedImageBase + Identity.UnwindData;
+            if (UnwindInfoAddress < ExpectedImageBase)
+                return 0;
+
+            auto UnwindInfo =
+                reinterpret_cast<const FHeistUnwindInfoHeader*>(
+                    UnwindInfoAddress);
+            if (!SDK::MemReadable(
+                    UnwindInfo, sizeof(FHeistUnwindInfoHeader)) ||
+                (UnwindInfo->VersionAndFlags & 0x7) != 1)
+            {
+                return 0;
+            }
+
+            const uint8 Flags =
+                UnwindInfo->VersionAndFlags >> 3;
+            if (!(Flags & UnwindFlagChainInfo))
+                return BeginAddress;
+            if (Flags != UnwindFlagChainInfo)
+                return 0;
+
+            const size_t AlignedCodeCount =
+                (static_cast<size_t>(UnwindInfo->CodeCount) + 1u) &
+                ~size_t(1);
+            const uintptr_t ChainedEntryAddress =
+                UnwindInfoAddress +
+                sizeof(FHeistUnwindInfoHeader) +
+                AlignedCodeCount * sizeof(uint16);
+            if (ChainedEntryAddress < UnwindInfoAddress)
+                return 0;
+
+            auto ChainedEntry =
+                reinterpret_cast<PRUNTIME_FUNCTION>(
+                    ChainedEntryAddress);
+            if (!SDK::MemReadable(
+                    ChainedEntry, sizeof(*ChainedEntry)))
+            {
+                return 0;
+            }
+
+            Entry = ChainedEntry;
+        }
+
+        return 0;
+    }
+
+    uintptr_t FindHeistStartEndGamePhase()
+    {
+        if (!FFortAthenaHeistCompatibility::IsSupportedBuild())
+            return 0;
+
+        auto StringReference = Memcury::Scanner::FindStringRef(
+            L"FortGameModeAthena: %s won the match!", false);
+        if (!StringReference.IsValid())
+            return 0;
+
+        const uintptr_t ReferenceAddress = StringReference.Get();
+        auto TextSection =
+            Memcury::PE::Section::GetSection(".text");
+        const uintptr_t TextStart =
+            TextSection.GetSectionStart().Get();
+        const uintptr_t TextEnd =
+            TextSection.GetSectionEnd().Get();
+        if (!ReferenceAddress ||
+            ReferenceAddress < TextStart ||
+            ReferenceAddress >= TextEnd ||
+            !SDK::MemReadable((void*)ReferenceAddress, 7))
+        {
+            return 0;
+        }
+
+        const uintptr_t FunctionAddress =
+            FindHeistRuntimeFunctionStart(
+                ReferenceAddress, TextStart, TextEnd);
+        const uintptr_t ValidatedFunctionAddress =
+            FunctionAddress
+                ? FindHeistRuntimeFunctionStart(
+                      FunctionAddress, TextStart, TextEnd)
+                : 0;
+
+        constexpr uintptr_t MaxFunctionSpan = 0x10000;
+        if (!FunctionAddress ||
+            ValidatedFunctionAddress != FunctionAddress ||
+            FunctionAddress < TextStart ||
+            FunctionAddress >= TextEnd ||
+            FunctionAddress > ReferenceAddress ||
+            ReferenceAddress - FunctionAddress > MaxFunctionSpan ||
+            FunctionAddress + 16 > TextEnd ||
+            !SDK::MemReadable((void*)FunctionAddress, 16))
+        {
+            SDK::DbgLog(
+                "[Heist] rejected StartEndGamePhase resolver ref=%p function=%p text=[%p,%p)\n",
+                (void*)ReferenceAddress,
+                (void*)FunctionAddress,
+                (void*)TextStart,
+                (void*)TextEnd);
+            return 0;
+        }
+
+        return FunctionAddress;
+    }
+
+    void InstallHeistStartEndGamePhaseHook()
+    {
+        if (!FFortAthenaHeistCompatibility::IsSupportedBuild())
+            return;
+
+        const uintptr_t Address = FindHeistStartEndGamePhase();
+        if (!Address)
+        {
+            SDK::DbgLog(
+                "[Heist] StartEndGamePhase resolver unavailable; team-win bridge disabled\n");
+            return;
+        }
+
+        Utils::Hook(
+            Address,
+            HeistStartEndGamePhase,
+            GHeistStartEndGamePhaseOG);
+        SDK::DbgLog(
+            "[Heist] StartEndGamePhase team-win bridge installed at %p original=%p\n",
+            (void*)Address,
+            (void*)GHeistStartEndGamePhaseOG);
+    }
+
+    bool IsCarminePlaylist(const UFortPlaylistAthena* Playlist)
+    {
+        if (VersionInfo.FortniteVersion != 4.20 || !Playlist)
+            return false;
+
+        static const FName CarminePlaylistName(L"Playlist_Carmine");
+        return Playlist->Name == CarminePlaylistName;
+    }
+
+    uintptr_t ValidateCarminePlaylistFunction(uintptr_t Address)
+    {
+        if (!Address)
+            return 0;
+
+        auto TextSection =
+            Memcury::PE::Section::GetSection(".text");
+        const uintptr_t TextStart =
+            TextSection.GetSectionStart().Get();
+        const uintptr_t TextEnd =
+            TextSection.GetSectionEnd().Get();
+        if (!TextStart || TextEnd <= TextStart ||
+            Address < TextStart || Address >= TextEnd)
+        {
+            return 0;
+        }
+
+        return FindHeistRuntimeFunctionStart(
+                   Address, TextStart, TextEnd) == Address &&
+                SDK::MemReadable((void*)Address, 16)
+            ? Address
+            : 0;
+    }
+
+    uintptr_t FindCarminePlaylistDataLoader()
+    {
+        static bool bInitialized = false;
+        static uintptr_t Address = 0;
+        if (bInitialized)
+            return Address;
+
+        bInitialized = true;
+        if (VersionInfo.FortniteVersion != 4.20)
+            return 0;
+
+        auto StringReference =
+            Memcury::Scanner::FindStringRef(
+                L"PLAYLIST: Playlist Object is loading its assets in "
+                L"AFortGameStateAthena::LoadCurrentPlaylistData(), "
+                L"PlaylistName is %s (Server Side)",
+                false);
+        if (!StringReference.IsValid())
+        {
+            StringReference =
+                Memcury::Scanner::FindStringRef(
+                    L"PLAYLIST: Playlist Object is loading its assets in "
+                    L"AFortGameStateAthena::LoadCurrentPlaylistData(), "
+                    L"PlaylistName is %s (Client Side)",
+                    false);
+        }
+
+        if (StringReference.IsValid())
+        {
+            auto TextSection =
+                Memcury::PE::Section::GetSection(".text");
+            Address = FindHeistRuntimeFunctionStart(
+                StringReference.Get(),
+                TextSection.GetSectionStart().Get(),
+                TextSection.GetSectionEnd().Get());
+            Address = ValidateCarminePlaylistFunction(Address);
+        }
+
+        SDK::DbgLog(
+            "[Carmine] LoadCurrentPlaylistData resolver=%p\n",
+            (void*)Address);
+        return Address;
+    }
+
+    uintptr_t FindCarminePlaylistDataInitializer()
+    {
+        static bool bInitialized = false;
+        static uintptr_t Address = 0;
+        if (bInitialized)
+            return Address;
+
+        bInitialized = true;
+        if (VersionInfo.FortniteVersion != 4.20)
+            return 0;
+
+        Address =
+            Memcury::Scanner::FindPattern(
+                "40 53 48 83 EC ? 48 8B D9 48 8B 89 ? ? ? ? "
+                "48 85 C9 74 ? 80 BB",
+                false)
+                .Get();
+        Address = ValidateCarminePlaylistFunction(Address);
+
+        SDK::DbgLog(
+            "[Carmine] InitializePlaylistDataPreDataLoad resolver=%p\n",
+            (void*)Address);
+        return Address;
+    }
+
+    void LoadCarminePlaylistData(
+        AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist)
+    {
+        if (!IsCarminePlaylist(Playlist) ||
+            !IsSaneObject(GameState))
+        {
+            return;
+        }
+
+        // Core publishes the ID before entering the native data loader.
+        // CurrentPlaylistInfo alone does not start Carmine's playlist-owned
+        // assets on 4.20.
+        if (auto OnRepCurrentPlaylistId =
+                GameState->GetFunction("OnRep_CurrentPlaylistId"))
+        {
+            GameState->ProcessEvent(OnRepCurrentPlaylistId, nullptr);
+        }
+        else
+        {
+            SDK::DbgLog(
+                "[Carmine] OnRep_CurrentPlaylistId unavailable; "
+                "playlist data load skipped\n");
+            return;
+        }
+
+        if (!GameState->HasbPlaylistDataIsLoaded() ||
+            !GameState->HasbPlaylistDataIsActivelyLoading())
+        {
+            SDK::DbgLog(
+                "[Carmine] playlist load-state properties unavailable; "
+                "native data load skipped\n");
+            return;
+        }
+
+        if (GameState->bPlaylistDataIsLoaded ||
+            GameState->bPlaylistDataIsActivelyLoading)
+        {
+            SDK::DbgLog(
+                "[Carmine] playlist data already loaded/loading\n");
+            return;
+        }
+
+        auto ReflectedInitialize =
+            GameState->GetFunction(
+                "InitializePlaylistDataPreDataLoad");
+        auto ReflectedLoad =
+            GameState->GetFunction("LoadCurrentPlaylistData");
+        if (ReflectedInitialize && ReflectedLoad)
+        {
+            auto MatchWorld = UWorld::GetWorld();
+            GameState->ProcessEvent(ReflectedInitialize, nullptr);
+            if (UWorld::GetWorld() != MatchWorld ||
+                !IsSaneObject(GameState))
+            {
+                return;
+            }
+
+            GameState->ProcessEvent(ReflectedLoad, nullptr);
+            SDK::DbgLog(
+                "[Carmine] reflected playlist-data load requested\n");
+            return;
+        }
+
+        const uintptr_t InitializeAddress =
+            FindCarminePlaylistDataInitializer();
+        const uintptr_t LoadAddress =
+            FindCarminePlaylistDataLoader();
+        if (!InitializeAddress || !LoadAddress)
+        {
+            SDK::DbgLog(
+                "[Carmine] native playlist-data pipeline unresolved; "
+                "load skipped\n");
+            return;
+        }
+
+        auto MatchWorld = UWorld::GetWorld();
+        auto InitializePlaylistData =
+            reinterpret_cast<void(*)(AFortGameStateAthena*)>(
+                InitializeAddress);
+        auto LoadCurrentPlaylistData =
+            reinterpret_cast<void(*)(AFortGameStateAthena*)>(
+                LoadAddress);
+
+        InitializePlaylistData(GameState);
+        if (UWorld::GetWorld() != MatchWorld ||
+            !IsSaneObject(GameState))
+        {
+            return;
+        }
+
+        LoadCurrentPlaylistData(GameState);
+        SDK::DbgLog(
+            "[Carmine] native playlist-data load requested\n");
+    }
 }
 
 void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
@@ -824,6 +1607,9 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 
     if (Playlist)
     {
+        const bool bIsCarminePlaylist =
+            IsCarminePlaylist(Playlist);
+
         if (FConfiguration::bForceRespawns)
         {
             if (Playlist->HasbRespawnInAir())
@@ -874,7 +1660,10 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         {
             //if (VersionInfo.EngineVersion >= 4.27)
             GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
-            if (ShouldRepairLateSeasonTeams() &&
+            if ((ShouldRepairLateSeasonTeams() ||
+                    FFortAthenaHeistCompatibility::IsHeistPlaylist(
+                        Playlist) ||
+                    bIsCarminePlaylist) &&
                 FPlaylistPropertyArray::HasOverridePlaylist())
             {
                 GameState->CurrentPlaylistInfo.OverridePlaylist = Playlist;
@@ -891,7 +1680,13 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 
         GameMode->CurrentPlaylistId = Playlist->PlaylistId;
         if (GameState->HasCurrentPlaylistId())
+        {
             GameState->CurrentPlaylistId = Playlist->PlaylistId;
+            if (bIsCarminePlaylist)
+            {
+                LoadCarminePlaylistData(GameState, Playlist);
+            }
+        }
         if (GameMode->HasCurrentPlaylistName())
             GameMode->CurrentPlaylistName = Playlist->PlaylistName;
 
@@ -904,13 +1699,23 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         if (GameState->HasCachedSafeZoneStartUp() && Playlist->HasSafeZoneStartUp())
             GameState->CachedSafeZoneStartUp = Playlist->SafeZoneStartUp;
 
+        const bool bIsHeistPlaylist =
+            FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist);
+        if (bIsHeistPlaylist || ShouldRepairLateSeasonTeams())
+        {
+            SyncPlaylistTeamSettings(GameMode, GameState, Playlist);
+        }
+
         // Configure each reflected DBNO property independently because their
-        // availability and names vary by game version. FN17/18 is finalized
-        // below after its playlist team graph has been initialized.
-        bool bDBNOOn = ShouldRepairLateSeasonTeams()
+        // availability and names vary by game version. FN17/18 and Heist use
+        // the actual playlist team/DBNO rules; FN17/18 is finalized below
+        // after its playlist team graph has been initialized.
+        const bool bUsePlaylistDBNORules =
+            ShouldRepairLateSeasonTeams() || bIsHeistPlaylist;
+        bool bDBNOOn = bUsePlaylistDBNORules
             ? (FConfiguration::bEnableDBNO &&
                 IsLateSeasonTeamPlaylist(Playlist) &&
-                DoesLateSeasonPlaylistAllowDBNO(Playlist))
+                DoesPlaylistAllowDBNO(Playlist))
             : true;
         bool bAlwaysDBNO = false;
         if (!ShouldRepairLateSeasonTeams() &&
@@ -931,7 +1736,6 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 
         if (ShouldRepairLateSeasonTeams())
         {
-            SyncLateSeasonTeamSettings(GameMode, GameState, Playlist);
             EnsureLateSeasonTeamObjects(
                 GameMode, GameState, GetPlaylistFirstTeam(Playlist));
             ApplyLateSeasonDBNOSettings(
@@ -948,6 +1752,9 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
                 Playlist->HasMaxSquadSize() ? Playlist->MaxSquadSize : 1,
                 Playlist->HasbIsLargeTeamGame() ? (int)Playlist->bIsLargeTeamGame : 0);
         }
+
+        FFortAthenaHeistCompatibility::PreparePlaylist(
+            GameState, Playlist);
 
         // if (GameState->HasAdditionalPlaylistLevelsStreamed())
             // GameState->OnRep_AdditionalPlaylistLevelsStreamed();
@@ -2062,12 +2869,30 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         if (!Playlist)
             Playlist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
 
+        bool bHeistPlaylist = false;
         if (Playlist)
         {
             auto AdditionalPlaylistLevelsStreamed__Off = GameState->GetOffset("AdditionalPlaylistLevelsStreamed");
             auto AdditionalLevelStruct = FAdditionalLevelStreamed::StaticStruct();
 
-            if (FConfiguration::IsKnownS27CustomMapPlaylist())
+            bHeistPlaylist =
+                FFortAthenaHeistCompatibility::
+                    IsHeistPlaylist(Playlist);
+            if (bHeistPlaylist)
+            {
+                // The guarded Heist loader owns both normal and server-only
+                // level arrays for 5.40-6.00. A failed first attempt is
+                // retried from Tick; still publish the current (possibly
+                // empty) list instead of falling into the legacy branch that
+                // does not actually request its levels.
+                if (!FFortAthenaHeistCompatibility::
+                        LoadAdditionalPlaylistLevels(
+                            GameState, Playlist))
+                {
+                    GameState->OnRep_AdditionalPlaylistLevelsStreamed();
+                }
+            }
+            else if (FConfiguration::IsKnownS27CustomMapPlaylist())
             {
                 if (Playlist->HasAdditionalLevels())
                 {
@@ -2166,7 +2991,8 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
         }
 
-        if (!FConfiguration::IsKnownS27CustomMapPlaylist())
+        if (!FConfiguration::IsKnownS27CustomMapPlaylist() &&
+            !bHeistPlaylist)
             GameState->OnRep_AdditionalPlaylistLevelsStreamed();
 
         // misc C1 poi things
@@ -4792,6 +5618,14 @@ void AFortGameMode::PostLoadHook()
     Utils::ExecHook(spdf, SpawnDefaultPawnFor);
     Utils::ExecHook(GetDefaultObj()->GetFunction("HandleStartingNewPlayer"), HandleStartingNewPlayer_, HandleStartingNewPlayer_OG);
     Utils::Hook(FindPickTeam(), PickTeam, PickTeamOG);
+    if (FFortAthenaHeistCompatibility::IsSupportedBuild())
+    {
+        // Seven local 5.41 dumps traced to the supplemental end-game
+        // trampoline. Leave the native function untouched; Getaway gameplay
+        // does not require the teammate notification bridge to run.
+        SDK::DbgLog(
+            "[Heist] native StartEndGamePhase left unhooked\n");
+    }
     if (VersionInfo.FortniteVersion < 25.20)
     {
         Utils::Hook(FindStartAircraftPhase(), StartAircraftPhase, StartAircraftPhaseOG);

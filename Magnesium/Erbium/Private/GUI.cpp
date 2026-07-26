@@ -10,6 +10,7 @@
 #include "../Public/Events.h"
 #include "../Public/Misc.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
+#include "../../FortniteGame/Public/FortAthenaMutator.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
 #include "../../FortniteGame/Public/GameplayTagContainer.h"
 #include "../../Engine/Public/NetDriver.h"
@@ -3007,6 +3008,14 @@ static const char* GetSelectedPlaylistModeName()
         return "Trios";
     case (int)Playlist::Squads:
         return "Squads";
+    case (int)Playlist::GetawaySolos:
+        return "The Getaway Solos";
+    case (int)Playlist::GetawayDuos:
+        return "The Getaway Duos";
+    case (int)Playlist::GetawaySquads:
+        return "The Getaway Squads";
+    case (int)Playlist::InfinityGauntletSolos:
+        return "Infinity Gauntlet Solos";
     case (int)Playlist::ZBSolos:
         return "Zero Build Solos";
     case (int)Playlist::ZBDuos:
@@ -3889,11 +3898,7 @@ void GUI::Init()
             const ULONGLONG JoinableAtMs =
                 GServerJoinableAtMs.load(std::memory_order_acquire);
 
-            if (JoinableAtMs == 0)
-            {
-                ImGui::TextUnformatted("- Uptime: N/A");
-            }
-            else
+            if (gsStatus == Joinable && JoinableAtMs != 0)
             {
                 const ULONGLONG Now = GetTickCount64();
                 const double UptimeSeconds =
@@ -4505,6 +4510,46 @@ void GUI::Init()
 
             ImGui::RadioButton("Squads", &SelectedPlaylist, (int)Playlist::Squads);
 
+            const bool bGetawayAvailable =
+                FFortAthenaHeistCompatibility::IsSupportedBuild();
+            if (bGetawayAvailable &&
+                ImGui::RadioButton(
+                    "The Getaway Solos",
+                    &SelectedPlaylist,
+                    (int)Playlist::GetawaySolos))
+            {
+                FConfiguration::SetLateGameEnabled(false);
+            }
+
+            if (bGetawayAvailable &&
+                ImGui::RadioButton(
+                    "The Getaway Duos",
+                    &SelectedPlaylist,
+                    (int)Playlist::GetawayDuos))
+            {
+                FConfiguration::SetLateGameEnabled(false);
+            }
+
+            if (bGetawayAvailable &&
+                ImGui::RadioButton(
+                    "The Getaway Squads",
+                    &SelectedPlaylist,
+                    (int)Playlist::GetawaySquads))
+            {
+                FConfiguration::SetLateGameEnabled(false);
+            }
+
+            const bool bInfinityGauntletAvailable =
+                VersionInfo.FortniteVersion == 4.20;
+            if (bInfinityGauntletAvailable &&
+                ImGui::RadioButton(
+                    "Infinity Gauntlet Solos",
+                    &SelectedPlaylist,
+                    (int)Playlist::InfinityGauntletSolos))
+            {
+                FConfiguration::SetLateGameEnabled(false);
+            }
+
             if (VersionInfo.FortniteVersion >= 20.00)
             {
                 ImGui::RadioButton("Zero Build Solos", &SelectedPlaylist, (int)Playlist::ZBSolos);
@@ -4602,6 +4647,66 @@ void GUI::Init()
             case (int)Playlist::Squads:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSquad.Playlist_DefaultSquad";
+                break;
+            }
+            case (int)Playlist::GetawaySolos:
+            {
+                if (bGetawayAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Bling/Playlist_Bling_Solo.Playlist_Bling_Solo";
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Solos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
+                }
+                break;
+            }
+            case (int)Playlist::GetawayDuos:
+            {
+                if (bGetawayAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Bling/Playlist_Bling_Duos.Playlist_Bling_Duos";
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Duos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Playlist_DefaultDuo.Playlist_DefaultDuo";
+                }
+                break;
+            }
+            case (int)Playlist::GetawaySquads:
+            {
+                if (bGetawayAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Bling/Playlist_Bling_Squads.Playlist_Bling_Squads";
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Playlist_DefaultSquad.Playlist_DefaultSquad";
+                }
+                break;
+            }
+            case (int)Playlist::InfinityGauntletSolos:
+            {
+                if (bInfinityGauntletAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Carmine/Playlist_Carmine.Playlist_Carmine";
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Solos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
+                }
                 break;
             }
             case (int)Playlist::ZBSolos:
@@ -4771,67 +4876,67 @@ void GUI::Init()
             case (int)Playlist::Playground:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Playground/Playlist_Playground.Playlist_Playground";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Creative:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Gav:
             {
                 FConfiguration::Playlist = L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Retrac1v1:
             {
 				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::RetracTurtle:
             {
 				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_Turtle.Playlist_Retrac_Turtle";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::RetracWater:
             {
 				FConfiguration::Playlist = L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::TiltedZW:
             {
                 FConfiguration::Playlist = L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::OnlyUp:
             {
                 FConfiguration::Playlist = L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::Twine1v1:
             {
                 FConfiguration::Playlist = L"/Buddy/Playlists/Playlist_1v1Twine.Playlist_1v1Twine";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::Boxfight:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::Backrooms:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
-                FConfiguration::bLateGame = false;
+                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Event:
@@ -4843,7 +4948,7 @@ void GUI::Init()
                         if (Event.PlaylistPath != nullptr)
                             FConfiguration::Playlist = Event.PlaylistPath;
 
-                        FConfiguration::bLateGame = false;
+                        FConfiguration::SetLateGameEnabled(false);
                         break;
                     }
                 }
@@ -5287,14 +5392,24 @@ void GUI::Init()
                     || SelectedPlaylist == static_cast<int>(Playlist::Backrooms)
                     || SelectedPlaylist == static_cast<int>(Playlist::Event);
 
-                // Lategame skips the phases PlayerAI plays through, so it is
-                // forced off and greyed out while Enable AIs is on.
-                const bool bLockLateGame = bIsCustomMap || MagnesiumPlayerAISettings::bEnableAIs;
+                const bool bRequiresNormalPhases =
+                    SelectedPlaylist == static_cast<int>(Playlist::GetawaySolos)
+                    || SelectedPlaylist == static_cast<int>(Playlist::GetawayDuos)
+                    || SelectedPlaylist == static_cast<int>(Playlist::GetawaySquads)
+                    || SelectedPlaylist == static_cast<int>(Playlist::InfinityGauntletSolos);
+
+                // Lategame skips phases required by PlayerAI and these LTMs.
+                const bool bLockLateGame =
+                    bIsCustomMap
+                    || MagnesiumPlayerAISettings::bEnableAIs
+                    || bRequiresNormalPhases;
                 if (bLockLateGame)
-                    FConfiguration::bLateGame = false;
+                    FConfiguration::SetLateGameEnabled(false);
 
                 ImGui::BeginDisabled(bLockLateGame);
-                ImGui::Checkbox("Late Game", &FConfiguration::bLateGame);
+                bool bLateGameEnabled = FConfiguration::bLateGame;
+                if (ImGui::Checkbox("Late Game", &bLateGameEnabled))
+                    FConfiguration::SetLateGameEnabled(bLateGameEnabled);
                 ImGui::EndDisabled();
 
                 if (FConfiguration::bLateGame)
@@ -5674,7 +5789,7 @@ void GUI::Init()
             if (MagnesiumPlayerAISettings::bEnableAIs)
             {
                 if (FConfiguration::bLateGame)
-                    FConfiguration::bLateGame = false;
+                    FConfiguration::SetLateGameEnabled(false);
             }
 
             EndSectionBody();

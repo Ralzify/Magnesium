@@ -3,7 +3,6 @@
 #include "../Public/BuildingContainer.h"
 #include "../Public/FortGameMode.h"
 #include "../../Erbium/Public/Configuration.h"
-#include "../Public/FortKismetLibrary.h"
 
 struct FFortLootLevelData
 {
@@ -555,6 +554,53 @@ bool ServerOnAttemptInteract(ABuildingContainer* BuildingContainer, AFortPlayerP
 	return true;
 }
 
+using ConsumableServerOnAttemptInteractFn =
+	bool(*)(ABuildingGameplayActorConsumable*, AFortPlayerPawnAthena*);
+static ConsumableServerOnAttemptInteractFn
+	ConsumableServerOnAttemptInteractOG = nullptr;
+
+static bool ConsumableServerOnAttemptInteract(
+	ABuildingGameplayActorConsumable* Consumable,
+	AFortPlayerPawnAthena* InteractingPawn)
+{
+	if (!Consumable || !ConsumableServerOnAttemptInteractOG)
+		return false;
+
+	static const UClass* HopRockClass = nullptr;
+	if (!HopRockClass)
+	{
+		HopRockClass = FindObject<UClass>(
+			L"/Game/Athena/Items/ForagedItems/LowGravity/"
+			L"CBGA_LowGravity_UsingJump."
+			L"CBGA_LowGravity_UsingJump_C");
+	}
+
+	const bool bIsHopRock =
+		HopRockClass && Consumable->IsA(HopRockClass);
+
+	// Core forces an update before processing consumable interactions. Keep
+	// that behavior narrowly scoped to Hop Rocks so their successful effect
+	// and subsequent removal are both visible to clients.
+	if (bIsHopRock)
+		Consumable->ForceNetUpdate();
+
+	const bool bConsumed =
+		ConsumableServerOnAttemptInteractOG(
+			Consumable, InteractingPawn);
+
+	// Lower Season 4 builds apply the low-gravity effect but leave the
+	// authoritative actor alive. Destroy only after the native interaction
+	// reports success, and only for the exact Hop Rock class.
+	if (bConsumed && bIsHopRock &&
+		(!Consumable->HasbActorIsBeingDestroyed() ||
+			!Consumable->bActorIsBeingDestroyed))
+	{
+		Consumable->K2_DestroyActor();
+	}
+
+	return bConsumed;
+}
+
 void UFortLootPackage::SpawnFloorLootForContainer(const UClass* ContainerType)
 {
 	TArray<ABuildingContainer*> Containers;
@@ -585,26 +631,191 @@ void UFortLootPackage::SpawnFloorLootForContainer(const UClass* ContainerType)
 	Containers.Free();
 }
 
-void UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
+struct FConsumableSpawnerHitResult
 {
-	return;
+	uint8 OpaqueStorage[0x120]{};
+};
+
+struct FConsumableSpawnerTraceColor
+{
+	float R = 0.f;
+	float G = 0.f;
+	float B = 0.f;
+	float A = 0.f;
+};
+
+static bool TryFindConsumableSpawnerSurface(
+	ABGAConsumableSpawner* Spawner,
+	FVector Start,
+	FVector& OutImpactPoint)
+{
+	auto KismetSystemLibrary = UKismetSystemLibrary::GetDefaultObj();
+	if (!KismetSystemLibrary)
+		return false;
+
+	auto LineTraceSingle =
+		KismetSystemLibrary->GetFunction("LineTraceSingle");
+	if (!LineTraceSingle)
+		LineTraceSingle =
+			KismetSystemLibrary->GetFunction("LineTraceSingle_NEW");
+	if (!LineTraceSingle)
+		return false;
+
+	TArray<AActor*> ActorsToIgnore{};
+	if (Spawner->HasAssociatedBuildingActor() &&
+		Spawner->AssociatedBuildingActor)
+	{
+		ActorsToIgnore.Add(Spawner->AssociatedBuildingActor);
+	}
+
+	FConsumableSpawnerHitResult Hit{};
+	const auto End = Start - FVector(0.f, 0.f, 100000.f);
+	const bool bHit = KismetSystemLibrary->Call<bool>(
+		LineTraceSingle, Spawner, Start, End, static_cast<uint8>(0), false,
+		ActorsToIgnore, static_cast<uint8>(0), &Hit, true,
+		FConsumableSpawnerTraceColor{},
+		FConsumableSpawnerTraceColor{}, 0.f);
+	ActorsToIgnore.Free();
+
+	if (!bHit)
+		return false;
+
+	static int32 ImpactPointOffset = -2;
+	if (ImpactPointOffset == -2)
+	{
+		auto HitResultStruct = FindStruct("HitResult");
+		ImpactPointOffset = HitResultStruct
+			? static_cast<int32>(
+				HitResultStruct->GetOffset("ImpactPoint"))
+			: -1;
+	}
+
+	if (ImpactPointOffset < 0 ||
+		ImpactPointOffset + FVector::Size() >
+			static_cast<int32>(sizeof(Hit.OpaqueStorage)))
+	{
+		return false;
+	}
+
+	auto& ImpactPoint = *(FVector*)(
+		Hit.OpaqueStorage + ImpactPointOffset);
+	if (!std::isfinite(static_cast<double>(ImpactPoint.X)) ||
+		!std::isfinite(static_cast<double>(ImpactPoint.Y)) ||
+		!std::isfinite(static_cast<double>(ImpactPoint.Z)) ||
+		(ImpactPoint.IsZero() && !Start.IsZero()))
+	{
+		return false;
+	}
+
+	OutImpactPoint = ImpactPoint;
+	return true;
+}
+
+bool UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
+{
+	auto World = UWorld::GetWorld();
+	if (!World || !Spawner)
+		return false;
+
+	if (Spawner->HasAssociatedBuildingActor())
+	{
+		auto AssociatedBuilding = Spawner->AssociatedBuildingActor;
+		if (AssociatedBuilding && AssociatedBuilding->HasbDestroyed() &&
+			AssociatedBuilding->bDestroyed)
+		{
+			return false;
+		}
+	}
+
 	TArray<FFortItemEntry*> LootDrops{};
 
-	UFortLootPackage::ChooseLootForContainer(LootDrops, Spawner->SpawnLootTierGroup);
-	if (LootDrops.Num() == 0)
-		return;
+	if (Spawner->HasSpawnLootTierGroup() &&
+		Spawner->SpawnLootTierGroup.ComparisonIndex != 0)
+	{
+		UFortLootPackage::ChooseLootForContainer(
+			LootDrops, Spawner->SpawnLootTierGroup);
+	}
 
-	auto ItemDefinition = (UBGAConsumableWrapperItemDefinition*)LootDrops[0]->ItemDefinition;
+	auto SpawnEntry = [&](FFortItemEntry& Entry) -> bool
+	{
+		if (!Entry.ItemDefinition)
+			return false;
 
-	auto GroundLoc = UFortKismetLibrary::FindGroundLocationAt(UWorld::GetWorld(), nullptr, Spawner->K2_GetActorLocation(), -1000.f, 2500.f, FName(L"FortDynamicMeshPhysics"));
-	auto SpawnTransform = FTransform(GroundLoc, Spawner->K2_GetActorRotation());
+		auto SpawnLocation = Spawner->K2_GetActorLocation();
+		auto SpawnRotation = Spawner->K2_GetActorRotation();
 
-	auto Class = ItemDefinition->ConsumableClass.Get();
-	if (Class)
-		UWorld::SpawnActor(Class, SpawnTransform);
+		const bool bAlignToSurface =
+			Spawner->HasbAlignSpawnedActorsToSurface() &&
+			Spawner->bAlignSpawnedActorsToSurface;
+		if (bAlignToSurface)
+		{
+			FVector GroundLocation{};
+			if (TryFindConsumableSpawnerSurface(
+				Spawner, SpawnLocation, GroundLocation))
+				SpawnLocation = GroundLocation;
+		}
 
-	for (auto& LootDrop : LootDrops)
+		UClass* ConsumableActorClass = nullptr;
+		auto WrapperClass =
+			UBGAConsumableWrapperItemDefinition::StaticClass();
+		if (WrapperClass && Entry.ItemDefinition->IsA(WrapperClass))
+		{
+			auto WrapperDefinition =
+				(UBGAConsumableWrapperItemDefinition*)Entry.ItemDefinition;
+			if (WrapperDefinition->HasConsumableClass())
+				ConsumableActorClass =
+					WrapperDefinition->ConsumableClass.Get();
+		}
+
+		if (ConsumableActorClass)
+		{
+			auto ConsumableDefault =
+				(ABuildingGameplayActorConsumable*)
+				ConsumableActorClass->GetDefaultObj();
+			if (ConsumableDefault &&
+				ConsumableDefault->HasbSpawnerCalculateRandomRotation() &&
+				ConsumableDefault->bSpawnerCalculateRandomRotation)
+			{
+				SpawnRotation.Yaw = static_cast<float>(rand() % 360);
+			}
+
+			return World->SpawnActor(
+				ConsumableActorClass,
+				FTransform(SpawnLocation, SpawnRotation)) != nullptr;
+		}
+
+		return AFortInventory::SpawnPickup(
+			SpawnLocation, Entry, EFortPickupSourceTypeFlag::GetOther(),
+			EFortPickupSpawnSource::GetItemSpawner(), nullptr, -1,
+			bAlignToSurface, true) != nullptr;
+	};
+
+	bool bSpawnedAny = false;
+
+	if (LootDrops.Num() > 0)
+	{
+		for (auto LootDrop : LootDrops)
+		{
+			if (LootDrop)
+				bSpawnedAny |= SpawnEntry(*LootDrop);
+		}
+	}
+	else if (Spawner->HasConsumablesToSpawn())
+	{
+		auto& Consumables = Spawner->ConsumablesToSpawn;
+		for (int32 Index = 0; Index < Consumables.Num(); ++Index)
+		{
+			auto& Entry =
+				Consumables.Get(Index, FFortItemEntry::Size());
+			bSpawnedAny |= SpawnEntry(Entry);
+		}
+	}
+
+	for (auto LootDrop : LootDrops)
 		free(LootDrop);
+	LootDrops.Free();
+
+	return bSpawnedAny;
 }
 
 void (*OnAuthorityRandomUpgradeAppliedOG)(ABuildingContainer*, FName&);
@@ -693,6 +904,17 @@ void UFortLootPackage::Hook()
 				if (VFTIndex != 0)
 				{
 					Utils::Hook<ABuildingContainer>(VFTIndex / 8, ServerOnAttemptInteract);
+
+					if (VersionInfo.FortniteVersion >= 4.00 &&
+						VersionInfo.FortniteVersion < 5.00 &&
+						ABuildingGameplayActorConsumable::StaticClass() &&
+						ABuildingGameplayActorConsumable::GetDefaultObj())
+					{
+						Utils::Hook<ABuildingGameplayActorConsumable>(
+							VFTIndex / 8,
+							ConsumableServerOnAttemptInteract,
+							ConsumableServerOnAttemptInteractOG);
+					}
 
 					return;
 				}

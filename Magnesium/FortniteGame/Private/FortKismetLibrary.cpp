@@ -3,6 +3,8 @@
 #include "../Public/FortInventory.h"
 #include "../Public/FortLootPackage.h"
 #include "../Public/FortPlayerControllerAthena.h"
+#include <limits>
+#include <vector>
 
 bool bHasbPickupOnlyRelevantToOwner = false;
 bool bHasbToss = false;
@@ -107,108 +109,293 @@ void UFortKismetLibrary::GiveItemToInventoryOwner(UObject* Object, FFrame& Stack
 }
 
 
-bool bHasItemVariantGuid = false;
-bool bHasbForceRemoval = false;
-void UFortKismetLibrary::K2_RemoveItemFromPlayer(UObject* Context, FFrame& Stack, int32* Ret)
+namespace
 {
-	AFortPlayerControllerAthena* PlayerController;
-	UFortItemDefinition* ItemDefinition;
-	FGuid ItemVariantGuid{};
-	int32 AmountToRemove;
-	bool bForceRemoval = false;
-	Stack.StepCompiledIn(&PlayerController);
-	Stack.StepCompiledIn(&ItemDefinition);
-	if (bHasItemVariantGuid)
-		Stack.StepCompiledIn(&ItemVariantGuid);
-	Stack.StepCompiledIn(&AmountToRemove);
-	if (bHasbForceRemoval)
-		Stack.StepCompiledIn(&bForceRemoval);
-	Stack.IncrementCode();
-
-	if (!PlayerController || !PlayerController->WorldInventory || !ItemDefinition)
+	struct FInventoryStackSnapshot
 	{
-		*Ret = 0;
-		return;
-	}
-	printf(__FUNCTION__ " %s %d\n", ItemDefinition->Name.ToString().c_str(), AmountToRemove);
+		FGuid Guid{};
+		int32 Count = 0;
+	};
 
-	auto ItemP = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
-		{ return entry->ItemEntry.ItemDefinition == ItemDefinition; });
-	auto itemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-		{ return entry.ItemDefinition == ItemDefinition; }, FFortItemEntry::Size());
-	if (!ItemP || !*ItemP || !itemEntry)
-	{
-		*Ret = 0;
-		return;
-	}
-	auto Item = *ItemP;
+	UFunction* K2GetItemQuantityOnPlayerFn = nullptr;
+	UFunction* K2RemoveItemFromPlayerFn = nullptr;
+	UFunction* K2RemoveItemFromPlayerByGuidFn = nullptr;
 
-	printf("[Inventory] Removing %d of %s\n", AmountToRemove, itemEntry->ItemDefinition->Name.ToString().c_str());
+	UFunction* ResolveExecFunction(
+		FFrame& Stack,
+		UFunction* CachedFunction)
+	{
+		if (CachedFunction)
+			return CachedFunction;
 
-	auto RemoveCount = max(AmountToRemove, 0);
-	itemEntry->Count -= RemoveCount;
-	
-	if (AmountToRemove < 0 || itemEntry->Count <= 0)
-	{
-		printf("[Inventory] Removing item\n");
-		RemoveCount += itemEntry->Count;
-		PlayerController->WorldInventory->Remove(itemEntry->ItemGuid);
-	}
-	else
-	{
-		Item->ItemEntry.Count = itemEntry->Count;
-		PlayerController->WorldInventory->UpdateEntry(*itemEntry);
-		Item->ItemEntry.bIsDirty = true;
+		auto Function = Stack.GetCurrentNativeFunction();
+		return Function ? Function : Stack.Node;
 	}
 
-	*Ret = RemoveCount;
+	int32 ClampInventoryResult(int64 Value)
+	{
+		const int64 Maximum =
+			static_cast<int64>(
+				(std::numeric_limits<int32>::max)());
+		return static_cast<int32>(min(Value, Maximum));
+	}
+
+	int32 GetItemQuantityOnPlayer(
+		AFortPlayerControllerAthena* PlayerController,
+		UFortItemDefinition* ItemDefinition)
+	{
+		if (!PlayerController || !PlayerController->WorldInventory ||
+			!ItemDefinition)
+		{
+			return 0;
+		}
+
+		int64 Quantity = 0;
+		auto& Entries =
+			PlayerController->WorldInventory->Inventory.ReplicatedEntries;
+		for (int32 Index = 0; Index < Entries.Num(); Index++)
+		{
+			auto& Entry =
+				Entries.Get(Index, FFortItemEntry::Size());
+			if (Entry.ItemDefinition == ItemDefinition &&
+				Entry.Count > 0)
+			{
+				Quantity += Entry.Count;
+			}
+		}
+
+		return ClampInventoryResult(Quantity);
+	}
+
+	int32 RemoveItemFromPlayer(
+		AFortPlayerControllerAthena* PlayerController,
+		UFortItemDefinition* ItemDefinition,
+		const FGuid& ItemVariantGuid,
+		int32 AmountToRemove,
+		bool bForceRemoval)
+	{
+		if (!PlayerController || !PlayerController->WorldInventory ||
+			!ItemDefinition || AmountToRemove == 0)
+		{
+			return 0;
+		}
+
+		// Variant GUID and force-removal were added to some later signatures.
+		// Lower builds do not expose variants, and the inventory layout has no
+		// safe cross-version variant accessor. Consume both reflected params
+		// while preserving the historical definition-based behavior.
+		(void)ItemVariantGuid;
+		(void)bForceRemoval;
+
+		auto WorldInventory = PlayerController->WorldInventory;
+		std::vector<FInventoryStackSnapshot> Stacks;
+		auto& Entries = WorldInventory->Inventory.ReplicatedEntries;
+		Stacks.reserve(Entries.Num());
+		for (int32 Index = 0; Index < Entries.Num(); Index++)
+		{
+			auto& Entry =
+				Entries.Get(Index, FFortItemEntry::Size());
+			if (Entry.ItemDefinition == ItemDefinition)
+			{
+				Stacks.push_back(
+					{ Entry.ItemGuid, max(Entry.Count, 0) });
+			}
+		}
+
+		const bool bRemoveAll = AmountToRemove < 0;
+		int32 Remaining = max(AmountToRemove, 0);
+		int64 Removed = 0;
+		for (auto& StackSnapshot : Stacks)
+		{
+			if (!bRemoveAll && Remaining <= 0)
+				break;
+
+			const int32 Requested =
+				bRemoveAll
+					? -1
+					: min(StackSnapshot.Count, Remaining);
+			if (!bRemoveAll && Requested <= 0)
+				continue;
+
+			const int32 RemovedFromStack =
+				WorldInventory->RemoveItem(
+					StackSnapshot.Guid,
+					Requested);
+			Removed += RemovedFromStack;
+			if (!bRemoveAll)
+				Remaining -= RemovedFromStack;
+		}
+
+		return ClampInventoryResult(Removed);
+	}
+
+	int32 RemoveItemFromPlayerByGuid(
+		AFortPlayerControllerAthena* PlayerController,
+		FGuid ItemGuid,
+		int32 AmountToRemove,
+		bool bForceRemoval)
+	{
+		if (!PlayerController || !PlayerController->WorldInventory ||
+			AmountToRemove == 0)
+		{
+			return 0;
+		}
+
+		(void)bForceRemoval;
+		return PlayerController->WorldInventory->RemoveItem(
+			ItemGuid,
+			AmountToRemove < 0 ? -1 : AmountToRemove);
+	}
 }
 
-void UFortKismetLibrary::K2_RemoveItemFromPlayerByGuid(UObject* Context, FFrame& Stack, int32* Ret)
+void UFortKismetLibrary::K2_GetItemQuantityOnPlayer(
+	UObject* Context,
+	FFrame& Stack,
+	int32* Ret)
 {
-	class AFortPlayerControllerAthena* PlayerController;
-	struct FGuid ItemGuid;
-	int32 AmountToRemove;
-	bool bForceRemoval;
-	Stack.StepCompiledIn(&PlayerController);
-	Stack.StepCompiledIn(&ItemGuid);
-	Stack.StepCompiledIn(&AmountToRemove);
-	Stack.StepCompiledIn(&bForceRemoval);
+	(void)Context;
+	if (Ret)
+		*Ret = 0;
+
+	auto Function =
+		ResolveExecFunction(
+			Stack,
+			K2GetItemQuantityOnPlayerFn);
+	if (!Function)
+		return;
+
+	AFortPlayerControllerAthena* PlayerController = nullptr;
+	UFortItemDefinition* ItemDefinition = nullptr;
+	for (auto& Param :
+		Function->GetParamsNamed().NameOffsetMap)
+	{
+		if (Param.Name == "PlayerController")
+			Stack.StepCompiledIn(&PlayerController);
+		else if (Param.Name == "ItemDefinition")
+			Stack.StepCompiledIn(&ItemDefinition);
+		else if (Param.Name != "ReturnValue")
+		{
+			SDK::DbgLog(
+				"[FortKismetLibrary] K2_GetItemQuantityOnPlayer: "
+				"discarding unknown parameter %s\n",
+				Param.Name.c_str());
+			Stack.StepCompiledIn();
+		}
+	}
 	Stack.IncrementCode();
 
-	auto ItemP = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
-		{ return entry->ItemEntry.ItemGuid == ItemGuid; });
-	auto itemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-		{ return entry.ItemGuid == ItemGuid; }, FFortItemEntry::Size());
+	if (Ret)
+		*Ret =
+			GetItemQuantityOnPlayer(
+				PlayerController,
+				ItemDefinition);
+}
 
-	// printf(__FUNCTION__ " %s %d\n", itemEntry->ItemDefinition->Name.ToString().c_str(), AmountToRemove);
-	if (!ItemP)
-	{
+void UFortKismetLibrary::K2_RemoveItemFromPlayer(
+	UObject* Context,
+	FFrame& Stack,
+	int32* Ret)
+{
+	(void)Context;
+	if (Ret)
 		*Ret = 0;
+
+	auto Function =
+		ResolveExecFunction(
+			Stack,
+			K2RemoveItemFromPlayerFn);
+	if (!Function)
 		return;
-	}
-	auto Item = *ItemP;
-	
-	printf("[Inventory] Removing %d of %s\n", AmountToRemove, itemEntry->ItemDefinition->Name.ToString().c_str());
 
-	auto RemoveCount = max(AmountToRemove, 0);
-	itemEntry->Count -= RemoveCount;
-
-	if (AmountToRemove < 0 || itemEntry->Count <= 0)
+	AFortPlayerControllerAthena* PlayerController = nullptr;
+	UFortItemDefinition* ItemDefinition = nullptr;
+	FGuid ItemVariantGuid{};
+	int32 AmountToRemove = 0;
+	bool bForceRemoval = false;
+	for (auto& Param :
+		Function->GetParamsNamed().NameOffsetMap)
 	{
-		printf("[Inventory] Removing item\n");
-		RemoveCount += itemEntry->Count;
-		PlayerController->WorldInventory->Remove(itemEntry->ItemGuid);
+		if (Param.Name == "PlayerController")
+			Stack.StepCompiledIn(&PlayerController);
+		else if (Param.Name == "ItemDefinition")
+			Stack.StepCompiledIn(&ItemDefinition);
+		else if (Param.Name == "ItemVariantGuid")
+			Stack.StepCompiledIn(&ItemVariantGuid);
+		else if (Param.Name == "AmountToRemove")
+			Stack.StepCompiledIn(&AmountToRemove);
+		else if (Param.Name == "bForceRemoval")
+			Stack.StepCompiledIn(&bForceRemoval);
+		else if (Param.Name != "ReturnValue")
+		{
+			SDK::DbgLog(
+				"[FortKismetLibrary] K2_RemoveItemFromPlayer: "
+				"discarding unknown parameter %s\n",
+				Param.Name.c_str());
+			Stack.StepCompiledIn();
+		}
 	}
-	else
-	{
-		Item->ItemEntry.Count = itemEntry->Count;
-		PlayerController->WorldInventory->UpdateEntry(*itemEntry);
-		Item->ItemEntry.bIsDirty = true;
-	}
+	Stack.IncrementCode();
 
-	*Ret = RemoveCount;
-	return;
+	if (Ret)
+		*Ret =
+			RemoveItemFromPlayer(
+				PlayerController,
+				ItemDefinition,
+				ItemVariantGuid,
+				AmountToRemove,
+				bForceRemoval);
+}
+
+void UFortKismetLibrary::K2_RemoveItemFromPlayerByGuid(
+	UObject* Context,
+	FFrame& Stack,
+	int32* Ret)
+{
+	(void)Context;
+	if (Ret)
+		*Ret = 0;
+
+	auto Function =
+		ResolveExecFunction(
+			Stack,
+			K2RemoveItemFromPlayerByGuidFn);
+	if (!Function)
+		return;
+
+	AFortPlayerControllerAthena* PlayerController = nullptr;
+	FGuid ItemGuid{};
+	int32 AmountToRemove = 0;
+	bool bForceRemoval = false;
+	for (auto& Param :
+		Function->GetParamsNamed().NameOffsetMap)
+	{
+		if (Param.Name == "PlayerController")
+			Stack.StepCompiledIn(&PlayerController);
+		else if (Param.Name == "ItemGuid")
+			Stack.StepCompiledIn(&ItemGuid);
+		else if (Param.Name == "AmountToRemove")
+			Stack.StepCompiledIn(&AmountToRemove);
+		else if (Param.Name == "bForceRemoval")
+			Stack.StepCompiledIn(&bForceRemoval);
+		else if (Param.Name != "ReturnValue")
+		{
+			SDK::DbgLog(
+				"[FortKismetLibrary] "
+				"K2_RemoveItemFromPlayerByGuid: discarding "
+				"unknown parameter %s\n",
+				Param.Name.c_str());
+			Stack.StepCompiledIn();
+		}
+	}
+	Stack.IncrementCode();
+
+	if (Ret)
+		*Ret =
+			RemoveItemFromPlayerByGuid(
+				PlayerController,
+				ItemGuid,
+				AmountToRemove,
+				bForceRemoval);
 }
 
 void UFortKismetLibrary::SpawnItemVariantPickupInWorld(UObject* Object, FFrame& Stack, AFortPickupAthena** Ret)
@@ -339,49 +526,6 @@ void UFortKismetLibrary::CloseActor_(UObject* Context, FFrame& Stack)
 		return callOG(UFortKismetLibrary::GetDefaultObj(), Stack.GetCurrentNativeFunction(), CloseActor, OpenableInterfaceActor, OptionalControllerInstigator);
 }
 
-static int32 RemoveItemFromPlayer(
-	AFortPlayerControllerAthena* PlayerController,
-	UFortItemDefinition* ItemDefinition,
-	int32 AmountToRemove,
-	bool bForceRemoval)
-{
-	if (!PlayerController || !PlayerController->WorldInventory || !ItemDefinition)
-		return 0;
-
-	auto ItemP = PlayerController->WorldInventory->Inventory.ItemInstances.Search(
-		[&](UFortWorldItem* Entry)
-		{
-			return Entry && Entry->ItemEntry.ItemDefinition == ItemDefinition;
-		});
-	auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search(
-		[&](FFortItemEntry& Entry)
-		{
-			return Entry.ItemDefinition == ItemDefinition;
-		},
-		FFortItemEntry::Size());
-
-	if (!ItemP || !*ItemP || !ItemEntry)
-		return 0;
-
-	auto Item = *ItemP;
-	auto RemoveCount = max(AmountToRemove, 0);
-	ItemEntry->Count -= RemoveCount;
-
-	if (AmountToRemove < 0 || ItemEntry->Count <= 0)
-	{
-		RemoveCount += ItemEntry->Count;
-		PlayerController->WorldInventory->Remove(ItemEntry->ItemGuid);
-	}
-	else
-	{
-		Item->ItemEntry.Count = ItemEntry->Count;
-		PlayerController->WorldInventory->UpdateEntry(*ItemEntry);
-		Item->ItemEntry.bIsDirty = true;
-	}
-
-	return RemoveCount;
-}
-
 void UFortKismetLibrary::Hook()
 {
 	auto K2_SpawnPickupInWorldFn = GetDefaultObj()->GetFunction("K2_SpawnPickupInWorld");
@@ -443,29 +587,25 @@ void UFortKismetLibrary::PostLoadHook()
 		}
 	Utils::ExecHook(GiveItemToInventoryOwnerFn, GiveItemToInventoryOwner);
 
-	auto K2_RemoveItemFromPlayerFn = GetDefaultObj()->GetFunction("K2_RemoveItemFromPlayer");
-	if (VersionInfo.FortniteVersion <= 16)
-	{
-		if (K2_RemoveItemFromPlayerFn)
-		{
-			auto RemoveItemFromPlayerImpl = K2_RemoveItemFromPlayerFn->GetImpl();
-			Utils::Hook((uint64_t)RemoveItemFromPlayerImpl, RemoveItemFromPlayer);
-		}
-	}
-	else
-	{
-		if (K2_RemoveItemFromPlayerFn)
-			for (auto& Param : K2_RemoveItemFromPlayerFn->GetParamsNamed().NameOffsetMap)
-			{
-				if (Param.Name == "ItemVariantGuid")
-					bHasItemVariantGuid = true;
-				else if (Param.Name == "bForceRemoval")
-					bHasbForceRemoval = true;
-			}
-		Utils::ExecHook(K2_RemoveItemFromPlayerFn, K2_RemoveItemFromPlayer);
-	}
+	K2GetItemQuantityOnPlayerFn =
+		GetDefaultObj()->GetFunction(
+			"K2_GetItemQuantityOnPlayer");
+	K2RemoveItemFromPlayerFn =
+		GetDefaultObj()->GetFunction(
+			"K2_RemoveItemFromPlayer");
+	K2RemoveItemFromPlayerByGuidFn =
+		GetDefaultObj()->GetFunction(
+			"K2_RemoveItemFromPlayerByGuid");
 
-	Utils::ExecHook(GetDefaultObj()->GetFunction("K2_RemoveItemFromPlayerByGuid"), K2_RemoveItemFromPlayerByGuid);
+	Utils::ExecHook(
+		K2GetItemQuantityOnPlayerFn,
+		K2_GetItemQuantityOnPlayer);
+	Utils::ExecHook(
+		K2RemoveItemFromPlayerFn,
+		K2_RemoveItemFromPlayer);
+	Utils::ExecHook(
+		K2RemoveItemFromPlayerByGuidFn,
+		K2_RemoveItemFromPlayerByGuid);
 
 	SetIsDoorOpen = decltype(SetIsDoorOpen)(FindSetIsDoorOpen());
 	Utils::ExecHook(GetDefaultObj()->GetFunction("OpenActor"), OpenActor_, OpenActor_OG);

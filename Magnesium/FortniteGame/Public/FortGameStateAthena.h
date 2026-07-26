@@ -5,6 +5,8 @@
 #include "FortPlayerStateAthena.h"
 #include "LevelStreamingDynamic.h"
 
+class AFortAthenaMutator;
+
 struct FGameMemberInfo : public FFastArraySerializerItem
 {
 public:
@@ -233,6 +235,10 @@ public:
     DEFINE_PROP(SafeZoneIndicator, AActor*);
     DEFINE_PROP(StructuralSupportSystem, UObject*);
     DEFINE_PROP(bPlaylistDataIsLoaded, bool);
+    DEFINE_PROP(bPlaylistDataIsActivelyLoading, bool);
+    DEFINE_PROP(GamePhaseStepTimeRemaining, float);
+    DEFINE_PROP(GamePhaseStepChanged, TMulticastInlineDelegate<void(uint8)>);
+    DEFINE_PROP(GameplayMutators, TArray<AFortAthenaMutator*>);
     DEFINE_PROP(VolumeManager, AFortVolumeManager*);
     DEFINE_PROP(CreativePortalManager, AFortCreativePortalManager*);
     DEFINE_PROP(MissionManager, AActor*);
@@ -240,6 +246,8 @@ public:
     DEFINE_BITFIELD_PROP(bInSpawningStartup);
     DEFINE_BITFIELD_PROP(bDBNOEnabledForGameMode);
     DEFINE_BITFIELD_PROP(bDBNODeathEnabled);
+    DEFINE_BITFIELD_PROP(bIsInCountdown);
+    DEFINE_BITFIELD_PROP(bIsInFinalCountdown);
 
     DEFINE_FUNC(OnRep_CurrentPlaylistInfo, void);
     DEFINE_FUNC(OnRep_CurrentPlaylistData, void);
@@ -252,4 +260,5 @@ public:
     DEFINE_FUNC(OnRep_PlayersLeft, void);
     DEFINE_FUNC(OnRep_SafeZoneIndicator, void);
     DEFINE_FUNC(OnRep_MissionManager, void);
+    DEFINE_FUNC(OnFinishedStreamingAdditionalPlaylistLevel, void);
 };

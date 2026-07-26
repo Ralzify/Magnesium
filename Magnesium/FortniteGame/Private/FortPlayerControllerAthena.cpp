@@ -43,6 +43,9 @@
 static const UClass* GetRemoteControlledPawnClass();
 static bool IsNativeVehiclePossessionPawn(AActor* Actor);
 static bool IsUsableDeathObject(const UObject* Object);
+static void ForEachSquadController(
+	AFortPlayerControllerAthena* InstigatingController,
+	const std::function<void(AFortPlayerControllerAthena*)>& Visitor);
 
 // A guided missile's controller Pawn fields are not reliable on legacy builds:
 // Season 4 can leave both of them pointing at the character for the entire
@@ -456,6 +459,25 @@ void AFortPlayerControllerAthena::GetPlayerViewPoint(AFortPlayerControllerAthena
 			Rot = ViewTarget->K2_GetActorRotation();
 			return;
 		}
+	}
+
+	// Once native death handling has entered spectator state, its camera and
+	// view-target selection are authoritative. In particular, MyFortPawn can
+	// still point at the dead character while the native spectator target has
+	// already changed, so the normal Magnesium override below would pin the
+	// view (and relevancy origin) to the corpse.
+	static const FName SpectatingState(L"Spectating");
+	const bool bNativeSpectating =
+		(PlayerController->HasStateName() &&
+			PlayerController->StateName == SpectatingState) ||
+		(PlayerController->HasPlayerState() &&
+			IsUsableDeathObject(PlayerController->PlayerState) &&
+			PlayerController->PlayerState->HasbIsSpectator() &&
+			PlayerController->PlayerState->bIsSpectator);
+	if (bNativeSpectating && GetPlayerViewPointOG)
+	{
+		GetPlayerViewPointOG(PlayerController, Loc, Rot);
+		return;
 	}
 
 	if (FConfiguration::bInfiniteRender)
@@ -1513,6 +1535,8 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	const bool bPendingLateGameAircraftLoadout =
 		GPendingLateGameAircraftLoadout.erase(PlayerController) > 0;
 	const auto LastAcknowledgedPawn = GLastAcknowledgedPawn.find(PlayerController);
+	const bool bHadAcknowledgedPawn =
+		LastAcknowledgedPawn != GLastAcknowledgedPawn.end();
 	const bool bNewAcknowledgedPawn = LastAcknowledgedPawn == GLastAcknowledgedPawn.end() ||
 		LastAcknowledgedPawn->second != Pawn;
 	GLastAcknowledgedPawn[PlayerController] = Pawn;
@@ -1580,11 +1604,14 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	bRespawnAllowed |= FConfiguration::bForceRespawns;
 
 	// Inventory count is not a lifecycle signal: death may legitimately leave a
-	// respawning player with zero entries. Track whether this controller has
-	// already acknowledged a pawn instead, so an empty-inventory respawn still
-	// exits the death/spectating state and restores usable equipment.
+	// respawning player with zero entries. ClientOnPawnDied clears the last-pawn
+	// record specifically for a real player death, while an aircraft jump keeps
+	// it. Requiring that cleared record prevents the bus pawn replacement from
+	// being mistaken for a death respawn even if its acknowledgement arrives
+	// after the game has advanced to SafeZones.
 	const bool bRestoringRespawnPawn = !bPendingLateGameAircraftLoadout &&
-		bNewAcknowledgedPawn && bRespawnAllowed && PlayersInitialized.contains(PlayerController);
+		!bHadAcknowledgedPawn && bNewAcknowledgedPawn && bRespawnAllowed &&
+		PlayersInitialized.contains(PlayerController);
 	if (bRestoringRespawnPawn)
 	{
 		GPendingRespawnLandingFinalization.insert(PlayerController);
@@ -1602,7 +1629,8 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 	FVector ConfiguredRespawnLocation{};
 	bool bSkipRespawn = ConsumePossessRespawnSkip(PlayerController);
-	if (bRespawnAllowed && !bSkipRespawn && TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
+	if (bRestoringRespawnPawn && !bSkipRespawn &&
+		TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
 		FortPawn->K2_TeleportTo(ConfiguredRespawnLocation, FRotator(0.f, 0.f, 0.f));
 
 	if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1") && VersionInfo.FortniteVersion == 14.40)
@@ -2397,21 +2425,23 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 
 	UFortItemDefinition* RealDef = (UFortItemDefinition*)entry->ItemDefinition;
 
-	// Season 4 special gadgets carry their own server execution path. The
-	// Infinity Gauntlet uses it to perform the original Thanos transformation;
-	// treating it as an ordinary weapon only equips the gauntlet mesh/abilities.
-	if (VersionInfo.FortniteVersion >= 4.0 && VersionInfo.FortniteVersion <= 4.5)
+	// Special gadgets carry their own server execution path. The Infinity
+	// Gauntlet and Getaway Jewel both depend on it for their native gameplay
+	// state; treating either as an ordinary weapon only equips its backing
+	// weapon. The validated finder fails closed when a build has no known
+	// ServerExecute virtual.
+	if (auto Gadget = RealDef->Cast<UFortGadgetItemDefinition>())
 	{
-		if (auto Gadget = RealDef->Cast<UFortGadgetItemDefinition>())
-		{
-			auto ItemInstance = PlayerController->WorldInventory->Inventory.ItemInstances.Search(
-				[&](UFortWorldItem* Item)
-				{
-					return Item && Item->ItemEntry.ItemGuid == ItemGuid;
-				});
+		auto ItemInstance = PlayerController->WorldInventory->Inventory.ItemInstances.Search(
+			[&](UFortWorldItem* Item)
+			{
+				return Item && Item->ItemEntry.ItemGuid == ItemGuid;
+			});
 
-			if (ItemInstance && *ItemInstance && Gadget->ServerExecute((UFortItem*)*ItemInstance, PlayerController))
-				return;
+		if (ItemInstance && *ItemInstance &&
+			Gadget->ServerExecute((UFortItem*)*ItemInstance, PlayerController))
+		{
+			return;
 		}
 	}
 
@@ -2989,27 +3019,73 @@ void AFortPlayerControllerAthena::ServerRepairBuildingActor(UObject* Context, FF
 
 void AFortPlayerControllerAthena::ServerAttemptInventoryDrop(UObject* Context, FFrame& Stack)
 {
-	FGuid Guid;
-	int32 Count;
+	FGuid Guid{};
+	int32 Count = 0;
 	bool bTrash = false; // this only exists on some newer builds
-	Stack.StepCompiledIn(&Guid);
-	Stack.StepCompiledIn(&Count);
-	Stack.StepCompiledIn(&bTrash);
+	bool bReadGuid = false;
+	bool bReadCount = false;
+
+	auto Function = Stack.GetCurrentNativeFunction();
+	if (!Function)
+		Function = Stack.Node;
+
+	if (Function)
+	{
+		for (const auto& Parameter :
+			Function->GetParamsNamed().NameOffsetMap)
+		{
+			if (Parameter.Name == "ItemGuid" ||
+				Parameter.Name == "Guid")
+			{
+				Stack.StepCompiledIn(&Guid);
+				bReadGuid = true;
+			}
+			else if (Parameter.Name == "Count")
+			{
+				Stack.StepCompiledIn(&Count);
+				bReadCount = true;
+			}
+			else if (Parameter.Name == "bTrash")
+			{
+				Stack.StepCompiledIn(&bTrash);
+			}
+			else if (Parameter.Name != "ReturnValue")
+			{
+				SDK::DbgLog(
+					"[InventoryDrop] discarding unknown parameter %s\n",
+					Parameter.Name.c_str());
+				Stack.StepCompiledIn();
+			}
+		}
+	}
+	else
+	{
+		// The reflected function is expected on every supported build. Keep
+		// the original two-parameter layout as a fail-safe fallback.
+		Stack.StepCompiledIn(&Guid);
+		Stack.StepCompiledIn(&Count);
+		bReadGuid = true;
+		bReadCount = true;
+	}
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
-	if (!PlayerController || !PlayerController->Pawn)
+	if (!bReadGuid || !bReadCount ||
+		!PlayerController || !PlayerController->Pawn ||
+		!PlayerController->WorldInventory)
 		return;
 
-	auto ItemP = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
-		{ return entry->ItemEntry.ItemGuid == Guid; });
 	auto itemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
 		{ return entry.ItemGuid == Guid; }, FFortItemEntry::Size());
-	if (!ItemP)
+	if (!itemEntry || itemEntry->Count <= 0 || Count <= 0)
 		return;
-	auto Item = *ItemP;
 
-	itemEntry->Count -= Count;
+	Count = min(Count, itemEntry->Count);
+	if (bTrash)
+	{
+		PlayerController->WorldInventory->RemoveItem(Guid, Count);
+		return;
+	}
 
 	FVector FinalLoc = PlayerController->Pawn->K2_GetActorLocation();
 
@@ -3021,8 +3097,8 @@ void AFortPlayerControllerAthena::ServerAttemptInventoryDrop(UObject* Context, F
 
 		AActor* PetrolPickup = UWorld::SpawnActor<AActor>(BGA_Petrol_PickupClass, FinalLoc);
 
-		PlayerController->WorldInventory->Remove(Guid);
-		PlayerController->WorldInventory->Update(itemEntry);
+		if (PetrolPickup)
+			PlayerController->WorldInventory->RemoveItem(Guid, Count);
 
 		return;
 	}
@@ -3040,14 +3116,23 @@ void AFortPlayerControllerAthena::ServerAttemptInventoryDrop(UObject* Context, F
 	FinalLoc.X += cos(FinalAngle) * 100.f;
 	FinalLoc.Y += sin(FinalAngle) * 100.f;
 
-	AFortInventory::SpawnPickup(PlayerController->Pawn->K2_GetActorLocation() + PlayerController->Pawn->GetActorForwardVector() * 70.f + FVector(0, 0, 50), *itemEntry, EFortPickupSourceTypeFlag::GetPlayer(), EFortPickupSpawnSource::GetUnset(), PlayerController->MyFortPawn, Count, true, true, true, nullptr, FinalLoc);
-	if (itemEntry->Count <= 0 || Count < 0)
-		PlayerController->WorldInventory->Remove(Guid);
-	else
+	auto Pickup = AFortInventory::SpawnPickup(
+		PlayerController->Pawn->K2_GetActorLocation() +
+			PlayerController->Pawn->GetActorForwardVector() * 70.f +
+			FVector(0, 0, 50),
+		*itemEntry,
+		EFortPickupSourceTypeFlag::GetPlayer(),
+		EFortPickupSpawnSource::GetTossedByPlayer(),
+		PlayerController->MyFortPawn,
+		Count,
+		true,
+		true,
+		true,
+		nullptr,
+		FinalLoc);
+	if (Pickup)
 	{
-		Item->ItemEntry.Count = itemEntry->Count;
-		PlayerController->WorldInventory->UpdateEntry(*itemEntry);
-		Item->ItemEntry.bIsDirty = true;
+		PlayerController->WorldInventory->RemoveItem(Guid, Count);
 	}
 }
 
@@ -4870,7 +4955,9 @@ static bool IsControllerInAlivePlayers(
 	AFortGameMode* GameMode,
 	AFortPlayerControllerAthena* PlayerController)
 {
-	if (!GameMode || !PlayerController || !IsUsableDeathObject(GameMode))
+	if (!IsUsableDeathObject(GameMode) ||
+		!IsUsableDeathObject(PlayerController) ||
+		!GameMode->HasAlivePlayers())
 		return false;
 
 	for (auto AliveActor : GameMode->AlivePlayers)
@@ -5288,6 +5375,232 @@ static void CompleteLateSeasonBotVictoryAfterNative(
 		(int)WinningControllers.size());
 }
 
+static bool UsesCoreLegacyDeathSpectating()
+{
+	const double FortniteVersion = VersionInfo.FortniteVersion;
+	return (FortniteVersion >= 1.91 && FortniteVersion <= 6.00) ||
+		FortniteVersion == 1.10 ||
+		FortniteVersion == 1.11;
+}
+
+static bool IsPawnDBNOForSpectating(AFortPlayerPawnAthena* Pawn)
+{
+	if (!IsUsableDeathObject(Pawn))
+		return false;
+
+	if (Pawn->HasbIsDBNO())
+		return Pawn->bIsDBNO;
+
+	auto IsDBNOFunction = Pawn->GetFunction("IsDBNO");
+	return IsDBNOFunction
+		? Pawn->Call<bool>(IsDBNOFunction)
+		: false;
+}
+
+static AFortPlayerPawnAthena* ResolveValidDeathSpectatePawn(
+	AFortGameMode* GameMode,
+	AFortPlayerControllerAthena* VictimController,
+	AFortPlayerControllerAthena* CandidateController)
+{
+	if (!IsUsableDeathObject(CandidateController) ||
+		CandidateController == VictimController ||
+		!IsControllerInAlivePlayers(GameMode, CandidateController) ||
+		!CandidateController->HasPlayerState() ||
+		!IsUsableDeathObject(CandidateController->PlayerState))
+	{
+		return nullptr;
+	}
+
+	auto CandidatePlayerState = CandidateController->PlayerState;
+	if ((CandidateController->HasbMarkedAlive() &&
+			!CandidateController->bMarkedAlive) ||
+		(CandidatePlayerState->HasbIsSpectator() &&
+			CandidatePlayerState->bIsSpectator))
+	{
+		return nullptr;
+	}
+
+	AFortPlayerPawnAthena* CandidatePawn = nullptr;
+	if (CandidateController->HasMyFortPawn() &&
+		IsUsableDeathObject(CandidateController->MyFortPawn))
+	{
+		CandidatePawn = CandidateController->MyFortPawn;
+	}
+	else if (CandidateController->HasPawn() &&
+		IsUsableDeathObject(CandidateController->Pawn))
+	{
+		CandidatePawn = CandidateController->Pawn;
+	}
+
+	auto VictimPawn =
+		VictimController && VictimController->HasPawn()
+		? VictimController->Pawn : nullptr;
+	auto VictimFortPawn =
+		VictimController && VictimController->HasMyFortPawn()
+		? VictimController->MyFortPawn : nullptr;
+
+	if (!CandidatePawn ||
+		(VictimController &&
+			(CandidatePawn == VictimPawn ||
+				CandidatePawn == VictimFortPawn)) ||
+		IsPawnDBNOForSpectating(CandidatePawn) ||
+		(CandidatePawn->HasbIsDying() && CandidatePawn->bIsDying) ||
+		(CandidatePawn->HasbPlayedDying() && CandidatePawn->bPlayedDying) ||
+		(CandidatePawn->HasbIsHiddenForDeath() &&
+			CandidatePawn->bIsHiddenForDeath))
+	{
+		return nullptr;
+	}
+
+	return CandidatePawn;
+}
+
+static bool IsSameDeathSpectateSquad(
+	AFortPlayerControllerAthena* VictimController,
+	AFortPlayerControllerAthena* CandidateController)
+{
+	if (!VictimController || !CandidateController ||
+		!VictimController->HasPlayerState() ||
+		!CandidateController->HasPlayerState() ||
+		!IsUsableDeathObject(VictimController->PlayerState) ||
+		!IsUsableDeathObject(CandidateController->PlayerState))
+	{
+		return false;
+	}
+
+	auto VictimPlayerState = VictimController->PlayerState;
+	auto CandidatePlayerState = CandidateController->PlayerState;
+
+	if (VictimPlayerState->HasTeamIndex() &&
+		CandidatePlayerState->HasTeamIndex() &&
+		VictimPlayerState->TeamIndex != CandidatePlayerState->TeamIndex)
+	{
+		return false;
+	}
+
+	if (VictimPlayerState->HasSquadId() &&
+		CandidatePlayerState->HasSquadId() &&
+		VictimPlayerState->SquadId != CandidatePlayerState->SquadId)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+static AFortPlayerPawnAthena* ResolveLegacyDeathSpectateTarget(
+	AFortGameMode* GameMode,
+	AFortPlayerControllerAthena* VictimController,
+	AFortPlayerControllerAthena* KillerController,
+	AFortPlayerPawnAthena* KillerPawn)
+{
+	AFortPlayerPawnAthena* ResolvedTarget = nullptr;
+
+	// Prefer the first still-alive member in the reflected native squad list.
+	// That list is stable and avoids the invalid fixed-layout PlayerTeam wrapper.
+	ForEachSquadController(
+		VictimController,
+		[&](AFortPlayerControllerAthena* SquadController)
+		{
+			if (ResolvedTarget ||
+				!IsSameDeathSpectateSquad(
+					VictimController, SquadController))
+			{
+				return;
+			}
+
+			ResolvedTarget = ResolveValidDeathSpectatePawn(
+				GameMode, VictimController, SquadController);
+		});
+	if (ResolvedTarget)
+		return ResolvedTarget;
+
+	// Fall back to the reported killer only when its live controller/pawn can
+	// be validated. The raw report pointer may instead be a stale pawn.
+	if (!IsUsableDeathObject(KillerController) &&
+		IsUsableDeathObject(KillerPawn) &&
+		KillerPawn->HasController() &&
+		IsUsableDeathObject(KillerPawn->Controller))
+	{
+		KillerController =
+			KillerPawn->Controller->Cast<AFortPlayerControllerAthena>();
+	}
+
+	ResolvedTarget = ResolveValidDeathSpectatePawn(
+		GameMode, VictimController, KillerController);
+	if (ResolvedTarget)
+		return ResolvedTarget;
+
+	// AlivePlayers order is authoritative and deterministic; do not use a
+	// random fallback because it can choose self, stale, or dying entries.
+	if (!GameMode || !GameMode->HasAlivePlayers())
+		return nullptr;
+
+	auto& AlivePlayers = GameMode->AlivePlayers;
+	for (int32 Index = 0; Index < AlivePlayers.Num(); ++Index)
+	{
+		auto AliveActor = AlivePlayers[Index];
+		if (!IsUsableDeathObject(AliveActor))
+			continue;
+
+		auto AliveController =
+			AliveActor->Cast<AFortPlayerControllerAthena>();
+		ResolvedTarget = ResolveValidDeathSpectatePawn(
+			GameMode, VictimController, AliveController);
+		if (ResolvedTarget)
+			return ResolvedTarget;
+	}
+
+	return nullptr;
+}
+
+static bool IsRespawningAllowedForDeath(
+	AFortGameMode* GameMode,
+	AFortGameStateAthena* GameState,
+	AFortPlayerStateAthena* PlayerState)
+{
+	if (!GameMode || !GameState || !PlayerState)
+		return FConfiguration::bForceRespawns;
+
+	auto IsRespawningAllowedFunction =
+		GameState->GetFunction("IsRespawningAllowed");
+	bool bRespawnAllowed = false;
+
+	if (IsRespawningAllowedFunction)
+	{
+		bRespawnAllowed = GameState->Call<bool>(
+			IsRespawningAllowedFunction, PlayerState);
+	}
+	else
+	{
+		const UFortPlaylistAthena* Playlist = nullptr;
+		if (VersionInfo.FortniteVersion >= 3.5 &&
+			GameMode->HasWarmupRequiredPlayerCount())
+		{
+			if (GameState->HasCurrentPlaylistInfo() &&
+				GameState->CurrentPlaylistInfo.HasBasePlaylist())
+			{
+				Playlist =
+					GameState->CurrentPlaylistInfo.BasePlaylist;
+			}
+			else if (GameState->HasCurrentPlaylistData())
+			{
+				Playlist = GameState->CurrentPlaylistData;
+			}
+		}
+
+		// Some legacy builds do not expose IsRespawningAllowed. Preserve the
+		// existing playlist/config fallback for those builds.
+		bRespawnAllowed = Playlist
+			? (Playlist->HasRespawnType()
+				? Playlist->RespawnType > 0
+				: FConfiguration::bForceRespawns)
+			: FConfiguration::bForceRespawns;
+	}
+
+	return bRespawnAllowed || FConfiguration::bForceRespawns;
+}
+
 void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* PlayerController, FFortPlayerDeathReport& DeathReport)
 {
 	if (!PlayerController)
@@ -5408,6 +5721,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			(KillerPawn && KillerPawn->Controller) ? 1 : 0);
 	FGameplayTagContainer EmptyDeathTags{};
 	auto& DeathTags = DeathReport.HasTags() ? DeathReport.Tags : EmptyDeathTags;
+	const bool bRespawnAllowed = IsRespawningAllowedForDeath(
+		GameMode, GameState, PlayerState);
 
 	if (VersionInfo.FortniteVersion > 1.8 || VersionInfo.EngineVersion >= 4.19)
 	{
@@ -5516,22 +5831,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		{
 			KillerPlayerState->ClientReportTournamentStatUpdate();
 		}
-
-		static auto IsRespawningAllowedFunc = GameState->GetFunction("IsRespawningAllowed");
-
-		bool bRespawnAllowed = false;
-
-		if (!IsRespawningAllowedFunc)
-		{
-			auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
-
-			// respawn except storm needs to be fixed
-			bRespawnAllowed = Playlist ? (Playlist->HasRespawnType() ? Playlist->RespawnType > 0 : FConfiguration::bForceRespawns) : FConfiguration::bForceRespawns;
-		}
-		else
-			bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerState);
-
-		bRespawnAllowed |= FConfiguration::bForceRespawns;
 
 		if (!bRespawnAllowed && (PlayerController->Pawn ? !PlayerController->Pawn->IsDBNO() : true) && PlayerState->HasPlace())
 		{
@@ -6064,16 +6363,45 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 	}
 
-	if (VersionInfo.FortniteVersion < 6)
-	{
-		if (GameState->GamePhase > 2)
-		{
-			if (GameMode->bAllowSpectateAfterDeath)
-			{
-				PlayerController->PlayerToSpectateOnDeath = KillerPawn ? KillerPawn : (GameMode->AlivePlayers.Num() > 0 ? ((AFortPlayerControllerAthena*)GameMode->AlivePlayers[rand() % GameMode->AlivePlayers.Num()])->Pawn : nullptr);
+	// Core's tested legacy shim only seeds the target/timer; native death logic
+	// remains responsible for possession, state, spectator flags, and camera.
+	// Builds after 6.00 (including Season 7) stay entirely native-authoritative.
+	auto KismetSystemLibrary = UKismetSystemLibrary::GetDefaultObj();
+	const bool bCanSeedLegacySpectating =
+		UsesCoreLegacyDeathSpectating() &&
+		!bRespawnAllowed &&
+		(!PlayerController->Pawn ||
+			!IsPawnDBNOForSpectating(PlayerController->Pawn)) &&
+		GameState->HasGamePhase() &&
+		GameState->GamePhase > 2 &&
+		GameMode->HasbAllowSpectateAfterDeath() &&
+		GameMode->bAllowSpectateAfterDeath &&
+		PlayerController->HasPlayerToSpectateOnDeath() &&
+		PlayerController->GetFunction("SpectateOnDeath") &&
+		KismetSystemLibrary &&
+		KismetSystemLibrary->GetFunction("K2_SetTimer");
 
-				UKismetSystemLibrary::K2_SetTimer(PlayerController, FString(L"SpectateOnDeath"), 5.f, false);
-			}
+	if (bCanSeedLegacySpectating)
+	{
+		auto SpectateTarget = ResolveLegacyDeathSpectateTarget(
+			GameMode, PlayerController,
+			KillerPlayerController, KillerPawn);
+		if (SpectateTarget)
+		{
+			PlayerController->PlayerToSpectateOnDeath = SpectateTarget;
+			UKismetSystemLibrary::K2_SetTimer(
+				PlayerController,
+				FString(L"SpectateOnDeath"),
+				5.f,
+				false);
+		}
+		else
+		{
+			SDK::DbgLog(
+				"[Spectating] no valid legacy death target "
+				"controller=%p version=%.2f\n",
+				(void*)PlayerController,
+				VersionInfo.FortniteVersion);
 		}
 	}
 
