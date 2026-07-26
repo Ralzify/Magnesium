@@ -7506,6 +7506,155 @@ struct FLoadedGameplayEffectCommandCatalog
 
 static FLoadedGameplayEffectCommandCatalog GLoadedGameplayEffectCommandCatalog;
 
+struct FObservedGameplayEffectCommandEntry
+{
+	TWeakObjectPtr<UClass> GameplayEffectClass;
+	FName EffectName;
+	FName EffectClassName;
+};
+
+struct FObservedGameplayEffectCommandCache
+{
+	TWeakObjectPtr<UWorld> World;
+	std::vector<FObservedGameplayEffectCommandEntry> Entries;
+};
+
+static FObservedGameplayEffectCommandCache
+	GObservedGameplayEffectCommandCache;
+static constexpr size_t MaxObservedGameplayEffectCommandEntries = 256;
+
+static void ResetObservedGameplayEffectCommandCacheForWorld(
+	UWorld* CurrentWorld)
+{
+	auto& Cache = GObservedGameplayEffectCommandCache;
+
+	if (Cache.World.Get() == CurrentWorld)
+		return;
+
+	Cache = FObservedGameplayEffectCommandCache();
+
+	if (CurrentWorld)
+	{
+		Cache.World = TWeakObjectPtr<UWorld>(CurrentWorld);
+		Cache.Entries.reserve(
+			MaxObservedGameplayEffectCommandEntries);
+	}
+}
+
+static void RememberObservedGameplayEffectClassForCommand(
+	const FName& EffectName,
+	const FName& EffectClassName,
+	UClass* GameplayEffectClass)
+{
+	auto CurrentWorld = UWorld::GetWorld();
+	ResetObservedGameplayEffectCommandCacheForWorld(CurrentWorld);
+
+	if (!CurrentWorld ||
+		!IsGameplayEffectClassForCommand(GameplayEffectClass))
+	{
+		return;
+	}
+
+	auto& Entries = GObservedGameplayEffectCommandCache.Entries;
+
+	for (size_t Index = 0; Index < Entries.size(); Index++)
+	{
+		if (Entries[Index].GameplayEffectClass.Get() !=
+			GameplayEffectClass)
+		{
+			continue;
+		}
+
+		FObservedGameplayEffectCommandEntry RefreshedEntry;
+		RefreshedEntry.GameplayEffectClass =
+			TWeakObjectPtr<UClass>(GameplayEffectClass);
+		RefreshedEntry.EffectName = EffectName;
+		RefreshedEntry.EffectClassName = EffectClassName;
+
+		Entries.erase(Entries.begin() + Index);
+		Entries.emplace_back(std::move(RefreshedEntry));
+		return;
+	}
+
+	Entries.erase(
+		std::remove_if(
+			Entries.begin(),
+			Entries.end(),
+			[](const FObservedGameplayEffectCommandEntry& Entry)
+			{
+				return !Entry.GameplayEffectClass.Get();
+			}),
+		Entries.end());
+
+	if (Entries.size() >= MaxObservedGameplayEffectCommandEntries)
+		Entries.erase(Entries.begin());
+
+	FObservedGameplayEffectCommandEntry NewEntry;
+	NewEntry.GameplayEffectClass =
+		TWeakObjectPtr<UClass>(GameplayEffectClass);
+	NewEntry.EffectName = EffectName;
+	NewEntry.EffectClassName = EffectClassName;
+	Entries.emplace_back(std::move(NewEntry));
+}
+
+static bool TryFindObservedGameplayEffectClassForCommand(
+	const std::string& NormalizedArg,
+	const UClass*& OutGameplayEffectClass)
+{
+	OutGameplayEffectClass = nullptr;
+	auto CurrentWorld = UWorld::GetWorld();
+	ResetObservedGameplayEffectCommandCacheForWorld(CurrentWorld);
+
+	if (!CurrentWorld || NormalizedArg.empty())
+		return false;
+
+	auto& Entries = GObservedGameplayEffectCommandCache.Entries;
+	bool bFoundMatch = false;
+
+	for (auto Entry = Entries.rbegin();
+		Entry != Entries.rend(); ++Entry)
+	{
+		auto GameplayEffectClass = Entry->GameplayEffectClass.Get();
+
+		if (!IsGameplayEffectClassForCommand(GameplayEffectClass))
+			continue;
+
+		auto NormalizedEffectName =
+			NormalizePlayerCommandString(
+				Entry->EffectName.ToString().c_str());
+		auto NormalizedEffectClassName =
+			NormalizePlayerCommandString(
+				Entry->EffectClassName.ToString().c_str());
+		auto NormalizedShortClassName =
+			NormalizedEffectClassName;
+
+		if (NormalizedShortClassName.ends_with("_c"))
+		{
+			NormalizedShortClassName.resize(
+				NormalizedShortClassName.size() - 2);
+		}
+
+		if (NormalizedArg == NormalizedEffectName ||
+			NormalizedArg == NormalizedEffectClassName ||
+			NormalizedArg == NormalizedShortClassName)
+		{
+			if (bFoundMatch &&
+				OutGameplayEffectClass != GameplayEffectClass)
+			{
+				// Two packages can contain the same short class name. Never
+				// guess in that case; a full path or dump index is unambiguous.
+				OutGameplayEffectClass = nullptr;
+				return true;
+			}
+
+			bFoundMatch = true;
+			OutGameplayEffectClass = GameplayEffectClass;
+		}
+	}
+
+	return bFoundMatch;
+}
+
 static const std::vector<FLoadedGameplayEffectCommandEntry>*
 GetLoadedGameplayEffectCatalogForCommand()
 {
@@ -7830,6 +7979,11 @@ static const UClass* FindGameplayEffectClassByCommandArg(const std::string& Effe
 				return Class;
 	}
 
+	const UClass* ObservedGameplayEffectClass = nullptr;
+	if (TryFindObservedGameplayEffectClassForCommand(
+		NormalizedArg, ObservedGameplayEffectClass))
+		return ObservedGameplayEffectClass;
+
 	auto GameplayEffects = GetLoadedGameplayEffectCatalogForCommand();
 
 	if (!GameplayEffects)
@@ -7966,14 +8120,27 @@ static std::wstring GetRemoveGameplayEffectsCommandMessage(
 
 struct FGameplayEffectOutputEntry
 {
-	std::string EffectName;
-	std::string EffectClassName;
+	TWeakObjectPtr<UClass> GameplayEffectClass;
+	FName EffectName;
+	FName EffectClassName;
 	bool bHasLevel = false;
 	float Level = 0.f;
 	bool bHasStackCount = false;
 	int32 StackCount = 0;
-	bool bHasStartTime = false;
-	float StartTime = 0.f;
+};
+
+enum class EGameplayEffectOutputChange : uint8
+{
+	Applied,
+	Updated,
+	Removed
+};
+
+struct FGameplayEffectOutputChange
+{
+	EGameplayEffectOutputChange Change;
+	int32 Handle = 0;
+	FGameplayEffectOutputEntry Entry;
 };
 
 struct FGameplayEffectOutputState
@@ -7982,19 +8149,54 @@ struct FGameplayEffectOutputState
 	TWeakObjectPtr<UWorld> World;
 	TWeakObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
 	std::unordered_map<int32, FGameplayEffectOutputEntry> ActiveEffects;
+	std::vector<FGameplayEffectOutputChange> PendingChanges;
+	float SecondsUntilPoll = 0.f;
+	int32 SuppressedChangeCount = 0;
+	int32 ConsecutiveSnapshotFailures = 0;
 	bool bHasBaseline = false;
 };
+
+static constexpr int32 GameplayEffectOutputMaxSnapshotEffects = 1024;
+static constexpr size_t GameplayEffectOutputMaxPendingChanges = 32;
+static constexpr size_t GameplayEffectOutputMaxLinesPerMessage = 8;
+static constexpr size_t GameplayEffectOutputMaxMessageCharacters = 1024;
+static constexpr float GameplayEffectOutputPollIntervalSeconds = 0.1f;
+static constexpr int32 GameplayEffectOutputMaxSnapshotFailures = 3;
 
 static std::unordered_map<AFortPlayerControllerAthena*, FGameplayEffectOutputState>
 	GGameplayEffectOutputStates;
 
+static void SendGameplayEffectOutputMessage(
+	AFortPlayerControllerAthena* PlayerController,
+	const wchar_t* Message)
+{
+	if (!PlayerController || !Message || !*Message)
+		return;
+
+	FString ClientMessageText(Message);
+	PlayerController->ClientMessage(
+		ClientMessageText,
+		FName(),
+		1.f);
+	ClientMessageText.Free();
+}
+
 static UAbilitySystemComponent* GetGameplayEffectOutputAbilitySystem(
 	AFortPlayerControllerAthena* PlayerController)
 {
-	if (!PlayerController || !PlayerController->PlayerState)
+	if (!PlayerController ||
+		!PlayerController->PlayerState ||
+		!SDK::MemReadable(
+			PlayerController->PlayerState, sizeof(UObject)))
 		return nullptr;
 
-	return PlayerController->PlayerState->AbilitySystemComponent;
+	auto PlayerState =
+		PlayerController->PlayerState->Cast<AFortPlayerStateAthena>();
+
+	if (!PlayerState || !PlayerState->HasAbilitySystemComponent())
+		return nullptr;
+
+	return PlayerState->AbilitySystemComponent;
 }
 
 template <typename T>
@@ -8019,20 +8221,97 @@ static int32 ResolveGameplayEffectOutputStructPropertyOffset(
 	return static_cast<int32>(Offset);
 }
 
-static std::unordered_map<int32, FGameplayEffectOutputEntry>
-CaptureGameplayEffectOutputSnapshot(UAbilitySystemComponent* AbilitySystemComponent)
+static bool CaptureGameplayEffectOutputSnapshot(
+	UAbilitySystemComponent* AbilitySystemComponent,
+	std::unordered_map<int32, FGameplayEffectOutputEntry>& Snapshot)
 {
-	std::unordered_map<int32, FGameplayEffectOutputEntry> Snapshot;
+	Snapshot.clear();
 
-	if (!AbilitySystemComponent)
-		return Snapshot;
+	if (!AbilitySystemComponent ||
+		!SDK::MemReadable(AbilitySystemComponent, sizeof(UObject)) ||
+		!AbilitySystemComponent->HasActiveGameplayEffects())
+	{
+		return false;
+	}
 
-	auto& Effects =
-		AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+	auto ActiveGameplayEffectsStruct =
+		FActiveGameplayEffectsContainer::StaticStruct();
+	auto ActiveGameplayEffectStruct =
+		FActiveGameplayEffect::StaticStruct();
+	auto GameplayEffectSpecStruct =
+		FGameplayEffectSpec::StaticStruct();
+
+	if (!ActiveGameplayEffectsStruct ||
+		!ActiveGameplayEffectStruct ||
+		!GameplayEffectSpecStruct ||
+		!FActiveGameplayEffectsContainer::HasGameplayEffects_Internal() ||
+		!FActiveGameplayEffect::HasSpec() ||
+		!FGameplayEffectSpec::HasDef())
+	{
+		return false;
+	}
+
+	auto& ActiveGameplayEffects =
+		AbilitySystemComponent->ActiveGameplayEffects;
+
+	const int32 ActiveGameplayEffectsSize =
+		FActiveGameplayEffectsContainer::Size();
+	const int32 EffectsOffset =
+		FActiveGameplayEffectsContainer::GameplayEffects_Internal__Offset;
+
+	if (ActiveGameplayEffectsSize < static_cast<int32>(
+			sizeof(TArray<FActiveGameplayEffect>)) ||
+		EffectsOffset < 0 ||
+		EffectsOffset > ActiveGameplayEffectsSize -
+			static_cast<int32>(sizeof(TArray<FActiveGameplayEffect>)))
+	{
+		return false;
+	}
+
+	auto& Effects = ActiveGameplayEffects.GameplayEffects_Internal;
+
+	if (!SDK::MemReadable(&Effects, sizeof(Effects)))
+		return false;
+
 	const int EffectCount = Effects.Num();
+	const int EffectCapacity = Effects.Max();
+	const int32 ActiveEffectSize = FActiveGameplayEffect::Size();
+	const int32 GameplayEffectSpecSize = FGameplayEffectSpec::Size();
+	const int32 GameplayEffectSpecOffset =
+		FActiveGameplayEffect::Spec__Offset;
+	const int32 GameplayEffectDefinitionOffset =
+		FGameplayEffectSpec::Def__Offset;
 
-	if (EffectCount <= 0 || EffectCount > 100000)
-		return Snapshot;
+	if (EffectCount < 0 ||
+		EffectCount > GameplayEffectOutputMaxSnapshotEffects ||
+		EffectCapacity < EffectCount ||
+		EffectCapacity > 100000 ||
+		ActiveEffectSize < 0x14 ||
+		ActiveEffectSize > 0x1000 ||
+		GameplayEffectSpecSize < static_cast<int32>(sizeof(void*)) ||
+		GameplayEffectSpecSize > ActiveEffectSize ||
+		GameplayEffectSpecOffset < 0 ||
+		GameplayEffectSpecOffset >
+			ActiveEffectSize - GameplayEffectSpecSize ||
+		GameplayEffectDefinitionOffset < 0 ||
+		GameplayEffectDefinitionOffset >
+			GameplayEffectSpecSize - static_cast<int32>(sizeof(void*)))
+	{
+		return false;
+	}
+
+	if (EffectCount == 0)
+		return true;
+
+	const size_t EffectsByteCount =
+		static_cast<size_t>(EffectCount) *
+		static_cast<size_t>(ActiveEffectSize);
+
+	if (!Effects.GetData() ||
+		!SDK::MemReadable(Effects.GetData(), EffectsByteCount))
+	{
+		return false;
+	}
 
 	Snapshot.reserve(EffectCount);
 	const bool bCanReadLevel = FGameplayEffectSpec::HasLevel();
@@ -8042,39 +8321,14 @@ CaptureGameplayEffectOutputSnapshot(UAbilitySystemComponent* AbilitySystemCompon
 			"StackCount",
 			0x80,
 			FGameplayEffectSpec::Size());
-	static const int32 StartTimeOffset = []()
-	{
-		auto ActiveEffectStruct = FActiveGameplayEffect::StaticStruct();
-		const int32 ActiveEffectSize = FActiveGameplayEffect::Size();
-		const char* StartTimePropertyNames[] =
-		{
-			"StartServerWorldTime",
-			"StartWorldTime",
-			"CachedStartServerWorldTime"
-		};
-
-		for (auto PropertyName : StartTimePropertyNames)
-		{
-			const int32 Offset =
-				ResolveGameplayEffectOutputStructPropertyOffset<float>(
-					ActiveEffectStruct,
-					PropertyName,
-					0x100,
-					ActiveEffectSize);
-
-			if (Offset >= 0)
-				return Offset;
-		}
-
-		return -1;
-	}();
 
 	for (int Index = 0; Index < EffectCount; Index++)
 	{
-		auto& Effect = Effects.Get(Index, FActiveGameplayEffect::Size());
+		auto& Effect = Effects.Get(Index, ActiveEffectSize);
 		auto EffectDefinition = Effect.Spec.Def;
 
-		if (!EffectDefinition)
+		if (!EffectDefinition ||
+			!SDK::MemReadable(EffectDefinition, sizeof(UObject)))
 			continue;
 
 		auto Handle = *(FActiveGameplayEffectHandle*)((char*)&Effect + 0xc);
@@ -8083,13 +8337,20 @@ CaptureGameplayEffectOutputSnapshot(UAbilitySystemComponent* AbilitySystemCompon
 			continue;
 
 		FGameplayEffectOutputEntry Entry;
-		Entry.EffectName = EffectDefinition->Name.ToString().c_str();
+		Entry.EffectName = EffectDefinition->Name;
 
-		if (EffectDefinition->Class)
-			Entry.EffectClassName =
-				EffectDefinition->Class->GetName().ToString().c_str();
+		if (EffectDefinition->Class &&
+			SDK::MemReadable(EffectDefinition->Class, sizeof(UObject)))
+		{
+			Entry.GameplayEffectClass =
+				TWeakObjectPtr<UClass>(EffectDefinition->Class);
+			Entry.EffectClassName = EffectDefinition->Class->Name;
+		}
 
-		if (bCanReadLevel)
+		if (bCanReadLevel &&
+			FGameplayEffectSpec::Level__Offset >= 0 &&
+			FGameplayEffectSpec::Level__Offset <=
+				GameplayEffectSpecSize - static_cast<int32>(sizeof(float)))
 		{
 			Entry.bHasLevel = true;
 			Entry.Level = Effect.Spec.Level;
@@ -8102,106 +8363,232 @@ CaptureGameplayEffectOutputSnapshot(UAbilitySystemComponent* AbilitySystemCompon
 				GetFromOffset<int32>(&Effect.Spec, StackCountOffset);
 		}
 
-		if (StartTimeOffset >= 0)
-		{
-			Entry.bHasStartTime = true;
-			Entry.StartTime =
-				GetFromOffset<float>(&Effect, StartTimeOffset);
-		}
-
 		Snapshot.insert_or_assign(Handle.Handle, std::move(Entry));
 	}
 
-	return Snapshot;
+	return true;
 }
 
-static std::string GetGameplayEffectOutputPlayerName(
-	AFortPlayerControllerAthena* PlayerController)
+static const wchar_t* GetGameplayEffectOutputChangeName(
+	EGameplayEffectOutputChange Change)
 {
-	if (!PlayerController)
-		return "unknown";
-
-	if (PlayerController->PlayerState)
+	switch (Change)
 	{
-		auto PlayerState =
-			PlayerController->PlayerState->Cast<AFortPlayerStateAthena>();
-
-		if (PlayerState)
-		{
-			std::string PlayerName =
-				PlayerState->GetPlayerName().ToString().c_str();
-
-			if (!PlayerName.empty())
-				return PlayerName;
-		}
+	case EGameplayEffectOutputChange::Applied:
+		return L"APPLIED";
+	case EGameplayEffectOutputChange::Updated:
+		return L"UPDATED";
+	case EGameplayEffectOutputChange::Removed:
+		return L"REMOVED";
+	default:
+		return L"UNKNOWN";
 	}
-
-	return PlayerController->Name.ToString().c_str();
 }
 
-static void PrintGameplayEffectOutputChange(
-	const char* Change,
-	AFortPlayerControllerAthena* PlayerController,
+static std::wstring FormatGameplayEffectOutputChange(
+	EGameplayEffectOutputChange Change,
 	int32 Handle,
 	const FGameplayEffectOutputEntry& Entry)
 {
-	auto PlayerName = GetGameplayEffectOutputPlayerName(PlayerController);
-	std::string AvatarName = "none";
-	std::string Details;
-	auto AbilitySystemComponent =
-		GetGameplayEffectOutputAbilitySystem(PlayerController);
+	auto EffectName = Entry.EffectName.IsValid()
+		? Entry.EffectName.ToWString()
+		: UEAllocatedWString(L"unknown");
+	auto EffectClassName = Entry.EffectClassName.IsValid()
+		? Entry.EffectClassName.ToWString()
+		: UEAllocatedWString(L"unknown");
 
-	if (AbilitySystemComponent &&
-		AbilitySystemComponent->HasAvatarActor() &&
-		AbilitySystemComponent->AvatarActor)
-	{
-		AvatarName =
-			AbilitySystemComponent->AvatarActor->Name.ToString().c_str();
-	}
+	wchar_t HeaderBuffer[96];
+	swprintf_s(
+		HeaderBuffer,
+		std::size(HeaderBuffer),
+		L"[OutputGE] %ls handle=%d effect=",
+		GetGameplayEffectOutputChangeName(Change),
+		Handle);
 
-	char DetailBuffer[64];
+	std::wstring Line = HeaderBuffer;
+	Line.append(EffectName.c_str());
+	Line.append(L" class=");
+	Line.append(EffectClassName.c_str());
+
+	wchar_t DetailBuffer[64];
 
 	if (Entry.bHasLevel)
 	{
-		snprintf(
+		swprintf_s(
 			DetailBuffer,
-			sizeof(DetailBuffer),
-			" level=%.3f",
+			std::size(DetailBuffer),
+			L" level=%.3f",
 			Entry.Level);
-		Details += DetailBuffer;
+		Line.append(DetailBuffer);
 	}
 
 	if (Entry.bHasStackCount)
 	{
-		snprintf(
+		swprintf_s(
 			DetailBuffer,
-			sizeof(DetailBuffer),
-			" stacks=%d",
+			std::size(DetailBuffer),
+			L" stacks=%d",
 			Entry.StackCount);
-		Details += DetailBuffer;
+		Line.append(DetailBuffer);
 	}
 
-	if (Entry.bHasStartTime)
+	static constexpr size_t MaxLineCharacters = 384;
+	if (Line.size() > MaxLineCharacters)
 	{
-		snprintf(
-			DetailBuffer,
-			sizeof(DetailBuffer),
-			" start_time=%.3f",
-			Entry.StartTime);
-		Details += DetailBuffer;
+		Line.resize(MaxLineCharacters - 3);
+		Line.append(L"...");
 	}
 
-	printf(
-		"[OutputGE] %s player=\"%s\" avatar=%s handle=%d effect=%s class=%s%s\n",
-		Change,
-		PlayerName.c_str(),
-		AvatarName.c_str(),
-		Handle,
-		Entry.EffectName.c_str(),
-		Entry.EffectClassName.c_str(),
-		Details.c_str());
+	return Line;
+}
 
-	fflush(stdout);
+static void QueueGameplayEffectOutputChange(
+	FGameplayEffectOutputState& State,
+	EGameplayEffectOutputChange Change,
+	int32 Handle,
+	const FGameplayEffectOutputEntry& Entry)
+{
+	RememberObservedGameplayEffectClassForCommand(
+		Entry.EffectName,
+		Entry.EffectClassName,
+		Entry.GameplayEffectClass.Get());
+
+	for (auto Existing = State.PendingChanges.rbegin();
+		Existing != State.PendingChanges.rend(); ++Existing)
+	{
+		if (Existing->Handle != Handle)
+			continue;
+
+		if (Existing->Change == EGameplayEffectOutputChange::Applied &&
+			Change == EGameplayEffectOutputChange::Updated)
+		{
+			Existing->Entry = Entry;
+			return;
+		}
+
+		if (Existing->Change == EGameplayEffectOutputChange::Updated &&
+			Change == EGameplayEffectOutputChange::Updated)
+		{
+			Existing->Entry = Entry;
+			return;
+		}
+
+		if (Existing->Change == EGameplayEffectOutputChange::Updated &&
+			Change == EGameplayEffectOutputChange::Removed)
+		{
+			Existing->Change = Change;
+			Existing->Entry = Entry;
+			return;
+		}
+
+		break;
+	}
+
+	if (State.PendingChanges.size() >=
+		GameplayEffectOutputMaxPendingChanges)
+	{
+		if (Change == EGameplayEffectOutputChange::Applied)
+		{
+			auto Replace = std::find_if(
+				State.PendingChanges.rbegin(),
+				State.PendingChanges.rend(),
+				[](const FGameplayEffectOutputChange& PendingChange)
+				{
+					return PendingChange.Change !=
+						EGameplayEffectOutputChange::Applied;
+				});
+
+			if (Replace != State.PendingChanges.rend())
+			{
+				*Replace = {Change, Handle, Entry};
+				State.SuppressedChangeCount++;
+				return;
+			}
+		}
+
+		State.SuppressedChangeCount++;
+		return;
+	}
+
+	State.PendingChanges.push_back({Change, Handle, Entry});
+}
+
+static void FlushGameplayEffectOutputChanges(
+	AFortPlayerControllerAthena* PlayerController,
+	FGameplayEffectOutputState& State)
+{
+	if (!PlayerController)
+		return;
+
+	std::wstring Message;
+	size_t EmittedLineCount = 0;
+	int32 SuppressedChangeCount = State.SuppressedChangeCount;
+
+	const EGameplayEffectOutputChange ChangeOrder[] =
+	{
+		EGameplayEffectOutputChange::Applied,
+		EGameplayEffectOutputChange::Updated,
+		EGameplayEffectOutputChange::Removed
+	};
+
+	for (auto ChangeType : ChangeOrder)
+	{
+		for (const auto& PendingChange : State.PendingChanges)
+		{
+			if (PendingChange.Change != ChangeType)
+				continue;
+
+			if (EmittedLineCount >=
+				GameplayEffectOutputMaxLinesPerMessage)
+			{
+				SuppressedChangeCount++;
+				continue;
+			}
+
+			auto Line = FormatGameplayEffectOutputChange(
+				PendingChange.Change,
+				PendingChange.Handle,
+				PendingChange.Entry);
+			const size_t SeparatorLength = Message.empty() ? 0 : 1;
+			static constexpr size_t SuppressionSummaryReserve = 72;
+
+			if (Message.size() + SeparatorLength + Line.size() >
+					GameplayEffectOutputMaxMessageCharacters -
+						SuppressionSummaryReserve)
+			{
+				SuppressedChangeCount++;
+				continue;
+			}
+
+			if (!Message.empty())
+				Message.push_back(L'\n');
+
+			Message.append(Line);
+			EmittedLineCount++;
+		}
+	}
+
+	if (SuppressedChangeCount > 0)
+	{
+		wchar_t SummaryBuffer[72];
+		swprintf_s(
+			SummaryBuffer,
+			std::size(SummaryBuffer),
+			L"[OutputGE] %d additional change(s) suppressed.",
+			SuppressedChangeCount);
+
+		if (!Message.empty())
+			Message.push_back(L'\n');
+
+		Message.append(SummaryBuffer);
+	}
+
+	State.PendingChanges.clear();
+	State.SuppressedChangeCount = 0;
+
+	if (!Message.empty())
+		SendGameplayEffectOutputMessage(
+			PlayerController, Message.c_str());
 }
 
 static bool HasGameplayEffectOutputFloatChanged(
@@ -8250,11 +8637,7 @@ static bool HasGameplayEffectOutputEntryChanged(
 		return true;
 	}
 
-	return HasGameplayEffectOutputFloatChanged(
-		Previous.bHasStartTime,
-		Previous.StartTime,
-		Current.bHasStartTime,
-		Current.StartTime);
+	return false;
 }
 
 static bool ToggleGameplayEffectOutputForCommand(
@@ -8269,10 +8652,6 @@ static bool ToggleGameplayEffectOutputForCommand(
 		if (Existing->second.Controller.Get() == PlayerController)
 		{
 			GGameplayEffectOutputStates.erase(Existing);
-			printf(
-				"[OutputGE] DISABLED player=\"%s\"\n",
-				GetGameplayEffectOutputPlayerName(PlayerController).c_str());
-			fflush(stdout);
 			return false;
 		}
 
@@ -8289,32 +8668,33 @@ static bool ToggleGameplayEffectOutputForCommand(
 
 	if (AbilitySystemComponent)
 	{
-		State.AbilitySystemComponent =
-			TWeakObjectPtr<UAbilitySystemComponent>(AbilitySystemComponent);
-		State.ActiveEffects =
-			CaptureGameplayEffectOutputSnapshot(AbilitySystemComponent);
-		State.bHasBaseline = true;
+		std::unordered_map<int32, FGameplayEffectOutputEntry> Baseline;
+
+		if (CaptureGameplayEffectOutputSnapshot(
+			AbilitySystemComponent, Baseline))
+		{
+			State.AbilitySystemComponent =
+				TWeakObjectPtr<UAbilitySystemComponent>(
+					AbilitySystemComponent);
+			State.ActiveEffects = std::move(Baseline);
+			State.bHasBaseline = true;
+		}
 	}
 
-	const size_t BaselineEffectCount = State.ActiveEffects.size();
 	GGameplayEffectOutputStates.emplace(PlayerController, std::move(State));
-
-	printf(
-		"[OutputGE] ENABLED player=\"%s\" baseline=%zu active effects\n",
-		GetGameplayEffectOutputPlayerName(PlayerController).c_str(),
-		BaselineEffectCount);
-	printf(
-		"[OutputGE] NOTE: tracks active duration/infinite effects; instant effects are not retained by GAS.\n");
-	fflush(stdout);
 	return true;
 }
 
-static void TickGameplayEffectOutputForCommand()
+static void TickGameplayEffectOutputForCommand(float DeltaSeconds)
 {
 	if (GGameplayEffectOutputStates.empty())
 		return;
 
 	auto CurrentWorld = UWorld::GetWorld();
+	const float SafeDeltaSeconds =
+		std::isfinite((double)DeltaSeconds) && DeltaSeconds > 0.f
+			? (std::min)(DeltaSeconds, 1.f)
+			: 0.f;
 
 	for (auto It = GGameplayEffectOutputStates.begin();
 		It != GGameplayEffectOutputStates.end();)
@@ -8330,6 +8710,17 @@ static void TickGameplayEffectOutputForCommand()
 			continue;
 		}
 
+		State.SecondsUntilPoll -= SafeDeltaSeconds;
+
+		if (State.SecondsUntilPoll > 0.f)
+		{
+			++It;
+			continue;
+		}
+
+		State.SecondsUntilPoll =
+			GameplayEffectOutputPollIntervalSeconds;
+
 		auto AbilitySystemComponent =
 			GetGameplayEffectOutputAbilitySystem(PlayerController);
 
@@ -8338,6 +8729,9 @@ static void TickGameplayEffectOutputForCommand()
 			State.AbilitySystemComponent =
 				TWeakObjectPtr<UAbilitySystemComponent>();
 			State.ActiveEffects.clear();
+			State.PendingChanges.clear();
+			State.SuppressedChangeCount = 0;
+			State.ConsecutiveSnapshotFailures = 0;
 			State.bHasBaseline = false;
 			++It;
 			continue;
@@ -8346,19 +8740,62 @@ static void TickGameplayEffectOutputForCommand()
 		if (!State.bHasBaseline ||
 			State.AbilitySystemComponent.Get() != AbilitySystemComponent)
 		{
-			State.AbilitySystemComponent =
-				TWeakObjectPtr<UAbilitySystemComponent>(
-					AbilitySystemComponent);
-			State.ActiveEffects =
-				CaptureGameplayEffectOutputSnapshot(
-					AbilitySystemComponent);
-			State.bHasBaseline = true;
+			std::unordered_map<int32, FGameplayEffectOutputEntry> Baseline;
+
+			if (CaptureGameplayEffectOutputSnapshot(
+				AbilitySystemComponent, Baseline))
+			{
+				State.AbilitySystemComponent =
+					TWeakObjectPtr<UAbilitySystemComponent>(
+						AbilitySystemComponent);
+				State.ActiveEffects = std::move(Baseline);
+				State.PendingChanges.clear();
+				State.SuppressedChangeCount = 0;
+				State.ConsecutiveSnapshotFailures = 0;
+				State.bHasBaseline = true;
+			}
+			else
+			{
+				State.ConsecutiveSnapshotFailures++;
+			}
+
+			if (State.ConsecutiveSnapshotFailures >=
+				GameplayEffectOutputMaxSnapshotFailures)
+			{
+				SendGameplayEffectOutputMessage(
+					PlayerController,
+					L"Active Gameplay Effect output disabled because this version's effect data could not be read safely.");
+				It = GGameplayEffectOutputStates.erase(It);
+				continue;
+			}
+
 			++It;
 			continue;
 		}
 
-		auto CurrentEffects =
-			CaptureGameplayEffectOutputSnapshot(AbilitySystemComponent);
+		std::unordered_map<int32, FGameplayEffectOutputEntry>
+			CurrentEffects;
+
+		if (!CaptureGameplayEffectOutputSnapshot(
+			AbilitySystemComponent, CurrentEffects))
+		{
+			State.ConsecutiveSnapshotFailures++;
+
+			if (State.ConsecutiveSnapshotFailures >=
+				GameplayEffectOutputMaxSnapshotFailures)
+			{
+				SendGameplayEffectOutputMessage(
+					PlayerController,
+					L"Active Gameplay Effect output disabled because this version's effect data could not be read safely.");
+				It = GGameplayEffectOutputStates.erase(It);
+				continue;
+			}
+
+			++It;
+			continue;
+		}
+
+		State.ConsecutiveSnapshotFailures = 0;
 
 		for (auto& [Handle, CurrentEntry] : CurrentEffects)
 		{
@@ -8366,18 +8803,18 @@ static void TickGameplayEffectOutputForCommand()
 
 			if (Previous == State.ActiveEffects.end())
 			{
-				PrintGameplayEffectOutputChange(
-					"APPLIED",
-					PlayerController,
+				QueueGameplayEffectOutputChange(
+					State,
+					EGameplayEffectOutputChange::Applied,
 					Handle,
 					CurrentEntry);
 			}
 			else if (HasGameplayEffectOutputEntryChanged(
 				Previous->second, CurrentEntry))
 			{
-				PrintGameplayEffectOutputChange(
-					"UPDATED",
-					PlayerController,
+				QueueGameplayEffectOutputChange(
+					State,
+					EGameplayEffectOutputChange::Updated,
 					Handle,
 					CurrentEntry);
 			}
@@ -8387,15 +8824,18 @@ static void TickGameplayEffectOutputForCommand()
 		{
 			if (!CurrentEffects.contains(Handle))
 			{
-				PrintGameplayEffectOutputChange(
-					"REMOVED",
-					PlayerController,
+				QueueGameplayEffectOutputChange(
+					State,
+					EGameplayEffectOutputChange::Removed,
 					Handle,
 					PreviousEntry);
 			}
 		}
 
 		State.ActiveEffects = std::move(CurrentEffects);
+		FlushGameplayEffectOutputChanges(
+			PlayerController, State);
+
 		++It;
 	}
 }
@@ -9375,7 +9815,7 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 {
 	TickOneShotLowGravityVfxRetries(DeltaSeconds);
 	TickLoadedGameplayEffectCatalogForCommand();
-	TickGameplayEffectOutputForCommand();
+	TickGameplayEffectOutputForCommand(DeltaSeconds);
 
 	for (int CleanupIndex =
 		static_cast<int>(GPendingSpawnedBotCleanup.size()) - 1;
@@ -9735,7 +10175,7 @@ cheat delbot - Removes every spawned player bot (PlayerAI is left alone)
 cheat dumppawns - Lists every player pawn with its index and owner
 cheat dumpge - Builds an indexed gameplay-effect catalog and writes DumpedGameplayEffects.txt
 cheat applyge <index | effect name/path | remove> - Applies a gameplay effect, or removes all active effects
-cheat outputge - Toggles console logging for active Gameplay Effect changes on your pawn
+cheat outputge - Toggles batched UE-console output for active Gameplay Effect changes on your player
 cheat possess <player name | index | pawn name | reset> - Puppet a pawn (move it around, owner watches), reset returns you to your own
 cheat tpall - Teleports all real players around your location
 cheat botemote - Plays the 'Accolades' emote to the player bot
@@ -9758,7 +10198,7 @@ cheat givetraps - Gives you all available traps
 cheat giveammo - Gives you 999 of every ammo type
 cheat givemats - Gives you 500 of each material
 cheat spawnpickup <WID/path> <Count = 1> [X Y Z] - Spawns a pickup at your player's or specified location
-cheat lootrain <Count = 20> <Radius = 600> <TierGroup = Loot_AthenaTreasure> - Rains loot drops around you
+cheat lootrain <Count = 20> <Radius = 600> <TierGroup = chest> - Rains chest, floor, rare, or custom tier-group loot around you
 cheat clearinventory - Clears your inventory of all items that are droppable
 cheat delitem - Removes the item you currently have equipped
 cheat spawn <class/path> <s[size] | s[X,Y,Z]> <h[meters]> - Spawns an actor at your location
@@ -10826,7 +11266,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 					if (!IsGameplayEffectClassForCommand(GEClass))
 					{
-						PlayerController->ClientMessage(FString(L"Could not find that Gameplay Effect. Use an index from cheat dumpge, a short name, or a full path."), FName(), 1.f);
+						PlayerController->ClientMessage(FString(L"Could not find that Gameplay Effect. Trigger it while outputge is enabled, rerun cheat dumpge after it loads, or use a full path."), FName(), 1.f);
 						return;
 					}
 
@@ -10886,12 +11326,11 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				const bool bEnabled =
 					ToggleGameplayEffectOutputForCommand(PlayerController);
 
-				PlayerController->ClientMessage(
-					FString(bEnabled
-						? L"Active Gameplay Effect console output enabled!"
-						: L"Active Gameplay Effect console output disabled!"),
-					FName(),
-					1.f);
+				SendGameplayEffectOutputMessage(
+					PlayerController,
+					bEnabled
+						? L"Active Gameplay Effect output enabled.\nWatching future active duration/infinite effects on your player; instant or very brief effects may not appear. Output is sampled, batched, and capped for stability."
+						: L"Active Gameplay Effect console output disabled!");
 			}
 			else if (command == "cipher")
 			{
@@ -13144,13 +13583,26 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				Radius = std::clamp(Radius, 100.f, 20000.f);
 
 				static auto Loot_AthenaTreasure = FName(L"Loot_AthenaTreasure");
+				static auto Loot_AthenaFloorLoot = FName(L"Loot_AthenaFloorLoot");
+				static auto Loot_ApolloTreasure_Rare = FName(L"Loot_ApolloTreasure_Rare");
 
 				FName TierGroup = Loot_AthenaTreasure;
 
 				if (!TierGroupArg.empty())
 				{
-					auto TierGroupWide = UEAllocatedWString(TierGroupArg.begin(), TierGroupArg.end());
-					TierGroup = FName(TierGroupWide.c_str());
+					auto TierGroupAlias = NormalizePlayerCommandString(TierGroupArg);
+
+					if (TierGroupAlias == "chest")
+						TierGroup = Loot_AthenaTreasure;
+					else if (TierGroupAlias == "floor")
+						TierGroup = Loot_AthenaFloorLoot;
+					else if (TierGroupAlias == "rare")
+						TierGroup = Loot_ApolloTreasure_Rare;
+					else
+					{
+						auto TierGroupWide = UEAllocatedWString(TierGroupArg.begin(), TierGroupArg.end());
+						TierGroup = FName(TierGroupWide.c_str());
+					}
 				}
 
 				auto Center = Pawn->K2_GetActorLocation();
@@ -13208,7 +13660,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
 				}
 				else
-					PlayerController->ClientMessage(FString(L"Found no loot for that tier group. Check the name (e.g. Loot_AthenaTreasure, Loot_AthenaFloorLoot)."), FName(), 1.f);
+					PlayerController->ClientMessage(FString(L"Found no loot for that tier group. Use chest, floor, rare, or a full tier-group name."), FName(), 1.f);
 			}
 			else if (command == "deltarget")
 			{

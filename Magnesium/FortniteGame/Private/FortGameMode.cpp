@@ -1968,6 +1968,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     }
 
     static bool setup = false;
+    static bool bListenSucceeded = false;
     if (GameMode->HasWarmupRequiredPlayerCount() ? GameMode->WarmupRequiredPlayerCount != 1 : !setup)
     {
         setup = true;
@@ -2032,6 +2033,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             SetWorld(NetDriver, World);
             FString Err;
             bool ok = InitListen(NetDriver, World, URL, false, Err);
+            bListenSucceeded = ok;
             SDK::DbgLog("[GameMode] Listen: InitListen returned %d\n", (int)ok);
             if (ok)
                 SetWorld(NetDriver, World);
@@ -2391,9 +2393,6 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         *Ret = false;
         return;
     }
-
-    if (Misc::bHookedAll)
-        GUI::gsStatus = Joinable;
 
     if (!GameMode->bWorldIsReady)
     {
@@ -2877,10 +2876,54 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         }
 
         static auto WaitingToStart = FName(L"WaitingToStart");
-        *Ret = GameMode->bWorldIsReady && (GameState->HasbPlaylistDataIsLoaded() ? GameState->bPlaylistDataIsLoaded : true) && GameMode->MatchState == WaitingToStart && bAllLevelsFinishedStreaming && (!VolumeManager || !(VolumeManager->HasbInSpawningStartup() ? VolumeManager->bInSpawningStartup : GameState->bInSpawningStartup)) && ReadyPlayers >= (GameMode->HasWarmupRequiredPlayerCount() ? GameMode->WarmupRequiredPlayerCount : 1);
+        const bool bPlaylistReady =
+            GameState->HasbPlaylistDataIsLoaded()
+                ? GameState->bPlaylistDataIsLoaded
+                : true;
+        const bool bStartupSpawning =
+            VolumeManager &&
+            (VolumeManager->HasbInSpawningStartup()
+                ? VolumeManager->bInSpawningStartup
+                : GameState->bInSpawningStartup);
+        const bool bCoreServerReady =
+            bListenSucceeded &&
+            Misc::bHookedAll &&
+            GameMode->bWorldIsReady &&
+            bPlaylistReady &&
+            GameMode->MatchState == WaitingToStart &&
+            bAllLevelsFinishedStreaming &&
+            !bStartupSpawning;
+
+        if (bCoreServerReady)
+            GUI::MarkServerJoinable();
+
+        *Ret =
+            GameMode->bWorldIsReady &&
+            bPlaylistReady &&
+            GameMode->MatchState == WaitingToStart &&
+            bAllLevelsFinishedStreaming &&
+            !bStartupSpawning &&
+            ReadyPlayers >=
+                (GameMode->HasWarmupRequiredPlayerCount()
+                    ? GameMode->WarmupRequiredPlayerCount
+                    : 1);
     }
     else
-        *Ret = callOGWithRet(GameMode, Stack.GetCurrentNativeFunction(), ReadyToStartMatch);
+    {
+        *Ret = callOGWithRet(
+            GameMode,
+            Stack.GetCurrentNativeFunction(),
+            ReadyToStartMatch);
+
+        static auto WaitingToStartLegacy = FName(L"WaitingToStart");
+        if (bListenSucceeded &&
+            Misc::bHookedAll &&
+            GameMode->bWorldIsReady &&
+            GameMode->MatchState == WaitingToStartLegacy)
+        {
+            GUI::MarkServerJoinable();
+        }
+    }
 
     if (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 25.20 && !*Ret)
     {
@@ -4690,6 +4733,16 @@ bool ReadyToStartMatch_Direct(AFortGameModeAthena* GameMode)
     }
 
     static auto WaitingToStart = FName(L"WaitingToStart");
+    auto World = UWorld::GetWorld();
+    if (GameMode->bWorldIsReady &&
+        GameMode->MatchState == WaitingToStart &&
+        Misc::bHookedAll &&
+        World &&
+        World->NetDriver)
+    {
+        GUI::MarkServerJoinable();
+    }
+
     if (call <= 20) RtsmLog("[RTSM #%d] pre-GetAll PlayerControllers\n", call);
     int ReadyPlayers = 0;
     TArray<AFortPlayerControllerAthena*> PlayerList;

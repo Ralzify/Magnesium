@@ -438,6 +438,11 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 		ABuildingSMActor::RegisterTrapDefinition(NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(), ItemDefinition);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
 
+		if (FConfiguration::bInfiniteAmmo ||
+			(PlayerController->HasbInfiniteAmmo() &&
+				PlayerController->bInfiniteAmmo))
+			return;
+
 		auto Resource = UFortKismetLibrary::GetDefaultObj()->K2_GetResourceItemDefinition(AttachedActor->ResourceType);
 		auto item = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Item) {
 			return Item->ItemEntry.ItemDefinition == DecoTool->ItemDefinition;
@@ -533,6 +538,11 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 		ApplyTrapTeam(NewTrap, PlayerState);
 		ABuildingSMActor::RegisterTrapDefinition(NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(), ItemDefinition);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
+
+		if (FConfiguration::bInfiniteAmmo ||
+			(PlayerController->HasbInfiniteAmmo() &&
+				PlayerController->bInfiniteAmmo))
+			return;
 
 		auto Resource = UFortKismetLibrary::GetDefaultObj()->K2_GetResourceItemDefinition(AttachedActor->ResourceType);
 		auto item = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Item) {

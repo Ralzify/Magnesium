@@ -121,6 +121,7 @@ public:
     static inline int SelectedPlot = static_cast<int>(Plot::Temperate);
 	static inline int SelectedMap = static_cast<int>(Map::Faceoff);
     static void Init();
+    static void MarkServerJoinable();
 
     // Drains the Custom Safe Zone minimap load request (UE asset loading is
     // game-thread-only). Called by the pre-Start GetMaxTickRate pump and the

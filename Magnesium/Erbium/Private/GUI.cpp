@@ -45,6 +45,29 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 
+static std::atomic<ULONGLONG> GServerJoinableAtMs{ 0 };
+
+void GUI::MarkServerJoinable()
+{
+    if (GServerJoinableAtMs.load(std::memory_order_acquire) != 0)
+    {
+        if (gsStatus < Joinable)
+            gsStatus = Joinable;
+        return;
+    }
+
+    ULONGLONG Expected = 0;
+    const ULONGLONG Now = GetTickCount64();
+    GServerJoinableAtMs.compare_exchange_strong(
+        Expected,
+        Now,
+        std::memory_order_release,
+        std::memory_order_relaxed);
+
+    if (gsStatus < Joinable)
+        gsStatus = Joinable;
+}
+
 ID3D11ShaderResourceView* g_EmbedTexture = nullptr;
 int EmbedWidth = 0;
 int EmbedHeight = 0;
@@ -2937,6 +2960,9 @@ static std::string FormatDurationSeconds(double Seconds)
     if (Result.empty() || RemainingSeconds > 0)
         AppendUnit(RemainingSeconds, "Second");
 
+    if (Result.empty())
+        Result = "0 Seconds";
+
     return Result;
 }
 
@@ -3860,6 +3886,25 @@ void GUI::Init()
             ImGui::Text("- Server Port: %d", FConfiguration::Port);
             ImGui::Text("- Server Tick Rate: %.1f", FConfiguration::MaxTickRate);
 
+            const ULONGLONG JoinableAtMs =
+                GServerJoinableAtMs.load(std::memory_order_acquire);
+
+            if (JoinableAtMs == 0)
+            {
+                ImGui::TextUnformatted("- Uptime: N/A");
+            }
+            else
+            {
+                const ULONGLONG Now = GetTickCount64();
+                const double UptimeSeconds =
+                    Now >= JoinableAtMs
+                        ? static_cast<double>(Now - JoinableAtMs) / 1000.0
+                        : 0.0;
+                const std::string Uptime =
+                    FormatDurationSeconds(UptimeSeconds);
+                ImGui::Text("- Uptime: %s", Uptime.c_str());
+            }
+
             if (gsStatus >= Joinable)
             {
                 AFortGameMode* GameMode = nullptr;
@@ -3884,9 +3929,6 @@ void GUI::Init()
                     AliveCount = GameMode->AlivePlayers.Num();
 
                 ImGui::Text("- Players: %d", AliveCount);
-
-                const std::string Uptime = FormatDurationSeconds(GameMode ? UGameplayStatics::GetTimeSeconds(GameMode) : 0.0);
-                ImGui::Text("- Uptime: %s", Uptime.c_str());
 
                 static std::string LastElimStatusMessage;
                 static std::chrono::high_resolution_clock::time_point AddMessageTime;
