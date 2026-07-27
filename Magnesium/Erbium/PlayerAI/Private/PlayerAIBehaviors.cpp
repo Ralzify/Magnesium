@@ -36,6 +36,19 @@
 static constexpr double PLAYERAI_RAD_TO_DEG = 57.29577951308232;
 static constexpr float PLAYERAI_PAWN_HALF_HEIGHT = 90.f;
 
+static float GetPlayerAIShieldHealingTarget(
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (!Pawn)
+        return 0.f;
+
+    const float MaxShield = Pawn->GetMaxShield();
+    if (!FPlatformMath::IsFinite(MaxShield) || MaxShield <= 0.f)
+        return 0.f;
+
+    return (std::min)(50.f, MaxShield);
+}
+
 // ---- Simulated-tier runtime capability probes -------------------------------
 // The engine's own character movement usually simulates connectionless
 // player pawns server side (gravity, collision, real walking) - which is
@@ -1894,8 +1907,12 @@ void ZoneRotationBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWor
 
         const float Health = Pawn->GetHealth();
         const float Shield = Pawn->GetShield();
+        const float ShieldTarget =
+            GetPlayerAIShieldHealingTarget(Pawn);
 
-        if (((Health < 75.f && AI.HealingItemCount > 0) || (Shield < 50.f && AI.ShieldItemCount > 0)) &&
+        if (((Health < 75.f && AI.HealingItemCount > 0) ||
+            (ShieldTarget > 0.f && Shield < ShieldTarget &&
+                AI.ShieldItemCount > 0)) &&
             PlayerAIRandChance(AI.Skill.HealingDiscipline))
         {
             AI.ActionEndTime = Now + PlayerAIConfig::HealDuration;
@@ -2334,23 +2351,31 @@ void CombatBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSnap
         if (!AI.bHealingItemEquipped)
         {
             AI.bHealingItemEquipped = true;
-            const bool bShieldPreview = Pawn->GetShield() < 50.f && AI.ShieldItemCount > 0;
+            const float ShieldTarget =
+                GetPlayerAIShieldHealingTarget(Pawn);
+            const bool bShieldPreview =
+                ShieldTarget > 0.f &&
+                Pawn->GetShield() < ShieldTarget &&
+                AI.ShieldItemCount > 0;
             InventoryBehavior::EquipHealingItem(AI, bShieldPreview);
         }
 
         if (Now >= AI.ActionEndTime)
         {
             const float Shield = Pawn->GetShield();
-            const bool bShield = Shield < 50.f && AI.ShieldItemCount > 0;
+            const float MaxShield = Pawn->GetMaxShield();
+            const float ShieldTarget =
+                GetPlayerAIShieldHealingTarget(Pawn);
+            const bool bShield =
+                ShieldTarget > 0.f &&
+                Shield < ShieldTarget &&
+                AI.ShieldItemCount > 0;
             const float Amount = InventoryBehavior::ConsumeHealingItem(AI, bShield);
 
             if (Amount > 0.f)
             {
                 if (bShield)
                 {
-                    float MaxShield = Pawn->GetMaxShield();
-                    if (MaxShield <= 0.f)
-                        MaxShield = 100.f;
                     float NewShield = Shield + Amount;
                     if (NewShield > MaxShield)
                         NewShield = MaxShield;
@@ -2406,7 +2431,17 @@ void CombatBehavior::Think(PlayerAIController& AI, float Now, FPlayerAIWorldSnap
         {
             AI.CombatTarget = nullptr;
 
-            if ((AI.HealingItemCount > 0 || AI.ShieldItemCount > 0) && PlayerAIRandChance(AI.Skill.HealingDiscipline))
+            const bool bCanHeal =
+                AI.HealingItemCount > 0 &&
+                Pawn->GetHealth() < Pawn->GetMaxHealth();
+            const float ShieldTarget =
+                GetPlayerAIShieldHealingTarget(Pawn);
+            const bool bCanShield =
+                AI.ShieldItemCount > 0 &&
+                ShieldTarget > 0.f &&
+                Pawn->GetShield() < ShieldTarget;
+            if ((bCanHeal || bCanShield) &&
+                PlayerAIRandChance(AI.Skill.HealingDiscipline))
             {
                 AI.ActionEndTime = Now + PlayerAIConfig::HealDuration;
                 AI.SetState(EPlayerAIState::Healing, "healing after retreat");

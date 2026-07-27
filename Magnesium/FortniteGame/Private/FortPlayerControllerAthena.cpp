@@ -917,6 +917,61 @@ static bool IsConfiguredOneShotPlaylist()
 			wcsstr(Playlist, L"Playlist_ShowdownTournament_Low_"));
 }
 
+// Late-game normally starts players at full shield, but mode modifiers can
+// lower that capacity. One Shot is the important zero-capacity case: invoking
+// SetShield(100) there can leave native GAS with an active/duplicated shield
+// aggregator even though the replicated maximum remains zero. Damage is then
+// deposited into that invalid layer (for example 0 - 86) instead of health.
+static float ClampShieldToInitializedPawnCapacity(
+	AFortPlayerPawnAthena* Pawn, float RequestedShield)
+{
+	if (!Pawn || !FPlatformMath::IsFinite(RequestedShield) ||
+		RequestedShield <= 0.f || IsConfiguredOneShotPlaylist())
+	{
+		return 0.f;
+	}
+
+	const float MaxShield = Pawn->GetMaxShield();
+	if (!FPlatformMath::IsFinite(MaxShield))
+		return 0.f;
+	if (MaxShield <= 0.f)
+		return 0.f;
+	if (RequestedShield > MaxShield)
+		return MaxShield;
+
+	return RequestedShield;
+}
+
+static void ApplyLateGameSpawnShield(AFortPlayerPawnAthena* Pawn)
+{
+	if (Pawn)
+		Pawn->SetShield(
+			ClampShieldToInitializedPawnCapacity(Pawn, 100.f));
+}
+
+// Run after the default and playlist gameplay effects have initialized. This
+// both enforces ordinary capacity bounds and explicitly clears One Shot's
+// native shield aggregator, even when its visible current value is already 0.
+static void NormalizeShieldAfterGameplayInitialization(
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!Pawn)
+		return;
+
+	const float CurrentShield = Pawn->GetShield();
+	const float MaxShield = Pawn->GetMaxShield();
+	const float NormalizedShield =
+		ClampShieldToInitializedPawnCapacity(Pawn, CurrentShield);
+	if (IsConfiguredOneShotPlaylist() ||
+		!FPlatformMath::IsFinite(MaxShield) ||
+		MaxShield <= 0.f ||
+		!FPlatformMath::IsFinite(CurrentShield) ||
+		CurrentShield != NormalizedShield)
+	{
+		Pawn->SetShield(NormalizedShield);
+	}
+}
+
 static bool IsGameplayEffectClassForCommand(const UClass* Class);
 
 // One Shot's playlist already supplies its movement/gravity behavior. This
@@ -1274,7 +1329,12 @@ static void TickOneShotLowGravityVfxRetries(float DeltaSeconds)
 		if (Pending.RemainingSeconds > 0.f)
 			continue;
 
-		if (TryEnsureOneShotLowGravityVfx(PlayerController, Pawn))
+		const bool bEffectReady =
+			TryEnsureOneShotLowGravityVfx(PlayerController, Pawn);
+		// A failed refresh can still remove the previous pawn's effect and
+		// rebuild GAS aggregators, so normalize after every attempted mutation.
+		NormalizeShieldAfterGameplayInitialization(Pawn);
+		if (bEffectReady)
 		{
 			GPendingOneShotLowGravityVfxApplications.erase(
 				GPendingOneShotLowGravityVfxApplications.begin() + Index);
@@ -1299,6 +1359,82 @@ static void TickOneShotLowGravityVfxRetries(float DeltaSeconds)
 
 extern uint64_t ApplyCharacterCustomization;
 uint64_t InitializePlayerGameplayAbilities_;
+
+struct FGameplayAbilityInitializationState
+{
+	TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
+	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+};
+
+static std::vector<FGameplayAbilityInitializationState>
+	GGameplayAbilityInitializationStates;
+
+// The PlayerState ASC can survive pawn replacement, and more than one pawn
+// lifecycle callback may observe the replacement. Apply the default/playlist
+// ability sets exactly once for each controller+pawn pair so their persistent
+// modifiers cannot stack or be reordered.
+static bool EnsurePawnGameplayAbilitiesInitialized(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!PlayerController || !Pawn || !PlayerController->PlayerState)
+		return false;
+
+	for (auto It = GGameplayAbilityInitializationStates.begin();
+		It != GGameplayAbilityInitializationStates.end();)
+	{
+		auto ExistingController = It->PlayerController.Get();
+		auto ExistingPawn = It->Pawn.Get();
+		if (!ExistingController || !ExistingPawn)
+		{
+			It = GGameplayAbilityInitializationStates.erase(It);
+			continue;
+		}
+
+		if (ExistingController == PlayerController &&
+			ExistingPawn == Pawn)
+		{
+			return true;
+		}
+
+		if (ExistingController == PlayerController)
+		{
+			It = GGameplayAbilityInitializationStates.erase(It);
+			continue;
+		}
+
+		++It;
+	}
+
+	bool bInitialized = false;
+	auto Interface = PlayerController->PlayerState->GetInterface(
+		IFortAbilitySystemInterface::StaticClass());
+	if (InitializePlayerGameplayAbilities_ && Interface)
+	{
+		auto InitializePlayerGameplayAbilities =
+			(void (*&)(const IInterface*))
+			InitializePlayerGameplayAbilities_;
+		InitializePlayerGameplayAbilities(Interface);
+		bInitialized = true;
+	}
+	else if (auto AbilitySystemComponent =
+		PlayerController->PlayerState->AbilitySystemComponent)
+	{
+		for (auto& AbilitySet : AFortGameMode::AbilitySets)
+			AbilitySystemComponent->GiveAbilitySet(AbilitySet);
+		bInitialized = true;
+	}
+
+	if (!bInitialized)
+		return false;
+
+	FGameplayAbilityInitializationState State;
+	State.PlayerController =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
+	State.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+	GGameplayAbilityInitializationStates.emplace_back(State);
+	return true;
+}
 
 // Controllers whose NEXT possession-ack should skip the respawn-point teleport.
 // Set by commands that re-possess deliberately ("size", "possess"), consumed in
@@ -2011,13 +2147,10 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		FortPawn->OnRep_IsInsideSafeZone();
 	}
 
-	auto Interface = PlayerController->PlayerState->GetInterface(IFortAbilitySystemInterface::StaticClass());
-	if (InitializePlayerGameplayAbilities_ && Interface)
+	const bool bAbilitiesInitialized =
+		EnsurePawnGameplayAbilitiesInitialized(PlayerController, FortPawn);
+	if (bAbilitiesInitialized)
 	{
-		auto InitializePlayerGameplayAbilities = (void (*&)(const IInterface*))InitializePlayerGameplayAbilities_;
-
-		InitializePlayerGameplayAbilities(Interface);
-
 		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
 		{
 			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(FortPawn->GetCharacterMovement());
@@ -2025,9 +2158,6 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 	}
-	else if (!bRestoringRespawnPawn)
-		for (auto& AbilitySet : AFortGameMode::AbilitySets)
-			PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
 
 	if (bRestoringRespawnPawn)
 	{
@@ -2103,7 +2233,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		// full-shield spawn. Match native Erbium and leave the fresh pawn's zero
 		// shield untouched unless late game explicitly grants full shield.
 		if (FConfiguration::bLateGame)
-			FortPawn->SetShield(100.f);
+			ApplyLateGameSpawnShield(FortPawn);
 	}
 
 	if (Num == 0)
@@ -2179,17 +2309,9 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			((void (*)(AActor*, AActor*)) ApplyCharacterCustomization)(PlayerController->PlayerState, Pawn);
 		}
 
-		auto Interface = PlayerController->PlayerState->GetInterface(IFortAbilitySystemInterface::StaticClass());
-		if (InitializePlayerGameplayAbilities_ && Interface)
-		{
-			auto InitializePlayerGameplayAbilities = (void(*&)(const IInterface*))InitializePlayerGameplayAbilities_;
-
-			InitializePlayerGameplayAbilities(Interface);
-		}
-		else
-			for (auto& AbilitySet : AFortGameMode::AbilitySets)
-				PlayerController->PlayerState->AbilitySystemComponent->GiveAbilitySet(AbilitySet);
-
+		// Gameplay abilities were initialized once above for this pawn. Repeating
+		// that work here used to apply the base and playlist ability sets twice
+		// on an empty-inventory spawn, corrupting One Shot's shield aggregator.
 	}
 	if (FConfiguration::bLateGame && (bPendingLateGameAircraftLoadout || Num != 0) &&
 		(!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
@@ -2198,7 +2320,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		{
 			PlayersInitialized.insert(PlayerController);
 
-			FortPawn->SetShield(100.f);
+			ApplyLateGameSpawnShield(FortPawn);
 
 			LateGame::EquipLoadout(PlayerController);
 			SDK::DbgLog("[LateGame] aircraft loadout granted controller=%p pending=%d initialEntries=%d finalEntries=%d\n",
@@ -2302,6 +2424,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	}
 
 	EnsureOneShotLowGravityVfx(PlayerController, FortPawn);
+	NormalizeShieldAfterGameplayInitialization(FortPawn);
 
 	// Mark every successful first possession, including Num == 0. Previously
 	// this happened only in the late-game/non-empty-inventory branch, causing a
@@ -2370,7 +2493,7 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 	
 	if (FConfiguration::bLateGame)
 	{
-		PlayerController->MyFortPawn->SetShield(100.f);
+		ApplyLateGameSpawnShield(PlayerController->MyFortPawn);
 		auto Aircraft = GameState->HasAircrafts() ? GameState->Aircrafts[0] : (GameState->HasAircraft() ? GameState->Aircraft : nullptr);
 		if (!Aircraft) // gamephaselogic builds
 		{
@@ -6089,20 +6212,37 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		{
 			auto Health = KillerPawn->GetHealth();
 			auto Shield = KillerPawn->GetShield();
+			float RemainingSiphon =
+				static_cast<float>(FConfiguration::SiphonAmount);
 
-			if (Health == 100)
+			const float MaxHealth = KillerPawn->GetMaxHealth();
+			if (FPlatformMath::IsFinite(MaxHealth) && MaxHealth > 0.f)
 			{
-				Shield += FConfiguration::SiphonAmount;
+				if (!FPlatformMath::IsFinite(Health) || Health < 0.f)
+					Health = 0.f;
+				if (Health > MaxHealth)
+					Health = MaxHealth;
+
+				const float HealthGain =
+					(std::min)(RemainingSiphon, MaxHealth - Health);
+				Health += HealthGain;
+				RemainingSiphon -= HealthGain;
 			}
-			else if (Health + FConfiguration::SiphonAmount > 100)
+			else
 			{
-				float Overflow = (Health + FConfiguration::SiphonAmount) - 100;
-				Health = 100;
-				Shield += Overflow;
+				// Do not invent a capacity when reflection is unavailable.
+				RemainingSiphon = 0.f;
 			}
-			else if (Health + FConfiguration::SiphonAmount <= 100)
+
+			Shield = ClampShieldToInitializedPawnCapacity(
+				KillerPawn, Shield);
+			const float MaxShield = KillerPawn->GetMaxShield();
+			if (RemainingSiphon > 0.f &&
+				FPlatformMath::IsFinite(MaxShield) &&
+				MaxShield > Shield)
 			{
-				Health += FConfiguration::SiphonAmount;
+				Shield += (std::min)(
+					RemainingSiphon, MaxShield - Shield);
 			}
 
 			KillerPawn->SetHealth(Health);
@@ -6512,7 +6652,6 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		PlayerController->RespawnPlayerAfterDeath(true);
 
 		NewPawn->SetHealth(100.f);
-		NewPawn->SetShield(FConfiguration::bLateGame ? 100.f : 0.f);
 
 		// -315.373858 219.791659 452.150000 // button
 		if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn") && VersionInfo.FortniteVersion == 27.11)
@@ -6550,16 +6689,16 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 
-		auto Interface = PlayerController->PlayerState->GetInterface(IFortAbilitySystemInterface::StaticClass());
+		EnsurePawnGameplayAbilitiesInitialized(
+			PlayerController, NewPawn);
 
-		if (InitializePlayerGameplayAbilities_ && Interface)
-		{
-			auto InitializePlayerGameplayAbilities = (void(*&)(const IInterface*))InitializePlayerGameplayAbilities_;
-
-			InitializePlayerGameplayAbilities(Interface);
-		}
+		if (FConfiguration::bLateGame)
+			ApplyLateGameSpawnShield(NewPawn);
+		else
+			NewPawn->SetShield(0.f);
 
 		EnsureOneShotLowGravityVfx(PlayerController, NewPawn);
+		NormalizeShieldAfterGameplayInitialization(NewPawn);
 
 		ResetLowerSeasonStormStateForRespawn(PlayerController, OldPawn, NewPawn);
 		// On the earliest clients, wait for the observed landing transition

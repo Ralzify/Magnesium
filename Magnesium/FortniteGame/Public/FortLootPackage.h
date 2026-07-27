@@ -128,6 +128,7 @@ public:
     UCLASS_COMMON_MEMBERS(ABuildingActor);
 
     DEFINE_BITFIELD_PROP(bDestroyed);
+    DEFINE_BITFIELD_PROP(bAllowInteract);
 };
 
 class ABuildingGameplayActorConsumable : public ABuildingActor

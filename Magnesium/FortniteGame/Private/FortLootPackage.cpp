@@ -554,18 +554,32 @@ bool ServerOnAttemptInteract(ABuildingContainer* BuildingContainer, AFortPlayerP
 	return true;
 }
 
-using ConsumableServerOnAttemptInteractFn =
-	bool(*)(ABuildingGameplayActorConsumable*, AFortPlayerPawnAthena*);
-static ConsumableServerOnAttemptInteractFn
-	ConsumableServerOnAttemptInteractOG = nullptr;
+using ApplyGameplayEffectSpecToOwnerExecFn =
+	void(*)(UObject*, FFrame&, FActiveGameplayEffectHandle*);
+static ApplyGameplayEffectSpecToOwnerExecFn
+	ApplyGameplayEffectSpecToOwnerExecOG = nullptr;
 
-static bool ConsumableServerOnAttemptInteract(
-	ABuildingGameplayActorConsumable* Consumable,
-	AFortPlayerPawnAthena* InteractingPawn)
+static bool HasExactClassName(
+	const UObject* Object, const FName& ExpectedClassName)
 {
-	if (!Consumable || !ConsumableServerOnAttemptInteractOG)
-		return false;
+	return Object && Object->Class &&
+		Object->Class->Name == ExpectedClassName;
+}
 
+static const UClass* ResolveGenericConsumeClass()
+{
+	static const UClass* GenericConsumeClass = nullptr;
+	if (!GenericConsumeClass)
+	{
+		GenericConsumeClass = FindObject<UClass>(
+			L"/Game/Athena/BuildingActors/ConsumableBGAs/Abilities/"
+			L"GA_GenericConsume.GA_GenericConsume_C");
+	}
+	return GenericConsumeClass;
+}
+
+static const UClass* ResolveHopRockClass()
+{
 	static const UClass* HopRockClass = nullptr;
 	if (!HopRockClass)
 	{
@@ -574,31 +588,282 @@ static bool ConsumableServerOnAttemptInteract(
 			L"CBGA_LowGravity_UsingJump."
 			L"CBGA_LowGravity_UsingJump_C");
 	}
+	return HopRockClass;
+}
 
-	const bool bIsHopRock =
-		HopRockClass && Consumable->IsA(HopRockClass);
+static bool IsActorBeingDestroyed(const AActor* Actor)
+{
+	return Actor && Actor->HasbActorIsBeingDestroyed() &&
+		Actor->bActorIsBeingDestroyed;
+}
 
-	// Core forces an update before processing consumable interactions. Keep
-	// that behavior narrowly scoped to Hop Rocks so their successful effect
-	// and subsequent removal are both visible to clients.
-	if (bIsHopRock)
-		Consumable->ForceNetUpdate();
+static bool HasNearbyLiveActorOfClass(
+	const UClass* ActorClass, const FVector& Location,
+	double RadiusSquared, AActor** OutActor = nullptr)
+{
+	if (!ActorClass)
+		return false;
 
-	const bool bConsumed =
-		ConsumableServerOnAttemptInteractOG(
-			Consumable, InteractingPawn);
+	TArray<AActor*> Actors{};
+	Utils::GetAll(ActorClass, Actors);
 
-	// Lower Season 4 builds apply the low-gravity effect but leave the
-	// authoritative actor alive. Destroy only after the native interaction
-	// reports success, and only for the exact Hop Rock class.
-	if (bConsumed && bIsHopRock &&
-		(!Consumable->HasbActorIsBeingDestroyed() ||
-			!Consumable->bActorIsBeingDestroyed))
+	AActor* FoundActor = nullptr;
+	for (auto Actor : Actors)
 	{
-		Consumable->K2_DestroyActor();
+		if (!Actor || Actor->Class != ActorClass ||
+			IsActorBeingDestroyed(Actor))
+		{
+			continue;
+		}
+
+		const auto Delta =
+			Actor->K2_GetActorLocation() - Location;
+		if (Delta.SizeSquared() <= RadiusSquared)
+		{
+			FoundActor = Actor;
+			break;
+		}
 	}
 
-	return bConsumed;
+	Actors.Free();
+	if (OutActor)
+		*OutActor = FoundActor;
+	return FoundActor != nullptr;
+}
+
+static void DisableAndScheduleActorRemoval(AActor* Actor)
+{
+	if (!Actor || IsActorBeingDestroyed(Actor))
+		return;
+
+	// Give the replicated hidden/collision state a frame to reach clients
+	// before UE closes the actor channel. This also prevents another consume
+	// while the deferred destruction is pending.
+	Actor->FlushNetDormancy();
+	auto BuildingActor = (ABuildingActor*)Actor;
+	if (BuildingActor->HasbAllowInteract())
+		BuildingActor->bAllowInteract = false;
+	Actor->SetActorHiddenInGame(true);
+
+	auto SetActorEnableCollision =
+		Actor->GetFunction("SetActorEnableCollision");
+	if (SetActorEnableCollision)
+	{
+		bool bEnableCollision = false;
+		Actor->Call<void>(
+			SetActorEnableCollision, bEnableCollision);
+	}
+	else
+	{
+		static bool bLoggedMissingCollisionFunction = false;
+		if (!bLoggedMissingCollisionFunction)
+		{
+			SDK::DbgLog(
+				"[HopRock] SetActorEnableCollision missing; "
+				"hidden/noninteractive removal continues\n");
+			bLoggedMissingCollisionFunction = true;
+		}
+	}
+
+	Actor->ForceNetUpdate();
+	Actor->SetLifeSpan(0.25f);
+}
+
+static int32 ScheduleHopRockClusterRemoval(
+	ABuildingGameplayActorConsumable* ConsumedHopRock,
+	const UClass* HopRockClass)
+{
+	if (!ConsumedHopRock || !HopRockClass)
+		return 0;
+
+	// Multiple loot entries were being spawned on the same BGA spawner
+	// transform. Remove only exact-class actors within ten Unreal units of the
+	// consumed source, leaving legitimately separate nearby rocks untouched.
+	constexpr double DuplicateRadiusSquared = 100.0;
+	const auto ConsumedLocation =
+		ConsumedHopRock->K2_GetActorLocation();
+
+	TArray<AActor*> HopRocks{};
+	Utils::GetAll(HopRockClass, HopRocks);
+
+	int32 ScheduledCount = 0;
+	bool bFoundConsumedActor = false;
+	for (auto Actor : HopRocks)
+	{
+		if (!Actor || Actor->Class != HopRockClass)
+			continue;
+
+		if (Actor == ConsumedHopRock)
+			bFoundConsumedActor = true;
+
+		const auto Delta =
+			Actor->K2_GetActorLocation() - ConsumedLocation;
+		if (Delta.SizeSquared() > DuplicateRadiusSquared ||
+			IsActorBeingDestroyed(Actor))
+		{
+			continue;
+		}
+
+		DisableAndScheduleActorRemoval(Actor);
+		ScheduledCount++;
+	}
+	HopRocks.Free();
+
+	// GetAllActorsOfClass can omit an actor already transitioning out of the
+	// world. Still schedule the confirmed source if it was not in that list.
+	if (!bFoundConsumedActor &&
+		!IsActorBeingDestroyed(ConsumedHopRock))
+	{
+		DisableAndScheduleActorRemoval(ConsumedHopRock);
+		ScheduledCount++;
+	}
+
+	SDK::DbgLog(
+		"[HopRock] removal-scheduled source=%p authority=%d "
+		"cluster=%d loc=(%.1f,%.1f,%.1f)\n",
+		(void*)ConsumedHopRock,
+		ConsumedHopRock->HasAuthority(),
+		ScheduledCount,
+		ConsumedLocation.X,
+		ConsumedLocation.Y,
+		ConsumedLocation.Z);
+	return ScheduledCount;
+}
+
+static void HopRockApplyGameplayEffectSpecToOwner(
+	UObject* Context, FFrame& Stack,
+	FActiveGameplayEffectHandle* Result)
+{
+	if (!ApplyGameplayEffectSpecToOwnerExecOG)
+		return;
+
+	static const FName GenericConsumeClassName(
+		L"GA_GenericConsume_C");
+	static const FName HopRockClassName(
+		L"CBGA_LowGravity_UsingJump_C");
+
+	UObject* SourceObject = nullptr;
+	const bool bHasGenericConsumeName =
+		HasExactClassName(Context, GenericConsumeClassName);
+	const auto GenericConsumeClass = bHasGenericConsumeName
+		? ResolveGenericConsumeClass() : nullptr;
+	const bool bIsGenericConsume =
+		GenericConsumeClass &&
+		Context->Class == GenericConsumeClass;
+	if (bIsGenericConsume)
+	{
+		auto GetCurrentSourceObject =
+			Context->GetFunction("GetCurrentSourceObject");
+		if (GetCurrentSourceObject)
+		{
+			// Capture this before the native effect application returns to the
+			// ability graph. GA_GenericConsume uses the live consumable actor as
+			// its ability source object.
+			SourceObject =
+				Context->Call<UObject*>(GetCurrentSourceObject);
+		}
+	}
+
+	// The original thunk consumes the opaque 4.20 effect-spec parameter and
+	// writes the authoritative application result. Do not parse the stack here:
+	// its layout differs between engine versions.
+	ApplyGameplayEffectSpecToOwnerExecOG(
+		Context, Stack, Result);
+
+	const bool bHasHopRockName =
+		HasExactClassName(SourceObject, HopRockClassName);
+	const auto HopRockClass = bHasHopRockName
+		? ResolveHopRockClass() : nullptr;
+	const bool bIsHopRock = HopRockClass &&
+		SourceObject->Class == HopRockClass;
+	const bool bEffectApplied =
+		Result && Result->bPassedFiltersAndWasExecuted;
+
+	static int32 TraceCount = 0;
+	if (bHasGenericConsumeName && TraceCount++ < 16)
+	{
+		SDK::DbgLog(
+			"[HopRock] consume-result context-exact=%d "
+			"source=%p source-name-match=%d source-exact=%d "
+			"handle=%d applied=%d\n",
+			bIsGenericConsume,
+			(void*)SourceObject,
+			bHasHopRockName,
+			bIsHopRock,
+			Result ? Result->Handle : -1,
+			bEffectApplied);
+	}
+
+	if (!bIsHopRock)
+		return;
+
+	auto HopRock =
+		(ABuildingGameplayActorConsumable*)SourceObject;
+	const bool bAlreadyDestroying =
+		HopRock->HasbActorIsBeingDestroyed() &&
+		HopRock->bActorIsBeingDestroyed;
+
+	// This is deliberately post-success. A press that is rejected, interrupted,
+	// or filtered cannot remove the rock. Removal is scheduled after the
+	// consume ability returns so its remaining bytecode can safely finish.
+	if (bEffectApplied && !bAlreadyDestroying &&
+		HopRock->HasAuthority())
+	{
+		ScheduleHopRockClusterRemoval(
+			HopRock, HopRockClass);
+	}
+}
+
+static void InstallHopRockConsumeHook()
+{
+	if (VersionInfo.FortniteVersion < 4.00 ||
+		VersionInfo.FortniteVersion >= 5.00)
+	{
+		return;
+	}
+
+	auto GameplayAbilityClass =
+		UFortGameplayAbility::StaticClass();
+	auto GameplayAbilityDefault = GameplayAbilityClass
+		? GameplayAbilityClass->GetDefaultObj() : nullptr;
+	auto ApplyEffectFunction = GameplayAbilityDefault
+		? GameplayAbilityDefault->GetFunction(
+			"K2_ApplyGameplayEffectSpecToOwner")
+		: nullptr;
+
+	if (!ApplyEffectFunction)
+	{
+		SDK::DbgLog(
+			"[HopRock] probe=v3 apply-hook missing "
+			"class=%p default=%p\n",
+			(void*)GameplayAbilityClass,
+			(void*)GameplayAbilityDefault);
+		return;
+	}
+
+	auto ExecBefore = ApplyEffectFunction->ExecFunction;
+	if (ExecBefore ==
+		(void*)HopRockApplyGameplayEffectSpecToOwner)
+	{
+		SDK::DbgLog(
+			"[HopRock] probe=v3 apply-hook already-installed "
+			"fn=%p\n",
+			(void*)ApplyEffectFunction);
+		return;
+	}
+
+	Utils::ExecHook(
+		ApplyEffectFunction,
+		HopRockApplyGameplayEffectSpecToOwner,
+		ApplyGameplayEffectSpecToOwnerExecOG);
+
+	SDK::DbgLog(
+		"[HopRock] probe=v3 apply-hook fn=%p before=%p "
+		"original=%p after=%p\n",
+		(void*)ApplyEffectFunction,
+		(void*)ExecBefore,
+		(void*)ApplyGameplayEffectSpecToOwnerExecOG,
+		(void*)ApplyEffectFunction->ExecFunction);
 }
 
 void UFortLootPackage::SpawnFloorLootForContainer(const UClass* ContainerType)
@@ -736,6 +1001,7 @@ bool UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
 			LootDrops, Spawner->SpawnLootTierGroup);
 	}
 
+	AActor* SpawnedHopRockForSpawner = nullptr;
 	auto SpawnEntry = [&](FFortItemEntry& Entry) -> bool
 	{
 		if (!Entry.ItemDefinition)
@@ -769,6 +1035,47 @@ bool UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
 
 		if (ConsumableActorClass)
 		{
+			const auto HopRockClass = ResolveHopRockClass();
+			const bool bIsSeasonFourHopRock =
+				VersionInfo.FortniteVersion >= 4.00 &&
+				VersionInfo.FortniteVersion < 5.00 &&
+				HopRockClass &&
+				ConsumableActorClass == HopRockClass;
+
+			// A loot package can yield duplicate entries for one consumable
+			// spawner. It previously created visually stacked actors: consuming
+			// one revealed the identical actor underneath. Treat an exact-class
+			// actor already on this transform as the spawner's resolved result.
+			constexpr double DuplicateRadiusSquared = 100.0;
+			AActor* ExistingActor = nullptr;
+			if (bIsSeasonFourHopRock &&
+				SpawnedHopRockForSpawner &&
+				!IsActorBeingDestroyed(SpawnedHopRockForSpawner))
+			{
+				SDK::DbgLog(
+					"[HopRock] duplicate-spawn-skipped "
+					"spawner=%p existing=%p reason=same-spawner\n",
+					(void*)Spawner,
+					(void*)SpawnedHopRockForSpawner);
+				return true;
+			}
+			if (bIsSeasonFourHopRock &&
+				HasNearbyLiveActorOfClass(
+				ConsumableActorClass, SpawnLocation,
+				DuplicateRadiusSquared, &ExistingActor))
+			{
+				SDK::DbgLog(
+					"[HopRock] duplicate-spawn-skipped "
+					"spawner=%p existing=%p "
+					"loc=(%.1f,%.1f,%.1f)\n",
+					(void*)Spawner,
+					(void*)ExistingActor,
+					SpawnLocation.X,
+					SpawnLocation.Y,
+					SpawnLocation.Z);
+				return true;
+			}
+
 			auto ConsumableDefault =
 				(ABuildingGameplayActorConsumable*)
 				ConsumableActorClass->GetDefaultObj();
@@ -779,9 +1086,28 @@ bool UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
 				SpawnRotation.Yaw = static_cast<float>(rand() % 360);
 			}
 
-			return World->SpawnActor(
+			auto SpawnedActor = (AActor*)World->SpawnActor(
 				ConsumableActorClass,
-				FTransform(SpawnLocation, SpawnRotation)) != nullptr;
+				FTransform(SpawnLocation, SpawnRotation));
+			if (SpawnedActor && bIsSeasonFourHopRock)
+			{
+				SpawnedHopRockForSpawner = SpawnedActor;
+				const auto ActualLocation =
+					SpawnedActor->K2_GetActorLocation();
+				SDK::DbgLog(
+					"[HopRock] spawned actor=%p spawner=%p "
+					"requested=(%.1f,%.1f,%.1f) "
+					"actual=(%.1f,%.1f,%.1f)\n",
+					(void*)SpawnedActor,
+					(void*)Spawner,
+					SpawnLocation.X,
+					SpawnLocation.Y,
+					SpawnLocation.Z,
+					ActualLocation.X,
+					ActualLocation.Y,
+					ActualLocation.Z);
+			}
+			return SpawnedActor != nullptr;
 		}
 
 		return AFortInventory::SpawnPickup(
@@ -873,6 +1199,10 @@ void PostUpdate(ABuildingSMActor* BuildingSMActor)
 bool bDidntFind = false;
 void UFortLootPackage::Hook()
 {
+	// The legacy BuildingContainer string below has no code xref in 4.20, so
+	// install the Hop Rock success hook independently before any early return.
+	InstallHopRockConsumeHook();
+
 	/*if (VersionInfo.FortniteVersion < 3)
 	{
 		auto PostUpdate_ = Memcury::Scanner::FindStringRef(L"ABuildingSMActor::PostUpdate() Building: %s, AltMeshIdx: %d", false, 0, VersionInfo.FortniteVersion >= 19).ScanFor({ 0x40, 0x53 }, false).Get();
@@ -904,17 +1234,6 @@ void UFortLootPackage::Hook()
 				if (VFTIndex != 0)
 				{
 					Utils::Hook<ABuildingContainer>(VFTIndex / 8, ServerOnAttemptInteract);
-
-					if (VersionInfo.FortniteVersion >= 4.00 &&
-						VersionInfo.FortniteVersion < 5.00 &&
-						ABuildingGameplayActorConsumable::StaticClass() &&
-						ABuildingGameplayActorConsumable::GetDefaultObj())
-					{
-						Utils::Hook<ABuildingGameplayActorConsumable>(
-							VFTIndex / 8,
-							ConsumableServerOnAttemptInteract,
-							ConsumableServerOnAttemptInteractOG);
-					}
 
 					return;
 				}

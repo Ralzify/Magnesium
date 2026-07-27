@@ -277,6 +277,13 @@ public:
 
     void SetShield(float NewValue) const
     {
+        // Shield is never a signed resource. Keep every server-authored write
+        // inside the lower bound before either the native setter or the legacy
+        // attribute fallback sees it. In particular, cosmetic gameplay effects
+        // may be compensated by subtracting their grant from a zero-shield pawn.
+        if (!FPlatformMath::IsFinite(NewValue) || NewValue < 0.f)
+            NewValue = 0.f;
+
         // Shield is the one attribute a capability probe gets WRONG. Early builds
         // (<= 5.0) DO ship a SetShield UFunction, but it does not actually apply
         // current shield - so "the function exists, call it" left the bar at 0
