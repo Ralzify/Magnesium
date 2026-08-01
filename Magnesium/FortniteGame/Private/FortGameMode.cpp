@@ -9,6 +9,7 @@
 #include "../../Engine/Public/CurveTable.h"
 #include "../Public/FortSafeZoneIndicator.h"
 #include "../../Engine/Public/DataTableFunctionLibrary.h"
+#include "../../Erbium/Public/Calendar.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 #include "../../Erbium/PlayerAI/Public/PlayerAIManager.h"
@@ -5311,6 +5312,12 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         *Ret = false;
         return;
     }
+
+    // Pumped here as well as from TickFlush: this runs from the moment the
+    // athena game mode has a game state, so the Calendar tab's snow value is
+    // already being applied through warmup rather than only once the net
+    // driver starts ticking.
+    Calendar::TickSnow();
 
     // Apply before native match setup can create or schedule a drop. The same
     // helper is also ticked later so suppression stays enforced on builds with

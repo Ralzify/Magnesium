@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Public/AutoHosting.h"
+#include "../Public/Calendar.h"
 #include "../Public/Configuration.h"
 #include "../Public/GUI.h"
 #include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
@@ -253,6 +254,11 @@ namespace AutoHosting
                 { "start_delay", FConfiguration::EventStartTime.load(std::memory_order_acquire) }
             };
 
+            Preferences["calendar"] = {
+                { "snow_on_match_start", FConfiguration::bSnowOnMatchStart.load(std::memory_order_acquire) },
+                { "snow_value", FConfiguration::SnowValue.load(std::memory_order_acquire) }
+            };
+
             Preferences["lategame"] = {
                 { "enabled", FConfiguration::bLateGame.load(std::memory_order_acquire) },
                 { "moving_bus", FConfiguration::bMovingBus.load(std::memory_order_acquire) },
@@ -480,6 +486,17 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Trickshot["time_of_day"] =
                 FConfiguration::TODMTime.load(
+                    std::memory_order_acquire);
+
+            auto& CalendarPreferences =
+                GStoredPreferences["calendar"];
+            if (!CalendarPreferences.is_object())
+                CalendarPreferences = nlohmann::json::object();
+            CalendarPreferences["snow_on_match_start"] =
+                FConfiguration::bSnowOnMatchStart.load(
+                    std::memory_order_acquire);
+            CalendarPreferences["snow_value"] =
+                FConfiguration::SnowValue.load(
                     std::memory_order_acquire);
         }
 
@@ -943,6 +960,28 @@ namespace AutoHosting
                         "time_of_day",
                         7.f),
                     0.f, 24.f),
+                std::memory_order_release);
+
+            // Profiles are per Fortnite version, so a stored snow value always
+            // belongs to the model the running build uses.
+            const auto& CalendarPreferences =
+                ReadObject(Preferences, "calendar");
+            const Calendar::FSnowVersionModel SnowModel =
+                Calendar::GetSnowVersionModel();
+            FConfiguration::bSnowOnMatchStart.store(
+                ReadBool(
+                    CalendarPreferences,
+                    "snow_on_match_start",
+                    false),
+                std::memory_order_release);
+            FConfiguration::SnowValue.store(
+                ClampValue(
+                    ReadFloat(
+                        CalendarPreferences,
+                        "snow_value",
+                        0.f),
+                    SnowModel.Min,
+                    SnowModel.Max),
                 std::memory_order_release);
 
             return true;

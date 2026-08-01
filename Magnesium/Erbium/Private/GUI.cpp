@@ -6535,6 +6535,7 @@ void GUI::Init()
                 { "Custom Map", 6, inMatch && FConfiguration::bIsCustomMap },
                 { "Player Bot", 4, inMatch },
                 { "Players",    2, gsStatus >= Joinable },
+                { "Calendar",   9, Calendar::HasSnowControls() },
                 { "Trickshot",  7, FConfiguration::bEnableTrickshotTab },
                 { "Credits",    8, true },
             };
@@ -9901,6 +9902,147 @@ void GUI::Init()
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.44f, 0.50f, 1.f));
             ImGui::TextUnformatted("Thank you for using Magnesium.");
             ImGui::PopStyleColor();
+
+            break;
+        }
+        case 9:
+        {
+            const Calendar::FSnowVersionModel SnowModel =
+                Calendar::GetSnowVersionModel();
+            const bool bSnowPhases =
+                SnowModel.Model == Calendar::ESnowValueModel::Phase;
+
+            SectionHeader("Snow", SectionWidth);
+            BeginSectionBody();
+
+            if (SnowModel.Model == Calendar::ESnowValueModel::Unsupported)
+            {
+                ImGui::TextWrapped(
+                    "This build has no snow setup to drive.");
+            }
+            else
+            {
+                ImGui::PushStyleColor(
+                    ImGuiCol_Text,
+                    ImVec4(0.58f, 0.60f, 0.66f, 1.f));
+                ImGui::TextWrapped("%s", SnowModel.Note);
+                ImGui::PopStyleColor();
+                ImGui::Spacing();
+
+                float SnowValue =
+                    FConfiguration::SnowValue.load(
+                        std::memory_order_acquire);
+
+                if (bSnowPhases)
+                {
+                    int SnowPhase = (int)SnowValue;
+                    if (LabeledSliderInt(
+                            "Snow Phase",
+                            "##snow-value",
+                            &SnowPhase,
+                            (int)SnowModel.Min,
+                            (int)SnowModel.Max,
+                            Width))
+                    {
+                        FConfiguration::SnowValue.store(
+                            (float)SnowPhase,
+                            std::memory_order_release);
+                    }
+                }
+                else if (LabeledSliderFloat(
+                             "Snow Coverage",
+                             "##snow-value",
+                             &SnowValue,
+                             SnowModel.Min,
+                             SnowModel.Max,
+                             "%.3f",
+                             Width))
+                {
+                    FConfiguration::SnowValue.store(
+                        SnowValue, std::memory_order_release);
+                }
+
+                const float PresetWidth =
+                    (Width -
+                        ImGui::GetStyle().ItemSpacing.x *
+                            (SnowModel.PresetCount - 1)) /
+                    SnowModel.PresetCount;
+
+                for (int Index = 0;
+                    Index < SnowModel.PresetCount;
+                    ++Index)
+                {
+                    const Calendar::FSnowPreset& Preset =
+                        SnowModel.Presets[Index];
+
+                    if (Index > 0)
+                        ImGui::SameLine();
+
+                    ImGui::PushID(Index);
+                    if (ImGui::Button(
+                            Preset.Label,
+                            ImVec2(PresetWidth, Height)))
+                    {
+                        FConfiguration::SnowValue.store(
+                            Preset.Value,
+                            std::memory_order_release);
+                    }
+                    ImGui::PopID();
+                }
+
+                AtomicCheckbox(
+                    "Apply On Bus Start",
+                    FConfiguration::bSnowOnMatchStart);
+
+                if (gsStatus >= Joinable)
+                {
+                    if (ImGui::Button(
+                            "Apply Now", ImVec2(Width, Height)))
+                    {
+                        Calendar::RequestSnow(
+                            FConfiguration::SnowValue.load(
+                                std::memory_order_acquire));
+                    }
+                }
+                else
+                {
+                    ImGui::TextWrapped(
+                        "Start the server to change snow live.");
+                }
+
+                switch (Calendar::GetSnowStatus())
+                {
+                case Calendar::ESnowStatus::Pending:
+                {
+                    ImGui::TextUnformatted("- Applying...");
+                    break;
+                }
+                case Calendar::ESnowStatus::Applied:
+                {
+                    if (bSnowPhases)
+                        ImGui::Text(
+                            "- Applied phase %d.",
+                            (int)Calendar::GetAppliedSnowValue());
+                    else
+                        ImGui::Text(
+                            "- Applied %.3f.",
+                            Calendar::GetAppliedSnowValue());
+                    break;
+                }
+                case Calendar::ESnowStatus::SetupMissing:
+                {
+                    ImGui::TextWrapped(
+                        "- No snow setup was found in this map.");
+                    break;
+                }
+                default:
+                {
+                    break;
+                }
+                }
+            }
+
+            EndSectionBody();
 
             break;
         }

@@ -8,6 +8,7 @@
 #include "../Public/FortWeapon.h"
 #include "../Public/BuildingSMActor.h"
 #include "../Public/FortKismetLibrary.h"
+#include "../../Erbium/Public/Calendar.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../Public/FortLootPackage.h"
 #include "../../Erbium/Public/Events.h"
@@ -2961,6 +2962,11 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			SetMinimumHealthGodMode(
 				PlayerController, true);
 	}
+
+	// This player is now genuinely in the world, which is the first point a
+	// snow change can reach them. Re-send the Calendar tab's value; the push
+	// is coalesced onto the next tick so a whole bus costs one call.
+	Calendar::RequestSnowRefreshForPlayer();
 }
 
 uint32 ServerAttemptAircraftJumpVft;
