@@ -8,6 +8,22 @@
 #define PCH_H
 
 // add headers that you want to pre-compile here
+#include <atomic>
+
+// MSVC /GL can record the first std::atomic<T> instantiation differently
+// from later ones (microsoft/STL#3241), which produces false C4744 type
+// mismatches for inline configuration fields. Instantiate every scalar type
+// used by the cross-thread settings before any project header sees it.
+namespace MagnesiumAtomicPchDetail
+{
+	struct FConsistentAtomicLayout
+	{
+		std::atomic_bool BoolValue;
+		std::atomic_int IntValue;
+		std::atomic<float> FloatValue;
+	};
+}
+
 #include "framework.h"
 #include "../SDK/Includes.h"
 using namespace SDK;

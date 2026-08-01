@@ -1024,7 +1024,7 @@ uint64_t FindFinishedTargetSpline()
             return FinishedTargetSpline = 0; // TODO: 32.11 sig — skipped for now (gameplay hook, not boot-critical)
 
         if (VersionInfo.EngineVersion == 4.16 || VersionInfo.EngineVersion == 4.19)
-            return Memcury::Scanner::FindPattern("4C 8B DC 53 55 56 48 83 EC 60 48 8B F1 48 8B 89 ? ? ? ? 48 85 C9").Get();
+            return FinishedTargetSpline = Memcury::Scanner::FindPattern("4C 8B DC 53 55 56 48 83 EC 60 48 8B F1 48 8B 89 ? ? ? ? 48 85 C9").Get();
         else if (VersionInfo.EngineVersion == 4.20)
         {
             FinishedTargetSpline = Memcury::Scanner::FindPattern("4C 8B DC 53 55 56 48 83 EC 60 48 8B F1 48 8B 89", false).Get();
@@ -1760,6 +1760,58 @@ uint64_t FindSetPickupItems()
     }
 
     return SetPickupItems;
+}
+
+uint64_t FindApplyGadgetData()
+{
+    static uint64_t ApplyGadgetData = 0;
+    static bool bInitialized = false;
+
+    if (!bInitialized)
+    {
+        bInitialized = true;
+
+        // Fortnite 10.40 (CL 9380822, UE 4.23). This is the Athena gadget
+        // override used by the stock inventory grant path, not the base
+        // UFortGadgetItemDefinition implementation found by its prologue.
+        if (VersionInfo.FortniteVersion == 10.40)
+        {
+            const uint64_t Candidate = ImageBase + 0x14C8210;
+            // Captured from a live CL-9380822 process after its encrypted
+            // .text section had been restored. Reject shifted 10.40 builds
+            // instead of dispatching through an unrelated executable RVA.
+            static constexpr uint8_t ExpectedPrologue[] = {
+                0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83,
+                0xEC, 0x20, 0x48, 0x8B, 0xDA, 0x48, 0x8B, 0xF9
+            };
+            MEMORY_BASIC_INFORMATION MemoryInfo{};
+            if (SDK::MemReadable(
+                    reinterpret_cast<void*>(Candidate),
+                    sizeof(ExpectedPrologue)) &&
+                memcmp(
+                    reinterpret_cast<void*>(Candidate),
+                    ExpectedPrologue,
+                    sizeof(ExpectedPrologue)) == 0 &&
+                VirtualQuery(
+                    reinterpret_cast<void*>(Candidate),
+                    &MemoryInfo,
+                    sizeof(MemoryInfo)) == sizeof(MemoryInfo) &&
+                MemoryInfo.State == MEM_COMMIT)
+            {
+                const DWORD Protection =
+                    MemoryInfo.Protect & 0xFF;
+                const bool bExecutable =
+                    Protection == PAGE_EXECUTE ||
+                    Protection == PAGE_EXECUTE_READ ||
+                    Protection == PAGE_EXECUTE_READWRITE ||
+                    Protection == PAGE_EXECUTE_WRITECOPY;
+                if (bExecutable)
+                    ApplyGadgetData = Candidate;
+            }
+        }
+    }
+
+    return ApplyGadgetData;
 }
 
 uint64_t FindCallPreReplication()
@@ -2928,6 +2980,9 @@ uint64_t FindSetPickupTarget()
     if (!sRef.IsValid())
         sRef = Memcury::Scanner::FindStringRef(L"Attempted to spawn non-world item %s!", false, 0, VersionInfo.FortniteVersion >= 17, false);
 
+    if (!sRef.IsValid())
+        return 0;
+
     for (int i = 0; i < 0x1500; i++)
     {
         auto Ptr = (uint8_t*)(sRef.Get() - i);
@@ -3780,6 +3835,7 @@ void ValidateFinders()
         { "RemoveFromAlivePlayers", FindRemoveFromAlivePlayers },
         { "StartAircraftPhase", FindStartAircraftPhase },
         { "SetPickupItems", FindSetPickupItems },
+        { "ApplyGadgetData", FindApplyGadgetData },
         { "CallPreReplication", FindCallPreReplication },
         { "SendClientAdjustment", FindSendClientAdjustment },
         { "SetChannelActor", FindSetChannelActor },

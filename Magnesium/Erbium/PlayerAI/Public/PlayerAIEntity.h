@@ -24,14 +24,18 @@ struct PlayerAIEntity
     AFortPlayerStateAthena* PlayerState = nullptr;
     std::string DisplayName;
     bool bNativeBacked = false;
-    bool bManualAliveCount = false; // we incremented PlayersLeft ourselves
 
     AFortPlayerPawnAthena* GetPawn() const;
+    // Returns only the pawn currently owned by the native bot controller.
+    // Unlike GetPawn(), this never falls back to the remembered spawn pawn;
+    // lifecycle validation uses it to detect an unauthorized replacement.
+    AFortPlayerPawnAthena* GetNativeControllerPawn() const;
+    AFortInventory* GetInventory() const;
 
-    bool IsValid() const
-    {
-        return (PC != nullptr || NativeController != nullptr) && PlayerState != nullptr;
-    }
+    bool HasLiveController() const;
+    bool HasLivePlayerState() const;
+    bool IsValid() const;
+    static bool IsLivePawn(const AFortPlayerPawnAthena* Pawn);
 
     bool HasAlivePawn() const
     {

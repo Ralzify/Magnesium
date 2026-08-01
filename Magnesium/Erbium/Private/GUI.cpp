@@ -6,9 +6,11 @@
 #include "../../ImGui/imgui_impl_win32.h"
 #include "../../ImGui/imgui_impl_dx11.h"
 #include "../Public/Calendar.h"
+#include "../Public/AutoHosting.h"
 #include "../Public/Configuration.h"
 #include "../Public/Events.h"
 #include "../Public/Misc.h"
+#include "../Public/PlayerLoadout.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/FortAthenaMutator.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
@@ -25,7 +27,10 @@
 #include <Shellapi.h>
 #include <chrono>
 #include <algorithm>
-#include <cfloat>
+#include <filesystem>
+#include <cmath>
+#include <vector>
+#include <unordered_map>
 #include <unordered_set>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -47,6 +52,1116 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 
 static std::atomic<ULONGLONG> GServerJoinableAtMs{ 0 };
+static unsigned int GPreferenceEditorGeneration = 0;
+
+namespace
+{
+    SRWLOCK GPlayerNameCacheLock = SRWLOCK_INIT;
+    std::atomic_bool GPlayerNameCacheDisabled{ false };
+    std::atomic<ULONGLONG> GPlayerNameCacheRetryAtMs{ 0 };
+    constexpr ULONGLONG kPlayerNameCacheFaultRetryMs = 5000ULL;
+    UWorld* GPlayerNameCacheWorld = nullptr;
+    uint64_t GPlayerNameCacheWorldIdentity = 0;
+    ULONGLONG GNextPlayerNameRefreshMs = 0;
+    std::unordered_map<uint64_t, std::string>
+        GPlayerNamesByState;
+    std::unordered_map<uint64_t, std::string>
+        GPlayerNamesByConnection;
+
+    struct FPlayerCombatStats
+    {
+        uint64_t WorldIdentity = 0;
+        uint64_t ControllerIdentity = 0;
+        uint64_t PlayerStateIdentity = 0;
+        uint64_t PawnIdentity = 0;
+        ULONGLONG CapturedAtMs = 0;
+        float Health = 0.f;
+        float Shield = 0.f;
+        int Kills = 0;
+    };
+
+    constexpr ULONGLONG kPlayerCombatMaxAgeMs = 1000ULL;
+    std::unordered_map<uint64_t, FPlayerCombatStats>
+        GPlayerCombatStatsByState;
+
+    uint64_t GetGuiObjectIdentityGuarded(
+        const UObject* Object) noexcept;
+
+    class FPlayerNameCacheSharedLock final
+    {
+    public:
+        FPlayerNameCacheSharedLock() noexcept
+            : Acquired(
+                TryAcquireSRWLockShared(
+                    &GPlayerNameCacheLock) != FALSE)
+        {
+        }
+
+        ~FPlayerNameCacheSharedLock()
+        {
+            if (Acquired)
+                ReleaseSRWLockShared(&GPlayerNameCacheLock);
+        }
+
+        FPlayerNameCacheSharedLock(
+            const FPlayerNameCacheSharedLock&) = delete;
+        FPlayerNameCacheSharedLock& operator=(
+            const FPlayerNameCacheSharedLock&) = delete;
+
+        bool owns_lock() const noexcept
+        {
+            return Acquired;
+        }
+
+    private:
+        bool Acquired = false;
+    };
+
+    class FPlayerNameCacheExclusiveLock final
+    {
+    public:
+        FPlayerNameCacheExclusiveLock() noexcept
+            : Acquired(
+                TryAcquireSRWLockExclusive(
+                    &GPlayerNameCacheLock) != FALSE)
+        {
+        }
+
+        ~FPlayerNameCacheExclusiveLock()
+        {
+            if (Acquired)
+                ReleaseSRWLockExclusive(&GPlayerNameCacheLock);
+        }
+
+        FPlayerNameCacheExclusiveLock(
+            const FPlayerNameCacheExclusiveLock&) = delete;
+        FPlayerNameCacheExclusiveLock& operator=(
+            const FPlayerNameCacheExclusiveLock&) = delete;
+
+        bool owns_lock() const noexcept
+        {
+            return Acquired;
+        }
+
+    private:
+        bool Acquired = false;
+    };
+
+    void DisablePlayerNameCache() noexcept
+    {
+        GPlayerNameCacheRetryAtMs.store(
+            GetTickCount64() + kPlayerNameCacheFaultRetryMs,
+            std::memory_order_release);
+        if (!GPlayerNameCacheDisabled.exchange(
+                true, std::memory_order_acq_rel))
+        {
+            OutputDebugStringA(
+                "[PlayerNames] disabled after a guarded fault\n");
+        }
+    }
+
+    bool TryReenablePlayerNameCache() noexcept
+    {
+        if (!GPlayerNameCacheDisabled.load(
+                std::memory_order_acquire))
+        {
+            return true;
+        }
+
+        if (GetTickCount64() < GPlayerNameCacheRetryAtMs.load(
+                std::memory_order_acquire))
+        {
+            return false;
+        }
+
+        GPlayerNameCacheDisabled.store(
+            false, std::memory_order_release);
+        GPlayerNameCacheRetryAtMs.store(
+            0, std::memory_order_release);
+        OutputDebugStringA(
+            "[PlayerNames] retrying after guarded fault\n");
+        return true;
+    }
+
+    bool TryCopyFStringUtf8(
+        const FString* Value,
+        int32 MaxCharacters,
+        std::string& OutValue)
+    {
+        OutValue.clear();
+        if (!Value ||
+            !SDK::MemReadable(Value, sizeof(FString)) ||
+            !Value->Data ||
+            Value->NumElements <= 0 ||
+            Value->NumElements > MaxCharacters ||
+            Value->MaxElements < Value->NumElements ||
+            Value->MaxElements > (1 << 20))
+        {
+            return false;
+        }
+
+        const size_t ReadBytes =
+            (size_t)Value->NumElements * sizeof(wchar_t);
+        if (!SDK::MemReadable(Value->Data, ReadBytes))
+            return false;
+
+        int32 CharacterCount = 0;
+        while (CharacterCount < Value->NumElements &&
+            Value->Data[CharacterCount] != L'\0')
+        {
+            const wchar_t Character =
+                Value->Data[CharacterCount];
+            if (Character < L' ')
+                return false;
+            CharacterCount++;
+        }
+        if (CharacterCount <= 0)
+            return false;
+
+        const int Utf8Bytes = WideCharToMultiByte(
+            CP_UTF8,
+            WC_ERR_INVALID_CHARS,
+            Value->Data,
+            CharacterCount,
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+        // A connection RequestURL can legitimately be much longer than a
+        // player name because older clients append authentication/options.
+        // Keep the conversion bounded by the caller's validated UTF-16 limit
+        // instead of silently imposing a second 1 KiB cap that made valid
+        // URLs fall through to an unreliable PlayerState placeholder.
+        const int MaxUtf8Bytes = MaxCharacters * 3;
+        if (Utf8Bytes <= 0 || Utf8Bytes > MaxUtf8Bytes)
+            return false;
+
+        OutValue.resize((size_t)Utf8Bytes);
+        return WideCharToMultiByte(
+            CP_UTF8,
+            WC_ERR_INVALID_CHARS,
+            Value->Data,
+            CharacterCount,
+            OutValue.data(),
+            Utf8Bytes,
+            nullptr,
+            nullptr) == Utf8Bytes;
+    }
+
+    bool TryReadReflectedPlayerName(
+        AFortPlayerStateAthena* PlayerState,
+        const char* PropertyName,
+        std::string& OutName)
+    {
+        if (!PlayerState || !PropertyName ||
+            !SDK::MemReadable(PlayerState, sizeof(UObject)))
+        {
+            return false;
+        }
+
+        auto Property = PlayerState->GetProperty(
+            PropertyName, GUESS_PROP_FLAGS(FString));
+        if (!Property)
+            return false;
+
+        // ElementSize is reliable on the classic reflection layouts.  FN32's
+        // restricted metadata encrypts/reorders parts of FProperty, so the
+        // exact-name lookup plus the fully validated FString header/data below
+        // is the stronger check there.
+        if (VersionInfo.FortniteVersion < 32.0 &&
+            GetFromOffset<uint32>(
+                Property, Offsets::ElementSize) != sizeof(FString))
+        {
+            return false;
+        }
+
+        const uint32 Offset = SDK::DecryptPropOffset(
+            GetFromOffset<uint32>(
+                Property, Offsets::Offset_Internal));
+        if (Offset == UINT32_MAX || Offset >= 0x10000)
+            return false;
+
+        auto Value = reinterpret_cast<const FString*>(
+            reinterpret_cast<const uint8*>(PlayerState) + Offset);
+        return TryCopyFStringUtf8(Value, 512, OutName);
+    }
+
+    bool TryReadPlayerNameFunction(
+        AFortPlayerStateAthena* PlayerState,
+        std::string& OutName)
+    {
+        OutName.clear();
+        if (!PlayerState ||
+            VersionInfo.FortniteVersion >= 32.0f ||
+            !SDK::MemReadable(PlayerState, sizeof(UObject)))
+        {
+            return false;
+        }
+
+        // This is the same displayed-name source the older menu used. Resolve
+        // the function dynamically instead of using DEFINE_FUNC's one-shot
+        // cache: the earliest supported builds do not expose this UFunction,
+        // and a transient early miss must not permanently disable it.
+        auto Function = PlayerState->GetFunction("GetPlayerName");
+        if (!Function)
+            return false;
+
+        // The no-argument Call<T> fast path places the return value at byte
+        // zero. Prove that exact ABI before invoking it; a same-named function
+        // with parameters must never be called through a guessed stack layout.
+        const auto Parameters = Function->GetParamsNamed();
+        int32 ParameterCount = 0;
+        bool HasExactReturn = false;
+        for (const auto& Parameter : Parameters.NameOffsetMap)
+        {
+            if ((Parameter.PropertyFlags & 0x80) == 0)
+                continue;
+            ++ParameterCount;
+            HasExactReturn = HasExactReturn ||
+                ((Parameter.PropertyFlags & 0x400) != 0 &&
+                 Parameter.Offset == 0 &&
+                 Parameter.ElementSize == sizeof(FString));
+        }
+        if (Parameters.Size != sizeof(FString) ||
+            ParameterCount != 1 || !HasExactReturn)
+        {
+            return false;
+        }
+
+        FString Value = PlayerState->Call<FString>(Function);
+        const bool Copied =
+            TryCopyFStringUtf8(&Value, 512, OutName);
+        // ProcessEvent constructs the return FString for the caller. The SDK's
+        // TArray destructor is intentionally non-owning, so release this one
+        // explicitly after copying instead of leaking it every cache refresh.
+        Value.Free();
+        return Copied;
+    }
+
+    std::string ResolveAuthoritativePlayerName(
+        AFortPlayerStateAthena* PlayerState)
+    {
+        std::string Name;
+        // Use Fortnite's displayed PlayerState name before any connection URL
+        // identity. FN30 can put an opaque launcher/profile alias in the join
+        // URL even while GetPlayerName returns the correct in-game label.
+        if (TryReadPlayerNameFunction(PlayerState, Name) ||
+            TryReadReflectedPlayerName(
+                PlayerState, "PlayerNamePrivate", Name) ||
+            TryReadReflectedPlayerName(
+                PlayerState, "PlayerName", Name))
+        {
+            return Name;
+        }
+        return {};
+    }
+
+    bool TryCopyConnectionPlayerNameUnsafe(
+        UNetConnection* Connection,
+        char* OutName,
+        size_t OutCapacity,
+        size_t* OutLength)
+    {
+        if (!OutName || !OutCapacity || !OutLength)
+            return false;
+        OutName[0] = '\0';
+        *OutLength = 0;
+
+        const std::string Name =
+            GUI::GetPlayerNameFromConnection(Connection);
+        if (Name.empty() || Name.size() >= OutCapacity)
+            return false;
+        memcpy(OutName, Name.data(), Name.size());
+        OutName[Name.size()] = '\0';
+        *OutLength = Name.size();
+        return true;
+    }
+
+    bool TryCopyConnectionPlayerNameGuarded(
+        UNetConnection* Connection,
+        char* OutName,
+        size_t OutCapacity,
+        size_t* OutLength) noexcept
+    {
+        __try
+        {
+            return TryCopyConnectionPlayerNameUnsafe(
+                Connection, OutName, OutCapacity, OutLength);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            if (OutName && OutCapacity)
+                OutName[0] = '\0';
+            if (OutLength)
+                *OutLength = 0;
+            return false;
+        }
+    }
+
+    bool TryCopyResolvedPlayerNameUnsafe(
+        AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection,
+        char* OutName,
+        size_t OutCapacity,
+        size_t* OutLength)
+    {
+        if (!OutName || OutCapacity == 0 || !OutLength)
+            return false;
+        OutName[0] = '\0';
+        *OutLength = 0;
+
+        // Preserve the working pre-cache behavior: the join URL carries the
+        // player's plaintext connection name on builds whose PlayerState name
+        // is still encoded. Only use reflected PlayerState data as a fallback.
+        std::array<char, 1025> ConnectionName{};
+        size_t ConnectionNameLength = 0;
+        TryCopyConnectionPlayerNameGuarded(
+            Connection,
+            ConnectionName.data(),
+            ConnectionName.size(),
+            &ConnectionNameLength);
+        std::string Name(
+            ConnectionName.data(), ConnectionNameLength);
+        if (Name.empty())
+            Name = ResolveAuthoritativePlayerName(PlayerState);
+        if (Name.empty() || Name.size() >= OutCapacity)
+            return false;
+
+        memcpy(OutName, Name.data(), Name.size());
+        OutName[Name.size()] = '\0';
+        *OutLength = Name.size();
+        return true;
+    }
+
+    bool TryCopyResolvedPlayerNameGuarded(
+        AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection,
+        char* OutName,
+        size_t OutCapacity,
+        size_t* OutLength) noexcept
+    {
+        __try
+        {
+            return TryCopyResolvedPlayerNameUnsafe(
+                PlayerState,
+                Connection,
+                OutName,
+                OutCapacity,
+                OutLength);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            if (OutName && OutCapacity)
+                OutName[0] = '\0';
+            if (OutLength)
+                *OutLength = 0;
+            return false;
+        }
+    }
+
+    int HexDigitValue(char Character)
+    {
+        if (Character >= '0' && Character <= '9')
+            return Character - '0';
+        if (Character >= 'a' && Character <= 'f')
+            return Character - 'a' + 10;
+        if (Character >= 'A' && Character <= 'F')
+            return Character - 'A' + 10;
+        return -1;
+    }
+
+    std::string DecodeURLPlayerName(const std::string& Value)
+    {
+        std::string Decoded;
+        Decoded.reserve(Value.size());
+        for (size_t Index = 0; Index < Value.size(); Index++)
+        {
+            if (Value[Index] == '+')
+            {
+                Decoded.push_back(' ');
+                continue;
+            }
+            if (Value[Index] == '%' && Index + 2 < Value.size())
+            {
+                const int High = HexDigitValue(Value[Index + 1]);
+                const int Low = HexDigitValue(Value[Index + 2]);
+                if (High >= 0 && Low >= 0)
+                {
+                    Decoded.push_back(
+                        (char)((High << 4) | Low));
+                    Index += 2;
+                    continue;
+                }
+            }
+            Decoded.push_back(Value[Index]);
+        }
+        return Decoded;
+    }
+
+    bool EqualsAsciiInsensitive(
+        const std::string& Value,
+        size_t Offset,
+        size_t Length,
+        const char* Expected)
+    {
+        if (!Expected || strlen(Expected) != Length)
+            return false;
+        for (size_t Index = 0; Index < Length; ++Index)
+        {
+            const unsigned char Left =
+                static_cast<unsigned char>(
+                    Value[Offset + Index]);
+            const unsigned char Right =
+                static_cast<unsigned char>(Expected[Index]);
+            if (std::tolower(Left) != std::tolower(Right))
+                return false;
+        }
+        return true;
+    }
+
+    bool IsPlausiblePlayerName(const std::string& Name)
+    {
+        if (Name.empty() || Name.size() > 512)
+            return false;
+        for (const unsigned char Character : Name)
+        {
+            if (Character < 0x20 || Character == 0x7f)
+                return false;
+        }
+        return MultiByteToWideChar(
+                   CP_UTF8,
+                   MB_ERR_INVALID_CHARS,
+                   Name.data(),
+                   static_cast<int>(Name.size()),
+                   nullptr,
+                   0) > 0;
+    }
+
+    bool TryReadExactURLNameOption(
+        const std::string& URL,
+        const char* Key,
+        std::string& Name)
+    {
+        Name.clear();
+        size_t SegmentStart = 0;
+        while (SegmentStart <= URL.size())
+        {
+            const size_t SegmentEnd =
+                URL.find_first_of("?&", SegmentStart);
+            const size_t BoundedEnd =
+                SegmentEnd == std::string::npos
+                    ? URL.size()
+                    : SegmentEnd;
+            const size_t Equals =
+                URL.find('=', SegmentStart);
+            if (Equals != std::string::npos &&
+                Equals < BoundedEnd &&
+                EqualsAsciiInsensitive(
+                    URL,
+                    SegmentStart,
+                    Equals - SegmentStart,
+                    Key))
+            {
+                auto Candidate = DecodeURLPlayerName(
+                    URL.substr(
+                        Equals + 1,
+                        BoundedEnd - Equals - 1));
+                if (IsPlausiblePlayerName(Candidate))
+                {
+                    Name = std::move(Candidate);
+                    return true;
+                }
+            }
+            if (SegmentEnd == std::string::npos)
+                break;
+            SegmentStart = SegmentEnd + 1;
+        }
+        return false;
+    }
+
+    bool TryResetPlayerNameCache(UWorld* World)
+    {
+        const uint64_t WorldIdentity =
+            GetGuiObjectIdentityGuarded(World);
+        FPlayerNameCacheExclusiveLock Lock;
+        if (!Lock.owns_lock())
+            return false;
+
+        GPlayerNameCacheWorld = World;
+        GPlayerNameCacheWorldIdentity = WorldIdentity;
+        GNextPlayerNameRefreshMs = 0;
+        GPlayerNamesByState.clear();
+        GPlayerNamesByConnection.clear();
+        GPlayerCombatStatsByState.clear();
+        return true;
+    }
+
+    bool TryBeginPlayerNameRefresh(
+        UWorld* World,
+        ULONGLONG CurrentTimeMs)
+    {
+        const uint64_t WorldIdentity =
+            GetGuiObjectIdentityGuarded(World);
+        if (!World || !WorldIdentity)
+            return false;
+
+        FPlayerNameCacheExclusiveLock Lock;
+        if (!Lock.owns_lock())
+            return false;
+
+        if (GPlayerNameCacheWorld != World ||
+            GPlayerNameCacheWorldIdentity != WorldIdentity)
+        {
+            GPlayerNameCacheWorld = World;
+            GPlayerNameCacheWorldIdentity = WorldIdentity;
+            GNextPlayerNameRefreshMs = 0;
+            GPlayerNamesByState.clear();
+            GPlayerNamesByConnection.clear();
+            GPlayerCombatStatsByState.clear();
+        }
+
+        if (CurrentTimeMs < GNextPlayerNameRefreshMs)
+            return false;
+
+        GNextPlayerNameRefreshMs = CurrentTimeMs + 250ULL;
+        return true;
+    }
+
+    bool TryCopyCachedPlayerNameUnsafe(
+        AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection,
+        char* OutName,
+        size_t OutCapacity,
+        size_t* OutLength)
+    {
+        if (!OutName || OutCapacity == 0 || !OutLength)
+            return false;
+
+        OutName[0] = '\0';
+        *OutLength = 0;
+
+        // Object-array probing is the only fault-prone live-object work in a
+        // cache lookup. Complete it before taking the SRW lock so a guarded
+        // failure can never strand the cache lock in the acquired state.
+        const uint64_t PlayerStateIdentity =
+            GetGuiObjectIdentityGuarded(PlayerState);
+        const uint64_t ConnectionIdentity =
+            GetGuiObjectIdentityGuarded(Connection);
+
+        FPlayerNameCacheSharedLock Lock;
+        if (!Lock.owns_lock())
+            return false;
+
+        const std::string* CachedName = nullptr;
+        if (PlayerStateIdentity)
+        {
+            auto Found = GPlayerNamesByState.find(
+                PlayerStateIdentity);
+            if (Found != GPlayerNamesByState.end() &&
+                !Found->second.empty())
+            {
+                CachedName = &Found->second;
+            }
+        }
+        if (!CachedName && ConnectionIdentity)
+        {
+            auto Found = GPlayerNamesByConnection.find(
+                ConnectionIdentity);
+            if (Found != GPlayerNamesByConnection.end() &&
+                !Found->second.empty())
+            {
+                CachedName = &Found->second;
+            }
+        }
+
+        if (!CachedName || CachedName->size() >= OutCapacity)
+            return false;
+
+        memcpy(OutName, CachedName->data(), CachedName->size());
+        OutName[CachedName->size()] = '\0';
+        *OutLength = CachedName->size();
+        return true;
+    }
+
+    bool TryCopyCachedPlayerNameGuarded(
+        AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection,
+        char* OutName,
+        size_t OutCapacity,
+        size_t* OutLength) noexcept
+    {
+        __try
+        {
+            return TryCopyCachedPlayerNameUnsafe(
+                PlayerState,
+                Connection,
+                OutName,
+                OutCapacity,
+                OutLength);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            if (OutName && OutCapacity)
+                OutName[0] = '\0';
+            if (OutLength)
+                *OutLength = 0;
+            DisablePlayerNameCache();
+            return false;
+        }
+    }
+
+    bool TryReadPlayerCombatStatsUnsafe(
+        UWorld* World,
+        AFortPlayerControllerAthena* PlayerController,
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* PlayerPawn,
+        uint64_t WorldIdentity,
+        uint64_t ControllerIdentity,
+        uint64_t PlayerStateIdentity,
+        uint64_t PawnIdentity,
+        ULONGLONG CapturedAtMs,
+        FPlayerCombatStats& OutStats)
+    {
+        if (!World || !PlayerController ||
+            !PlayerState || !PlayerPawn ||
+            !WorldIdentity || !ControllerIdentity ||
+            !PlayerStateIdentity || !PawnIdentity ||
+            PlayerController->PlayerState != PlayerState)
+        {
+            return false;
+        }
+
+        const auto ControllerOwnsPawn = [&]()
+        {
+            return
+                (PlayerController->HasMyFortPawn() &&
+                 PlayerController->MyFortPawn == PlayerPawn) ||
+                (PlayerController->HasPawn() &&
+                 PlayerController->Pawn == PlayerPawn);
+        };
+        if (!ControllerOwnsPawn())
+            return false;
+
+        FPlayerCombatStats Stats{};
+        Stats.Health = PlayerPawn->GetHealth();
+        Stats.Shield = PlayerPawn->GetShield();
+        Stats.Kills = PlayerState->HasKillScore()
+            ? PlayerState->KillScore
+            : (PlayerState->HasKills()
+                   ? PlayerState->Kills
+                   : 0);
+
+        if (!std::isfinite(Stats.Health))
+            Stats.Health = 0.f;
+        if (!std::isfinite(Stats.Shield))
+            Stats.Shield = 0.f;
+        Stats.Health =
+            (std::clamp)(Stats.Health, 0.f, 9999.f);
+        Stats.Shield =
+            (std::clamp)(Stats.Shield, 0.f, 9999.f);
+        Stats.Kills =
+            (std::clamp)(Stats.Kills, 0, 99999);
+
+        // A pawn can change during a respawn while the values above are being
+        // queried. Publish only if the complete object relationship is still
+        // exactly the one that began this sample.
+        if (GetGuiObjectIdentityGuarded(World) != WorldIdentity ||
+            GetGuiObjectIdentityGuarded(PlayerController) !=
+                ControllerIdentity ||
+            GetGuiObjectIdentityGuarded(PlayerState) !=
+                PlayerStateIdentity ||
+            GetGuiObjectIdentityGuarded(PlayerPawn) != PawnIdentity ||
+            PlayerController->PlayerState != PlayerState ||
+            !ControllerOwnsPawn())
+        {
+            return false;
+        }
+
+        Stats.WorldIdentity = WorldIdentity;
+        Stats.ControllerIdentity = ControllerIdentity;
+        Stats.PlayerStateIdentity = PlayerStateIdentity;
+        Stats.PawnIdentity = PawnIdentity;
+        Stats.CapturedAtMs = CapturedAtMs;
+        OutStats = Stats;
+        return true;
+    }
+
+    bool TryReadPlayerCombatStatsGuarded(
+        UWorld* World,
+        AFortPlayerControllerAthena* PlayerController,
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* PlayerPawn,
+        uint64_t WorldIdentity,
+        uint64_t ControllerIdentity,
+        uint64_t PlayerStateIdentity,
+        uint64_t PawnIdentity,
+        ULONGLONG CapturedAtMs,
+        FPlayerCombatStats& OutStats) noexcept
+    {
+        __try
+        {
+            return TryReadPlayerCombatStatsUnsafe(
+                World, PlayerController, PlayerState, PlayerPawn,
+                WorldIdentity, ControllerIdentity,
+                PlayerStateIdentity, PawnIdentity,
+                CapturedAtMs, OutStats);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            OutStats = {};
+            return false;
+        }
+    }
+
+    bool TryCopyCachedPlayerCombatStats(
+        AFortPlayerControllerAthena* PlayerController,
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* PlayerPawn,
+        FPlayerCombatStats& OutStats)
+    {
+        OutStats = {};
+        auto World = UWorld::GetWorld();
+        const uint64_t WorldIdentity =
+            GetGuiObjectIdentityGuarded(World);
+        const uint64_t ControllerIdentity =
+            GetGuiObjectIdentityGuarded(PlayerController);
+        const uint64_t PlayerStateIdentity =
+            GetGuiObjectIdentityGuarded(PlayerState);
+        const uint64_t PawnIdentity =
+            GetGuiObjectIdentityGuarded(PlayerPawn);
+        if (!WorldIdentity || !ControllerIdentity ||
+            !PlayerStateIdentity || !PawnIdentity)
+        {
+            return false;
+        }
+        const ULONGLONG CurrentTimeMs = GetTickCount64();
+
+        FPlayerNameCacheSharedLock Lock;
+        if (!Lock.owns_lock())
+            return false;
+
+        if (GPlayerNameCacheWorld != World ||
+            GPlayerNameCacheWorldIdentity != WorldIdentity)
+        {
+            return false;
+        }
+
+        auto Found = GPlayerCombatStatsByState.find(
+            PlayerStateIdentity);
+        if (Found == GPlayerCombatStatsByState.end())
+            return false;
+
+        const auto& Stats = Found->second;
+        if (Stats.WorldIdentity != WorldIdentity ||
+            Stats.ControllerIdentity != ControllerIdentity ||
+            Stats.PlayerStateIdentity != PlayerStateIdentity ||
+            Stats.PawnIdentity != PawnIdentity ||
+            CurrentTimeMs < Stats.CapturedAtMs ||
+            CurrentTimeMs - Stats.CapturedAtMs >
+                kPlayerCombatMaxAgeMs)
+        {
+            return false;
+        }
+
+        OutStats = Stats;
+        return true;
+    }
+
+    uint64_t GetGuiObjectIdentityUnsafe(const UObject* Object)
+    {
+        if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
+            return 0;
+        const int32 ObjectIndex = Object->Index;
+        if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
+            return 0;
+        auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+        const int32 InvalidFlags =
+            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        if (!Item || Item->GetObject() != Object ||
+            (Item->GetFlags() & InvalidFlags))
+        {
+            return 0;
+        }
+        return
+            (static_cast<uint64_t>(
+                static_cast<uint32_t>(ObjectIndex)) << 32) |
+            static_cast<uint32_t>(Item->SerialRef());
+    }
+
+    uint64_t GetGuiObjectIdentityGuarded(
+        const UObject* Object) noexcept
+    {
+        __try
+        {
+            return GetGuiObjectIdentityUnsafe(Object);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return 0;
+        }
+    }
+}
+
+std::string GUI::GetPlayerNameFromConnection(
+    UNetConnection* Connection)
+{
+    if (!Connection ||
+        !SDK::MemReadable(Connection, sizeof(UObject)))
+    {
+        return {};
+    }
+
+    FString* RequestURL = GetRequestURL(Connection);
+    std::string URL;
+    if (!TryCopyFStringUtf8(RequestURL, 16384, URL))
+        return {};
+
+    // Parse complete option keys instead of accepting the first arbitrary
+    // suffix ending in "Name". Legacy clients can send several name-shaped
+    // options; these keys identify the connection's displayed player name.
+    std::string Name;
+    if (TryReadExactURLNameOption(URL, "PlayerName", Name) ||
+        TryReadExactURLNameOption(URL, "DisplayName", Name) ||
+        TryReadExactURLNameOption(URL, "Name", Name))
+    {
+        return Name;
+    }
+    return {};
+}
+
+std::string GUI::GetPlayerName(
+    AFortPlayerStateAthena* PlayerState,
+    UNetConnection* Connection)
+{
+    if (GPlayerNameCacheDisabled.load(
+            std::memory_order_acquire))
+    {
+        return {};
+    }
+
+    std::array<char, 1025> Name{};
+    size_t NameLength = 0;
+    if (TryCopyCachedPlayerNameGuarded(
+            PlayerState,
+            Connection,
+            Name.data(),
+            Name.size(),
+            &NameLength))
+    {
+        return std::string(Name.data(), NameLength);
+    }
+
+    // The menu renders on a separate thread, so a cache miss must never touch
+    // live Unreal objects. PlayerNamesGameTick reads the connection identity
+    // and any PlayerState fallback on the game thread.
+    return {};
+}
+
+namespace
+{
+    void PlayerNamesGameTickUnsafe()
+    {
+        auto World = UWorld::GetWorld();
+        auto Driver = World
+            ? (UNetDriver*)World->NetDriver
+            : nullptr;
+        if (!World || !Driver)
+        {
+            TryResetPlayerNameCache(nullptr);
+            return;
+        }
+
+        const ULONGLONG CurrentTimeMs = GetTickCount64();
+        if (!TryBeginPlayerNameRefresh(
+                World, CurrentTimeMs))
+        {
+            return;
+        }
+
+        const uint64_t WorldIdentity =
+            GetGuiObjectIdentityGuarded(World);
+        if (!WorldIdentity)
+            return;
+
+        std::unordered_map<uint64_t, std::string>
+            NamesByState;
+        std::unordered_map<uint64_t, std::string>
+            NamesByConnection;
+        std::unordered_map<uint64_t, FPlayerCombatStats>
+            CombatStatsByState;
+        auto PlayerControllerClass =
+            AFortPlayerControllerAthena::StaticClass();
+        auto PlayerPawnClass =
+            AFortPlayerPawnAthena::StaticClass();
+        auto& Connections = Driver->ClientConnections;
+        if (Connections.Num() < 0 ||
+            Connections.Max() < Connections.Num() ||
+            Connections.Max() > 4096 ||
+            (Connections.Num() > 0 &&
+             (!Connections.Data ||
+              !SDK::MemReadable(
+                  Connections.Data,
+                  static_cast<size_t>(Connections.Num()) *
+                      sizeof(UNetConnection*)))))
+        {
+            return;
+        }
+        for (int32 Index = 0;
+            Index < Connections.Num();
+            Index++)
+        {
+            auto Connection = Connections[Index];
+            const uint64_t ConnectionIdentity =
+                GetGuiObjectIdentityGuarded(Connection);
+            auto PlayerController = ConnectionIdentity
+                ? Connection->PlayerController
+                : nullptr;
+            const uint64_t ControllerIdentity =
+                GetGuiObjectIdentityGuarded(PlayerController);
+            auto PlayerState = ControllerIdentity
+                ? (AFortPlayerStateAthena*)
+                    PlayerController->PlayerState
+                : nullptr;
+            const uint64_t PlayerStateIdentity =
+                GetGuiObjectIdentityGuarded(PlayerState);
+            if (!ConnectionIdentity && !PlayerStateIdentity)
+                continue;
+
+            AFortPlayerPawnAthena* PlayerPawn = nullptr;
+            auto FortPlayerController =
+                ControllerIdentity && PlayerControllerClass &&
+                PlayerController->IsA(PlayerControllerClass)
+                    ? (AFortPlayerControllerAthena*)PlayerController
+                    : nullptr;
+            uint64_t PawnIdentity = 0;
+            if (FortPlayerController && PlayerPawnClass &&
+                FortPlayerController->HasMyFortPawn())
+            {
+                auto Candidate =
+                    FortPlayerController->MyFortPawn;
+                const uint64_t CandidateIdentity =
+                    GetGuiObjectIdentityGuarded(Candidate);
+                if (CandidateIdentity &&
+                    Candidate->IsA(PlayerPawnClass))
+                {
+                    PlayerPawn = Candidate;
+                    PawnIdentity = CandidateIdentity;
+                }
+            }
+            if (!PlayerPawn && FortPlayerController &&
+                PlayerPawnClass &&
+                FortPlayerController->HasPawn() &&
+                FortPlayerController->Pawn)
+            {
+                auto Candidate = FortPlayerController->Pawn;
+                const uint64_t CandidateIdentity =
+                    GetGuiObjectIdentityGuarded(Candidate);
+                if (CandidateIdentity &&
+                    Candidate->IsA(PlayerPawnClass))
+                {
+                    PlayerPawn = (AFortPlayerPawnAthena*)Candidate;
+                    PawnIdentity = CandidateIdentity;
+                }
+            }
+
+            FPlayerCombatStats CombatStats{};
+            if (ControllerIdentity && PlayerStateIdentity &&
+                PawnIdentity &&
+                TryReadPlayerCombatStatsGuarded(
+                    World, FortPlayerController,
+                    PlayerState, PlayerPawn,
+                    WorldIdentity, ControllerIdentity,
+                    PlayerStateIdentity, PawnIdentity,
+                    CurrentTimeMs, CombatStats))
+            {
+                CombatStatsByState.emplace(
+                    PlayerStateIdentity, CombatStats);
+            }
+
+            // Keep the historical connection-first resolution order.  The
+            // guarded PlayerState lookup remains available as a fallback for
+            // clients whose URL omits Name=.
+            std::array<char, 1025> Resolved{};
+            size_t ResolvedLength = 0;
+            TryCopyResolvedPlayerNameGuarded(
+                PlayerState,
+                Connection,
+                Resolved.data(),
+                Resolved.size(),
+                &ResolvedLength);
+            std::string Name(
+                Resolved.data(), ResolvedLength);
+            if (Name.empty())
+            {
+                // A disconnect can transiently invalidate one reflected row.
+                // Preserve its previous good label for this refresh rather than
+                // blanking the entire cache or disabling names for everyone.
+                std::array<char, 1025> Cached{};
+                size_t CachedLength = 0;
+                if (TryCopyCachedPlayerNameGuarded(
+                        PlayerState,
+                        Connection,
+                        Cached.data(),
+                        Cached.size(),
+                        &CachedLength))
+                {
+                    Name.assign(Cached.data(), CachedLength);
+                }
+            }
+            if (Name.empty())
+                continue;
+
+            if (PlayerStateIdentity)
+            {
+                NamesByState.emplace(
+                    PlayerStateIdentity, Name);
+            }
+            if (ConnectionIdentity)
+            {
+                NamesByConnection.emplace(
+                    ConnectionIdentity, Name);
+            }
+        }
+
+        FPlayerNameCacheExclusiveLock Lock;
+        if (Lock.owns_lock() &&
+            GPlayerNameCacheWorld == World &&
+            GPlayerNameCacheWorldIdentity == WorldIdentity)
+        {
+            GPlayerNamesByState.swap(NamesByState);
+            GPlayerNamesByConnection.swap(NamesByConnection);
+            GPlayerCombatStatsByState.swap(
+                CombatStatsByState);
+        }
+    }
+}
+
+void GUI::PlayerNamesGameTick()
+{
+    if (!TryReenablePlayerNameCache())
+        return;
+
+    __try
+    {
+        PlayerNamesGameTickUnsafe();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        DisablePlayerNameCache();
+    }
+}
+
+int GUI::GetSelectedPlaylist()
+{
+    return PublishedSelectedPlaylist.load(
+        std::memory_order_acquire);
+}
+
+void GUI::PublishSelectedPlaylist(int Value)
+{
+    PublishedSelectedPlaylist.store(
+        Value, std::memory_order_release);
+}
 
 void GUI::MarkServerJoinable()
 {
@@ -67,6 +1182,14 @@ void GUI::MarkServerJoinable()
 
     if (gsStatus < Joinable)
         gsStatus = Joinable;
+}
+
+void GUI::ResetServerLifecycle()
+{
+    GServerJoinableAtMs.store(
+        0, std::memory_order_release);
+    gsStatus.store(
+        NotReady, std::memory_order_release);
 }
 
 ID3D11ShaderResourceView* g_EmbedTexture = nullptr;
@@ -380,7 +1503,9 @@ namespace SafeZoneMap
         // circle can silently become a 550 m circle. Reproject only the center;
         // preserve the exact distance selected by the user.
         SDK::DbgLog("[SafeZoneMap] reprojected selection uv=(%.5f, %.5f) to world=(%.1f, %.1f), radius-preserved=%.1f\n",
-            u, v, worldX, worldY, FConfiguration::CustomSafeZoneRadius);
+            u, v, worldX, worldY,
+            FConfiguration::CustomSafeZoneRadius.load(
+                std::memory_order_relaxed));
     }
 
     // Shade the part of rect [rmin,rmax] outside a world-space circle. It may
@@ -503,6 +1628,11 @@ namespace SafeZoneMap
 
     // Manual override for tuning on a specific engine version (0 = auto-detect).
     static uint32_t g_PlatformDataOffsetOverride = 0;
+    // Player loadout icons reuse this decoder but must stay quiet and small.
+    // These are game-thread-local so the Safe Zone editor keeps its diagnostics
+    // and full-resolution behavior on the GUI thread.
+    static thread_local bool g_SuppressTextureExtractionLogs = false;
+    static thread_local int32 g_MaxTextureExtractionDimension = 0;
 
     // EPixelFormat is append-only across the supported UE4 builds. Chapter 2
     // minimaps can be BC7; treating its 16-byte blocks as same-sized BC3 is what
@@ -527,8 +1657,10 @@ namespace SafeZoneMap
         const size_t px = (size_t)w * h;
         if (f == PF_B8G8R8A8 || f == PF_R8G8B8A8)
             return px * 4; // 32bpp uncompressed
-        if (f == PF_DXT1)     return px / 2; // BC1: 8 bytes / 16 px
-        return px;                            // BC2/BC3/BC7: 16 bytes / 16 px
+        const size_t blocksX = ((size_t)w + 3) / 4;
+        const size_t blocksY = ((size_t)h + 3) / 4;
+        if (f == PF_DXT1) return blocksX * blocksY * 8;
+        return blocksX * blocksY * 16; // BC2/BC3/BC7
     }
 
     // True only if every byte of [p, p+bytes) is committed and readable.
@@ -565,6 +1697,44 @@ namespace SafeZoneMap
         if (mbi.Type != MEM_PRIVATE) return 0; // heap only: reject EXE image / mapped-file pointers
         size_t before = (const uint8_t*)p - (const uint8_t*)mbi.BaseAddress;
         return mbi.RegionSize > before ? (size_t)(mbi.RegionSize - before) : 0;
+    }
+
+    // The strict resident-icon decoder proves the mip layout, dimensions,
+    // encoded byte count and payload identity before and after its bounded
+    // copy. That is strong enough to admit read-only IoStore/pak mappings here
+    // without weakening the legacy heuristic decoder above. Executable/image
+    // mappings remain invalid icon payloads.
+    static size_t StrictResidentIconPayloadRegionSize(const void* p)
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!p ||
+            (uintptr_t)p < 0x10000 ||
+            VirtualQuery(p, &mbi, sizeof(mbi)) == 0 ||
+            mbi.State != MEM_COMMIT)
+        {
+            return 0;
+        }
+        if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+            mbi.Protect == 0 ||
+            (mbi.Protect &
+                (PAGE_EXECUTE |
+                 PAGE_EXECUTE_READ |
+                 PAGE_EXECUTE_READWRITE |
+                 PAGE_EXECUTE_WRITECOPY)))
+        {
+            return 0;
+        }
+        if (mbi.Type != MEM_PRIVATE &&
+            mbi.Type != MEM_MAPPED)
+        {
+            return 0;
+        }
+        const size_t Before =
+            static_cast<const uint8_t*>(p) -
+            static_cast<const uint8_t*>(mbi.BaseAddress);
+        return mbi.RegionSize > Before
+            ? static_cast<size_t>(mbi.RegionSize - Before)
+            : 0;
     }
 
     static bool IsPow2Dim(int32 v) { return v >= 64 && v <= 16384 && (v & (v - 1)) == 0; }
@@ -609,25 +1779,46 @@ namespace SafeZoneMap
             if (!IsPow2Dim(sx) || !IsPow2Dim(sy)) return false;
             // PixelFormat is at +0x0C (after two dims + PackedData); a couple of
             // older layouts keep it at +0x08. Take whichever is a known format.
-            int32 pf0c = *(const int32*)(P + 0x0C);
-            int32 pf08 = *(const int32*)(P + 0x08);
-            int32 pf = IsKnownFormat(pf0c) ? pf0c : (IsKnownFormat(pf08) ? pf08 : 0);
+            const int32 pf0c =
+                *reinterpret_cast<const int32*>(P + 0x0C);
+            const int32 pf08 =
+                *reinterpret_cast<const int32*>(P + 0x08);
+            // UE4 stores PixelFormat as a byte-sized TEnumAsByte in several cooked
+            // FTexturePlatformData layouts. The following padding is not
+            // guaranteed to be zero, so reading four bytes can turn a valid
+            // PF_DXT5 (7) into an unrecognised integer.
+            const int32 pf0cByte =
+                *reinterpret_cast<const uint8_t*>(P + 0x0C);
+            const int32 pf08Byte =
+                *reinterpret_cast<const uint8_t*>(P + 0x08);
+            const int32 pf =
+                IsKnownFormat(pf0c)
+                    ? pf0c
+                    : (IsKnownFormat(pf0cByte)
+                        ? pf0cByte
+                        : (IsKnownFormat(pf08)
+                            ? pf08
+                            : (IsKnownFormat(pf08Byte)
+                                ? pf08Byte
+                                : 0)));
             if (pf != 0) // strong match: real FTexturePlatformData with a known format
             {
                 out.Ptr = P; out.SizeX = sx; out.SizeY = sy; out.PixelFormat = pf; out.FoundAtOffset = off;
-                SDK::DbgLog("[SafeZoneMap] PlatformData @0x%X ptr=%p %dx%d PixelFormat=%d\n",
-                    off, (const void*)P, sx, sy, pf);
+                if (!g_SuppressTextureExtractionLogs)
+                    SDK::DbgLog("[SafeZoneMap] PlatformData @0x%X ptr=%p %dx%d PixelFormat=%d\n",
+                        off, (const void*)P, sx, sy, pf);
                 return true;
             }
             if (!haveFallback)
             {
                 fallback = { P, sx, sy, 0, off };
                 haveFallback = true;
-                SDK::DbgLog(
-                    "[SafeZoneMap] PlatformData candidate @0x%X ptr=%p %dx%d header pf08=%d pf0c=%d pf10=%d pf14=%d\n",
-                    off, (const void*)P, sx, sy, pf08, pf0c,
-                    *(const int32*)(P + 0x10),
-                    *(const int32*)(P + 0x14));
+                if (!g_SuppressTextureExtractionLogs)
+                    SDK::DbgLog(
+                        "[SafeZoneMap] PlatformData candidate @0x%X ptr=%p %dx%d header pf08=%d pf0c=%d pf10=%d pf14=%d\n",
+                        off, (const void*)P, sx, sy, pf08, pf0c,
+                        *(const int32*)(P + 0x10),
+                        *(const int32*)(P + 0x14));
             }
             return false;
         };
@@ -647,11 +1838,13 @@ namespace SafeZoneMap
         if (haveFallback) // no known-format match; fall back to first pow2 candidate
         {
             out = fallback;
-            SDK::DbgLog("[SafeZoneMap] PlatformData (weak) @0x%X ptr=%p %dx%d (no known format)\n",
-                out.FoundAtOffset, (const void*)out.Ptr, out.SizeX, out.SizeY);
+            if (!g_SuppressTextureExtractionLogs)
+                SDK::DbgLog("[SafeZoneMap] PlatformData (weak) @0x%X ptr=%p %dx%d (no known format)\n",
+                    out.FoundAtOffset, (const void*)out.Ptr, out.SizeX, out.SizeY);
             return true;
         }
-        SDK::DbgLog("[SafeZoneMap] PlatformData not found in texture object\n");
+        if (!g_SuppressTextureExtractionLogs)
+            SDK::DbgLog("[SafeZoneMap] PlatformData not found in texture object\n");
         return false;
     }
 
@@ -680,7 +1873,8 @@ namespace SafeZoneMap
         return false;
     }
 
-    static const uint8_t* FindMip0Bytes(const FPlatformData& pd, size_t neededBytes)
+    static const uint8_t* FindMip0Bytes(
+        const FPlatformData& pd, size_t neededBytes)
     {
         for (uint32_t moff = 0x0C; moff <= 0x80; moff += 4) // the mips TArray {Data,Num,Max}
         {
@@ -704,50 +1898,34 @@ namespace SafeZoneMap
                 const uint8_t* cand = *(const uint8_t* const*)(mip0 + boff);
                 if (RegionSize(cand) >= neededBytes && !StartsWithImagePointer(cand))
                 {
-                    SDK::DbgLog("[SafeZoneMap] mip0 bytes @mip+0x%X ptr=%p (need %zu, mips@pd+0x%X num=%d)\n",
-                        boff, (const void*)cand, neededBytes, moff, num);
+                    if (!g_SuppressTextureExtractionLogs)
+                        SDK::DbgLog("[SafeZoneMap] mip0 bytes @mip+0x%X ptr=%p (need %zu, mips@pd+0x%X num=%d)\n",
+                            boff, (const void*)cand, neededBytes, moff, num);
                     return cand;
                 }
             }
         }
-        SDK::DbgLog("[SafeZoneMap] mip0 resident bytes not found (need %zu)\n", neededBytes);
+        if (!g_SuppressTextureExtractionLogs)
+            SDK::DbgLog("[SafeZoneMap] mip0 resident bytes not found (need %zu)\n", neededBytes);
         return nullptr;
     }
 
-    // Best-effort: extract the given minimap texture into an RGBA8 buffer.
-    static bool ExtractToRGBA(const void* tex, std::vector<unsigned char>& rgba, int& outW, int& outH)
+    static bool DecodeTextureBytes(
+        const uint8_t* src,
+        int fmt,
+        int w,
+        int h,
+        std::vector<unsigned char>& rgba,
+        int& outW,
+        int& outH)
     {
-        FPlatformData pd;
-        if (!DetectPlatformData(tex, pd)) return false;
-
-        const int w = pd.SizeX, h = pd.SizeY;
+        if (!src || w <= 0 || h <= 0)
+            return false;
         const size_t pixels = (size_t)w * h;
-
-        int fmt = pd.PixelFormat;
-        const uint8_t* src = nullptr;
-
-        // Known format -> look for exactly the mip that size (no size-guessing,
-        // which is what previously decoded BC1 bytes as raw RGBA -> garbled).
-        if (IsKnownFormat(fmt))
-            src = FindMip0Bytes(pd, FormatBytes(fmt, w, h));
-
-        if (!src) // unknown format or not found: probe by descending size class
-        {
-            const struct { int f; size_t need; } probes[] = {
-                { PF_B8G8R8A8, pixels * 4 },
-                { PF_DXT5,     pixels     },
-                { PF_DXT1,     pixels / 2 },
-            };
-            for (auto& pr : probes)
-            {
-                const uint8_t* p = FindMip0Bytes(pd, pr.need);
-                if (p) { src = p; fmt = pr.f; break; }
-            }
-            if (!src) return false;
-        }
+        if (pixels > SIZE_MAX / 4)
+            return false;
 
         rgba.assign(pixels * 4, 0);
-
         auto decodeBlocks = [&](int blockBytes, void(*dec)(const void*, void*, int))
         {
             const int bw = (w + 3) / 4, bh = (h + 3) / 4;
@@ -790,8 +1968,54 @@ namespace SafeZoneMap
         else if (fmt == PF_BC7)  { decodeBlocks(BCDEC_BC7_BLOCK_SIZE, bcdec_bc7); }
         else return false;
 
-        outW = w; outH = h;
-        SDK::DbgLog("[SafeZoneMap] extracted %dx%d fmt=%d ok\n", w, h, fmt);
+        outW = w;
+        outH = h;
+        return true;
+    }
+
+    // Best-effort: extract the given minimap texture into an RGBA8 buffer.
+    static bool ExtractToRGBA(const void* tex, std::vector<unsigned char>& rgba, int& outW, int& outH)
+    {
+        FPlatformData pd;
+        if (!DetectPlatformData(tex, pd)) return false;
+        if (g_MaxTextureExtractionDimension > 0 &&
+            (pd.SizeX > g_MaxTextureExtractionDimension ||
+             pd.SizeY > g_MaxTextureExtractionDimension))
+        {
+            return false;
+        }
+
+        const int w = pd.SizeX, h = pd.SizeY;
+        const size_t pixels = (size_t)w * h;
+        int fmt = pd.PixelFormat;
+        const uint8_t* src = nullptr;
+
+        // Known format -> look for exactly the mip that size (no size-guessing,
+        // which is what previously decoded BC1 bytes as raw RGBA -> garbled).
+        if (IsKnownFormat(fmt))
+            src = FindMip0Bytes(pd, FormatBytes(fmt, w, h));
+
+        if (!src) // unknown format or not found: probe by descending size class
+        {
+            const struct { int f; size_t need; } probes[] = {
+                { PF_B8G8R8A8, pixels * 4 },
+                { PF_DXT5,     pixels     },
+                { PF_DXT1,     FormatBytes(PF_DXT1, w, h) },
+            };
+            for (auto& pr : probes)
+            {
+                const uint8_t* p = FindMip0Bytes(pd, pr.need);
+                if (p) { src = p; fmt = pr.f; break; }
+            }
+            if (!src) return false;
+        }
+
+        if (!DecodeTextureBytes(
+                src, fmt, w, h,
+                rgba, outW, outH))
+            return false;
+        if (!g_SuppressTextureExtractionLogs)
+            SDK::DbgLog("[SafeZoneMap] extracted %dx%d fmt=%d ok\n", w, h, fmt);
         return true;
     }
 
@@ -806,7 +2030,893 @@ namespace SafeZoneMap
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
-            SDK::DbgLog("[SafeZoneMap] extraction faulted (SEH); skipping image\n");
+            if (!g_SuppressTextureExtractionLogs)
+                SDK::DbgLog("[SafeZoneMap] extraction faulted (SEH); skipping image\n");
+            return false;
+        }
+    }
+
+    constexpr int32 kMaximumResidentIconMips = 20;
+    constexpr int32 kMaximumResidentIconDimension = 512;
+    constexpr size_t kMaximumResidentIconBytes =
+        1024 * 1024;
+
+    struct FResidentIconMipChain
+    {
+        const uint8_t* Header = nullptr;
+        const uint8_t* Data = nullptr;
+        size_t ArrayStorageBytes = 0;
+        size_t MipScanBytes = 0;
+        int32 Num = 0;
+        int32 Max = 0;
+        const uint8_t* Mips[kMaximumResidentIconMips]{};
+        uint16_t DimensionOffset = 0;
+        bool DimensionsAre16Bit = false;
+        bool MipsAreIndirect = false;
+    };
+
+    struct FResidentIconPayload
+    {
+        const uint8_t* Bytes = nullptr;
+        int32 MipIndex = -1;
+        int32 Width = 0;
+        int32 Height = 0;
+        size_t ByteCount = 0;
+    };
+
+    static bool ReadResidentIconMipDimensions(
+        const uint8_t* Mip,
+        uint16_t Offset,
+        bool Is16Bit,
+        int32& Width,
+        int32& Height,
+        int32& Depth)
+    {
+        const size_t Bytes =
+            Is16Bit
+                ? sizeof(uint16_t) * 3
+                : sizeof(uint32_t) * 3;
+        if (!Mip ||
+            !IsReadable(Mip + Offset, Bytes))
+        {
+            return false;
+        }
+
+        if (Is16Bit)
+        {
+            const auto Values =
+                reinterpret_cast<const uint16_t*>(
+                    Mip + Offset);
+            Width = Values[0];
+            Height = Values[1];
+            Depth = Values[2];
+        }
+        else
+        {
+            const auto Values =
+                reinterpret_cast<const uint32_t*>(
+                    Mip + Offset);
+            Width = static_cast<int32>(Values[0]);
+            Height = static_cast<int32>(Values[1]);
+            Depth = static_cast<int32>(Values[2]);
+        }
+        return true;
+    }
+
+    static bool IsResidentIconMipLayout(
+        const FPlatformData& PlatformData,
+        const FResidentIconMipChain& Chain,
+        uint16_t DimensionOffset,
+        bool DimensionsAre16Bit)
+    {
+        for (int32 Index = 0;
+             Index < Chain.Num;
+             ++Index)
+        {
+            int32 Width = 0;
+            int32 Height = 0;
+            int32 Depth = 0;
+            if (!ReadResidentIconMipDimensions(
+                    Chain.Mips[Index],
+                    DimensionOffset,
+                    DimensionsAre16Bit,
+                    Width,
+                    Height,
+                    Depth) ||
+                Width !=
+                    (std::max)(
+                        1,
+                        PlatformData.SizeX >> Index) ||
+                Height !=
+                    (std::max)(
+                        1,
+                        PlatformData.SizeY >> Index) ||
+                Depth != 1)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool FinalizeResidentIconMipLayout(
+        const FPlatformData& PlatformData,
+        FResidentIconMipChain& Chain)
+    {
+        if (Chain.MipScanBytes <
+                sizeof(uint16_t) * 3)
+        {
+            return false;
+        }
+
+        int LayoutCount = 0;
+        uint16_t MatchedOffset = 0;
+        bool Matched16Bit = false;
+        const size_t Maximum32BitOffset =
+            Chain.MipScanBytes >= sizeof(uint32_t) * 3
+                ? Chain.MipScanBytes -
+                    sizeof(uint32_t) * 3
+                : 0;
+        for (uint16_t Offset = 0;
+             Offset <= Maximum32BitOffset;
+             Offset += 4)
+        {
+            if (IsResidentIconMipLayout(
+                    PlatformData,
+                    Chain,
+                    Offset,
+                    false))
+            {
+                ++LayoutCount;
+                MatchedOffset = Offset;
+                Matched16Bit = false;
+            }
+        }
+        const size_t Maximum16BitOffset =
+            Chain.MipScanBytes -
+            sizeof(uint16_t) * 3;
+        for (uint16_t Offset = 0;
+             Offset <= Maximum16BitOffset;
+             Offset += 2)
+        {
+            if (IsResidentIconMipLayout(
+                    PlatformData,
+                    Chain,
+                    Offset,
+                    true))
+            {
+                ++LayoutCount;
+                MatchedOffset = Offset;
+                Matched16Bit = true;
+            }
+        }
+        if (LayoutCount != 1)
+            return false;
+
+        Chain.DimensionOffset = MatchedOffset;
+        Chain.DimensionsAre16Bit = Matched16Bit;
+        return true;
+    }
+
+    static bool ValidateResidentIconMipHeaderUnsafe(
+        const FPlatformData& PlatformData,
+        uint32_t HeaderOffset,
+        FResidentIconMipChain& Result)
+    {
+        Result = {};
+        const uint8_t* Header =
+            PlatformData.Ptr + HeaderOffset;
+        if (!IsReadable(Header, 16))
+            return false;
+
+        const uint8_t* Data =
+            *reinterpret_cast<const uint8_t* const*>(
+                Header);
+        const int32 Num =
+            *reinterpret_cast<const int32*>(
+                Header + 8);
+        const int32 Max =
+            *reinterpret_cast<const int32*>(
+                Header + 12);
+        if (!Data ||
+            (reinterpret_cast<uintptr_t>(Data) & 7) ||
+            Num < 1 ||
+            Num > kMaximumResidentIconMips ||
+            Max < Num ||
+            Max > 64)
+        {
+            return false;
+        }
+
+        FResidentIconMipChain Matched;
+        int StorageMatches = 0;
+        auto TryCandidate = [&] (
+            bool IsIndirect,
+            size_t InlineStride)
+        {
+            FResidentIconMipChain Candidate;
+            Candidate.Header = Header;
+            Candidate.Data = Data;
+            Candidate.Num = Num;
+            Candidate.Max = Max;
+            Candidate.MipsAreIndirect = IsIndirect;
+            const size_t ElementStride = IsIndirect
+                ? sizeof(const uint8_t*)
+                : InlineStride;
+            Candidate.ArrayStorageBytes =
+                static_cast<size_t>(Max) *
+                ElementStride;
+            Candidate.MipScanBytes = IsIndirect
+                ? 0x100
+                : InlineStride;
+            const size_t ConstructedBytes =
+                static_cast<size_t>(Num) *
+                ElementStride;
+            if (!ElementStride ||
+                !ConstructedBytes ||
+                !IsReadable(Data, ConstructedBytes))
+                return;
+
+            const uintptr_t ArrayBegin =
+                reinterpret_cast<uintptr_t>(Data);
+            const uintptr_t ArrayEnd =
+                ArrayBegin +
+                Candidate.ArrayStorageBytes;
+            if (ArrayEnd < ArrayBegin)
+                return;
+            for (int32 Index = 0;
+                 Index < Num;
+                 ++Index)
+            {
+                const uint8_t* Mip = IsIndirect
+                    ? reinterpret_cast<
+                        const uint8_t* const*>(Data)[Index]
+                    : Data + InlineStride *
+                        static_cast<size_t>(Index);
+                if (!Mip ||
+                    (reinterpret_cast<uintptr_t>(Mip) & 7) ||
+                    !IsReadable(
+                        Mip,
+                        Candidate.MipScanBytes))
+                {
+                    return;
+                }
+                const uintptr_t MipAddress =
+                    reinterpret_cast<uintptr_t>(Mip);
+                if (IsIndirect &&
+                    MipAddress >= ArrayBegin &&
+                    MipAddress < ArrayEnd)
+                {
+                    return;
+                }
+                Candidate.Mips[Index] = Mip;
+            }
+            if (!FinalizeResidentIconMipLayout(
+                    PlatformData, Candidate))
+            {
+                return;
+            }
+            Matched = Candidate;
+            ++StorageMatches;
+        };
+
+        // UE4 uses both TIndirectArray<FTexture2DMipMap> and an inline
+        // TArray<FTexture2DMipMap> across the supported releases. First try
+        // the pointer-array form, then prove an inline element stride by the
+        // complete halving dimension sequence. Ambiguous layouts fail closed.
+        TryCandidate(true, 0);
+        if (Num >= 2)
+        {
+            for (size_t Stride = 0x30;
+                 Stride <= 0x100;
+                 Stride += 8)
+            {
+                TryCandidate(false, Stride);
+            }
+        }
+        if (StorageMatches != 1)
+        {
+            Result = {};
+            return false;
+        }
+        Result = Matched;
+
+        // Re-read the header and pointer array so a streaming update cannot
+        // turn a partially observed chain into a valid-looking snapshot.
+        if (*reinterpret_cast<
+                const uint8_t* const*>(Header) != Data ||
+            *reinterpret_cast<
+                const int32*>(Header + 8) != Num ||
+            *reinterpret_cast<
+                const int32*>(Header + 12) != Max)
+        {
+            Result = {};
+            return false;
+        }
+        if (Result.MipsAreIndirect)
+        {
+            for (int32 Index = 0;
+                 Index < Num;
+                 ++Index)
+            {
+                if (reinterpret_cast<
+                        const uint8_t* const*>(
+                            Data)[Index] !=
+                    Result.Mips[Index])
+                {
+                    Result = {};
+                    return false;
+                }
+            }
+        }
+        if (!IsResidentIconMipLayout(
+                PlatformData,
+                Result,
+                Result.DimensionOffset,
+                Result.DimensionsAre16Bit))
+        {
+            Result = {};
+            return false;
+        }
+        return true;
+    }
+
+    static bool SnapshotResidentIconMipChainUnsafe(
+        const FPlatformData& PlatformData,
+        FResidentIconMipChain& Result)
+    {
+        Result = {};
+        int Matches = 0;
+        for (uint32_t Offset = 0x10;
+             Offset <= 0x80;
+             Offset += 8)
+        {
+            FResidentIconMipChain Candidate;
+            if (!ValidateResidentIconMipHeaderUnsafe(
+                    PlatformData,
+                    Offset,
+                    Candidate))
+            {
+                continue;
+            }
+            Result = Candidate;
+            if (++Matches > 1)
+            {
+                Result = {};
+                return false;
+            }
+        }
+        return Matches == 1;
+    }
+
+    static bool TrySnapshotResidentIconMipChain(
+        const FPlatformData* PlatformData,
+        FResidentIconMipChain* Result)
+    {
+        __try
+        {
+            return SnapshotResidentIconMipChainUnsafe(
+                *PlatformData,
+                *Result);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            *Result = {};
+            return false;
+        }
+    }
+
+    static bool TryDetectResidentIconPlatformData(
+        const void* Texture,
+        FPlatformData* PlatformData)
+    {
+        __try
+        {
+            return DetectPlatformData(
+                Texture,
+                *PlatformData);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            *PlatformData = {};
+            return false;
+        }
+    }
+
+    static bool IsPointerInResidentIconRange(
+        const uint8_t* Pointer,
+        const uint8_t* Start,
+        size_t Size)
+    {
+        if (!Pointer || !Start || !Size)
+            return false;
+        const uintptr_t Value =
+            reinterpret_cast<uintptr_t>(Pointer);
+        const uintptr_t Begin =
+            reinterpret_cast<uintptr_t>(Start);
+        const uintptr_t End =
+            Begin + Size;
+        return End >= Begin &&
+            Value >= Begin &&
+            Value < End;
+    }
+
+    static bool IsResidentIconMipChainCurrentUnsafe(
+        const FPlatformData& PlatformData,
+        const FResidentIconMipChain& Chain)
+    {
+        if (!Chain.Header ||
+            !Chain.Data ||
+            Chain.Num < 1 ||
+            Chain.Num > kMaximumResidentIconMips ||
+            !Chain.MipScanBytes ||
+            !IsReadable(Chain.Header, 16) ||
+            *reinterpret_cast<
+                const uint8_t* const*>(
+                    Chain.Header) != Chain.Data ||
+            *reinterpret_cast<const int32*>(
+                Chain.Header + 8) != Chain.Num ||
+            *reinterpret_cast<const int32*>(
+                Chain.Header + 12) != Chain.Max ||
+            (Chain.MipsAreIndirect &&
+             !IsReadable(
+                 Chain.Data,
+                 static_cast<size_t>(Chain.Num) *
+                    sizeof(const uint8_t*))))
+        {
+            return false;
+        }
+
+        for (int32 Index = 0;
+             Index < Chain.Num;
+             ++Index)
+        {
+            const uint8_t* CurrentMip =
+                Chain.MipsAreIndirect
+                    ? reinterpret_cast<
+                        const uint8_t* const*>(
+                            Chain.Data)[Index]
+                    : Chain.Data +
+                        Chain.MipScanBytes *
+                            static_cast<size_t>(Index);
+            if (CurrentMip != Chain.Mips[Index] ||
+                !IsReadable(
+                    CurrentMip,
+                    Chain.MipScanBytes))
+            {
+                return false;
+            }
+        }
+        return IsResidentIconMipLayout(
+            PlatformData,
+            Chain,
+            Chain.DimensionOffset,
+            Chain.DimensionsAre16Bit);
+    }
+
+    static int ResidentIconBulkSizeScore(
+        const uint8_t* Mip,
+        uint16_t DimensionOffset,
+        bool DimensionsAre16Bit,
+        uint32_t PointerOffset,
+        size_t MipScanBytes,
+        size_t ExpectedBytes)
+    {
+        const uint32_t DimensionBytes =
+            DimensionsAre16Bit
+                ? sizeof(uint16_t) * 3
+                : sizeof(uint32_t) * 3;
+        auto Overlaps = [](
+            uint32_t LeftOffset,
+            uint32_t LeftSize,
+            uint32_t RightOffset,
+            uint32_t RightSize)
+        {
+            return LeftOffset <
+                    RightOffset + RightSize &&
+                RightOffset <
+                    LeftOffset + LeftSize;
+        };
+
+        int Score = 0;
+        for (uint32_t Offset = 0;
+             Offset + sizeof(uint32_t) <=
+                 MipScanBytes;
+             Offset += 4)
+        {
+            if (Overlaps(
+                    Offset,
+                    sizeof(uint32_t),
+                    DimensionOffset,
+                    DimensionBytes) ||
+                Overlaps(
+                    Offset,
+                    sizeof(uint32_t),
+                    PointerOffset,
+                    sizeof(const uint8_t*)))
+            {
+                continue;
+            }
+            const uint32_t Value =
+                *reinterpret_cast<const uint32_t*>(
+                    Mip + Offset);
+            if (Value == ExpectedBytes)
+            {
+                Score = (std::max)(
+                    Score,
+                    (Offset ==
+                             PointerOffset +
+                                 sizeof(const uint8_t*) ||
+                     Offset + sizeof(uint32_t) ==
+                         PointerOffset)
+                        ? 7
+                        : 3);
+            }
+        }
+        for (uint32_t Offset = 0;
+             Offset + sizeof(uint64_t) <=
+                 MipScanBytes;
+             Offset += 8)
+        {
+            if (Overlaps(
+                    Offset,
+                    sizeof(uint64_t),
+                    DimensionOffset,
+                    DimensionBytes) ||
+                Overlaps(
+                    Offset,
+                    sizeof(uint64_t),
+                    PointerOffset,
+                    sizeof(const uint8_t*)))
+            {
+                continue;
+            }
+            const uint64_t Value =
+                *reinterpret_cast<const uint64_t*>(
+                    Mip + Offset);
+            if (Value == ExpectedBytes)
+            {
+                Score = (std::max)(
+                    Score,
+                    (Offset ==
+                             PointerOffset +
+                                 sizeof(const uint8_t*) ||
+                     Offset + sizeof(uint64_t) ==
+                         PointerOffset)
+                        ? 8
+                        : 4);
+            }
+        }
+        return Score;
+    }
+
+    static bool FindResidentIconPayloadUnsafe(
+        const FPlatformData& PlatformData,
+        const FResidentIconMipChain& Chain,
+        int32 MipIndex,
+        FResidentIconPayload& Result)
+    {
+        Result = {};
+        if (MipIndex < 0 ||
+            MipIndex >= Chain.Num ||
+            !IsResidentIconMipChainCurrentUnsafe(
+                PlatformData, Chain))
+        {
+            return false;
+        }
+
+        int32 Width = 0;
+        int32 Height = 0;
+        int32 Depth = 0;
+        const uint8_t* Mip =
+            Chain.Mips[MipIndex];
+        if (!ReadResidentIconMipDimensions(
+                Mip,
+                Chain.DimensionOffset,
+                Chain.DimensionsAre16Bit,
+                Width,
+                Height,
+                Depth) ||
+            Width !=
+                (std::max)(
+                    1,
+                    PlatformData.SizeX >> MipIndex) ||
+            Height !=
+                (std::max)(
+                    1,
+                    PlatformData.SizeY >> MipIndex) ||
+            Depth != 1)
+        {
+            return false;
+        }
+
+        const size_t PixelCount =
+            static_cast<size_t>(Width) *
+            Height;
+        const size_t ExpectedBytes =
+            FormatBytes(
+                PlatformData.PixelFormat,
+                Width,
+                Height);
+        if (!ExpectedBytes ||
+            ExpectedBytes >
+                kMaximumResidentIconBytes ||
+            PixelCount >
+                kMaximumResidentIconBytes / 4)
+        {
+            return false;
+        }
+
+        const uint8_t* Best = nullptr;
+        int BestScore = 0;
+        bool Ambiguous = false;
+        for (uint32_t Offset = 0;
+             Offset + sizeof(const uint8_t*) <=
+                 Chain.MipScanBytes;
+             Offset += 8)
+        {
+            const uint32_t DimensionBytes =
+                Chain.DimensionsAre16Bit
+                    ? sizeof(uint16_t) * 3
+                    : sizeof(uint32_t) * 3;
+            if (Offset <
+                    Chain.DimensionOffset +
+                        DimensionBytes &&
+                Chain.DimensionOffset <
+                    Offset +
+                        sizeof(const uint8_t*))
+            {
+                continue;
+            }
+            const uint8_t* Candidate =
+                *reinterpret_cast<
+                    const uint8_t* const*>(
+                        Mip + Offset);
+            if (!Candidate ||
+                (reinterpret_cast<
+                    uintptr_t>(Candidate) & 7) ||
+                StrictResidentIconPayloadRegionSize(Candidate) <
+                    ExpectedBytes ||
+                StartsWithImagePointer(Candidate) ||
+                IsPointerInResidentIconRange(
+                    Candidate,
+                    PlatformData.Ptr,
+                    0x100) ||
+                IsPointerInResidentIconRange(
+                    Candidate,
+                    Chain.Data,
+                    Chain.ArrayStorageBytes))
+            {
+                continue;
+            }
+
+            bool PointsIntoMip = false;
+            for (int32 Index = 0;
+                 Index < Chain.Num;
+                 ++Index)
+            {
+                if (IsPointerInResidentIconRange(
+                        Candidate,
+                        Chain.Mips[Index],
+                        Chain.MipScanBytes))
+                {
+                    PointsIntoMip = true;
+                    break;
+                }
+            }
+            if (PointsIntoMip)
+                continue;
+
+            const int Score =
+                ResidentIconBulkSizeScore(
+                    Mip,
+                    Chain.DimensionOffset,
+                    Chain.DimensionsAre16Bit,
+                    Offset,
+                    Chain.MipScanBytes,
+                    ExpectedBytes);
+            if (!Score)
+                continue;
+            if (Score > BestScore)
+            {
+                Best = Candidate;
+                BestScore = Score;
+                Ambiguous = false;
+            }
+            else if (Score == BestScore &&
+                     Best != Candidate)
+            {
+                Ambiguous = true;
+            }
+        }
+        if (!Best || Ambiguous)
+            return false;
+
+        Result.Bytes = Best;
+        Result.MipIndex = MipIndex;
+        Result.Width = Width;
+        Result.Height = Height;
+        Result.ByteCount = ExpectedBytes;
+        return true;
+    }
+
+    static bool TryFindResidentIconPayload(
+        const FPlatformData* PlatformData,
+        const FResidentIconMipChain* Chain,
+        int32 MipIndex,
+        FResidentIconPayload* Result)
+    {
+        __try
+        {
+            return FindResidentIconPayloadUnsafe(
+                *PlatformData,
+                *Chain,
+                MipIndex,
+                *Result);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            *Result = {};
+            return false;
+        }
+    }
+
+    static bool CopyResidentIconPayloadUnsafe(
+        const FPlatformData& PlatformData,
+        const FResidentIconMipChain& Chain,
+        const FResidentIconPayload& Expected,
+        uint8_t* Destination)
+    {
+        if (!Destination ||
+            !Expected.Bytes ||
+            !Expected.ByteCount)
+        {
+            return false;
+        }
+
+        FResidentIconPayload Before;
+        if (!FindResidentIconPayloadUnsafe(
+                PlatformData,
+                Chain,
+                Expected.MipIndex,
+                Before) ||
+            Before.Bytes != Expected.Bytes ||
+            Before.ByteCount != Expected.ByteCount)
+        {
+            return false;
+        }
+
+        memcpy(
+            Destination,
+            Expected.Bytes,
+            Expected.ByteCount);
+
+        FResidentIconPayload After;
+        if (!FindResidentIconPayloadUnsafe(
+                PlatformData,
+                Chain,
+                Expected.MipIndex,
+                After) ||
+            After.Bytes != Expected.Bytes ||
+            After.ByteCount != Expected.ByteCount)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    static bool TryCopyResidentIconPayload(
+        const FPlatformData* PlatformData,
+        const FResidentIconMipChain* Chain,
+        const FResidentIconPayload* Expected,
+        uint8_t* Destination)
+    {
+        __try
+        {
+            return CopyResidentIconPayloadUnsafe(
+                *PlatformData,
+                *Chain,
+                *Expected,
+                Destination);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    static bool ExtractResidentIconToRGBA(
+        const void* Texture,
+        std::vector<unsigned char>& RGBA,
+        int& Width,
+        int& Height)
+    {
+        FPlatformData PlatformData;
+        if (!TryDetectResidentIconPlatformData(
+                Texture,
+                &PlatformData) ||
+            !IsKnownFormat(
+                PlatformData.PixelFormat))
+        {
+            return false;
+        }
+
+        FResidentIconMipChain Chain;
+        if (!TrySnapshotResidentIconMipChain(
+                &PlatformData,
+                &Chain))
+        {
+            return false;
+        }
+
+        for (int32 Index = 0;
+             Index < Chain.Num;
+             ++Index)
+        {
+            const int32 MipWidth =
+                (std::max)(
+                    1,
+                    PlatformData.SizeX >> Index);
+            const int32 MipHeight =
+                (std::max)(
+                    1,
+                    PlatformData.SizeY >> Index);
+            if (MipWidth >
+                    kMaximumResidentIconDimension ||
+                MipHeight >
+                    kMaximumResidentIconDimension)
+            {
+                continue;
+            }
+
+            FResidentIconPayload Payload;
+            if (!TryFindResidentIconPayload(
+                    &PlatformData,
+                    &Chain,
+                    Index,
+                    &Payload))
+            {
+                continue;
+            }
+
+            std::vector<unsigned char> Encoded(
+                Payload.ByteCount);
+            if (!TryCopyResidentIconPayload(
+                    &PlatformData,
+                    &Chain,
+                    &Payload,
+                    Encoded.data()))
+            {
+                continue;
+            }
+            return DecodeTextureBytes(
+                Encoded.data(),
+                PlatformData.PixelFormat,
+                Payload.Width,
+                Payload.Height,
+                RGBA,
+                Width,
+                Height);
+        }
+        return false;
+    }
+
+    static bool ExtractResidentIconToRGBA_Guarded(
+        const void* Texture,
+        std::vector<unsigned char>& RGBA,
+        int& Width,
+        int& Height)
+    {
+        __try
+        {
+            return ExtractResidentIconToRGBA(
+                Texture,
+                RGBA,
+                Width,
+                Height);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
             return false;
         }
     }
@@ -2818,6 +4928,48 @@ namespace SafeZoneMap
 void GUI::SafeZoneMapGameTick()
 {
     SafeZoneMap::GameThreadTick();
+    PlayerLoadout::GameThreadTick();
+}
+
+bool GameTextureBridge::ExtractToRGBA(
+    const UTexture2D* Texture,
+    std::vector<unsigned char>& RGBA,
+    int& Width,
+    int& Height)
+{
+    if (!Texture)
+        return false;
+
+    // Item cards render below 128 px. Use only a structurally validated,
+    // already-resident CPU mip no larger than 512 px; never request streaming
+    // or decode the full preview merely to shrink it for this admin UI.
+    const bool PreviousSuppress =
+        SafeZoneMap::g_SuppressTextureExtractionLogs;
+    const int32 PreviousMaximum =
+        SafeZoneMap::g_MaxTextureExtractionDimension;
+    SafeZoneMap::g_SuppressTextureExtractionLogs = true;
+    bool Result =
+        SafeZoneMap::ExtractResidentIconToRGBA_Guarded(
+        Texture, RGBA, Width, Height);
+    if (!Result)
+    {
+        // The strict extractor requires a uniquely identifiable cooked mip
+        // layout. Its older guarded decoder recognizes additional UE4 inline
+        // and indirect-array layouts; keep the same hard 512px ceiling so a
+        // menu icon can never decode a full map-sized texture.
+        RGBA.clear();
+        Width = Height = 0;
+        SafeZoneMap::g_MaxTextureExtractionDimension =
+            SafeZoneMap::kMaximumResidentIconDimension;
+        Result =
+            SafeZoneMap::ExtractToRGBA_Guarded(
+                Texture, RGBA, Width, Height);
+    }
+    SafeZoneMap::g_MaxTextureExtractionDimension =
+        PreviousMaximum;
+    SafeZoneMap::g_SuppressTextureExtractionLogs =
+        PreviousSuppress;
+    return Result;
 }
 
 void GUI::ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo)
@@ -2840,6 +4992,33 @@ void GUI::ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo)
     }
 
     SafeZoneMap::FinalizeSelectionForMapInfo(MapInfo);
+}
+
+bool GUI::GetNormalizedSafeZoneSelection(
+    float& U,
+    float& V)
+{
+    U = SafeZoneMap::g_SelectedU.load(
+        std::memory_order_relaxed);
+    V = SafeZoneMap::g_SelectedV.load(
+        std::memory_order_relaxed);
+    return SafeZoneMap::g_HasNormalizedSelection.load(
+        std::memory_order_acquire);
+}
+
+void GUI::RestoreNormalizedSafeZoneSelection(
+    bool bHasSelection,
+    float U,
+    float V)
+{
+    SafeZoneMap::g_SelectedU.store(
+        SafeZoneMap::Clamp(U, 0.f, 1.f),
+        std::memory_order_relaxed);
+    SafeZoneMap::g_SelectedV.store(
+        SafeZoneMap::Clamp(V, 0.f, 1.f),
+        std::memory_order_relaxed);
+    SafeZoneMap::g_HasNormalizedSelection.store(
+        bHasSelection, std::memory_order_release);
 }
 
 void Hyperlink(const char* label, const char* url)
@@ -2911,18 +5090,169 @@ static void EndSectionBody()
     ImGui::Unindent(10.f);
 }
 
-static bool LabeledSliderInt(const char* Label, const char* Id, int* Value, int Min, int Max, float Width)
+static bool LabeledSliderInt(
+    const char* Label,
+    const char* Id,
+    int* Value,
+    int Min,
+    int Max,
+    float Width,
+    const char* Format = "%d")
 {
     ImGui::TextUnformatted(Label);
     ImGui::SetNextItemWidth(Width);
-    return ImGui::SliderInt(Id, Value, Min, Max);
+    return ImGui::SliderInt(
+        Id, Value, Min, Max, Format,
+        ImGuiSliderFlags_AlwaysClamp);
 }
 
 static bool LabeledSliderFloat(const char* Label, const char* Id, float* Value, float Min, float Max, const char* Format, float Width)
 {
     ImGui::TextUnformatted(Label);
     ImGui::SetNextItemWidth(Width);
-    return ImGui::SliderFloat(Id, Value, Min, Max, Format);
+    return ImGui::SliderFloat(
+        Id, Value, Min, Max, Format,
+        ImGuiSliderFlags_AlwaysClamp);
+}
+
+static bool AtomicCheckbox(
+    const char* Label,
+    std::atomic_bool& Setting)
+{
+    bool Value = Setting.load(std::memory_order_acquire);
+    const bool bChanged = ImGui::Checkbox(Label, &Value);
+    if (bChanged)
+    {
+        Setting.store(Value, std::memory_order_release);
+    }
+    return bChanged;
+}
+
+static void ApplyInitialTrickshotDefaults()
+{
+    // Seed the historical Trickshot preset only on its first activation.
+    // Later checkbox edits and hide/show cycles remain user-owned.
+    static bool bInitialized = false;
+    static unsigned int LastResetGeneration =
+        GPreferenceEditorGeneration;
+    if (LastResetGeneration != GPreferenceEditorGeneration)
+    {
+        bInitialized = false;
+        LastResetGeneration = GPreferenceEditorGeneration;
+    }
+    if (bInitialized)
+        return;
+
+    if (FConfiguration::bLateGame.load(
+        std::memory_order_acquire))
+    {
+        FConfiguration::RandomizeKills.store(
+            true, std::memory_order_release);
+    }
+
+    FConfiguration::RandomizeLevels.store(
+        true, std::memory_order_release);
+    FConfiguration::bDisableJumpFatigue.store(
+        true, std::memory_order_release);
+    FConfiguration::bAutoPauseTODM.store(
+        true, std::memory_order_release);
+
+    if (GUI::IsArenaPlaylist() ||
+        GUI::IsTournamentPlaylist())
+    {
+        FConfiguration::RandomizeArenaPoints.store(
+            true, std::memory_order_release);
+    }
+
+    bInitialized = true;
+}
+
+static bool TrickshotTabCheckbox(const char* Label)
+{
+    const bool bWasEnabled =
+        FConfiguration::bEnableTrickshotTab.load(
+            std::memory_order_acquire);
+    const bool bChanged = AtomicCheckbox(
+        Label, FConfiguration::bEnableTrickshotTab);
+    if (bChanged && !bWasEnabled &&
+        FConfiguration::bEnableTrickshotTab.load(
+            std::memory_order_acquire))
+    {
+        ApplyInitialTrickshotDefaults();
+    }
+    return bChanged;
+}
+
+static bool AtomicLabeledSliderInt(
+    const char* Label,
+    const char* Id,
+    std::atomic_int& Setting,
+    int Min,
+    int Max,
+    float Width,
+    const char* Format = "%d")
+{
+    int Value = Setting.load(std::memory_order_acquire);
+    const bool bChanged =
+        LabeledSliderInt(
+            Label, Id, &Value, Min, Max, Width,
+            Format);
+    if (bChanged)
+    {
+        Setting.store(Value, std::memory_order_release);
+    }
+    return bChanged;
+}
+
+static bool AtomicLabeledSliderFloat(
+    const char* Label,
+    const char* Id,
+    std::atomic<float>& Setting,
+    float Min,
+    float Max,
+    const char* Format,
+    float Width)
+{
+    float Value = Setting.load(std::memory_order_acquire);
+    const bool bChanged =
+        LabeledSliderFloat(
+            Label, Id, &Value, Min, Max, Format,
+            Width);
+    if (bChanged)
+    {
+        Setting.store(Value, std::memory_order_release);
+    }
+    return bChanged;
+}
+
+static bool AtomicInputInt(
+    const char* Label,
+    std::atomic_int& Setting)
+{
+    int Value = Setting.load(std::memory_order_acquire);
+    const bool bChanged = ImGui::InputInt(Label, &Value);
+    if (bChanged)
+    {
+        Setting.store(Value, std::memory_order_release);
+    }
+    return bChanged;
+}
+
+static bool AtomicCombo(
+    const char* Label,
+    std::atomic_int& Setting,
+    const char* const Items[],
+    int ItemCount)
+{
+    int Value = Setting.load(std::memory_order_acquire);
+    const bool bChanged =
+        ImGui::Combo(
+            Label, &Value, Items, ItemCount);
+    if (bChanged)
+    {
+        Setting.store(Value, std::memory_order_release);
+    }
+    return bChanged;
 }
 
 static std::string FormatDurationSeconds(double Seconds)
@@ -3014,6 +5344,28 @@ static const char* GetSelectedPlaylistModeName()
         return "The Getaway Duos";
     case (int)Playlist::GetawaySquads:
         return "The Getaway Squads";
+    case (int)Playlist::FoodFight:
+        return "Food Fight";
+    case (int)Playlist::DeepFriedSquads:
+        return "Food Fight: Deep Fried";
+    case (int)Playlist::ArsenalSolos:
+        return "Arsenal Solos";
+    case (int)Playlist::WicksBountySolo:
+        return "Wick's Bounty Solo";
+    case (int)Playlist::WicksBountyDuo:
+        return "Wick's Bounty Duo";
+    case (int)Playlist::WicksBountySquads:
+        return "Wick's Bounty Squads";
+    case (int)Playlist::BountySolo:
+        return "Bounty Solo";
+    case (int)Playlist::BountyDuo:
+        return "Bounty Duo";
+    case (int)Playlist::BountySquads:
+        return "Bounty Squads";
+    case (int)Playlist::AvengersEndgame:
+        return "Avengers: Endgame";
+    case (int)Playlist::DiscoDomination:
+        return "Disco Domination";
     case (int)Playlist::InfinityGauntletSolos:
         return "Infinity Gauntlet Solos";
     case (int)Playlist::ZBSolos:
@@ -3106,6 +5458,349 @@ static const char* GetSelectedPlaylistModeName()
         return "Custom";
     default:
         return "Unknown";
+    }
+}
+
+static bool IsNativeLTMSelection(int SelectedPlaylist)
+{
+    if (VersionInfo.FortniteVersion != 10.40)
+        return false;
+
+    switch (SelectedPlaylist)
+    {
+    case (int)Playlist::GetawaySolos:
+    case (int)Playlist::GetawayDuos:
+    case (int)Playlist::GetawaySquads:
+    case (int)Playlist::FoodFight:
+    case (int)Playlist::DeepFriedSquads:
+    case (int)Playlist::ArsenalSolos:
+    case (int)Playlist::WicksBountySolo:
+    case (int)Playlist::WicksBountyDuo:
+    case (int)Playlist::WicksBountySquads:
+    case (int)Playlist::BountySolo:
+    case (int)Playlist::BountyDuo:
+    case (int)Playlist::BountySquads:
+    case (int)Playlist::AvengersEndgame:
+    case (int)Playlist::DiscoDomination:
+        return true;
+    default:
+        return false;
+    }
+}
+
+struct FCustomMapLifecyclePresetState
+{
+    int SelectedPlaylist = -1;
+    bool bOwnsJoinInProgress = false;
+    bool bOriginalJoinInProgress = false;
+    bool bAppliedJoinInProgress = false;
+    bool bOwnsKeepInventory = false;
+    bool bOriginalKeepInventory = false;
+    bool bAppliedKeepInventory = false;
+    bool bOwnsForceRespawns = false;
+    bool bOriginalForceRespawns = false;
+    bool bAppliedForceRespawns = false;
+    bool bOwnsPermanentRespawn = false;
+    bool bOriginalPermanentRespawn = false;
+    bool bAppliedPermanentRespawn = false;
+    bool bOwnsCustomRespawnPoint = false;
+    bool bOriginalHasCustomRespawnPoint = false;
+    bool bAppliedHasCustomRespawnPoint = false;
+    FVector OriginalCustomRespawnPoint{};
+    FVector AppliedCustomRespawnPoint{};
+    bool bOwnsAutoBusStart = false;
+    bool bOriginalAutoBusStart = false;
+    bool bAppliedAutoBusStart = false;
+    bool bOwnsInfiniteAmmo = false;
+    bool bOriginalInfiniteAmmo = false;
+    bool bAppliedInfiniteAmmo = false;
+    bool bOwnsInfiniteMats = false;
+    bool bOriginalInfiniteMats = false;
+    bool bAppliedInfiniteMats = false;
+};
+
+static FCustomMapLifecyclePresetState
+    GCustomMapLifecyclePresetState{};
+static int GLastSelectedPlaylist = -1;
+
+void GUI::ResetPreferenceEditorState()
+{
+    GCustomMapLifecyclePresetState = {};
+    GLastSelectedPlaylist = SelectedPlaylist;
+    PublishSelectedPlaylist(SelectedPlaylist);
+    ++GPreferenceEditorGeneration;
+}
+
+static bool AreRespawnPointsEqual(
+    const FVector& Left,
+    const FVector& Right)
+{
+    return Left.X == Right.X &&
+        Left.Y == Right.Y &&
+        Left.Z == Right.Z;
+}
+
+static void RestoreOutgoingCustomMapLifecyclePreset(
+    int OutgoingPlaylist)
+{
+    auto& State = GCustomMapLifecyclePresetState;
+    if (State.SelectedPlaylist != OutgoingPlaylist)
+        return;
+
+    // Restore only fields that still contain the value applied by the
+    // outgoing preset. A setting changed after selecting that preset is a
+    // user choice and must survive the transition.
+    if (State.bOwnsJoinInProgress &&
+        FConfiguration::bJoinInProgress ==
+            State.bAppliedJoinInProgress)
+    {
+        FConfiguration::bJoinInProgress =
+            State.bOriginalJoinInProgress;
+    }
+    if (State.bOwnsKeepInventory &&
+        FConfiguration::bKeepInventory ==
+            State.bAppliedKeepInventory)
+    {
+        FConfiguration::bKeepInventory =
+            State.bOriginalKeepInventory;
+    }
+    if (State.bOwnsForceRespawns &&
+        FConfiguration::bForceRespawns ==
+            State.bAppliedForceRespawns)
+    {
+        FConfiguration::bForceRespawns =
+            State.bOriginalForceRespawns;
+    }
+    if (State.bOwnsPermanentRespawn &&
+        FConfiguration::PermanentRespawn ==
+            State.bAppliedPermanentRespawn)
+    {
+        FConfiguration::PermanentRespawn =
+            State.bOriginalPermanentRespawn;
+    }
+    if (State.bOwnsCustomRespawnPoint &&
+        FConfiguration::HasCustomRespawnPoint ==
+            State.bAppliedHasCustomRespawnPoint &&
+        AreRespawnPointsEqual(
+            FConfiguration::CustomRespawnPoint,
+            State.AppliedCustomRespawnPoint))
+    {
+        FConfiguration::HasCustomRespawnPoint =
+            State.bOriginalHasCustomRespawnPoint;
+        FConfiguration::CustomRespawnPoint =
+            State.OriginalCustomRespawnPoint;
+    }
+    if (State.bOwnsAutoBusStart &&
+        FConfiguration::bAutoBusStart.load(
+            std::memory_order_acquire) ==
+            State.bAppliedAutoBusStart)
+    {
+        FConfiguration::bAutoBusStart.store(
+            State.bOriginalAutoBusStart,
+            std::memory_order_release);
+    }
+    if (State.bOwnsInfiniteAmmo &&
+        FConfiguration::bInfiniteAmmo.load(
+            std::memory_order_acquire) ==
+            State.bAppliedInfiniteAmmo)
+    {
+        FConfiguration::bInfiniteAmmo.store(
+            State.bOriginalInfiniteAmmo,
+            std::memory_order_release);
+    }
+    if (State.bOwnsInfiniteMats &&
+        FConfiguration::bInfiniteMats.load(
+            std::memory_order_acquire) ==
+            State.bAppliedInfiniteMats)
+    {
+        FConfiguration::bInfiniteMats.store(
+            State.bOriginalInfiniteMats,
+            std::memory_order_release);
+    }
+
+    State = {};
+}
+
+static void SanitizeNativeLTMSelection(int SelectedPlaylist)
+{
+    // Publish the render-thread selection through an atomic handoff before
+    // the game thread evaluates early mode ownership or lifecycle policy.
+    GUI::PublishSelectedPlaylist(SelectedPlaylist);
+
+    // Apply the native-mode defaults only when the selected mode changes.
+    // This function is intentionally called from the render loop, so without
+    // this transition guard every checkbox click is overwritten next frame.
+    if (SelectedPlaylist == GLastSelectedPlaylist)
+        return;
+
+    // Auto Hosting restores the resolved playlist and the user's explicit
+    // overrides before the first GUI frame. Reapplying selection defaults here
+    // would silently replace that saved profile.
+    if (GLastSelectedPlaylist == -1 &&
+        AutoHosting::HasRestoredPreferences())
+    {
+        GLastSelectedPlaylist = SelectedPlaylist;
+        return;
+    }
+
+    RestoreOutgoingCustomMapLifecyclePreset(
+        GLastSelectedPlaylist);
+    GLastSelectedPlaylist = SelectedPlaylist;
+
+    if (IsNativeLTMSelection(SelectedPlaylist))
+    {
+        // These playlists provide their own phase flow, inventory, and
+        // objective mechanics. Clear only settings that would replace those
+        // foundations. Ordinary gameplay options remain user-owned and must
+        // survive both selecting an LTM and its subsequent native setup.
+        FConfiguration::SetLateGameEnabled(false);
+        FConfiguration::bIsCustomMap = false;
+        FConfiguration::bCustomSafeZone = false;
+        FConfiguration::HasCustomRespawnPoint = false;
+        if (SelectedPlaylist ==
+            static_cast<int>(
+                Playlist::AvengersEndgame))
+        {
+            // Endgame's Chitauri weapons and building resources are finite.
+            // Own these two selection defaults so the player can still turn
+            // either option back on after selecting the mode, and restore the
+            // prior values when they leave it.
+            auto& EndgamePreset =
+                GCustomMapLifecyclePresetState;
+            EndgamePreset.SelectedPlaylist =
+                SelectedPlaylist;
+            EndgamePreset.bOwnsInfiniteAmmo = true;
+            EndgamePreset.bOriginalInfiniteAmmo =
+                FConfiguration::bInfiniteAmmo.load(
+                    std::memory_order_acquire);
+            EndgamePreset.bAppliedInfiniteAmmo = false;
+            FConfiguration::bInfiniteAmmo.store(
+                false, std::memory_order_release);
+            EndgamePreset.bOwnsInfiniteMats = true;
+            EndgamePreset.bOriginalInfiniteMats =
+                FConfiguration::bInfiniteMats.load(
+                    std::memory_order_acquire);
+            EndgamePreset.bAppliedInfiniteMats = false;
+            FConfiguration::bInfiniteMats.store(
+                false, std::memory_order_release);
+        }
+        return;
+    }
+
+    auto& CustomPreset =
+        GCustomMapLifecyclePresetState;
+    CustomPreset.SelectedPlaylist =
+        SelectedPlaylist;
+
+    auto ApplyJoinInProgressPreset =
+        [&]()
+        {
+            CustomPreset.bOwnsJoinInProgress = true;
+            CustomPreset.bOriginalJoinInProgress =
+                FConfiguration::bJoinInProgress;
+            CustomPreset.bAppliedJoinInProgress = true;
+            FConfiguration::bJoinInProgress = true;
+        };
+
+    auto ApplyKeepInventoryPreset =
+        [&]()
+        {
+            CustomPreset.bOwnsKeepInventory = true;
+            CustomPreset.bOriginalKeepInventory =
+                FConfiguration::bKeepInventory;
+            CustomPreset.bAppliedKeepInventory = true;
+            FConfiguration::bKeepInventory = true;
+        };
+
+    auto ApplyAutoBusStartPreset =
+        [&](bool Value)
+        {
+            CustomPreset.bOwnsAutoBusStart = true;
+            CustomPreset.bOriginalAutoBusStart =
+                FConfiguration::bAutoBusStart.load(
+                    std::memory_order_acquire);
+            CustomPreset.bAppliedAutoBusStart = Value;
+            FConfiguration::bAutoBusStart.store(
+                Value, std::memory_order_release);
+        };
+
+    auto ApplyArenaMapDefaults =
+        [&](int SiphonAmount)
+        {
+            FConfiguration::bSiphon = true;
+            FConfiguration::SiphonAmount =
+                SiphonAmount;
+            FConfiguration::bInfiniteAmmo = true;
+            FConfiguration::bInfiniteMats = true;
+            ApplyJoinInProgressPreset();
+            ApplyKeepInventoryPreset();
+            FConfiguration::MaxTickRate = 60.f;
+        };
+
+    switch ((Playlist)SelectedPlaylist)
+    {
+    case Playlist::Gav:
+    case Playlist::Retrac1v1:
+    case Playlist::RetracTurtle:
+    case Playlist::RetracWater:
+    case Playlist::TiltedZW:
+    case Playlist::Twine1v1:
+        FConfiguration::SetLateGameEnabled(false);
+        ApplyArenaMapDefaults(200);
+        break;
+    case Playlist::OnlyUp:
+        FConfiguration::SetLateGameEnabled(false);
+        FConfiguration::bEnableCheats = false;
+        FConfiguration::bInfiniteAmmo = false;
+        FConfiguration::bInfiniteMats = false;
+        ApplyJoinInProgressPreset();
+        FConfiguration::MaxTickRate = 60.f;
+        break;
+    case Playlist::Boxfight:
+        FConfiguration::SetLateGameEnabled(false);
+        ApplyArenaMapDefaults(500);
+        ApplyAutoBusStartPreset(false);
+        break;
+    case Playlist::Backrooms:
+        FConfiguration::SetLateGameEnabled(false);
+        if (VersionInfo.FortniteVersion == 7.40)
+        {
+            ApplyJoinInProgressPreset();
+            CustomPreset.bOwnsForceRespawns = true;
+            CustomPreset.bOriginalForceRespawns =
+                FConfiguration::bForceRespawns;
+            CustomPreset.bAppliedForceRespawns = true;
+            FConfiguration::bForceRespawns = true;
+
+            CustomPreset.bOwnsPermanentRespawn = true;
+            CustomPreset.bOriginalPermanentRespawn =
+                FConfiguration::PermanentRespawn;
+            CustomPreset.bAppliedPermanentRespawn = true;
+            FConfiguration::PermanentRespawn = true;
+
+            CustomPreset.bOwnsCustomRespawnPoint = true;
+            CustomPreset.bOriginalHasCustomRespawnPoint =
+                FConfiguration::HasCustomRespawnPoint;
+            CustomPreset.OriginalCustomRespawnPoint =
+                FConfiguration::CustomRespawnPoint;
+            CustomPreset.bAppliedHasCustomRespawnPoint =
+                true;
+            CustomPreset.AppliedCustomRespawnPoint =
+                FVector(0.f, 0.f, 85.275009f);
+            FConfiguration::HasCustomRespawnPoint =
+                true;
+            FConfiguration::CustomRespawnPoint =
+                CustomPreset.AppliedCustomRespawnPoint;
+        }
+        break;
+    case Playlist::Playground:
+    case Playlist::Creative:
+    case Playlist::Event:
+        FConfiguration::SetLateGameEnabled(false);
+        break;
+    default:
+        CustomPreset = {};
+        break;
     }
 }
 
@@ -3561,7 +6256,8 @@ void GUI::Init()
 
     ImFontConfig FontConfig;
     FontConfig.FontDataOwnedByAtlas = false;
-    ImGui::GetIO().Fonts->AddFontFromMemoryTTF((void*)font, sizeof(font), 17.f, &FontConfig);
+    ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
+        (void*)font, sizeof(font), 17.f, &FontConfig);
 
     auto& mStyle = ImGui::GetStyle();
     mStyle.WindowRounding = 0.f;
@@ -3627,6 +6323,16 @@ void GUI::Init()
     bool done = false;
     bool g_SwapChainOccluded = false;
 
+    // Start a restored Auto Host countdown only after the launcher and its
+    // countdown control are ready to render. This keeps short delays visible
+    // instead of spending them during SDK diagnostics or window creation.
+    if (FConfiguration::bAutoHost.load(
+            std::memory_order_acquire) &&
+        AutoHosting::HasRestoredPreferences())
+    {
+        AutoHosting::ArmCountdown();
+    }
+
     while (!done)
     {
         MSG msg;
@@ -3641,6 +6347,17 @@ void GUI::Init()
 
         if (done)
             break;
+
+        // Keep the countdown independent of rendering. In particular, a
+        // minimized or occluded launcher must not pause Auto Hosting.
+        AutoHosting::TickCountdown();
+        AutoHosting::TickPostMatchShutdown();
+        const bool bAutoHostCountdownThisFrame =
+            AutoHosting::IsCountdownActive();
+        const int AutoHostCountdownSecondsThisFrame =
+            bAutoHostCountdownThisFrame
+                ? AutoHosting::GetRemainingSeconds()
+                : 0;
 
         if (g_SwapChainOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
         {
@@ -3664,6 +6381,15 @@ void GUI::Init()
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+
+        SanitizeNativeLTMSelection(SelectedPlaylist);
+
+        // Match the original one-shot UI behavior: once requested, keep the
+        // button hidden for the rest of this joinable phase. A later server
+        // lifecycle resets it automatically before the next joinable phase.
+        static bool bStartBusEarlyDismissed = false;
+        if (gsStatus != Joinable)
+            bStartBusEarlyDismissed = false;
 
         if (FConfiguration::bAutoStartEvent && !FConfiguration::bEventStarted && FConfiguration::EventStartBaseTime > 0.f)
         {
@@ -3743,12 +6469,16 @@ void GUI::Init()
             ImGui::PopStyleColor();
         }
 
-        // divider lines (drawn on top so child backgrounds don't cover them)
+        // Keep the top-bar rule in the Magnesium window layer. The old
+        // foreground draw-list placement rendered this chrome over modal
+        // windows, including the loadout picker.
         {
-            ImDrawList* fdl = ImGui::GetForegroundDrawList();
+            ImDrawList* fdl = ImGui::GetWindowDrawList();
             const ImU32 lineCol = IM_COL32(50, 52, 58, 255);
-            fdl->AddLine(ImVec2(wp.x, wp.y + TopBarH), ImVec2(wp.x + W, wp.y + TopBarH), lineCol, 1.f);
-            fdl->AddLine(ImVec2(wp.x + SidebarW, wp.y + TopBarH), ImVec2(wp.x + SidebarW, wp.y + H), lineCol, 1.f);
+            fdl->AddLine(
+                ImVec2(wp.x, wp.y + TopBarH - 1.f),
+                ImVec2(wp.x + W, wp.y + TopBarH - 1.f),
+                lineCol, 1.f);
         }
 
         // ---- Sidebar (#284a2c): vertical tabs replacing the old tab bar ----
@@ -3802,27 +6532,85 @@ void GUI::Init()
                 const float bMargin = 12.f;
                 const float bH = 40.f;
                 const float bW = SidebarW - bMargin * 2.f;
+                const bool bAutoHostCountdown =
+                    bAutoHostCountdownThisFrame;
                 // Anchor to the visible viewport height (the window is taller than the
                 // actual client area, so using H would push this off-screen).
                 const float visH = ImGui::GetIO().DisplaySize.y;
                 ImGui::SetCursorPos(ImVec2(bMargin, (visH - TopBarH) - bH - bMargin));
                 const ImVec2 bp = ImGui::GetCursorScreenPos();
-                if (ImGui::InvisibleButton("##startserver", ImVec2(bW, bH)))
-                    FConfiguration::bReadyToStart = true;
-                const bool bHov = ImGui::IsItemHovered();
-                const bool bAct = ImGui::IsItemActive();
+                if (bAutoHostCountdown)
+                {
+                    // The normal CTA becomes a display-only countdown while
+                    // Auto Hosting owns startup.
+                    ImGui::Dummy(ImVec2(bW, bH));
+                }
+                else if (ImGui::InvisibleButton(
+                             "##startserver",
+                             ImVec2(bW, bH)))
+                {
+                    AutoHosting::CancelCountdown();
+                    AutoHosting::SaveNow(true);
+                    FConfiguration::bReadyToStart.store(
+                        true, std::memory_order_release);
+                }
+                const bool bHov =
+                    !bAutoHostCountdown &&
+                    ImGui::IsItemHovered();
+                const bool bAct =
+                    !bAutoHostCountdown &&
+                    ImGui::IsItemActive();
                 ImDrawList* bdl = ImGui::GetWindowDrawList();
-                const ImVec4 fillC = bAct ? ImVec4(0.62f, 0.66f, 0.78f, 1.f)
-                                    : (bHov ? ImVec4(0.88f, 0.91f, 0.97f, 1.f) : Accent());
+                const ImVec4 fillC =
+                    bAutoHostCountdown
+                        ? ImVec4(0.28f, 0.31f, 0.38f, 1.f)
+                        : (bAct
+                               ? ImVec4(
+                                     0.62f, 0.66f,
+                                     0.78f, 1.f)
+                               : (bHov
+                                      ? ImVec4(
+                                            0.88f, 0.91f,
+                                            0.97f, 1.f)
+                                      : Accent()));
                 bdl->AddRectFilled(bp, ImVec2(bp.x + bW, bp.y + bH), ImGui::GetColorU32(fillC), 6.f);
 
+                char CountdownLabel[48]{};
                 const char* bLbl = "START SERVER";
+                if (bAutoHostCountdown)
+                {
+                    snprintf(
+                        CountdownLabel,
+                        sizeof(CountdownLabel),
+                        "STARTING IN %ds",
+                        AutoHostCountdownSecondsThisFrame);
+                    bLbl = CountdownLabel;
+                }
                 const ImVec2 bts = ImGui::CalcTextSize(bLbl);
                 const ImVec2 tpos(bp.x + (bW - bts.x) * 0.5f, bp.y + (bH - bts.y) * 0.5f);
-                const ImU32 tcol = IM_COL32(16, 18, 22, 255);
+                const ImU32 tcol =
+                    bAutoHostCountdown
+                        ? ImGui::GetColorU32(Accent())
+                        : IM_COL32(16, 18, 22, 255);
                 bdl->AddText(tpos, tcol, bLbl);
                 bdl->AddText(ImVec2(tpos.x + 1.f, tpos.y), tcol, bLbl); // faux-bold
             }
+        }
+        {
+            // Draw the sidebar edge in the sidebar's own draw list so it sits
+            // above sidebar contents but below later popup/modal windows.
+            const ImVec2 SidebarPos = ImGui::GetWindowPos();
+            const float SidebarWidth = ImGui::GetWindowWidth();
+            const float SidebarHeight = ImGui::GetWindowHeight();
+            ImGui::GetWindowDrawList()->AddLine(
+                ImVec2(
+                    SidebarPos.x + SidebarWidth - 1.f,
+                    SidebarPos.y),
+                ImVec2(
+                    SidebarPos.x + SidebarWidth - 1.f,
+                    SidebarPos.y + SidebarHeight),
+                IM_COL32(50, 52, 58, 255),
+                1.f);
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -3841,6 +6629,15 @@ void GUI::Init()
 
         static char commandBuffer[1024] = { 0 };
         static char playlistBuffer[1024] = { 0 };
+        static unsigned int PlaylistBufferResetGeneration =
+            GPreferenceEditorGeneration;
+        if (PlaylistBufferResetGeneration !=
+            GPreferenceEditorGeneration)
+        {
+            playlistBuffer[0] = '\0';
+            PlaylistBufferResetGeneration =
+                GPreferenceEditorGeneration;
+        }
         switch (SelectedUI)
         {
         case 0:
@@ -3892,8 +6689,13 @@ void GUI::Init()
                 ImGui::SameLine(0.0f, 0.0f);
                 ImGui::TextUnformatted(" (only works on the last player to join!)");
             }
-            ImGui::Text("- Server Port: %d", FConfiguration::Port);
-            ImGui::Text("- Server Tick Rate: %.1f", FConfiguration::MaxTickRate);
+            ImGui::Text(
+                "- Server Port: %d",
+                FConfiguration::Port.load(std::memory_order_relaxed));
+            ImGui::Text(
+                "- Server Tick Rate: %.0f",
+                FConfiguration::MaxTickRate.load(
+                    std::memory_order_relaxed));
 
             const ULONGLONG JoinableAtMs =
                 GServerJoinableAtMs.load(std::memory_order_acquire);
@@ -3993,141 +6795,110 @@ void GUI::Init()
 
             EndSectionBody();
 
-            bool bIsGavMap = (SelectedPlaylist == static_cast<int>(Playlist::Gav));
-            bool bIsEventPlaylist = (SelectedPlaylist == static_cast<int>(Playlist::Event));
-            bool bIsRetrac1v1 = (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1));
-            bool bIsRetracTurtle = (SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle));
-            bool bIsCreative = (SelectedPlaylist == static_cast<int>(Playlist::Creative));
             bool bIsOnlyUp = (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp));
-            bool bIsTiltedZW = (SelectedPlaylist == static_cast<int>(Playlist::TiltedZW));
-            bool bIsTwine = (SelectedPlaylist == static_cast<int>(Playlist::Twine1v1));
-            bool bIsBoxfight = (SelectedPlaylist == static_cast<int>(Playlist::Boxfight));
-            bool bIsBackrooms = (SelectedPlaylist == static_cast<int>(Playlist::Backrooms));
-            bool bShowsOnlyUpPreGameConfig = bIsOnlyUp && gsStatus < Joinable;
-            bool bShowsDefaultPreGameConfig = !bIsGavMap && !bIsEventPlaylist && !bIsRetrac1v1 && !bIsRetracTurtle && !bIsCreative && !bIsOnlyUp && !bIsTiltedZW && !bIsTwine && !bIsBoxfight && !bIsBackrooms;
-            const bool bEventStartsOnSpawnIsland =
-                VersionInfo.FortniteVersion <= 4.50 ||
-                VersionInfo.FortniteVersion == 6.21 ||
-                VersionInfo.FortniteVersion == 7.20 ||
-                VersionInfo.FortniteVersion == 7.30 ||
-                VersionInfo.FortniteVersion == 8.51 ||
-                VersionInfo.FortniteVersion == 9.40 ||
-                VersionInfo.FortniteVersion == 9.41 ||
-                VersionInfo.FortniteVersion == 10.40;
-            bool bShowsEventBusControl = bIsEventPlaylist && bEventStartsOnSpawnIsland && gsStatus == Joinable;
-            bool bShowsDefaultMatchSettings = bShowsDefaultPreGameConfig;
 
-            if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig || bShowsEventBusControl))
+            if (gsStatus <= Joinable &&
+                !(gsStatus == Joinable &&
+                    bStartBusEarlyDismissed))
             {
-                static bool bStartedBus = false;
-
-                if (!bStartedBus)
-                {
                     SectionHeader("Pre-Game Configuration", SectionWidth);
                     BeginSectionBody();
 
-                    if (bShowsOnlyUpPreGameConfig)
+                    if (gsStatus < Joinable)
                     {
-                        ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
-                        ImGui::Checkbox("Player Has Pickaxe", &FConfiguration::bHasPickaxe);
-                    }
-                    else if (bShowsDefaultPreGameConfig)
-                    {
-                        if (gsStatus <= Joinable)
+                        if (AtomicCheckbox(
+                                "Auto Bus Start",
+                                FConfiguration::bAutoBusStart))
                         {
-                            if (gsStatus < Joinable)
+                            FConfiguration::bBusSettingsUserOverride.store(
+                                true, std::memory_order_release);
+                        }
+
+                        static bool bInitializedZone = false;
+
+                        if (!bInitializedZone)
+                        {
+                            if (!AutoHosting::
+                                    HasRestoredPreferences())
                             {
-                                ImGui::Checkbox("Auto Bus Start", &FConfiguration::bAutoBusStart);
-
-                                static bool bInitializedZone = false;
-
-                                if (!bInitializedZone)
-                                {
-                                    FConfiguration::LateGameZone = FConfiguration::IsS27() ? 1 : 4;
-                                    bInitializedZone = true;
-                                }
-
-                                if (VersionInfo.FortniteVersion == 19.20)
-                                    FConfiguration::bAutoDump = false;
-
-                                ImGui::Checkbox("Auto Dump Text", &FConfiguration::bAutoDump);
-
-                                ImGui::Checkbox("Use Custom Map", &FConfiguration::bIsCustomMap);
-
-                                ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
-
-                                static bool bInitializedConfig = false;
-
-                                if (FConfiguration::bEnableTrickshotTab)
-                                {
-                                    if (!bInitializedConfig)
-                                    {
-                                        if (FConfiguration::bLateGame)
-                                            FConfiguration::RandomizeKills = true;
-
-                                        FConfiguration::RandomizeLevels = true;
-                                        FConfiguration::bDisableJumpFatigue = true;
-                                        FConfiguration::bAutoPauseTODM = true;
-
-                                        if (IsArenaPlaylist() || IsTournamentPlaylist())
-                                        {
-                                            FConfiguration::RandomizeArenaPoints = true;
-                                        }
-
-                                        bInitializedConfig = true;
-                                    }
-                                }
-
-                                if (FConfiguration::bAutoBusStart)
-                                {
-                                    LabeledSliderFloat("Bus Start Delay", "##bus-start-delay", &FConfiguration::BusStartDelay, 0.0f, 300.0f, "%.1f seconds", Width);
-                                }
-
-                                LabeledSliderFloat("Max Tick Rate", "##max-tick-rate", &FConfiguration::MaxTickRate, 5.0f, 180.0f, "%.1f seconds", Width);
+                                FConfiguration::LateGameZone =
+                                    FConfiguration::IsS27()
+                                        ? 1
+                                        : 4;
                             }
+                            bInitializedZone = true;
+                        }
 
+                        static bool bAutoDumpDefaultInitialized =
+                            false;
+                        if (!bAutoDumpDefaultInitialized)
+                        {
+                            if (!AutoHosting::
+                                    HasRestoredPreferences() &&
+                                VersionInfo.FortniteVersion == 19.20)
+                            {
+                                FConfiguration::bAutoDump = false;
+                            }
+                            bAutoDumpDefaultInitialized = true;
+                        }
+
+                        AtomicCheckbox(
+                            "Auto Dump Text",
+                            FConfiguration::bAutoDump);
+                        AtomicCheckbox(
+                            "Use Custom Map",
+                            FConfiguration::bIsCustomMap);
+
+                        if (!FConfiguration::bReadyToStart)
+                        {
+                            TrickshotTabCheckbox(
+                                "Enable Trickshot Tab");
+                        }
+
+                        if (FConfiguration::bAutoBusStart &&
+                            AtomicLabeledSliderFloat(
+                                "Bus Start Delay",
+                                "##bus-start-delay",
+                                FConfiguration::BusStartDelay,
+                                0.0f, 300.0f,
+                                "%.0f sec", Width))
+                        {
+                            FConfiguration::bBusSettingsUserOverride.store(
+                                true, std::memory_order_release);
+                        }
+
+                        AtomicLabeledSliderFloat(
+                            "Max Tick Rate",
+                            "##max-tick-rate",
+                            FConfiguration::MaxTickRate,
+                            5.0f, 180.0f,
+                            "%.0f sec", Width);
+
+                        if (bIsOnlyUp)
+                        {
+                            AtomicCheckbox(
+                                "Disable Jump Fatigue",
+                                FConfiguration::bDisableJumpFatigue);
+                            AtomicCheckbox(
+                                "Player Has Pickaxe",
+                                FConfiguration::bHasPickaxe);
                         }
                     }
 
-                    if (gsStatus == Joinable && (bShowsDefaultPreGameConfig || bShowsEventBusControl))
+                    if (gsStatus == Joinable &&
+                        !bStartBusEarlyDismissed)
                     {
                         ImGui::Spacing();
 
                         if (ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                         {
-                            auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-                            auto WarmupDuration = 10.f;
-
-                            auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                            auto GameState = GameMode->GameState;
-
-                            if (GameState->HasWarmupCountdownEndTime())
-                            {
-                                GameState->WarmupCountdownStartTime = Time;
-                                GameState->WarmupCountdownEndTime = Time + WarmupDuration;
-                                GameMode->WarmupCountdownDuration = WarmupDuration;
-                                GameMode->WarmupEarlyCountdownDuration = WarmupDuration;
-                            }
-
-                            if (VersionInfo.FortniteVersion > 25.20)
-                            {
-                                auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-
-                                if (GamePhaseLogic->HasWarmupCountdownEndTime())
-                                {
-                                    GamePhaseLogic->WarmupCountdownStartTime = Time;
-                                    GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
-                                    GamePhaseLogic->WarmupCountdownDuration = WarmupDuration;
-                                    GamePhaseLogic->WarmupEarlyCountdownDuration = WarmupDuration;
-                                }
-                            }
-
-                            bStartedBus = true;
+                            bStartBusEarlyDismissed = true;
+                            FConfiguration::bStartBusRequested.store(
+                                true, std::memory_order_release);
                         }
                     }
 
                     EndSectionBody();
-                }
             }
 
             if (gsStatus == StartedMatch)
@@ -4135,15 +6906,18 @@ void GUI::Init()
                 SectionHeader("Storm Control", SectionWidth);
                 BeginSectionBody();
 
-                if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused())
+                if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+                        GetSafeZonePausedSnapshot())
                 {
                     if (ImGui::Button("Pause Safe Zone", ImVec2(Width, Height)))
-                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(true);
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+                            RequestSafeZonePaused(true);
                 }
                 else
                 {
                     if (ImGui::Button("Resume Safe Zone", ImVec2(Width, Height)))
-                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(false);
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+                            RequestSafeZonePaused(false);
                 }
 
                 if (ImGui::Button("Skip Safe Zone", ImVec2(Width, Height)))
@@ -4258,111 +7032,76 @@ void GUI::Init()
                 }
             }
 
-            const bool bCanShowGliderRedeploy = bShowsDefaultMatchSettings && gsStatus >= Joinable && gsStatus < Ended && VersionInfo.FortniteVersion > 5.41 && VersionInfo.FortniteVersion <= 16.00;
-            const bool bCanShowRespawns = bShowsDefaultMatchSettings && ((VersionInfo.FortniteVersion >= 8.00 || gsStatus < Joinable) && VersionInfo.FortniteVersion > 2.50);
+            const bool bCanShowGliderRedeploy =
+                gsStatus >= Joinable &&
+                gsStatus < Ended &&
+                VersionInfo.FortniteVersion > 5.41 &&
+                VersionInfo.FortniteVersion <= 16.00;
+            const bool bPlaylistHidesRespawnSection =
+                SelectedPlaylist ==
+                    static_cast<int>(Playlist::FoodFight) ||
+                SelectedPlaylist ==
+                    static_cast<int>(Playlist::DeepFriedSquads) ||
+                SelectedPlaylist ==
+                    static_cast<int>(Playlist::ArsenalSolos);
+            const bool bCanShowRespawns =
+                !bPlaylistHidesRespawnSection &&
+                ((VersionInfo.FortniteVersion >= 8.00 ||
+                    gsStatus < Joinable) &&
+                    VersionInfo.FortniteVersion > 2.50);
 
             if (bCanShowRespawns)
             {
                 SectionHeader("Respawns", SectionWidth);
                 BeginSectionBody();
 
-                if (ImGui::Checkbox("Infinite Respawns", &FConfiguration::bForceRespawns))
+                // The render thread owns only the configuration value. The
+                // authoritative playlist/GameState policy is applied from the
+                // server tick so native LTM mutators cannot overwrite it after
+                // this click (and UObject state is never mutated from ImGui).
+                const bool bRespawnsWereEnabled =
+                    FConfiguration::bForceRespawns;
+                if (AtomicCheckbox(
+                        "Infinite Respawns",
+                        FConfiguration::bForceRespawns) &&
+                    bRespawnsWereEnabled &&
+                    !FConfiguration::bForceRespawns)
                 {
-                    if (gsStatus >= Joinable)
-                    {
-                        auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                        if (!RespawnPlaylist)
-                            RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                        if (RespawnPlaylist)
-                        {
-                            if (FConfiguration::bForceRespawns)
-                            {
-                                if (RespawnPlaylist->HasbRespawnInAir())
-                                    RespawnPlaylist->bRespawnInAir = true;
-                                if (RespawnPlaylist->HasRespawnHeight())
-                                {
-                                    RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
-                                    RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
-                                    RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
-                                }
-                                if (RespawnPlaylist->HasRespawnTime())
-                                {
-                                    RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
-                                    RespawnPlaylist->RespawnTime.Curve.RowName = FName();
-                                    RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
-                                }
-
-                                if (RespawnPlaylist->HasRespawnType())
-                                {
-                                    if (FConfiguration::PermanentRespawn)
-                                        RespawnPlaylist->RespawnType = 1;
-                                    else
-                                        RespawnPlaylist->RespawnType = 2;
-                                }
-                            }
-                            else
-                            {
-                                if (RespawnPlaylist->HasRespawnType())
-                                    RespawnPlaylist->RespawnType = 0;
-                            }
-                        }
-                    }
+                    // These controls are children of Infinite Respawns. Do
+                    // not leave an invisible stale child affecting later
+                    // permanent deaths after its parent is switched off.
+                    FConfiguration::PermanentRespawn =
+                        false;
+                    FConfiguration::bKeepInventory =
+                        false;
+                    FConfiguration::bMidZoneRespawning =
+                        false;
                 }
 
                 if (FConfiguration::bForceRespawns)
                 {
                     ImGui::Indent(12.f);
 
-                    if (ImGui::Checkbox("Storm Respawns", &FConfiguration::PermanentRespawn))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                            if (!RespawnPlaylist)
-                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+                    AtomicCheckbox(
+                        "Storm Respawns",
+                        FConfiguration::PermanentRespawn);
 
-                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnType())
-                                RespawnPlaylist->RespawnType = FConfiguration::PermanentRespawn ? 1 : 2;
-                        }
-                    }
+                    AtomicCheckbox(
+                        "Keep Inventory on Respawn",
+                        FConfiguration::bKeepInventory);
+                    AtomicCheckbox(
+                        "Midzone Respawns",
+                        FConfiguration::bMidZoneRespawning);
 
-                    ImGui::Checkbox("Keep Inventory on Respawn", &FConfiguration::bKeepInventory);
-                    ImGui::Checkbox("Midzone Respawns", &FConfiguration::bMidZoneRespawning);
+                    AtomicLabeledSliderInt(
+                        "Respawn Time", "##respawn-time",
+                        FConfiguration::RespawnTime,
+                        1, 10, Width);
 
-                    if (LabeledSliderInt("Respawn Time", "##respawn-time", &FConfiguration::RespawnTime, 1, 10, Width))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                            if (!RespawnPlaylist)
-                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnTime())
-                            {
-                                RespawnPlaylist->RespawnTime.Curve.CurveTable = nullptr;
-                                RespawnPlaylist->RespawnTime.Curve.RowName = FName();
-                                RespawnPlaylist->RespawnTime.Value = FConfiguration::RespawnTime;
-                            }
-                        }
-                    }
-
-                    if (LabeledSliderInt("Respawn Height", "##respawn-height", &FConfiguration::RespawnHeight, 1000, 50000, Width))
-                    {
-                        if (gsStatus >= Joinable)
-                        {
-                            auto RespawnPlaylist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
-                            if (!RespawnPlaylist)
-                                RespawnPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
-
-                            if (RespawnPlaylist && RespawnPlaylist->HasRespawnHeight())
-                            {
-                                RespawnPlaylist->RespawnHeight.Curve.CurveTable = nullptr;
-                                RespawnPlaylist->RespawnHeight.Curve.RowName = FName();
-                                RespawnPlaylist->RespawnHeight.Value = FConfiguration::RespawnHeight;
-                            }
-                        }
-                    }
+                    AtomicLabeledSliderInt(
+                        "Respawn Height", "##respawn-height",
+                        FConfiguration::RespawnHeight,
+                        1000, 50000, Width);
 
                     ImGui::Unindent(12.f);
                 }
@@ -4377,20 +7116,25 @@ void GUI::Init()
 
                 if (bCanShowGliderRedeploy)
                 {
-                    if (ImGui::Checkbox("Glider Redeploy", &FConfiguration::bGliderRedeploy))
-                    {
-                        auto GliderGameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-                        auto GliderGameState = GliderGameMode->GameState;
-                        if (GliderGameState->HasDefaultGliderRedeployCanRedeploy())
-                            GliderGameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
-                    }
+                    AtomicCheckbox(
+                        "Glider Redeploy",
+                        FConfiguration::bGliderRedeploy);
                 }
 
-                ImGui::Checkbox("Infinite Materials", &FConfiguration::bInfiniteMats);
-                ImGui::Checkbox("Infinite Ammo", &FConfiguration::bInfiniteAmmo);
-                ImGui::Checkbox("Toggle Cheat Commands", &FConfiguration::bEnableCheats);
-                ImGui::Checkbox("Enable Trickshot Tab", &FConfiguration::bEnableTrickshotTab);
-                ImGui::Checkbox("Siphon", &FConfiguration::bSiphon);
+                AtomicCheckbox(
+                    "Infinite Materials",
+                    FConfiguration::bInfiniteMats);
+                AtomicCheckbox(
+                    "Infinite Ammo",
+                    FConfiguration::bInfiniteAmmo);
+                AtomicCheckbox(
+                    "Toggle Cheat Commands",
+                    FConfiguration::bEnableCheats);
+                TrickshotTabCheckbox(
+                    "Show Trickshot Tab");
+                AtomicCheckbox(
+                    "Siphon",
+                    FConfiguration::bSiphon);
 
                 if (FConfiguration::bSiphon)
                 {
@@ -4398,7 +7142,9 @@ void GUI::Init()
 
                     ImGui::TextUnformatted("Siphon Amount");
                     ImGui::SetNextItemWidth(Width);
-                    ImGui::InputInt("##siphon-amount", &FConfiguration::SiphonAmount);
+                    AtomicInputInt(
+                        "##siphon-amount",
+                        FConfiguration::SiphonAmount);
 
                     std::vector<const char*> SiphonAnimations = { "Default" };
 
@@ -4431,7 +7177,11 @@ void GUI::Init()
 
                     ImGui::TextUnformatted("Siphon Animation");
                     ImGui::SetNextItemWidth(Width);
-                    ImGui::Combo("##siphon-animation", &FConfiguration::SiphonAnimType, SiphonAnimations.data(), (int)SiphonAnimations.size());
+                    AtomicCombo(
+                        "##siphon-animation",
+                        FConfiguration::SiphonAnimType,
+                        SiphonAnimations.data(),
+                        (int)SiphonAnimations.size());
 
                     ImGui::Unindent(12.f);
                 }
@@ -4453,6 +7203,127 @@ void GUI::Init()
                     auto wstr = std::wstring(str.begin(), str.end());
 
                     UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(wstr.c_str()), nullptr);
+                }
+
+                EndSectionBody();
+            }
+
+            if (!FConfiguration::bReadyToStart.load(
+                    std::memory_order_acquire))
+            {
+                SectionHeader("Auto Hosting", SectionWidth);
+                BeginSectionBody();
+
+                if (AtomicCheckbox(
+                        "Toggle Auto Host",
+                        FConfiguration::bAutoHost))
+                {
+                    const bool bAutoHostEnabled =
+                        FConfiguration::bAutoHost.load(
+                            std::memory_order_acquire);
+                    if (bAutoHostEnabled &&
+                        !FConfiguration::bReadyToStart.load(
+                            std::memory_order_acquire))
+                    {
+                        // Auto-hosted servers default cheat commands closed to
+                        // guests. The verified host override remains available,
+                        // and the user can explicitly opt back in afterward.
+                        FConfiguration::bEnableCheats.store(
+                            false, std::memory_order_release);
+                        AutoHosting::ArmCountdown();
+                        AutoHosting::SaveNow(true);
+                    }
+                    else
+                    {
+                        AutoHosting::CancelCountdown();
+                        AutoHosting::SaveNow(false);
+                    }
+                }
+
+                bool bCountdownActive =
+                    AutoHosting::IsCountdownActive();
+                if (bCountdownActive)
+                {
+                    int RemainingSeconds = (std::max)(
+                        1,
+                        (std::min)(
+                            bAutoHostCountdownThisFrame
+                                ? AutoHostCountdownSecondsThisFrame
+                                : AutoHosting::
+                                      GetRemainingSeconds(),
+                            60));
+                    ImGui::SetNextItemWidth(Width);
+                    const bool bDelayChanged =
+                        ImGui::SliderInt(
+                            "##auto-host-delay-countdown",
+                            &RemainingSeconds,
+                            1, 60,
+                            "%d sec",
+                            ImGuiSliderFlags_AlwaysClamp);
+                    if (bDelayChanged)
+                    {
+                        // Treat an edit as a new countdown duration. The display
+                        // continues ticking down, while the chosen value remains
+                        // the saved delay used on the next launcher start.
+                        FConfiguration::AutoHostDelaySeconds.store(
+                            RemainingSeconds,
+                            std::memory_order_release);
+                        AutoHosting::ArmCountdown();
+                    }
+                    if (ImGui::IsItemDeactivatedAfterEdit())
+                    {
+                        // Commit once the drag or text edit finishes instead of
+                        // performing synchronous disk writes on every mouse move.
+                        AutoHosting::SaveNow(false);
+                    }
+                }
+                else
+                {
+                    int DelaySeconds =
+                        FConfiguration::AutoHostDelaySeconds.load(
+                            std::memory_order_acquire);
+                    ImGui::SetNextItemWidth(Width);
+                    if (ImGui::SliderInt(
+                            "##auto-host-delay",
+                            &DelaySeconds,
+                            1, 60,
+                            "%d sec",
+                            ImGuiSliderFlags_AlwaysClamp))
+                    {
+                        FConfiguration::AutoHostDelaySeconds.store(
+                            DelaySeconds,
+                            std::memory_order_release);
+                        if (FConfiguration::bAutoHost.load(
+                                std::memory_order_acquire) &&
+                            !FConfiguration::bReadyToStart.load(
+                                std::memory_order_acquire))
+                        {
+                            // Restart from the newly selected duration so the
+                            // visible countdown never jumps to an unexpected start.
+                            AutoHosting::ArmCountdown();
+                        }
+                        AutoHosting::SaveNow(false);
+                    }
+                }
+
+                if (ImGui::Button(
+                        "Reset Preferences",
+                        ImVec2(Width, Height)))
+                {
+                    AutoHosting::ResetPreferences();
+                    bCountdownActive = false;
+                }
+
+                if (bCountdownActive)
+                {
+                    ImGui::TextDisabled(
+                        "Adjust the timer, or disable Auto Host to cancel.");
+                }
+                else if (FConfiguration::bAutoHost.load(
+                             std::memory_order_acquire))
+                {
+                    ImGui::TextDisabled(
+                        "Saved for the next launcher start.");
                 }
 
                 EndSectionBody();
@@ -4511,33 +7382,10 @@ void GUI::Init()
             ImGui::RadioButton("Squads", &SelectedPlaylist, (int)Playlist::Squads);
 
             const bool bGetawayAvailable =
+                VersionInfo.FortniteVersion == 10.40 ||
                 FFortAthenaHeistCompatibility::IsSupportedBuild();
-            if (bGetawayAvailable &&
-                ImGui::RadioButton(
-                    "The Getaway Solos",
-                    &SelectedPlaylist,
-                    (int)Playlist::GetawaySolos))
-            {
-                FConfiguration::SetLateGameEnabled(false);
-            }
-
-            if (bGetawayAvailable &&
-                ImGui::RadioButton(
-                    "The Getaway Duos",
-                    &SelectedPlaylist,
-                    (int)Playlist::GetawayDuos))
-            {
-                FConfiguration::SetLateGameEnabled(false);
-            }
-
-            if (bGetawayAvailable &&
-                ImGui::RadioButton(
-                    "The Getaway Squads",
-                    &SelectedPlaylist,
-                    (int)Playlist::GetawaySquads))
-            {
-                FConfiguration::SetLateGameEnabled(false);
-            }
+            const bool bNative1040LTMsAvailable =
+                VersionInfo.FortniteVersion == 10.40;
 
             const bool bInfinityGauntletAvailable =
                 VersionInfo.FortniteVersion == 4.20;
@@ -4587,6 +7435,37 @@ void GUI::Init()
                 ImGui::RadioButton("One Shot Solos", &SelectedPlaylist, (int)Playlist::OneShotSolos);
                 ImGui::RadioButton("One Shot Duos", &SelectedPlaylist, (int)Playlist::OneShotDuos);
                 ImGui::RadioButton("One Shot Squads", &SelectedPlaylist, (int)Playlist::OneShotSquads);
+            }
+
+            if (bGetawayAvailable &&
+                ImGui::RadioButton(
+                    "The Getaway Solos",
+                    &SelectedPlaylist,
+                    (int)Playlist::GetawaySolos))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bGetawayAvailable &&
+                ImGui::RadioButton(
+                    "The Getaway Duos",
+                    &SelectedPlaylist,
+                    (int)Playlist::GetawayDuos))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bGetawayAvailable &&
+                ImGui::RadioButton(
+                    "The Getaway Squads",
+                    &SelectedPlaylist,
+                    (int)Playlist::GetawaySquads))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (VersionInfo.FortniteVersion >= 7.10)
+            {
                 ImGui::RadioButton("Siphon Solos", &SelectedPlaylist, (int)Playlist::SiphonSolos);
                 ImGui::RadioButton("Siphon Duos", &SelectedPlaylist, (int)Playlist::SiphonDuos);
                 ImGui::RadioButton("Siphon Squads", &SelectedPlaylist, (int)Playlist::SiphonSquads);
@@ -4603,6 +7482,105 @@ void GUI::Init()
                 ImGui::RadioButton("Floor Is Lava Solos", &SelectedPlaylist, (int)Playlist::FILSolos);
                 ImGui::RadioButton("Floor Is Lava Duos", &SelectedPlaylist, (int)Playlist::FILDuos);
                 ImGui::RadioButton("Floor Is Lava Squads", &SelectedPlaylist, (int)Playlist::FILSquads);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Food Fight: Deep Fried",
+                    &SelectedPlaylist,
+                    (int)Playlist::DeepFriedSquads))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Food Fight",
+                    &SelectedPlaylist,
+                    (int)Playlist::FoodFight))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Arsenal Solos",
+                    &SelectedPlaylist,
+                    (int)Playlist::ArsenalSolos))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Wick's Bounty Solo",
+                    &SelectedPlaylist,
+                    (int)Playlist::WicksBountySolo))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Wick's Bounty Duo",
+                    &SelectedPlaylist,
+                    (int)Playlist::WicksBountyDuo))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Wick's Bounty Squads",
+                    &SelectedPlaylist,
+                    (int)Playlist::WicksBountySquads))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Bounty Solo",
+                    &SelectedPlaylist,
+                    (int)Playlist::BountySolo))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Bounty Duo",
+                    &SelectedPlaylist,
+                    (int)Playlist::BountyDuo))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Bounty Squads",
+                    &SelectedPlaylist,
+                    (int)Playlist::BountySquads))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Avengers: Endgame",
+                    &SelectedPlaylist,
+                    (int)Playlist::AvengersEndgame))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bNative1040LTMsAvailable &&
+                ImGui::RadioButton(
+                    "Disco Domination",
+                    &SelectedPlaylist,
+                    (int)Playlist::DiscoDomination))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
             if (VersionInfo.FortniteVersion >= 4.5 && VersionInfo.FortniteVersion < 11.31)
@@ -4626,6 +7604,12 @@ void GUI::Init()
             ImGui::RadioButton("Custom", &SelectedPlaylist, (int)Playlist::Custom);
 
             EndSectionBody();
+
+            // Handle every radio-button transition in the frame it occurs.
+            // This is especially important when leaving a custom-map preset:
+            // its hidden respawn values must be restored before Start Server
+            // can consume the newly selected ordinary playlist.
+            SanitizeNativeLTMSelection(SelectedPlaylist);
 
             switch (SelectedPlaylist)
             {
@@ -4691,6 +7675,214 @@ void GUI::Init()
                     SelectedPlaylist = (int)Playlist::Squads;
                     FConfiguration::Playlist =
                         L"/Game/Athena/Playlists/Playlist_DefaultSquad.Playlist_DefaultSquad";
+                }
+                break;
+            }
+            case (int)Playlist::FoodFight:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Barrier/"
+                        L"Playlist_Barrier.Playlist_Barrier";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSquad."
+                        L"Playlist_DefaultSquad";
+                }
+                break;
+            }
+            case (int)Playlist::DeepFriedSquads:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Barrier/Playlist_Barrier_16_B_Lava.Playlist_Barrier_16_B_Lava";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Playlist_DefaultSquad.Playlist_DefaultSquad";
+                }
+                break;
+            }
+            case (int)Playlist::ArsenalSolos:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/gg/Playlist_Gg_Reverse.Playlist_Gg_Reverse";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Solos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
+                }
+                break;
+            }
+            case (int)Playlist::WicksBountySolo:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Wax/"
+                        L"Playlist_Wax_Solo.Playlist_Wax_Solo";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Solos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSolo."
+                        L"Playlist_DefaultSolo";
+                }
+                break;
+            }
+            case (int)Playlist::WicksBountyDuo:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Wax/"
+                        L"Playlist_Wax_Duos."
+                        L"Playlist_Wax_Duos";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Duos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultDuo."
+                        L"Playlist_DefaultDuo";
+                }
+                break;
+            }
+            case (int)Playlist::WicksBountySquads:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Wax/"
+                        L"Playlist_Wax_Squads."
+                        L"Playlist_Wax_Squads";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSquad."
+                        L"Playlist_DefaultSquad";
+                }
+                break;
+            }
+            case (int)Playlist::BountySolo:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Wax/"
+                        L"Playlist_Bounty_Solo."
+                        L"Playlist_Bounty_Solo";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Solos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSolo."
+                        L"Playlist_DefaultSolo";
+                }
+                break;
+            }
+            case (int)Playlist::BountyDuo:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Wax/"
+                        L"Playlist_Bounty_Duos."
+                        L"Playlist_Bounty_Duos";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Duos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultDuo."
+                        L"Playlist_DefaultDuo";
+                }
+                break;
+            }
+            case (int)Playlist::BountySquads:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Wax/"
+                        L"Playlist_Bounty_Squads."
+                        L"Playlist_Bounty_Squads";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSquad."
+                        L"Playlist_DefaultSquad";
+                }
+                break;
+            }
+            case (int)Playlist::AvengersEndgame:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Ashton/"
+                        L"Playlist_Ashton_Lg.Playlist_Ashton_Lg";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSquad."
+                        L"Playlist_DefaultSquad";
+                }
+                break;
+            }
+            case (int)Playlist::DiscoDomination:
+            {
+                if (bNative1040LTMsAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/50v50/Disco/"
+                        L"Playlist_Disco_32.Playlist_Disco_32";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSquad."
+                        L"Playlist_DefaultSquad";
                 }
                 break;
             }
@@ -4876,67 +8068,56 @@ void GUI::Init()
             case (int)Playlist::Playground:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Playground/Playlist_Playground.Playlist_Playground";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Creative:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Gav:
             {
                 FConfiguration::Playlist = L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Retrac1v1:
             {
 				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::RetracTurtle:
             {
 				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_Turtle.Playlist_Retrac_Turtle";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::RetracWater:
             {
 				FConfiguration::Playlist = L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::TiltedZW:
             {
                 FConfiguration::Playlist = L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::OnlyUp:
             {
                 FConfiguration::Playlist = L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::Twine1v1:
             {
                 FConfiguration::Playlist = L"/Buddy/Playlists/Playlist_1v1Twine.Playlist_1v1Twine";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::Boxfight:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
 			}
             case (int)Playlist::Backrooms:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
-                FConfiguration::SetLateGameEnabled(false);
                 break;
             }
             case (int)Playlist::Event:
@@ -4948,7 +8129,6 @@ void GUI::Init()
                         if (Event.PlaylistPath != nullptr)
                             FConfiguration::Playlist = Event.PlaylistPath;
 
-                        FConfiguration::SetLateGameEnabled(false);
                         break;
                     }
                 }
@@ -4963,6 +8143,12 @@ void GUI::Init()
                 break;
             }
             }
+
+            // The mapping switch can fall back to a normal playlist when a
+            // selected mode is unavailable on this version. Publish that
+            // corrected value in the same frame.
+            GUI::PublishSelectedPlaylist(
+                SelectedPlaylist);
 
             if (SelectedPlaylist == (int)Playlist::Custom)
             {
@@ -4989,11 +8175,18 @@ void GUI::Init()
                 SectionHeader("Event Settings", SectionWidth);
                 BeginSectionBody();
 
-                ImGui::Checkbox("Auto Start Event", &FConfiguration::bAutoStartEvent);
+                AtomicCheckbox(
+                    "Auto Start Event",
+                    FConfiguration::bAutoStartEvent);
 
                 if (FConfiguration::bAutoStartEvent)
                 {
-                    LabeledSliderFloat("Event Start Time", "##event-start-time", &FConfiguration::EventStartTime, 30.0f, 300.0f, "%.1f seconds", Width);
+                    AtomicLabeledSliderFloat(
+                        "Event Start Time",
+                        "##event-start-time",
+                        FConfiguration::EventStartTime,
+                        30.0f, 300.0f,
+                        "%.1f seconds", Width);
                 }
 
                 EndSectionBody();
@@ -5010,6 +8203,22 @@ void GUI::Init()
 
             static int InspectedPlayerIdx = -1;
             static bool bIsInspecting = false;
+			static AFortPlayerControllerAthena*
+				InspectedPlayerController = nullptr;
+			static UNetConnection*
+				InspectedPlayerConnection = nullptr;
+			static uint64_t InspectedControllerIdentity = 0;
+			static uint64_t InspectedConnectionIdentity = 0;
+
+			const auto ClearInspectedPlayer = [&]()
+			{
+				InspectedPlayerIdx = -1;
+				bIsInspecting = false;
+				InspectedPlayerController = nullptr;
+				InspectedPlayerConnection = nullptr;
+				InspectedControllerIdentity = 0;
+				InspectedConnectionIdentity = 0;
+			};
 
             UObject* NetDriver = World->NetDriver;
 
@@ -5051,33 +8260,36 @@ void GUI::Init()
                     auto Connection = CurrentPair.second;
 
                     std::string ButtonLabel = GUI::GetPlayerName(CurrentPlayerState, Connection);
-                    auto RequestURL = GUI::GetRequestURL(Connection);
-
-                    if (RequestURL && RequestURL->Data && RequestURL->NumElements)
-                    {
-                        auto RequestURLStr = RequestURL->ToString();
-                        std::size_t pos = RequestURLStr.find("Name=");
-
-                        if (pos != std::string::npos)
-                        {
-                            std::size_t end_pos = RequestURLStr.find('?', pos);
-                            if (end_pos != std::string::npos)
-                                ButtonLabel = RequestURLStr.substr(pos + 5, end_pos - pos - 5);
-                            else
-                                ButtonLabel = RequestURLStr.substr(pos + 5);
-                        }
-                    }
-
-                    if (ButtonLabel.empty())
-                        ButtonLabel = GUI::GetPlayerNameFromConnection(Connection);
 
                     if (ButtonLabel.empty())
                         ButtonLabel = std::string("Player ") + std::to_string(i + 1);
 
-                    if (ImGui::Button(ButtonLabel.c_str(), ImVec2(Width, Height)))
+                    // Names are display text, not stable widget identifiers;
+                    // two players may legitimately share one.  Key the row to
+                    // its connection so each button remains independently usable.
+                    ImGui::PushID(Connection);
+                    const bool InspectClicked = ImGui::Button(
+                        ButtonLabel.c_str(), ImVec2(Width, Height));
+                    ImGui::PopID();
+                    if (InspectClicked)
                     {
-                        InspectedPlayerIdx = i;
-                        bIsInspecting = true;
+						const uint64_t ControllerIdentity =
+							GetGuiObjectIdentityGuarded(
+								CurrentPair.first);
+						const uint64_t ConnectionIdentity =
+							GetGuiObjectIdentityGuarded(Connection);
+						if (ControllerIdentity && ConnectionIdentity)
+						{
+							InspectedPlayerIdx = i;
+							bIsInspecting = true;
+							InspectedPlayerController =
+								CurrentPair.first;
+							InspectedPlayerConnection = Connection;
+							InspectedControllerIdentity =
+								ControllerIdentity;
+							InspectedConnectionIdentity =
+								ConnectionIdentity;
+						}
                     }
                 }
 
@@ -5085,25 +8297,71 @@ void GUI::Init()
             }
             else
             {
-                if (InspectedPlayerIdx >= AllControllers.size())
+				// Connections can reorder or disappear between frames.  Re-find the
+				// exact UObject generations selected by the user; never let a stale
+				// numeric row silently retarget actions to another player.
+				InspectedPlayerIdx = -1;
+				for (int i = 0;
+					 i < static_cast<int>(AllControllers.size());
+					 ++i)
+				{
+					const auto& Pair = AllControllers[i];
+					if (Pair.first != InspectedPlayerController ||
+						Pair.second != InspectedPlayerConnection)
+					{
+						continue;
+					}
+					if (GetGuiObjectIdentityGuarded(Pair.first) ==
+							InspectedControllerIdentity &&
+						GetGuiObjectIdentityGuarded(Pair.second) ==
+							InspectedConnectionIdentity)
+					{
+						InspectedPlayerIdx = i;
+					}
+					break;
+				}
+				if (InspectedPlayerIdx < 0)
                 {
-                    bIsInspecting = false;
+					ClearInspectedPlayer();
                     break;
                 }
 
                 auto TargetPC = AllControllers[InspectedPlayerIdx].first;
-                auto TargetPS = TargetPC->PlayerState;
-                auto TargetPawn = (AFortPlayerPawnAthena*)TargetPC->Pawn;
-
-                if (!TargetPC || !TargetPawn || !TargetPS)
+                if (!TargetPC)
                 {
-                    bIsInspecting = false;
+					ClearInspectedPlayer();
                     break;
-				}
+                }
+
+                auto TargetPS = TargetPC->PlayerState;
+                AFortPlayerPawnAthena* TargetPawn = nullptr;
+                auto PlayerPawnClass =
+                    AFortPlayerPawnAthena::StaticClass();
+                if (PlayerPawnClass &&
+                    TargetPC->HasMyFortPawn() &&
+                    TargetPC->MyFortPawn &&
+                    TargetPC->MyFortPawn->IsA(
+                        PlayerPawnClass))
+                {
+                    TargetPawn = TargetPC->MyFortPawn;
+                }
+                else if (PlayerPawnClass &&
+                    TargetPC->HasPawn() &&
+                    TargetPC->Pawn &&
+                    TargetPC->Pawn->IsA(PlayerPawnClass))
+                {
+                    TargetPawn = TargetPC->Pawn;
+                }
+
+                if (!TargetPawn || !TargetPS)
+                {
+					ClearInspectedPlayer();
+                    break;
+                }
 
                 if (ImGui::Button("Back", ImVec2(Width, Height)))
                 {
-                    bIsInspecting = false;
+					ClearInspectedPlayer();
                     break;
                 }
 
@@ -5126,14 +8384,54 @@ void GUI::Init()
 
                 //ImGui::Text("Ping: %f ms", TargetPS->GetPingInMilliseconds()); // ig it js doesn't exist on some versions
 
-                ImGui::Text("Kills: %d", TargetPS->HasKillScore() ? TargetPS->KillScore : TargetPS->Kills);
+                FPlayerCombatStats PlayerStats{};
+                const bool HasPlayerStats =
+                    TryCopyCachedPlayerCombatStats(
+                        TargetPC,
+                        (AFortPlayerStateAthena*)TargetPS,
+                        TargetPawn,
+                        PlayerStats);
+
+                if (HasPlayerStats)
+                    ImGui::Text("Kills: %d", PlayerStats.Kills);
+                else
+                    ImGui::TextUnformatted("Kills: --");
 
                 ImGui::TextUnformatted("Health: ");
                 ImGui::SameLine(0.0f, 0.0f);
-                ImGui::TextColored(ImVec4(0.372f, 0.792f, 0.255f, 1.0f), "%.0f", TargetPawn->GetHealth());
+                if (HasPlayerStats)
+                {
+                    ImGui::TextColored(
+                        ImVec4(0.372f, 0.792f, 0.255f, 1.0f),
+                        "%.0f", PlayerStats.Health);
+                }
+                else
+                {
+                    ImGui::TextUnformatted("--");
+                }
+
                 ImGui::TextUnformatted("Shield: ");
                 ImGui::SameLine(0.0f, 0.0f);
-                ImGui::TextColored(ImVec4(0.278f, 0.612f, 0.945f, 1.0f), "%.0f", TargetPawn->GetShield());
+                if (HasPlayerStats)
+                {
+                    ImGui::TextColored(
+                        ImVec4(0.278f, 0.612f, 0.945f, 1.0f),
+                        "%.0f", PlayerStats.Shield);
+                }
+                else
+                {
+                    ImGui::TextUnformatted("--");
+                }
+
+                EndSectionBody();
+
+                SectionHeader("Player Loadout", SectionWidth);
+                BeginSectionBody();
+
+                PlayerLoadout::Render(
+                    TargetPC,
+                    SectionWidth - 20.f,
+                    g_pd3dDevice);
 
                 EndSectionBody();
 
@@ -5180,87 +8478,109 @@ void GUI::Init()
                     Actor->K2_DestroyActor();
 				}
 
-                auto& Health = TargetPC->MyFortPawn->HealthSet->Health;
-                float MinValue = 100.f;
-
-                bool bIsGodded = false;
-
-                if (VersionInfo.FortniteVersion >= 21)
-                {
-                    if (TargetPC->Pawn)
-                        bIsGodded = (TargetPC->Pawn->bCanBeDamaged == false);
-                }
-                else
-                {
-                    bIsGodded = (Health.Minimum == MinValue);
-                }
+                UFortHealthSet* GodHealthSet =
+                    TargetPawn->HasHealthSet()
+                        ? TargetPawn->HealthSet
+                        : nullptr;
+                FFortGameplayAttributeData* GodHealth =
+                    GodHealthSet &&
+                    GodHealthSet->HasHealth() &&
+                    FFortGameplayAttributeData::StaticStruct() &&
+                    FFortGameplayAttributeData::HasMinimum()
+                        ? &GodHealthSet->Health
+                        : nullptr;
+                const bool bIsMinimumGodded =
+                    AFortPlayerPawnAthena::
+                        HasMinimumHealthGodMode(TargetPC);
+                const bool bIsGodded =
+                    bIsMinimumGodded ||
+                    AFortPlayerPawnAthena::
+                        HasFullHealthGodMode(TargetPawn);
 
                 if (bIsGodded)
                 {
                     if (ImGui::Button("Ungod Player", ImVec2(Width, Height)))
                     {
-                        if (VersionInfo.FortniteVersion >= 21)
+                        if (bIsMinimumGodded)
                         {
-                            TargetPC->Pawn->bCanBeDamaged = true;
+                            AFortPlayerPawnAthena::
+                                SetMinimumHealthGodMode(
+                                    TargetPC, false);
                         }
                         else
                         {
-                            Health.Minimum = 0.f;
-                            TargetPC->MyFortPawn->HealthSet->OnRep_Health(Health);
+                            if (TargetPawn->HasbCanBeDamaged())
+                                TargetPawn->bCanBeDamaged = true;
+                            if (GodHealth)
+                                GodHealth->Minimum = 0.f;
                         }
+                        TargetPawn->ForceNetUpdate();
                     }
                 }
                 else
                 {
                     if (ImGui::Button("God Player", ImVec2(Width, Height)))
                     {
-                        if (VersionInfo.FortniteVersion >= 21)
-                        {
-                            TargetPC->Pawn->bCanBeDamaged = false;
+                        AFortPlayerPawnAthena::
+                            SetMinimumHealthGodMode(
+                                TargetPC, false);
 
+                        bool bAppliedGod = false;
+                        if (VersionInfo.FortniteVersion >= 21 &&
+                            TargetPawn->HasbCanBeDamaged())
+                        {
+                            TargetPawn->bCanBeDamaged = false;
+                            bAppliedGod = true;
+                        }
+                        else if (GodHealth)
+                        {
+                            GodHealth->Minimum =
+                                TargetPawn->GetMaxHealth();
+                            bAppliedGod = true;
+                        }
+                        else if (TargetPawn->HasbCanBeDamaged())
+                        {
+                            TargetPawn->bCanBeDamaged = false;
+                            bAppliedGod = true;
+                        }
+
+                        if (bAppliedGod)
+                        {
                             float MaxHealth = TargetPawn->GetMaxHealth();
                             float MaxShield = TargetPawn->GetMaxShield();
 
                             TargetPawn->SetHealth(MaxHealth);
                             TargetPawn->SetShield(MaxShield);
+                            TargetPawn->ForceNetUpdate();
 
-                            auto Handle = TargetPS->AbilitySystemComponent->MakeEffectContext();
-                            FGameplayTag Tag;
-                            static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
-                            Tag.TagName = Cue;
-                            auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-                            memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-                            TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-                            TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-                            free(PredictionKey);
-                        }
-                        else
-                        {
-                            if (Health.Minimum != MinValue)
+                            if (TargetPS &&
+                                TargetPS->HasAbilitySystemComponent() &&
+                                TargetPS->AbilitySystemComponent)
                             {
-                                Health.Minimum = MinValue;
-                                TargetPC->MyFortPawn->HealthSet->OnRep_Health(Health);
-
-                                float MaxHealth = TargetPawn->GetMaxHealth();
-                                float MaxShield = TargetPawn->GetMaxShield();
-
-                                TargetPawn->SetHealth(MaxHealth);
-                                TargetPawn->SetShield(MaxShield);
-
-                                auto Handle = TargetPS->AbilitySystemComponent->MakeEffectContext();
-                                FGameplayTag Tag;
-                                static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+                                auto AbilitySystem =
+                                    TargetPS->AbilitySystemComponent;
+                                auto Handle =
+                                    AbilitySystem->MakeEffectContext();
+                                FGameplayTag Tag{};
+                                static auto Cue = FName(
+                                    L"GameplayCue.Shield.PotionConsumed");
                                 Tag.TagName = Cue;
-                                auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-                                memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-                                TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-                                TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-                                free(PredictionKey);
-                            }
-                            else
-                            {
-                                Health.Minimum = 0.f;
-                                TargetPC->MyFortPawn->HealthSet->OnRep_Health(Health);
+                                auto PredictionKey =
+                                    (FPredictionKey*)malloc(
+                                        FPredictionKey::Size());
+                                if (PredictionKey)
+                                {
+                                    memset(
+                                        (PBYTE)PredictionKey, 0,
+                                        FPredictionKey::Size());
+                                    AbilitySystem
+                                        ->NetMulticast_InvokeGameplayCueAdded(
+                                            Tag, *PredictionKey, Handle);
+                                    AbilitySystem
+                                        ->NetMulticast_InvokeGameplayCueExecuted(
+                                            Tag, *PredictionKey, Handle);
+                                    free(PredictionKey);
+                                }
                             }
                         }
                     }
@@ -5381,28 +8701,10 @@ void GUI::Init()
 
             if (gsStatus < StartedMatch)
             {
-                bool bIsCustomMap = SelectedPlaylist == static_cast<int>(Playlist::Gav)
-                    || SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1)
-                    || SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle)
-                    || SelectedPlaylist == static_cast<int>(Playlist::RetracWater)
-                    || SelectedPlaylist == static_cast<int>(Playlist::TiltedZW)
-                    || SelectedPlaylist == static_cast<int>(Playlist::OnlyUp)
-                    || SelectedPlaylist == static_cast<int>(Playlist::Twine1v1)
-                    || SelectedPlaylist == static_cast<int>(Playlist::Boxfight)
-                    || SelectedPlaylist == static_cast<int>(Playlist::Backrooms)
-                    || SelectedPlaylist == static_cast<int>(Playlist::Event);
-
-                const bool bRequiresNormalPhases =
-                    SelectedPlaylist == static_cast<int>(Playlist::GetawaySolos)
-                    || SelectedPlaylist == static_cast<int>(Playlist::GetawayDuos)
-                    || SelectedPlaylist == static_cast<int>(Playlist::GetawaySquads)
-                    || SelectedPlaylist == static_cast<int>(Playlist::InfinityGauntletSolos);
-
-                // Lategame skips phases required by PlayerAI and these LTMs.
+                // PlayerAI owns the match phase while enabled. Playlists no
+                // longer hide or lock this user-facing control.
                 const bool bLockLateGame =
-                    bIsCustomMap
-                    || MagnesiumPlayerAISettings::bEnableAIs
-                    || bRequiresNormalPhases;
+                    MagnesiumPlayerAISettings::bEnableAIs;
                 if (bLockLateGame)
                     FConfiguration::SetLateGameEnabled(false);
 
@@ -5415,15 +8717,43 @@ void GUI::Init()
                 if (FConfiguration::bLateGame)
                 {
                     if (VersionInfo.FortniteVersion > 2.50)
-                        ImGui::Checkbox("Use Moving Bus", &FConfiguration::bMovingBus);
+                        AtomicCheckbox(
+                            "Use Moving Bus",
+                            FConfiguration::bMovingBus);
 
-                    ImGui::Checkbox("Use Long Zone", &FConfiguration::bLateGameLongZone);
-                    ImGui::Checkbox("Use Versionized Lategame Loadouts", &FConfiguration::bUseVersionizedLoadout);
-                    ImGui::Checkbox("Use Custom Lategame Loadout", &FConfiguration::bUseCustomLoadout);
-                    ImGui::Checkbox("Custom Safe Zone", &FConfiguration::bCustomSafeZone);
+                    AtomicCheckbox(
+                        "Use Long Zone",
+                        FConfiguration::bLateGameLongZone);
+                    if (AtomicCheckbox(
+                            "Use Versionized Lategame Loadouts",
+                            FConfiguration::
+                                bUseVersionizedLoadout) &&
+                        FConfiguration::
+                            bUseVersionizedLoadout)
+                    {
+                        FConfiguration::
+                            bUseCustomLoadout = false;
+                    }
+                    if (AtomicCheckbox(
+                            "Use Custom Lategame Loadout",
+                            FConfiguration::
+                                bUseCustomLoadout) &&
+                        FConfiguration::
+                            bUseCustomLoadout)
+                    {
+                        FConfiguration::
+                            bUseVersionizedLoadout = false;
+                    }
+                    AtomicCheckbox(
+                        "Custom Safe Zone",
+                        FConfiguration::bCustomSafeZone);
 
                     if (!FConfiguration::bCustomSafeZone)
-                        LabeledSliderInt("Starting Zone", "##starting-zone", &FConfiguration::LateGameZone, 1, 7, Width);
+                        AtomicLabeledSliderInt(
+                            "Starting Zone",
+                            "##starting-zone",
+                            FConfiguration::LateGameZone,
+                            1, 7, Width);
                     else
                     {
                         // Interactive minimap: click to place the zone center, drag
@@ -5636,10 +8966,26 @@ void GUI::Init()
             static int TrapsAmountBuffer = 6;
 
             static bool bBuffersInitialized = false;
+            static unsigned int LoadoutBufferResetGeneration =
+                GPreferenceEditorGeneration;
             static std::string LoadoutStatusMessage;
             static std::chrono::high_resolution_clock::time_point StatusMessageTime;
             static std::string ApplyLoadoutStatusMessage;
             static std::chrono::high_resolution_clock::time_point ApplyStatusMessageTime;
+
+            if (LoadoutBufferResetGeneration !=
+                GPreferenceEditorGeneration)
+            {
+                PrimaryWeaponBuffer[0] = '\0';
+                SecondaryWeaponBuffer[0] = '\0';
+                TertiaryWeaponBuffer[0] = '\0';
+                QuaternaryWeaponBuffer[0] = '\0';
+                QuinaryWeaponBuffer[0] = '\0';
+                TrapsBuffer[0] = '\0';
+                bBuffersInitialized = false;
+                LoadoutBufferResetGeneration =
+                    GPreferenceEditorGeneration;
+            }
 
             if (FConfiguration::bUseCustomLoadout)
             {
@@ -5784,13 +9130,12 @@ void GUI::Init()
             SectionHeader("AI Players", SectionWidth);
             BeginSectionBody();
 
-            ImGui::Checkbox("Enable AIs (EXPERIMENTAL)", &MagnesiumPlayerAISettings::bEnableAIs);
-
-            if (MagnesiumPlayerAISettings::bEnableAIs)
-            {
-                if (FConfiguration::bLateGame)
-                    FConfiguration::SetLateGameEnabled(false);
-            }
+            ImGui::BeginDisabled(
+                FConfiguration::bLateGame);
+            AtomicCheckbox(
+                "Enable AIs (EXPERIMENTAL)",
+                MagnesiumPlayerAISettings::bEnableAIs);
+            ImGui::EndDisabled();
 
             EndSectionBody();
 
@@ -5798,8 +9143,12 @@ void GUI::Init()
             BeginSectionBody();
 
             ImGui::PushItemWidth(Width);
-            ImGui::InputInt("Bot Health", &FConfiguration::BotHealth);
-            ImGui::InputInt("Bot Shield", &FConfiguration::BotShield);
+            AtomicInputInt(
+                "Bot Health",
+                FConfiguration::BotHealth);
+            AtomicInputInt(
+                "Bot Shield",
+                FConfiguration::BotShield);
             ImGui::PopItemWidth();
 
             EndSectionBody();
@@ -5807,13 +9156,26 @@ void GUI::Init()
             SectionHeader("Bot Names", SectionWidth);
             BeginSectionBody();
 
-            ImGui::Checkbox("Use Custom Bot Names", &FConfiguration::UseCustomBotNames);
+            AtomicCheckbox(
+                "Use Custom Bot Names",
+                FConfiguration::UseCustomBotNames);
 
             if (FConfiguration::UseCustomBotNames)
             {
                 static char BotNameBuffer[64] = {};
+                static unsigned int BotNameBufferResetGeneration =
+                    GPreferenceEditorGeneration;
 
-                if (BotNameBuffer[0] == '\0' && !FConfiguration::BotName.empty())
+                if (BotNameBufferResetGeneration !=
+                    GPreferenceEditorGeneration)
+                {
+                    BotNameBuffer[0] = '\0';
+                    BotNameBufferResetGeneration =
+                        GPreferenceEditorGeneration;
+                }
+
+                if (BotNameBuffer[0] == '\0' &&
+                    !FConfiguration::BotName.empty())
                     strncpy_s(BotNameBuffer, sizeof(BotNameBuffer), FConfiguration::BotName.c_str(), _TRUNCATE);
 
                 ImGui::PushItemWidth(Width);
@@ -6003,7 +9365,9 @@ void GUI::Init()
             SectionHeader("Custom Map Configuration", SectionWidth);
             BeginSectionBody();
 
-			ImGui::Checkbox("One Kill Ends Game", &FConfiguration::AutoEndGame);
+			AtomicCheckbox(
+                "One Kill Ends Game",
+                FConfiguration::AutoEndGame);
 
             EndSectionBody();
 
@@ -6085,37 +9449,69 @@ void GUI::Init()
 
             if (gsStatus < Joinable)
             {
-                ImGui::Checkbox("Toggle Swag Lines", &FConfiguration::bUseWinLines);
+                AtomicCheckbox(
+                    "Toggle Swag Lines",
+                    FConfiguration::bUseWinLines);
 
                 if (VersionInfo.FortniteVersion <= 23.50)
-                    ImGui::Checkbox("Toggle Infinite Render", &FConfiguration::bInfiniteRender);
+                    AtomicCheckbox(
+                        "Toggle Infinite Render",
+                        FConfiguration::bInfiniteRender);
 
-                if ((IsArenaPlaylist() || IsTournamentPlaylist()) && FConfiguration::bLateGame && !FConfiguration::bForceRespawns)
-                    ImGui::Checkbox("Randomize Arena Points", &FConfiguration::RandomizeArenaPoints);
+                if ((IsArenaPlaylist() ||
+                        IsTournamentPlaylist()) &&
+                    FConfiguration::bLateGame &&
+                    !FConfiguration::bForceRespawns)
+                    AtomicCheckbox(
+                        "Randomize Arena Points",
+                        FConfiguration::RandomizeArenaPoints);
 
                 if (FConfiguration::bLateGame)
-                    ImGui::Checkbox("Randomize Kills", &FConfiguration::RandomizeKills);
+                    AtomicCheckbox(
+                        "Randomize Kills",
+                        FConfiguration::RandomizeKills);
 
-                ImGui::Checkbox("Randomize Levels", &FConfiguration::RandomizeLevels);
+                AtomicCheckbox(
+                    "Randomize Levels",
+                    FConfiguration::RandomizeLevels);
 
-                ImGui::Checkbox("Disable Jump Fatigue", &FConfiguration::bDisableJumpFatigue);
+                AtomicCheckbox(
+                    "Disable Jump Fatigue",
+                    FConfiguration::bDisableJumpFatigue);
+
+                if (!FConfiguration::bReadyToStart)
+                {
+                    AtomicCheckbox(
+                        "Disable Supply Drops",
+                        FConfiguration::bDisableSupplyDrops);
+                }
             }
 
             //ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);
 
             if (VersionInfo.FortniteVersion >= 19.00)
-                ImGui::Checkbox("Toggle Crown Slomo", &FConfiguration::bCrownSlomo);
+                AtomicCheckbox(
+                    "Toggle Crown Slomo",
+                    FConfiguration::bCrownSlomo);
 
             if (VersionInfo.FortniteVersion >= 23.20 && VersionInfo.FortniteVersion < 25.20)
-                ImGui::Checkbox("Negate Velocity on Win", &FConfiguration::bCancelVelocityOnWin);
+                AtomicCheckbox(
+                    "Negate Velocity on Win",
+                    FConfiguration::bCancelVelocityOnWin);
 
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
 
-            ImGui::Checkbox("Auto Pause TODM", &FConfiguration::bAutoPauseTODM);
+            AtomicCheckbox(
+                "Auto Pause TODM",
+                FConfiguration::bAutoPauseTODM);
 
             if (FConfiguration::bAutoPauseTODM)
             {
-                LabeledSliderInt("Time Of Day", "##time-of-day", &FConfiguration::TODMTime, 1, 24, Width);
+                AtomicLabeledSliderFloat(
+                    "Time Of Day",
+                    "##time-of-day",
+                    FConfiguration::TODMTime,
+                    0.f, 24.f, "%.1f h", Width);
             }
 
             if (FConfiguration::bRideableProjectiles)
@@ -6362,6 +9758,13 @@ void GUI::Init()
         }
         }
 
+        // Render the loadout modal every frame, even when the inspected pawn
+        // vanished or another tab was selected, so ImGui cannot retain an
+        // invisible modal that blocks the rest of the interface.
+        PlayerLoadout::RenderPicker();
+
+        AutoHosting::SaveIfChanged();
+
         ImGui::Dummy(ImVec2(0.0f, 40.0f));
         ImGui::EndChild();      // content panel
         ImGui::PopStyleVar();   // content WindowPadding
@@ -6379,6 +9782,11 @@ void GUI::Init()
         g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
     }
 
+    // GUI close ends the entire host process below, so there is no later
+    // destructor/atexit opportunity to flush the toggle or delay.
+    AutoHosting::SaveNow(false);
+
+    PlayerLoadout::ShutdownRenderer();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

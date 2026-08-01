@@ -688,7 +688,8 @@ float Misc::SafeZoneTickGetMaxTickRate(
 		GUI::SafeZoneMapGameTick();
 		return SafeZoneTickGetMaxTickRateOG
 			? SafeZoneTickGetMaxTickRateOG(Engine, DeltaTime, bAllowFrameRateSmoothing)
-			: FConfiguration::MaxTickRate;
+			: FConfiguration::MaxTickRate.load(
+				std::memory_order_relaxed);
 	}
 
 	// Keep using the already-installed hook after Start. This preserves the
@@ -1138,9 +1139,12 @@ bool Listen()
 		urlSize = 0x100;
 	auto URL = (FURL*)malloc(urlSize);
 	memset((PBYTE)URL, 0, urlSize);
-	URL->Port = FConfiguration::Port;
+	URL->Port =
+		FConfiguration::Port.load(std::memory_order_relaxed);
 
-	SDK::DbgLog("[Listen] calling InitListen Port=%d...\n", (int)FConfiguration::Port);
+	SDK::DbgLog(
+		"[Listen] calling InitListen Port=%d...\n",
+		FConfiguration::Port.load(std::memory_order_relaxed));
 	FString Err;
 	bool ok = InitListen(NetDriver, World, URL, false, Err);
 	SDK::DbgLog("[Listen] InitListen returned %d\n", (int)ok);
@@ -1151,7 +1155,9 @@ bool Listen()
 		return false;
 	}
 	SetWorld(NetDriver, World);
-	SDK::DbgLog("[Listen] Listen() complete — server listening on port %d\n", (int)FConfiguration::Port);
+	SDK::DbgLog(
+		"[Listen] Listen() complete — server listening on port %d\n",
+		FConfiguration::Port.load(std::memory_order_relaxed));
 
 	free(URL);
 

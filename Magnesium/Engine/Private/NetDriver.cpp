@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Public/NetDriver.h"
+#include "../../Erbium/Public/AutoHosting.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/Finders.h"
 #include "../../Erbium/Public/GUI.h"
@@ -13,6 +14,7 @@
 #include "../Public/AbilitySystemComponent.h"
 #include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 
+#include <algorithm>
 #include <cmath>
 #include <unordered_set>
 
@@ -855,27 +857,16 @@ static void SynchronizeRespawnManagedStormEffects(UNetDriver* Driver,
 	}
 }
 
-static void SyncErbiumSafeZonePreviewPause(UNetDriver* Driver)
+static void SyncErbiumSafeZonePause(UNetDriver* Driver)
 {
-	// Chapter 1 indicators have a separate replicated preview-pause flag. The
-	// native console command pauses the wall/server phase, but these builds can
-	// leave the white preview running unless this flag follows the same state.
-	if (VersionInfo.FortniteVersion >= 6.00)
-		return;
-
 	auto World = UWorld::GetWorld();
 	if (!World || Driver != World->NetDriver)
 		return;
 
-	auto GameMode = (AFortGameMode*)World->AuthorityGameMode;
-	auto Indicator = GameMode && GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator : nullptr;
-	if (!Indicator)
-		return;
-
-	const bool bPaused = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused();
-
-	if (SetReflectedSafeZoneBool(Indicator, "bPausedForPreview", bPaused))
-		Indicator->ForceNetUpdate();
+	// Keep the server wall and its deadlines frozen even on shipping builds
+	// whose PauseSafeZone command or reflected owner flag is unavailable.
+	UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+		TickSafeZonePause();
 }
 
 static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
@@ -1003,48 +994,577 @@ static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
 	}
 }
 
+namespace
+{
+	struct FAuthoritativeMatchLifecycleState
+	{
+		UWorld* World = nullptr;
+		AFortGameMode* GameMode = nullptr;
+		AFortGameStateAthena* GameState = nullptr;
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+			PhaseLogic = nullptr;
+		ULONGLONG NextPhaseLogicResolveMs = 0;
+		int32 PhaseLogicScanCursor = 0;
+		int32 PhaseLogicScanLimit = 0;
+		bool bObservedLiveMatch = false;
+		bool bObservedLegacyLivePhase = false;
+		bool bObservedNativeTerminal = false;
+		bool bEndLatched = false;
+	};
+
+	FAuthoritativeMatchLifecycleState
+		GAuthoritativeMatchLifecycleState{};
+
+	bool IsLiveLifecycleObject(const UObject* Object)
+	{
+		if (!Object ||
+			!SDK::MemReadable(Object, sizeof(UObject)))
+		{
+			return false;
+		}
+
+		const int32 ObjectIndex = Object->Index;
+		if (ObjectIndex < 0 ||
+			ObjectIndex >= TUObjectArray::Num())
+		{
+			return false;
+		}
+
+		auto Item =
+			TUObjectArray::GetItemByIndex(ObjectIndex);
+		const int32 InvalidObjectFlags =
+			Offsets::bEncryptedObjects
+				? 0x10200000
+				: 0x20;
+		return Item &&
+			Item->GetObject() == Object &&
+			!(Item->GetFlags() & InvalidObjectFlags) &&
+			Object->Class;
+	}
+
+	bool IsOwnedByLifecycleGameState(
+		const UObject* Object,
+		const AFortGameStateAthena* GameState)
+	{
+		const UObject* Current = Object;
+		for (int32 Depth = 0;
+			Current && Depth < 16;
+			Depth++)
+		{
+			if (Current == GameState)
+				return true;
+			if (!IsLiveLifecycleObject(Current))
+				return false;
+			Current = Current->Outer;
+		}
+		return false;
+	}
+
+	UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+		ResolveCurrentLifecyclePhaseLogic(
+			FAuthoritativeMatchLifecycleState& State,
+			UWorld* World,
+			AFortGameStateAthena* GameState)
+	{
+		if (VersionInfo.FortniteVersion < 25.20)
+			return nullptr;
+
+		if (IsLiveLifecycleObject(State.PhaseLogic) &&
+			IsOwnedByLifecycleGameState(
+				State.PhaseLogic, GameState))
+		{
+			return State.PhaseLogic;
+		}
+		State.PhaseLogic = nullptr;
+
+		const ULONGLONG Now = GetTickCount64();
+		if (Now < State.NextPhaseLogicResolveMs)
+			return nullptr;
+
+		auto PhaseLogicClass =
+			UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+				StaticClass();
+		if (!IsLiveLifecycleObject(PhaseLogicClass))
+		{
+			State.NextPhaseLogicResolveMs = Now + 1000;
+			return nullptr;
+		}
+
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+			Candidate = nullptr;
+		auto DefaultObject =
+			(const UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)
+				PhaseLogicClass->GetDefaultObj();
+		if (DefaultObject &&
+			DefaultObject->GetFunction("Get"))
+		{
+			Candidate =
+				VersionInfo.FortniteVersion >= 32.00
+					? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+						GetFixed()
+					: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+						Get(World);
+		}
+
+		if (IsLiveLifecycleObject(Candidate) &&
+			IsOwnedByLifecycleGameState(
+				Candidate, GameState))
+		{
+			State.PhaseLogic = Candidate;
+			State.PhaseLogicScanCursor = 0;
+			State.PhaseLogicScanLimit = 0;
+			return Candidate;
+		}
+
+		// Reflection's Get helper is missing or stale on a few component-driven
+		// releases. Resolve only a component owned by the current GameState;
+		// never reuse the first process-wide object across map travel. Bound
+		// each slice so a component-less custom map cannot hitch every second.
+		if (State.PhaseLogicScanLimit <= 0)
+		{
+			State.PhaseLogicScanCursor = 0;
+			State.PhaseLogicScanLimit =
+				TUObjectArray::Num();
+		}
+		constexpr int32 PhaseLogicScanBudget = 2048;
+		const int32 ScanEnd = (std::min)(
+			State.PhaseLogicScanCursor +
+				PhaseLogicScanBudget,
+			State.PhaseLogicScanLimit);
+		for (int32 Index =
+				State.PhaseLogicScanCursor;
+			Index < ScanEnd;
+			Index++)
+		{
+			auto Object =
+				TUObjectArray::GetObjectByIndex(Index);
+			if (!IsLiveLifecycleObject(Object) ||
+				Object->IsDefaultObject() ||
+				!Object->IsA<
+					UFortGameStateComponent_BattleRoyaleGamePhaseLogic>())
+			{
+				continue;
+			}
+
+			Candidate =
+				(UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)
+					Object;
+			if (IsOwnedByLifecycleGameState(
+					Candidate, GameState))
+			{
+				State.PhaseLogic = Candidate;
+				State.PhaseLogicScanCursor = 0;
+				State.PhaseLogicScanLimit = 0;
+				return Candidate;
+			}
+		}
+
+		State.PhaseLogicScanCursor = ScanEnd;
+		if (State.PhaseLogicScanCursor >=
+			State.PhaseLogicScanLimit)
+		{
+			State.PhaseLogicScanCursor = 0;
+			State.PhaseLogicScanLimit = 0;
+			State.NextPhaseLogicResolveMs =
+				Now + 1000;
+		}
+		return nullptr;
+	}
+
+	bool TryReadLifecycleByte(
+		const UObject* Owner,
+		const char* PropertyName,
+		uint8& Value)
+	{
+		if (!IsLiveLifecycleObject(Owner))
+			return false;
+
+		const uint32 Offset =
+			Owner->GetOffset(PropertyName);
+		if (Offset == static_cast<uint32>(-1) ||
+			Offset >= 0x10000)
+		{
+			return false;
+		}
+
+		const auto Address =
+			(const uint8*)Owner + Offset;
+		if (!SDK::MemReadable(
+				Address, sizeof(uint8)))
+		{
+			return false;
+		}
+
+		Value = *Address;
+		return true;
+	}
+
+	void TickAuthoritativeMatchLifecycle(
+		UNetDriver* Driver)
+	{
+		auto World = UWorld::GetWorld();
+		if (!Driver || !World ||
+			Driver != World->NetDriver)
+		{
+			return;
+		}
+
+		// This deadline remains independent from world/game-time dilation and
+		// keeps progressing during the post-match presentation.
+		AutoHosting::TickPostMatchShutdown();
+
+		auto GameMode =
+			World->AuthorityGameMode
+				? World->AuthorityGameMode
+					->Cast<AFortGameMode>()
+				: nullptr;
+		auto GameState =
+			World->GameState
+				? World->GameState
+					->Cast<AFortGameStateAthena>()
+				: nullptr;
+		if (!IsLiveLifecycleObject(GameMode) ||
+			!IsLiveLifecycleObject(GameState))
+		{
+			return;
+		}
+
+		auto& State =
+			GAuthoritativeMatchLifecycleState;
+		const bool bGenerationChanged =
+			State.World != World ||
+			State.GameMode != GameMode ||
+			State.GameState != GameState;
+		bool bResetLifecycleForGeneration = false;
+		if (bGenerationChanged)
+		{
+			const bool bHadGeneration =
+				State.World || State.GameMode ||
+				State.GameState;
+			const bool bExplicitEndPending =
+				GUI::gsStatus.load(
+					std::memory_order_acquire) == Ended;
+			const bool bPreviousGenerationActive =
+				State.bObservedLiveMatch ||
+				State.bEndLatched ||
+				bExplicitEndPending;
+			const bool bPreserveAutoHostEnd =
+				(State.bEndLatched ||
+					bExplicitEndPending) &&
+				FConfiguration::bAutoHost.load(
+					std::memory_order_acquire);
+
+			State = {};
+			State.World = World;
+			State.GameMode = GameMode;
+			State.GameState = GameState;
+
+			if (bHadGeneration &&
+				bPreviousGenerationActive &&
+				!bPreserveAutoHostEnd)
+			{
+				GUI::ResetServerLifecycle();
+				bResetLifecycleForGeneration = true;
+				SDK::DbgLog(
+					"[MatchLifecycle] New world/match generation detected; lifecycle reset\n");
+			}
+		}
+
+		static const FName WaitingPostMatchState(
+			L"WaitingPostMatch");
+		static const FName WaitingToStartState(
+			L"WaitingToStart");
+		static const FName InProgressState(
+			L"InProgress");
+
+		bool bWaitingPostMatch = false;
+		bool bWaitingToStart = false;
+		bool bMatchStateInProgress = false;
+		if (GameMode->HasMatchState())
+		{
+			const FName MatchState =
+				GameMode->MatchState;
+			bWaitingPostMatch =
+				MatchState == WaitingPostMatchState;
+			bWaitingToStart =
+				MatchState == WaitingToStartState;
+			bMatchStateInProgress =
+				MatchState == InProgressState;
+		}
+
+		bool bPhaseLive = false;
+		bool bPhasePregame = false;
+		bool bPhaseTerminal = false;
+		bool bStepTerminal = false;
+		bool bUsingModernPhase = false;
+
+		if (VersionInfo.FortniteVersion >= 25.20)
+		{
+			auto PhaseLogic =
+				ResolveCurrentLifecyclePhaseLogic(
+					State, World, GameState);
+			if (PhaseLogic)
+			{
+				uint8 Phase = 0;
+				uint8 PhaseStep = 0;
+				const bool bHasPhase =
+					TryReadLifecycleByte(
+						PhaseLogic,
+						"GamePhase",
+						Phase);
+				const bool bHasPhaseStep =
+					TryReadLifecycleByte(
+						PhaseLogic,
+						"GamePhaseStep",
+						PhaseStep);
+				bUsingModernPhase =
+					bHasPhase || bHasPhaseStep;
+				if (bHasPhase)
+				{
+					bPhaseLive =
+						Phase ==
+							(uint8)EAthenaGamePhase::
+								Aircraft ||
+						Phase ==
+							(uint8)EAthenaGamePhase::
+								SafeZones;
+					bPhasePregame =
+						Phase ==
+							(uint8)EAthenaGamePhase::
+								Setup ||
+						Phase ==
+							(uint8)EAthenaGamePhase::
+								Warmup;
+					bPhaseTerminal =
+						Phase ==
+							(uint8)EAthenaGamePhase::
+								EndGame;
+				}
+				if (bHasPhaseStep)
+				{
+					bStepTerminal =
+						PhaseStep ==
+							(uint8)EAthenaGamePhaseStep::
+								EndGame;
+				}
+			}
+		}
+
+		if (!bUsingModernPhase)
+		{
+			if (GameState->HasGamePhase())
+			{
+				const uint8 Phase =
+					GameState->GamePhase;
+				bPhaseLive =
+					Phase ==
+						(uint8)EAthenaGamePhase::
+							Aircraft ||
+					Phase ==
+						(uint8)EAthenaGamePhase::
+							SafeZones;
+				bPhasePregame =
+					Phase ==
+						(uint8)EAthenaGamePhase::
+							Setup ||
+					Phase ==
+						(uint8)EAthenaGamePhase::
+							Warmup;
+				bPhaseTerminal =
+					Phase ==
+						(uint8)EAthenaGamePhase::
+							EndGame;
+				if (bPhaseLive)
+					State.bObservedLegacyLivePhase = true;
+			}
+			if (GameState->HasGamePhaseStep())
+			{
+				bStepTerminal =
+					GameState->GamePhaseStep ==
+						(uint8)EAthenaGamePhaseStep::
+							EndGame;
+			}
+
+			// Component seasons may retain a stale legacy EndGame byte. A
+			// component-less custom mode can still use the legacy field, but
+			// only after this GameState was observed in a live legacy phase.
+			if (VersionInfo.FortniteVersion >= 25.20 &&
+				!State.bObservedLegacyLivePhase)
+			{
+				bPhaseTerminal = false;
+				bStepTerminal = false;
+			}
+		}
+
+		if (bResetLifecycleForGeneration)
+		{
+			// Readiness hooks own Joinable because Setup/WaitingToStart can
+			// precede playlist loading and level streaming. Only recover a
+			// start transition that the new world has already completed.
+			if (bMatchStateInProgress ||
+				bPhaseLive)
+			{
+				GUI::gsStatus.store(
+					StartedMatch,
+					std::memory_order_release);
+			}
+		}
+
+		const bool bNativeTerminal =
+			bWaitingPostMatch ||
+			bPhaseTerminal ||
+			bStepTerminal;
+
+		// A manual same-world restart must be able to leave Ended. Do not
+		// reopen an Auto Host match: its promised shutdown remains armed.
+		const bool bAuthoritativeNewGeneration =
+			bWaitingToStart ||
+			bPhasePregame ||
+			(State.bObservedNativeTerminal &&
+			 !bNativeTerminal &&
+			 bPhaseLive);
+		if (State.bEndLatched &&
+			bAuthoritativeNewGeneration &&
+			!FConfiguration::bAutoHost.load(
+				std::memory_order_acquire))
+		{
+			State.bEndLatched = false;
+			State.bObservedLiveMatch = false;
+			State.bObservedLegacyLivePhase =
+				!bUsingModernPhase && bPhaseLive;
+			State.bObservedNativeTerminal = false;
+			GUI::ResetServerLifecycle();
+			if (bWaitingToStart)
+				GUI::MarkServerJoinable();
+			else if (bPhaseLive ||
+				bMatchStateInProgress)
+			{
+				GUI::gsStatus.store(
+					StartedMatch,
+					std::memory_order_release);
+			}
+			SDK::DbgLog(
+				"[MatchLifecycle] Same-world match restart detected; lifecycle reset\n");
+		}
+
+		const EGSStatus CurrentStatus =
+			GUI::gsStatus.load(
+				std::memory_order_acquire);
+		if (CurrentStatus == StartedMatch ||
+			CurrentStatus == Ended ||
+			bMatchStateInProgress ||
+			bPhaseLive)
+		{
+			State.bObservedLiveMatch = true;
+		}
+
+		if (bNativeTerminal)
+			State.bObservedNativeTerminal = true;
+
+		const bool bExplicitEnd =
+			CurrentStatus == Ended;
+		const bool bTerminal =
+			bExplicitEnd ||
+			(State.bObservedLiveMatch &&
+			 bNativeTerminal);
+		if (!State.bEndLatched && bTerminal)
+		{
+			State.bEndLatched = true;
+			GUI::gsStatus.store(
+				Ended, std::memory_order_release);
+			AutoHosting::OnAuthoritativeMatchEnded();
+
+			const char* Source =
+				bExplicitEnd
+					? "explicit winner path"
+					: (bWaitingPostMatch
+						? "WaitingPostMatch"
+						: (bUsingModernPhase
+							? "modern phase"
+							: "legacy phase"));
+			SDK::DbgLog(
+				"[MatchLifecycle] Match ended via %s; autoHost=%d\n",
+				Source,
+				FConfiguration::bAutoHost.load(
+					std::memory_order_acquire)
+					? 1
+					: 0);
+		}
+	}
+}
+
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+	GUI::PlayerNamesGameTick();
 	if (auto World = UWorld::GetWorld();
 		World && Driver == World->NetDriver)
 	{
 		AFortInventory::TickRegeneratingItems();
 		AFortWeaponRanged::TickProjectileRelays();
 		AFortGameMode::TickPendingVehicleSpawns();
+		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
-	SyncErbiumSafeZonePreviewPause(Driver);
+	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
+	// Consume a new UI request before a legacy phase fallback can advance.
+	SyncErbiumSafeZonePause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
+	// The late-game compatibility path can rewrite legacy geometry/deadlines.
+	// Apply pause last so the frozen snapshot is the final state replicated.
+	SyncErbiumSafeZonePause(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
+
+	// Apply the authoritative warmup hold/release after native LTM ticks but
+	// before phase logic consumes the countdown.
+	if (auto World = UWorld::GetWorld();
+		World && Driver == World->NetDriver)
+	{
+		AFortGameMode::TickGameplayConfigurationPolicy(
+			DeltaSeconds);
+	}
 
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
 		auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-		GamePhaseLogic->Tick();
+		if (GamePhaseLogic)
+			GamePhaseLogic->Tick();
 	}
-
+	TickAuthoritativeMatchLifecycle(Driver);
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
 	// Universal PlayerAI system (separate from the bot command and native AI).
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
 
+	// Finalize invalid health states after every custom gameplay producer and
+	// immediately before this path's replication send.
+	AFortPlayerControllerAthena::TickEditingToolStateRepair(Driver);
+	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ClientConnections.Num() > 0)
 		ServerReplicateActors(Driver, DeltaSeconds);
 
     if (GUI::gsStatus == Joinable && VersionInfo.FortniteVersion >= 11.00)
     { 
-        auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
+		auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
 		auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
-		static auto bSkipAircraft = GameState->HasCurrentPlaylistInfo() && GameState->CurrentPlaylistInfo.BasePlaylist ? GameState->CurrentPlaylistInfo.BasePlaylist->bSkipAircraft : false;
+		auto CurrentPlaylist =
+			GameState->HasCurrentPlaylistInfo()
+				? GameState->CurrentPlaylistInfo.BasePlaylist
+				: (GameState->HasCurrentPlaylistData()
+					? GameState->CurrentPlaylistData
+					: nullptr);
+		const bool bSkipAircraft =
+			CurrentPlaylist &&
+			CurrentPlaylist->HasbSkipAircraft() &&
+			CurrentPlaylist->bSkipAircraft;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 		if (!bSkipAircraft && GameState->HasWarmupCountdownEndTime() && GameMode->MatchState == FName(L"InProgress") && GameState->WarmupCountdownEndTime <= Time)
         {
             UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
         }
 	}
-	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
+	else if (GUI::gsStatus == Ended && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
 	{
 		auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -1078,7 +1598,8 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 					curl_easy_cleanup(curl);
 				}
 
-				if (FConfiguration::bAutoRestart)
+				if (FConfiguration::bAutoRestart &&
+					!FConfiguration::bAutoHost)
 					TerminateProcess(GetCurrentProcess(), 0);
 			}
 		}
@@ -1098,18 +1619,30 @@ uint64_t ServerReplicateActors_;
 void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+	GUI::PlayerNamesGameTick();
 	if (auto World = UWorld::GetWorld();
 		World && Driver == World->NetDriver)
 	{
 		AFortInventory::TickRegeneratingItems();
 		AFortWeaponRanged::TickProjectileRelays();
 		AFortGameMode::TickPendingVehicleSpawns();
+		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
-	SyncErbiumSafeZonePreviewPause(Driver);
+	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
+	SyncErbiumSafeZonePause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
+	SyncErbiumSafeZonePause(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
+	if (auto World = UWorld::GetWorld();
+		World && Driver == World->NetDriver)
+	{
+		AFortGameMode::TickGameplayConfigurationPolicy(
+			DeltaSeconds);
+	}
+
+	TickAuthoritativeMatchLifecycle(Driver);
 
 	// Universal PlayerAI system (separate from the bot command and native AI).
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
@@ -1117,6 +1650,10 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 	if (Driver->ReplicationDriver)
 		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
+	// Finalize invalid health states after every custom gameplay producer and
+	// immediately before this path's replication send.
+	AFortPlayerControllerAthena::TickEditingToolStateRepair(Driver);
+	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ReplicationDriver)
 	{
 		// this is our main netdriver
@@ -1129,13 +1666,22 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 			auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
 			auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 			auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-			static auto bSkipAircraft = GameState->HasCurrentPlaylistInfo() && GameState->CurrentPlaylistInfo.BasePlaylist ? GameState->CurrentPlaylistInfo.BasePlaylist->bSkipAircraft : false;
+			auto CurrentPlaylist =
+				GameState->HasCurrentPlaylistInfo()
+					? GameState->CurrentPlaylistInfo.BasePlaylist
+					: (GameState->HasCurrentPlaylistData()
+						? GameState->CurrentPlaylistData
+						: nullptr);
+			const bool bSkipAircraft =
+				CurrentPlaylist &&
+				CurrentPlaylist->HasbSkipAircraft() &&
+				CurrentPlaylist->bSkipAircraft;
 			if (!bSkipAircraft && GameState->HasWarmupCountdownEndTime() && GameMode->MatchState == FName(L"InProgress") && GameState->WarmupCountdownEndTime <= Time)
 			{
 				UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
 			}
 		}
-		else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
+		else if (GUI::gsStatus == Ended && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
 		{
 			auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 			auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -1169,7 +1715,8 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 						curl_easy_cleanup(curl);
 					}
 
-					if (FConfiguration::bAutoRestart)
+					if (FConfiguration::bAutoRestart &&
+						!FConfiguration::bAutoHost)
 						TerminateProcess(GetCurrentProcess(), 0);
 				}
 			}
@@ -1232,23 +1779,37 @@ volatile long g_tickFlushCounter = 0;
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
+	GUI::PlayerNamesGameTick();
 	if (auto World = UWorld::GetWorld();
 		World && Driver == World->NetDriver)
 	{
 		AFortInventory::TickRegeneratingItems();
 		AFortWeaponRanged::TickProjectileRelays();
 		AFortGameMode::TickPendingVehicleSpawns();
+		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
-	SyncErbiumSafeZonePreviewPause(Driver);
+	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
+	SyncErbiumSafeZonePause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
+	SyncErbiumSafeZonePause(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
 
 	static int _tf = 0;
 	_InterlockedIncrement(&g_tickFlushCounter);
 	bool _lg = VersionInfo.FortniteVersion >= 32.00 && _tf < 4;
 	if (_lg) SDK::DbgLog("[TickFlush] #%d ENTER Driver=%p\n", _tf, (void*)Driver);
+
+	// Hold/release the warmup schedule before phase logic consumes it. The
+	// policy has already run after native LTM ticks above, so Auto Bus Start
+	// OFF cannot lose a race to a mutator-authored elapsed deadline.
+	if (auto World = UWorld::GetWorld();
+		World && Driver == World->NetDriver)
+	{
+		AFortGameMode::TickGameplayConfigurationPolicy(
+			DeltaSeconds);
+	}
 
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
@@ -1262,6 +1823,8 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	}
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-GamePhase\n", _tf);
 
+	TickAuthoritativeMatchLifecycle(Driver);
+
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-NukeRockets\n", _tf);
 
@@ -1269,6 +1832,10 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OnServerTick\n", _tf);
 
+	// Finalize invalid health states after every custom gameplay producer and
+	// immediately before Iris builds its outgoing replication batch.
+	AFortPlayerControllerAthena::TickEditingToolStateRepair(Driver);
+	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ClientConnections.Num() > 0)
 	{
 		auto ReplicationSystem = *(UObject**)(__int64(&Driver->ReplicationDriver) + 8);
@@ -1291,13 +1858,22 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
 		auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-		static auto bSkipAircraft = GameState->HasCurrentPlaylistInfo() && GameState->CurrentPlaylistInfo.BasePlaylist ? GameState->CurrentPlaylistInfo.BasePlaylist->bSkipAircraft : false;
+		auto CurrentPlaylist =
+			GameState->HasCurrentPlaylistInfo()
+				? GameState->CurrentPlaylistInfo.BasePlaylist
+				: (GameState->HasCurrentPlaylistData()
+					? GameState->CurrentPlaylistData
+					: nullptr);
+		const bool bSkipAircraft =
+			CurrentPlaylist &&
+			CurrentPlaylist->HasbSkipAircraft() &&
+			CurrentPlaylist->bSkipAircraft;
 		if (!bSkipAircraft && GameState->HasWarmupCountdownEndTime() && GameMode->MatchState == FName(L"InProgress") && GameState->WarmupCountdownEndTime <= Time)
 		{
 			UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startaircraft"), nullptr);
 		}
 	}
-	else if (GUI::gsStatus == StartedMatch && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
+	else if (GUI::gsStatus == Ended && (FConfiguration::bAutoRestart || (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)))
 	{
 		auto WorldNetDriver = UWorld::GetWorld()->NetDriver;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
@@ -1332,7 +1908,8 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 					curl_easy_cleanup(curl);
 				}
 
-				if (FConfiguration::bAutoRestart)
+				if (FConfiguration::bAutoRestart &&
+					!FConfiguration::bAutoHost)
 					TerminateProcess(GetCurrentProcess(), 0);
 			}
 		}

@@ -68,6 +68,7 @@ private:
     static void OnMatchEnded();
 
     static int CountRealPlayers(UNetDriver* Driver);
+    static void ResetLifecycleState();
 
     static inline bool bConfigLoadedFired = false;
     static inline bool bServerStartedFired = false;
@@ -76,5 +77,11 @@ private:
     static inline bool bTransportFired = false;
     static inline bool bMatchEndedFired = false;
     static inline int LastRealPlayerCount = 0;
+    static inline float LastStatusTime = 0.f;
+    static inline int SystemFaults = 0;
+    static inline bool bSystemDisabled = false;
+    static inline bool bLifecycleTokensSeen = false;
+    static inline const void* LifecycleWorldToken = nullptr;
+    static inline const void* LifecycleGameStateToken = nullptr;
     static inline char StatusLine[128] = "PlayerAI: idle";
 };

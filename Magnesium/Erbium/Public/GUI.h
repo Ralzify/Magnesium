@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 #include <Shellapi.h>
+#include <atomic>
 
 class AFortAthenaMapInfo;
 
@@ -69,7 +70,18 @@ enum class Playlist : int
     Boxfight,
     Backrooms,
     Event,
-    Custom
+    Custom,
+    DeepFriedSquads,
+    ArsenalSolos,
+    FoodFight,
+    WicksBountySolo,
+    WicksBountyDuo,
+    WicksBountySquads,
+    BountySolo,
+    BountyDuo,
+    BountySquads,
+    AvengersEndgame,
+    DiscoDomination
 };
 
 enum class Plot : int
@@ -120,12 +132,27 @@ class GUI
 {
 public:
     static inline char windowTitle[67];
-    static inline EGSStatus gsStatus = NotReady;
+    static inline std::atomic<EGSStatus> gsStatus{ NotReady };
     static inline int SelectedPlaylist = static_cast<int>(Playlist::Solos);
+    static inline std::atomic_int PublishedSelectedPlaylist{
+        static_cast<int>(Playlist::Solos)
+    };
     static inline int SelectedPlot = static_cast<int>(Plot::Temperate);
 	static inline int SelectedMap = static_cast<int>(Map::Faceoff);
     static void Init();
     static void MarkServerJoinable();
+    static void ResetServerLifecycle();
+
+    static int GetSelectedPlaylist();
+    static void PublishSelectedPlaylist(int Value);
+    static bool GetNormalizedSafeZoneSelection(
+        float& U,
+        float& V);
+    static void RestoreNormalizedSafeZoneSelection(
+        bool bHasSelection,
+        float U,
+        float V);
+    static void ResetPreferenceEditorState();
 
     // Drains the Custom Safe Zone minimap load request (UE asset loading is
     // game-thread-only). Called by the pre-Start GetMaxTickRate pump and the
@@ -135,12 +162,14 @@ public:
 
     static bool IsArenaPlaylist()
     {
-        return GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::ArenaSquads) || GUI::SelectedPlaylist == static_cast<int>(Playlist::Gav) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TiltedZW) || GUI::SelectedPlaylist == static_cast<int>(Playlist::RetracWater);
+        const int Selected = GetSelectedPlaylist();
+        return Selected == static_cast<int>(Playlist::ArenaSolos) || Selected == static_cast<int>(Playlist::ArenaDuos) || Selected == static_cast<int>(Playlist::ArenaTrios) || Selected == static_cast<int>(Playlist::ArenaSquads) || Selected == static_cast<int>(Playlist::Gav) || Selected == static_cast<int>(Playlist::TiltedZW) || Selected == static_cast<int>(Playlist::RetracWater);
     }
 
     static bool IsTournamentPlaylist()
     {
-        return GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentTrios) || GUI::SelectedPlaylist == static_cast<int>(Playlist::TournamentSquads);
+        const int Selected = GetSelectedPlaylist();
+        return Selected == static_cast<int>(Playlist::TournamentSolos) || Selected == static_cast<int>(Playlist::TournamentDuos) || Selected == static_cast<int>(Playlist::TournamentTrios) || Selected == static_cast<int>(Playlist::TournamentSquads);
     }
 
     static inline FString* GetRequestURL(UObject* Connection)
@@ -155,60 +184,14 @@ public:
         return nullptr;
     }
 
-    static std::string GetPlayerNameFromConnection(UNetConnection* Connection)
-    {
-        if (!Connection)
-            return {};
-
-        FString* ReqPtr = GetRequestURL(Connection);
-
-        if (!ReqPtr || !ReqPtr->Data || !ReqPtr->NumElements)
-            return {};
-
-        FString URLStr = ReqPtr->ToString();
-
-        if (!URLStr.Data || !URLStr.NumElements)
-            return {};
-
-        std::string URL = URLStr.ToUtf8();
-
-        auto pos = URL.find("Name=");
-
-        if (pos == std::string::npos)
-            return {};
-
-        auto end = URL.find('?', pos);
-
-        if (end != std::string::npos)
-            return URL.substr(pos + 5, end - (pos + 5));
-
-        return URL.substr(pos + 5);
-    }
-
-    static std::string GetPlayerName(AFortPlayerStateAthena* PlayerState, UNetConnection* Connection)
-    {
-        if (Connection)
-        {
-            auto Name = GUI::GetPlayerNameFromConnection(Connection);
-            if (!Name.empty())
-                return Name;
-        }
-
-        if (PlayerState)
-        {
-            FString PSName = PlayerState->GetPlayerName();
-            // Bounds-check the FString and convert ONCE: taking begin()/end()
-            // from two separate ToString() temporaries is undefined behavior
-            // and threw length_error on some player states.
-            if (PSName.Data && PSName.NumElements > 0 && PSName.NumElements < 512)
-            {
-                auto Converted = PSName.ToString();
-                return std::string(Converted.begin(), Converted.end());
-            }
-        }
-
-        return "Unknown";
-    }
+    // Refreshes authoritative PlayerState display names on the game thread.
+    // The menu renders on its own thread and must not call ProcessEvent there.
+    static void PlayerNamesGameTick();
+    static std::string GetPlayerNameFromConnection(
+        UNetConnection* Connection);
+    static std::string GetPlayerName(
+        AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection);
 };
 
 // array size is 48672

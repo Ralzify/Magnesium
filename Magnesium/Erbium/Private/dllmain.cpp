@@ -7,6 +7,7 @@
 #include "../../FortniteGame/Public/FortInventory.h"
 #include <chrono>
 #include "../Public/Configuration.h"
+#include "../Public/AutoHosting.h"
 #include "../Public/Misc.h"
 #include "../Public/GUI.h"
 #include "../../Erbium/Plugins/CrashReporter/Public/CrashReporter.h"
@@ -192,6 +193,10 @@ void Main()
     printf("Initializing SDK...\n");
     SDK::Init();
 
+    // Restore the complete launch profile before either the GUI or the server
+    // start gate can observe configuration values.
+    AutoHosting::Initialize();
+
     if (VersionInfo.FortniteVersion >= 32.00)
         SDK::DumpObjArrayDiag();
 
@@ -355,12 +360,6 @@ void Main()
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Clambering 0"), nullptr);
     }
 
-#ifdef CLIENT
-    Misc::InitClient();
-
-    return;
-#endif
-
     if constexpr (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)
         curl_global_init(CURL_GLOBAL_ALL);
 
@@ -442,98 +441,38 @@ void Main()
     else if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
     {
         terrainOpen = L"open /Game/Gav/Levels/GM_1v1/Gav_1v1.Gav_1v1";
-        FConfiguration::bSiphon = true;
-		FConfiguration::SiphonAmount = 200;
-        FConfiguration::bInfiniteAmmo = true;
-		FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-		FConfiguration::MaxTickRate = 60.f;
     }
     else if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1"))
     {
         terrainOpen = L"open /Game/1v1s/Retrac_1v1";
-        FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 200;
-        FConfiguration::bInfiniteAmmo = true;
-        FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-        FConfiguration::MaxTickRate = 60.f;
     }
     else if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlist/Playlist_Retrac_Turtle.Playlist_Retrac_Turtle"))
     {
         terrainOpen = L"open /Game/Turtle/Retrac_Turtle";
-        FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 200;
-        FConfiguration::bInfiniteAmmo = true;
-        FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-        FConfiguration::MaxTickRate = 60.f;
     }
     else if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett"))
     {
         terrainOpen = L"open /Game/Jett/OnlyUp";
-        FConfiguration::bEnableCheats = false;
-        FConfiguration::bInfiniteAmmo = false;
-        FConfiguration::bInfiniteMats = false;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::MaxTickRate = 60.f;
     }
     else if (wcsstr(FConfiguration::Playlist, L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett"))
     {
         terrainOpen = L"open /Game/Jett/TiltedZW/TiltedZW_Jett";
-        FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 200;
-        FConfiguration::bInfiniteAmmo = true;
-        FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-        FConfiguration::MaxTickRate = 60.f;
     }
     else if (wcsstr(FConfiguration::Playlist, L"/Buddy/Playlists/Playlist_1v1Twine.Playlist_1v1Twine"))
     {
         terrainOpen = L"open /Game/Twine/GameModes/1v1/GameMode_1v1";
-        FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 200;
-        FConfiguration::bInfiniteAmmo = true;
-        FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-        FConfiguration::MaxTickRate = 60.f;
     }
     else if (wcsstr(FConfiguration::Playlist, L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac"))
     {
         terrainOpen = L"open /Game/Retrac/Maps/WaterMap";
-        FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 200;
-        FConfiguration::bInfiniteAmmo = true;
-        FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-        FConfiguration::MaxTickRate = 60.f;
     }
-    else if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo") && VersionInfo.FortniteVersion == 30.00 && GUI::SelectedPlaylist == static_cast<int>(Playlist::Boxfight))
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo") && VersionInfo.FortniteVersion == 30.00 && GUI::GetSelectedPlaylist() == static_cast<int>(Playlist::Boxfight))
     {
         terrainOpen = L"open /Game/Sawyer/Maps/BoxfightFFA.BoxfightFFA";
-        FConfiguration::bSiphon = true;
-        FConfiguration::SiphonAmount = 500;
-        FConfiguration::bAutoBusStart = false;
-        FConfiguration::bInfiniteAmmo = true;
-        FConfiguration::bInfiniteMats = true;
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bKeepInventory = true;
-        FConfiguration::MaxTickRate = 60.f;
     }
-    else if (VersionInfo.FortniteVersion == 7.40 && GUI::SelectedPlaylist == static_cast<int>(Playlist::Backrooms))
+    else if (VersionInfo.FortniteVersion == 7.40 && GUI::GetSelectedPlaylist() == static_cast<int>(Playlist::Backrooms))
     {
         terrainOpen = L"open /Game/Crow/Backrooms/Backrooms";
-        FConfiguration::bJoinInProgress = true;
-        FConfiguration::bForceRespawns = true;
-        FConfiguration::PermanentRespawn = true;
-        FConfiguration::HasCustomRespawnPoint = true;
-        FConfiguration::CustomRespawnPoint = FVector(0.f, 0.f, 85.275009f);
     }
     else if (FConfiguration::bIsCustomMap && FConfiguration::CustomMap && FConfiguration::CustomMap[0] != L'\0')
     {

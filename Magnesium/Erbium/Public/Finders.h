@@ -34,6 +34,7 @@ uint64 FindGameSessionPatch();
 uint64 FindRemoveFromAlivePlayers();
 uint64 FindStartAircraftPhase();
 uint64 FindSetPickupItems();
+uint64 FindApplyGadgetData();
 uint64 FindCallPreReplication();
 uint64 FindSendClientAdjustment();
 uint64 FindSetChannelActor();

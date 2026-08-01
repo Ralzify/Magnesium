@@ -4,6 +4,7 @@
 #include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
 #include "../../Erbium/PlayerAI/Public/AIDebugLogger.h"
 #include "../../Erbium/PlayerAI/Public/PlayerAIManager.h"
+#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/BuildingSMActor.h"
 #include "../Public/FortKismetLibrary.h"
@@ -14,7 +15,9 @@
 #include "../Public/BuildingItemCollectorActor.h"
 #include "../Public/FortPhysicsPawn.h"
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
+#include "../Public/FortAthenaMutator.h"
 #include "../../Erbium/Public/GUI.h"
+#include "../../Erbium/Public/PlayerLoadout.h"
 #include "../Public/FortAthenaCreativePortal.h"
 #include "../Public/FortInventory.h"
 #include "../../Engine/Public/NetDriver.h"
@@ -43,6 +46,13 @@
 static const UClass* GetRemoteControlledPawnClass();
 static bool IsNativeVehiclePossessionPawn(AActor* Actor);
 static bool IsUsableDeathObject(const UObject* Object);
+static bool IsManagedNonRespawningBot(
+	AFortPlayerControllerAthena* PlayerController);
+static bool IsTerminalManagedBot(
+	AFortPlayerControllerAthena* PlayerController);
+static bool ClientForceViewTarget(
+	AFortPlayerControllerAthena* PlayerController,
+	AActor* Target);
 static void ForEachSquadController(
 	AFortPlayerControllerAthena* InstigatingController,
 	const std::function<void(AFortPlayerControllerAthena*)>& Visitor);
@@ -530,6 +540,363 @@ static std::unordered_set<AFortPlayerControllerAthena*> GRespawnSkydivingObserve
 // skydive flags actually clear.
 static std::unordered_set<AFortPlayerControllerAthena*> GPendingLegacyAircraftLandingEquipment;
 static std::unordered_set<AFortPlayerControllerAthena*> GLegacyAircraftSkydivingObserved;
+// Aircraft lifecycle functions can be replayed while the bus is still flying.
+// Remember the authoritative match in which each controller was cleaned so a
+// duplicate RPC can never erase loot collected after that player jumped.
+static TWeakObjectPtr<UObject> GAircraftInventoryCleanupMatchToken;
+static std::unordered_set<uint64>
+	GAircraftInventoryCleanedControllerIds;
+static std::unordered_set<uint64>
+	GAircraftInventoryCleanupInProgressIds;
+
+static AFortPlayerControllerAthena* ResolveAircraftPlayerController(
+	UObject* Context)
+{
+	if (!Context)
+		return nullptr;
+
+	auto AircraftComponentClass =
+		FindClass("FortControllerComponent_Aircraft");
+	if (AircraftComponentClass &&
+		Context->IsA(AircraftComponentClass))
+	{
+		return (AFortPlayerControllerAthena*)
+			((UActorComponent*)Context)->GetOwner();
+	}
+
+	auto PlayerControllerClass =
+		AFortPlayerControllerAthena::StaticClass();
+	return PlayerControllerClass &&
+		Context->IsA(PlayerControllerClass)
+		? (AFortPlayerControllerAthena*)Context
+		: nullptr;
+}
+
+static bool CanDropInventoryItem(
+	const UFortItemDefinition* ItemDefinition)
+{
+	if (!IsUsableDeathObject(ItemDefinition))
+		return false;
+
+	if (ItemDefinition->HasbCanBeDropped())
+		return ItemDefinition->bCanBeDropped;
+
+	auto PickupComponent =
+		ItemDefinition->GetPickupComponent();
+	return PickupComponent &&
+		PickupComponent->bCanBeDroppedFromInventory;
+}
+
+static std::string LowerAscii(const char* Value)
+{
+	std::string Result = Value ? Value : "";
+	std::transform(
+		Result.begin(), Result.end(), Result.begin(),
+		[](unsigned char Character)
+		{
+			return (char)std::tolower(Character);
+		});
+	return Result;
+}
+
+static bool ContainsConfirmedStormIdentifier(
+	const FName& Name,
+	bool bAllowGenericStorm)
+{
+	const auto Value =
+		LowerAscii(Name.ToString().c_str());
+	std::string Compact;
+	Compact.reserve(Value.size());
+	for (const unsigned char Character : Value)
+	{
+		if (std::isalnum(Character))
+			Compact.push_back((char)Character);
+	}
+
+	return
+		Compact.find("outsidesafezone") !=
+			std::string::npos ||
+		Compact.find("safezonedamage") !=
+			std::string::npos ||
+		(bAllowGenericStorm &&
+			Compact.find("storm") !=
+				std::string::npos);
+}
+
+static bool HasConfirmedStormDeathEvidence(
+	const FGameplayTagContainer& DeathTags,
+	const FFortPlayerDeathReport& DeathReport)
+{
+	auto ContainsStormTag =
+		[](const TArray<FGameplayTag>& Tags)
+		{
+			for (int32 Index = 0;
+				Index < Tags.Num();
+				++Index)
+			{
+				const auto& Tag =
+					Tags.Get(
+						Index,
+						FGameplayTag::Size());
+				if (ContainsConfirmedStormIdentifier(
+						Tag.TagName, true))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
+	if (ContainsStormTag(DeathTags.GameplayTags) ||
+		ContainsStormTag(DeathTags.ParentTags))
+	{
+		return true;
+	}
+
+	// The outside-safe-zone gameplay effect is sometimes supplied only as the
+	// report's causer. Do not accept a generic "storm" substring here because
+	// legitimate weapons such as the Storm Scout can be damage causers.
+	auto DamageCauser =
+		DeathReport.HasDamageCauser()
+			? DeathReport.DamageCauser
+			: nullptr;
+	return IsUsableDeathObject(DamageCauser) &&
+		ContainsConfirmedStormIdentifier(
+			DamageCauser->Name, false);
+}
+
+static bool ShouldRemoveForAircraftTransition(
+	const UFortItemDefinition* ItemDefinition)
+{
+	if (!IsUsableDeathObject(ItemDefinition))
+		return false;
+
+	// ItemType remains reflected on the seasons where Epic removed both
+	// bCanBeDropped and the pickup component. Preserve only the built-in tools;
+	// weapons, ammo, traps, resources, and consumables collected during warmup
+	// all need to be reset before the live match.
+	if (ItemDefinition->HasItemType())
+	{
+		const uint8 ItemType = ItemDefinition->ItemType;
+		if (ItemType == EFortItemType::GetWeaponHarvest() ||
+			ItemType == EFortItemType::GetBuildingPiece() ||
+			ItemType == EFortItemType::GetEditTool())
+		{
+			return false;
+		}
+	}
+
+	const auto ObjectName =
+		LowerAscii(ItemDefinition->Name.ToString().c_str());
+	// These account/match-owned entries legitimately cross the warmup-to-bus
+	// transition and are not spawn-island loot.
+	if (ObjectName.find("victorycrown") != std::string::npos ||
+		ObjectName.find("victory_crown") != std::string::npos ||
+		ObjectName.find("athena_wadsitemdata") != std::string::npos ||
+		ObjectName.find("athena_golditemdata") != std::string::npos)
+	{
+		return false;
+	}
+
+	// Very early/forked builds may not expose ItemType either. Retain a narrow
+	// name fallback for their built-in tools.
+	if (!ItemDefinition->HasItemType() &&
+		(ObjectName.find("harvest") != std::string::npos ||
+			ObjectName.find("pickaxe") != std::string::npos ||
+			ObjectName.find("buildingitemdata") != std::string::npos ||
+			ObjectName.find("edittool") != std::string::npos))
+	{
+		return false;
+	}
+
+	// Where native drop capability exists, keep its more precise answer. On
+	// versions where both representations are absent, semantic removal is the
+	// safe fallback that prevents warmup inventory from leaking into the bus.
+	if (ItemDefinition->HasbCanBeDropped())
+		return ItemDefinition->bCanBeDropped;
+
+	auto PickupComponent = ItemDefinition->GetPickupComponent();
+	if (PickupComponent)
+		return PickupComponent->bCanBeDroppedFromInventory;
+
+	return true;
+}
+
+static bool IsGetawayJewelDefinition(
+	const UFortItemDefinition* ItemDefinition)
+{
+	if (!IsUsableDeathObject(ItemDefinition))
+		return false;
+
+	const auto ObjectName =
+		LowerAscii(
+			ItemDefinition->Name.ToString().c_str());
+
+	// Both supported Getaway generations (5.40/5.41 and 10.40) carry the
+	// objective as an item definition named Athena_Bling_Pack, even though its
+	// package moved between those releases. Match that exact object only:
+	// Bling_Pack is a character part, while generic "jewel"/"crystal" matches
+	// can incorrectly remove unrelated inventory.
+	return ObjectName == "athena_bling_pack";
+}
+
+void AFortPlayerControllerAthena::
+	BeginAircraftInventoryCleanupForMatch(
+		UObject* MatchToken)
+{
+	GAircraftInventoryCleanupMatchToken = MatchToken;
+	GAircraftInventoryCleanedControllerIds.clear();
+	GAircraftInventoryCleanupInProgressIds.clear();
+}
+
+int32 AFortPlayerControllerAthena::ClearDroppableInventoryForAircraft(
+	AFortPlayerControllerAthena* PlayerController,
+	const char* Source,
+	bool bRequireAircraftPassenger)
+{
+	// Keep Inventory is specifically "Keep Inventory on Respawn"; it must not
+	// preserve loot collected on the warmup island. Aircraft transition cleanup
+	// therefore applies regardless of that respawn setting.
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(PlayerController->WorldInventory) ||
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(
+			PlayerController))
+	{
+		return 0;
+	}
+
+	auto World = UWorld::GetWorld();
+	auto GameState =
+		World && IsUsableDeathObject(World->GameState)
+			? (AFortGameStateAthena*)World->GameState
+			: nullptr;
+	if (bRequireAircraftPassenger &&
+		!PlayerController->IsInAircraft())
+	{
+		return 0;
+	}
+	if (GameState && GameState->HasGamePhase() &&
+		GameState->GamePhase >
+			(uint8)EAthenaGamePhase::Aircraft)
+	{
+		// EnterAircraft and the jump RPC are callable functions. Reject stale
+		// or replayed calls after the bus phase so they cannot erase inventory
+		// collected during the live match.
+		return 0;
+	}
+
+	UObject* MatchToken = GameState
+		? (UObject*)GameState
+		: (UObject*)World;
+	if (!MatchToken)
+		return 0;
+
+	if (GAircraftInventoryCleanupMatchToken.Get() != MatchToken)
+	{
+		BeginAircraftInventoryCleanupForMatch(MatchToken);
+	}
+
+	TWeakObjectPtr<AFortPlayerControllerAthena>
+		WeakPlayerController(PlayerController);
+	if (WeakPlayerController.Get() != PlayerController)
+		return 0;
+	const uint64 ControllerId =
+		((uint64)(uint32)WeakPlayerController.ObjectIndex << 32) |
+		(uint32)WeakPlayerController.ObjectSerialNumber;
+	if (GAircraftInventoryCleanedControllerIds.contains(
+			ControllerId) ||
+		!GAircraftInventoryCleanupInProgressIds
+			.insert(ControllerId).second)
+	{
+		return 0;
+	}
+
+	auto Inventory = PlayerController->WorldInventory;
+	const int32 EntriesBefore =
+		Inventory->Inventory.ReplicatedEntries.Num();
+	std::vector<FGuid> GuidsToRemove;
+	GuidsToRemove.reserve(EntriesBefore);
+	int32 CandidateAttempts = 0;
+
+	// Inventory update callbacks can replace an entry with a new GUID while an
+	// old one is being removed. Rescan the live array after every pass instead
+	// of verifying only the original GUIDs. The bound prevents a broken native
+	// callback from trapping the aircraft transition in an infinite loop; an
+	// incomplete controller remains retryable from the next phase/jump hook.
+	constexpr int32 MaxCleanupPasses = 4;
+	for (int32 Pass = 0; Pass < MaxCleanupPasses; ++Pass)
+	{
+		GuidsToRemove.clear();
+		for (int32 Index = 0;
+			Index < Inventory->Inventory.ReplicatedEntries.Num();
+			++Index)
+		{
+			auto& Entry =
+				Inventory->Inventory.ReplicatedEntries.Get(
+					Index, FFortItemEntry::Size());
+			if (ShouldRemoveForAircraftTransition(
+					Entry.ItemDefinition) &&
+				!FFortAthenaNativeLTMCompatibility::
+					ShouldPreserveAshtonInventoryItem(
+						PlayerController,
+						Entry.ItemDefinition))
+			{
+				GuidsToRemove.push_back(Entry.ItemGuid);
+			}
+		}
+
+		if (GuidsToRemove.empty())
+			break;
+
+		CandidateAttempts += (int32)GuidsToRemove.size();
+		for (auto Guid : GuidsToRemove)
+			Inventory->Remove(Guid);
+	}
+
+	bool bCleanupComplete = true;
+	for (int32 Index = 0;
+		Index < Inventory->Inventory.ReplicatedEntries.Num();
+		++Index)
+	{
+		auto& Entry =
+			Inventory->Inventory.ReplicatedEntries.Get(
+				Index, FFortItemEntry::Size());
+		if (ShouldRemoveForAircraftTransition(
+				Entry.ItemDefinition) &&
+			!FFortAthenaNativeLTMCompatibility::
+				ShouldPreserveAshtonInventoryItem(
+					PlayerController,
+					Entry.ItemDefinition))
+		{
+			bCleanupComplete = false;
+			break;
+		}
+	}
+	GAircraftInventoryCleanupInProgressIds.erase(
+		ControllerId);
+	if (bCleanupComplete)
+	{
+		GAircraftInventoryCleanedControllerIds.insert(
+			ControllerId);
+	}
+
+	const int32 EntriesAfter =
+		Inventory->Inventory.ReplicatedEntries.Num();
+	const int32 RemovedCount =
+		max(EntriesBefore - EntriesAfter, 0);
+	SDK::DbgLog(
+		"[AircraftInventory] source=%s controller=%p "
+		"candidates=%d entries=%d->%d removed=%d "
+		"complete=%d FN=%.2f\n",
+		Source ? Source : "unknown",
+		(void*)PlayerController,
+		CandidateAttempts,
+		EntriesBefore, EntriesAfter, RemovedCount,
+		(int)bCleanupComplete,
+		VersionInfo.FortniteVersion);
+
+	return RemovedCount;
+}
 static bool UsesEarlyAthenaLandingClientRefresh()
 {
 	return VersionInfo.FortniteVersion == 1.72 ||
@@ -542,20 +909,51 @@ static bool UsesTrackedLegacySpawnedBotLifecycle()
 }
 // Controllers created by the `spawnbot` command have no UNetConnection and
 // therefore need explicit equipment replication and deferred actor teardown.
-// Keep them distinct from both real players and the managed PlayerAI system.
+// Track them on every version so the global player-respawn override can never
+// mistake one for a client-owned participant.
 static std::unordered_set<AFortPlayerControllerAthena*> GSpawnedBotControllers;
 // If 1.7.2 native pawn-death handling leaves a synthetic controller in
 // AlivePlayers, its native removal fallback must be attempted at most once.
 static std::unordered_set<AFortPlayerControllerAthena*> G172SpawnedBotRemovalAttempts;
+// Raw controller identities are safe only inside the world that created them.
+// Keep both a serial-aware token and the address so a recycled UWorld address
+// still forces a reset before any pointer-only bot membership check.
+static TWeakObjectPtr<UWorld> GSpawnedBotTrackingWorld;
+static UWorld* GSpawnedBotTrackingWorldIdentity = nullptr;
 struct FPendingSpawnedBotCleanup
 {
 	TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+	AFortPlayerControllerAthena* ControllerIdentity = nullptr;
 	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
 	TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
 	TWeakObjectPtr<AFortInventory> Inventory;
 	float RemainingSeconds = 3.f;
 };
 static std::vector<FPendingSpawnedBotCleanup> GPendingSpawnedBotCleanup;
+static void RefreshSpawnedBotTrackingWorld();
+static bool IsTrackedSpawnedBotController(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	RefreshSpawnedBotTrackingWorld();
+	return PlayerController &&
+		GSpawnedBotControllers.contains(PlayerController);
+}
+static void RegisterTrackedSpawnedBotController(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	RefreshSpawnedBotTrackingWorld();
+	if (PlayerController)
+		GSpawnedBotControllers.insert(PlayerController);
+}
+static void UnregisterTrackedSpawnedBotController(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	RefreshSpawnedBotTrackingWorld();
+	if (!PlayerController)
+		return;
+	GSpawnedBotControllers.erase(PlayerController);
+	G172SpawnedBotRemovalAttempts.erase(PlayerController);
+}
 // The forced post-respawn equip happens after native skydiving hid the previous
 // weapon. Hide only that newly equipped actor and keep a weak reference so a
 // destroyed/replaced weapon can never become a stale-pointer crash.
@@ -1685,7 +2083,18 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	// action and prevents the client from completing possession.
 	if (!bNewAcknowledgedPawn && !bPendingLateGameAircraftLoadout &&
 		!GFinalizePossessTakeover.contains(PlayerController))
+	{
+		AFortInventory::HandlePendingCarmineFocus(
+			PlayerController);
+		if (AFortPlayerPawnAthena::
+				HasMinimumHealthGodMode(PlayerController))
+		{
+			AFortPlayerPawnAthena::
+				SetMinimumHealthGodMode(
+					PlayerController, true);
+		}
 		return;
+	}
 
 	auto Num = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num();
 
@@ -1714,12 +2123,6 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			}
 		}
 
-		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
-		{
-			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(FortPawn->GetCharacterMovement());
-			if (MovementCompAthena->HasJumpPenaltyResetTime())
-				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
-		}
 	}
 
 	static auto IsRespawningAllowedFunc = GameState->GetFunction("IsRespawningAllowed");
@@ -1731,13 +2134,53 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
 
 		bRespawnAllowed = Playlist
-			? (Playlist->HasRespawnType() ? Playlist->RespawnType > 0 : FConfiguration::bForceRespawns)
-			: FConfiguration::bForceRespawns;
+			? (Playlist->HasRespawnType() ? Playlist->RespawnType > 0 : FConfiguration::bForceRespawns.load())
+			: FConfiguration::bForceRespawns.load();
 	}
 	else
 		bRespawnAllowed = GameState->Call<bool>(IsRespawningAllowedFunc, PlayerController->PlayerState);
 
-	bRespawnAllowed |= FConfiguration::bForceRespawns;
+	bool bWaxRespawnAllowed = false;
+	const bool bWaxRespawnManaged =
+		FFortAthenaNativeLTMCompatibility::
+			TryGetWaxRespawnAllowed(
+				PlayerController->PlayerState,
+				bWaxRespawnAllowed);
+	if (bWaxRespawnManaged)
+	{
+		bRespawnAllowed = bWaxRespawnAllowed;
+	}
+	else
+	{
+		bool bDiscoRespawnAllowed = false;
+		if (FFortAthenaNativeLTMCompatibility::
+				TryGetDiscoRespawnAllowed(
+					PlayerController->PlayerState,
+					bDiscoRespawnAllowed))
+		{
+			bRespawnAllowed = bDiscoRespawnAllowed;
+		}
+		else
+		{
+			bool bFoodFightRespawnAllowed = false;
+			if (FFortAthenaNativeLTMCompatibility::
+					TryGetFoodFightRespawnAllowed(
+						PlayerController->PlayerState,
+						bFoodFightRespawnAllowed))
+			{
+				bRespawnAllowed =
+					bFoodFightRespawnAllowed;
+			}
+			else
+			{
+				bRespawnAllowed |=
+					FConfiguration::bForceRespawns;
+			}
+		}
+	}
+
+	if (IsManagedNonRespawningBot(PlayerController))
+		bRespawnAllowed = false;
 
 	// Inventory count is not a lifecycle signal: death may legitimately leave a
 	// respawning player with zero entries. ClientOnPawnDied clears the last-pawn
@@ -1765,7 +2208,8 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 	FVector ConfiguredRespawnLocation{};
 	bool bSkipRespawn = ConsumePossessRespawnSkip(PlayerController);
-	if (bRestoringRespawnPawn && !bSkipRespawn &&
+	if (bRestoringRespawnPawn && !bWaxRespawnManaged &&
+		!bSkipRespawn &&
 		TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
 		FortPawn->K2_TeleportTo(ConfiguredRespawnLocation, FRotator(0.f, 0.f, 0.f));
 
@@ -1982,9 +2426,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		auto HeavyAmmo = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsHeavy.AthenaAmmoDataBulletsHeavy");
 		auto RocketAmmo = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AmmoDataRockets.AmmoDataRockets");
 
-		auto Wood = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/WoodItemData.WoodItemData");
-		auto Stone = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/StoneItemData.StoneItemData");
-		auto Metal = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/MetalItemData.MetalItemData");
+		auto Wood = UFortKismetLibrary::K2_GetResourceItemDefinition(
+			EFortResourceType::Wood);
+		auto Stone = UFortKismetLibrary::K2_GetResourceItemDefinition(
+			EFortResourceType::Stone);
+		auto Metal = UFortKismetLibrary::K2_GetResourceItemDefinition(
+			EFortResourceType::Metal);
 
 		PlayerController->WorldInventory->GiveItem(RifleAmmo, Medium(rng));
 		PlayerController->WorldInventory->GiveItem(Shells, ShellAmmo(rng));
@@ -1992,12 +2439,15 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		PlayerController->WorldInventory->GiveItem(HeavyAmmo, Heavy(rng));
 		PlayerController->WorldInventory->GiveItem(RocketAmmo, 12);
 
-		PlayerController->WorldInventory->GiveItem(Wood, Mats(rng));
-		PlayerController->WorldInventory->GiveItem(Stone, Mats(rng));
-		PlayerController->WorldInventory->GiveItem(Metal, Mats(rng));
+		PlayerController->WorldInventory->GiveItemToSingleStack(
+			Wood, Mats(rng), false);
+		PlayerController->WorldInventory->GiveItemToSingleStack(
+			Stone, Mats(rng), false);
+		PlayerController->WorldInventory->GiveItemToSingleStack(
+			Metal, Mats(rng), false);
 	}
 
-	if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo") && VersionInfo.FortniteVersion == 30.00 && GUI::SelectedPlaylist == static_cast<int>(Playlist::Boxfight))
+	if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo") && VersionInfo.FortniteVersion == 30.00 && GUI::GetSelectedPlaylist() == static_cast<int>(Playlist::Boxfight))
 	{
 		FortPawn->SetShield(100.f);
 
@@ -2029,9 +2479,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		auto Shells = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AthenaAmmoDataShells.AthenaAmmoDataShells");
 		auto LightAmmo = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Ammo/AthenaAmmoDataBulletsLight.AthenaAmmoDataBulletsLight");
 
-		auto Wood = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/WoodItemData.WoodItemData");
-		auto Stone = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/StoneItemData.StoneItemData");
-		auto Metal = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/MetalItemData.MetalItemData");
+		auto Wood = UFortKismetLibrary::K2_GetResourceItemDefinition(
+			EFortResourceType::Wood);
+		auto Stone = UFortKismetLibrary::K2_GetResourceItemDefinition(
+			EFortResourceType::Stone);
+		auto Metal = UFortKismetLibrary::K2_GetResourceItemDefinition(
+			EFortResourceType::Metal);
 
 		int32 RifleClipSize = 0;
 		int32 ShotgunClipSize = 0;
@@ -2075,9 +2528,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		PlayerController->WorldInventory->GiveItem(Shells, 150);
 		PlayerController->WorldInventory->GiveItem(LightAmmo, 500);
 
-		PlayerController->WorldInventory->GiveItem(Wood, 500);
-		PlayerController->WorldInventory->GiveItem(Stone, 500);
-		PlayerController->WorldInventory->GiveItem(Metal, 500);
+		PlayerController->WorldInventory->GiveItemToSingleStack(
+			Wood, 500, false);
+		PlayerController->WorldInventory->GiveItemToSingleStack(
+			Stone, 500, false);
+		PlayerController->WorldInventory->GiveItemToSingleStack(
+			Metal, 500, false);
 	}
 
 	if ((!FConfiguration::bKeepInventory || FConfiguration::bLateGame) && PlayerController->WorldInventory)
@@ -2147,17 +2603,10 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		FortPawn->OnRep_IsInsideSafeZone();
 	}
 
-	const bool bAbilitiesInitialized =
-		EnsurePawnGameplayAbilitiesInitialized(PlayerController, FortPawn);
-	if (bAbilitiesInitialized)
-	{
-		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
-		{
-			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(FortPawn->GetCharacterMovement());
-			if (MovementCompAthena->HasJumpPenaltyResetTime())
-				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
-		}
-	}
+	EnsurePawnGameplayAbilitiesInitialized(
+		PlayerController, FortPawn);
+	AFortInventory::HandlePendingCarmineFocus(
+		PlayerController);
 
 	if (bRestoringRespawnPawn)
 	{
@@ -2415,12 +2864,6 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			}
 		}
 
-		if (FConfiguration::bDisableJumpFatigue && FortPawn->HasCharacterMovement())
-		{
-			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(FortPawn->GetCharacterMovement());
-			if (MovementCompAthena->HasJumpPenaltyResetTime())
-				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
-		}
 	}
 
 	EnsureOneShotLowGravityVfx(PlayerController, FortPawn);
@@ -2431,12 +2874,37 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	// later empty respawn to be mistaken for another initial possession.
 	PlayersInitialized.insert(PlayerController);
 
+	// Arsenal's GG mutator can be registered after its native phase callback.
+	// Reconcile the already-earned tier after the authoritative pawn/inventory
+	// lifecycle is complete. The helper is exact-10.40/exact-playlist gated and
+	// ignores spawn-island acknowledgements before the aircraft phase.
+	FFortAthenaNativeLTMCompatibility::
+		HandleArsenalPlayerReady(PlayerController);
+	FFortAthenaNativeLTMCompatibility::
+		HandleWaxPlayerReady(PlayerController);
+	FFortAthenaNativeLTMCompatibility::
+		HandleDiscoPlayerReady(PlayerController);
+	FFortAthenaNativeLTMCompatibility::
+		HandleAshtonPlayerReady(PlayerController);
+
 	// Very last thing: if this ack is a "possess" command takeover, put the pawn
 	// on the ground and give it health. Nothing above overrode it because this
 	// runs after the native possession setup and the ability re-init that reset
 	// them.
 	if (GFinalizePossessTakeover.erase(PlayerController) > 0)
 		FinalizePossessedPawnForCommand(PlayerController, FortPawn);
+
+	// Reattach controller-scoped minimum-health god mode only after native
+	// possession, abilities, playlist effects, and respawn health setup have
+	// all finished. This also covers the listen-server controller, which is
+	// not guaranteed to appear in NetDriver::ClientConnections.
+	if (AFortPlayerPawnAthena::
+			HasMinimumHealthGodMode(PlayerController))
+	{
+		AFortPlayerPawnAthena::
+			SetMinimumHealthGodMode(
+				PlayerController, true);
+	}
 }
 
 uint32 ServerAttemptAircraftJumpVft;
@@ -2449,14 +2917,18 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 	AFortPlayerControllerAthena* PlayerController = nullptr;
 	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+	PlayerController = ResolveAircraftPlayerController(Context);
+
+	// EnterAircraft is not reached reliably on every native aircraft path
+	// (notably 5.41). The jump RPC is the final per-player authority checkpoint
+	// before the replacement pawn is spawned, so repeat the idempotent cleanup.
+	ClearDroppableInventoryForAircraft(
+		PlayerController, "jump", true);
 
 	if (VersionInfo.FortniteVersion >= 11.00 || FConfiguration::bLateGame)
 	{
-		static auto bIsComp = Context->IsA(FindClass("FortControllerComponent_Aircraft"));
-		if (bIsComp)
-			PlayerController = (AFortPlayerControllerAthena*)((UActorComponent*)Context)->GetOwner();
-		else
-			PlayerController = (AFortPlayerControllerAthena*)Context;
+		if (!PlayerController)
+			return;
 
 		if (FConfiguration::bLateGame && PlayerController)
 			GPendingLateGameAircraftLoadout.insert(PlayerController);
@@ -2488,8 +2960,20 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 	{
 		static auto ServerAttemptAircraftJumpOG = (void(*)(AFortPlayerControllerAthena*, FRotator&)) ((AFortPlayerControllerAthena*)Context)->Vft[ServerAttemptAircraftJumpVft];
 
-		ServerAttemptAircraftJumpOG((AFortPlayerControllerAthena*)Context, Rotation);
+		ServerAttemptAircraftJumpOG(
+			PlayerController
+				? PlayerController
+				: (AFortPlayerControllerAthena*)Context,
+			Rotation);
 	}
+
+	// The spawn-island pawn can remain possessed through the 10.40 aircraft
+	// transition, so ServerAcknowledgePossession is not guaranteed to run here.
+	// Grant the authored Arsenal tier only after the pregame inventory cleanup.
+	FFortAthenaNativeLTMCompatibility::HandleArsenalPlayerReady(PlayerController);
+	FFortAthenaNativeLTMCompatibility::HandleWaxPlayerReady(PlayerController);
+	FFortAthenaNativeLTMCompatibility::HandleDiscoPlayerReady(PlayerController);
+	FFortAthenaNativeLTMCompatibility::HandleAshtonPlayerReady(PlayerController);
 	
 	if (FConfiguration::bLateGame)
 	{
@@ -2519,12 +3003,6 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 
 		PlayerController->MyFortPawn->K2_SetActorLocation(NewLoc, false, nullptr, true);
 
-		if (FConfiguration::bDisableJumpFatigue && PlayerController->MyFortPawn->HasCharacterMovement())
-		{
-			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(PlayerController->MyFortPawn->GetCharacterMovement());
-			if (MovementCompAthena->HasJumpPenaltyResetTime())
-				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
-		}
 	}
 }
 
@@ -2915,67 +3393,911 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 
 void SetEditingPlayer(ABuildingSMActor* _this, AFortPlayerStateAthena* NewEditingPlayer)
 {
-	if (_this->Role == 3 && (!_this->EditingPlayer || !NewEditingPlayer))
+	if (!IsUsableDeathObject(_this) || _this->Role != 3 ||
+		(_this->EditingPlayer && NewEditingPlayer))
 	{
-		_this->SetNetDormancy(2 - (NewEditingPlayer != 0));
-		_this->ForceNetUpdate();
+		return;
+	}
 
-		auto EditingPlayer = _this->EditingPlayer;
-		if (EditingPlayer)
+	auto OwningState = _this->EditingPlayer
+		? _this->EditingPlayer : NewEditingPlayer;
+	if (OwningState)
+	{
+		auto Handle = OwningState->Owner;
+		if (!IsUsableDeathObject(Handle) ||
+			!Handle->Cast<AFortPlayerControllerAthena>())
 		{
-			auto Handle = EditingPlayer->Owner;
-
-			if (Handle)
-				if (auto PlayerController = Handle->Cast<AFortPlayerControllerAthena>())
-				{
-					_this->EditingPlayer = NewEditingPlayer;
-					_this->OnRep_EditingPlayer();
-					return;
-				}
+			return;
 		}
-		else
-		{
-			if (!NewEditingPlayer)
+	}
+
+	// Wake the actor before changing its replicated owner. The old ordering
+	// forced the previous value and then made a cleared build DormantAll, so
+	// legacy clients could retain an edit owner indefinitely.
+	_this->SetNetDormancy(ENetDormancy::DORM_Awake);
+	_this->FlushNetDormancy();
+	_this->EditingPlayer = NewEditingPlayer;
+	VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+		_this, L"EditingPlayer");
+	_this->OnRep_EditingPlayer();
+	_this->ForceNetUpdate();
+}
+
+struct FEditingToolSession
+{
+	uint64 Generation = 0;
+	TWeakObjectPtr<ABuildingSMActor> Building;
+	// Keep the original identity after the weak pointer becomes unusable. RPCs
+	// for a just-replaced actor can still carry that exact pointer value.
+	ABuildingSMActor* BuildingIdentity = nullptr;
+	ULONGLONG ClosedAtMs = 0;
+	bool bClosed = false;
+};
+
+struct FEditingToolRestoreState
+{
+	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+	TWeakObjectPtr<AFortWeap_EditingTool> ObservedTool;
+	FGuid RestoreItemGuid{};
+	std::vector<FEditingToolSession> Sessions;
+	uint64 Generation = 0;
+	uint64 ActiveGeneration = 0;
+	int32 InactiveTicks = 0;
+	int32 RepairAttempts = 0;
+	int32 AwaitingToolTicks = 0;
+	bool bHasRestoreItem = false;
+	bool bAwaitingEditTool = false;
+};
+
+static std::unordered_map<
+	AFortPlayerControllerAthena*, FEditingToolRestoreState>
+	GEditingToolRestoreStates;
+static UWorld* GEditingToolRestoreWorld = nullptr;
+
+static bool IsRestorableAfterEditing(
+	const FFortItemEntry* Entry)
+{
+	if (!Entry || !IsUsableDeathObject(Entry->ItemDefinition) ||
+		!Entry->ItemDefinition->IsA<UFortWeaponItemDefinition>())
+	{
+		return false;
+	}
+
+	auto EditToolDefinitionClass =
+		UFortEditToolItemDefinition::StaticClass();
+	return !EditToolDefinitionClass ||
+		!Entry->ItemDefinition->IsA(EditToolDefinitionClass);
+}
+
+static FFortItemEntry* FindEditingRestoreEntry(
+	AFortPlayerControllerAthena* PlayerController,
+	const FGuid& ItemGuid)
+{
+	if (!PlayerController || !PlayerController->WorldInventory)
+		return nullptr;
+
+	return PlayerController->WorldInventory
+		->Inventory.ReplicatedEntries.Search(
+			[&](FFortItemEntry& Entry)
 			{
-				_this->EditingPlayer = NewEditingPlayer;
-				_this->OnRep_EditingPlayer();
+				return VehicleLoadoutGuidsEqual(
+					Entry.ItemGuid, ItemGuid) &&
+					IsRestorableAfterEditing(&Entry);
+			}, FFortItemEntry::Size());
+}
+
+static bool CaptureEditingRestoreItem(
+	AFortPlayerControllerAthena* PlayerController,
+	AActor* WeaponActor,
+	FEditingToolRestoreState& State)
+{
+	if (!IsUsableDeathObject(WeaponActor) ||
+		WeaponActor->IsA<AFortWeap_EditingTool>())
+	{
+		return false;
+	}
+
+	auto Weapon = WeaponActor->Cast<AFortWeapon>();
+	auto Entry = Weapon
+		? FindEditingRestoreEntry(
+			PlayerController, Weapon->ItemEntryGuid)
+		: nullptr;
+	if (!Entry)
+		return false;
+
+	State.RestoreItemGuid = Entry->ItemGuid;
+	State.bHasRestoreItem = true;
+	return true;
+}
+
+static ABuildingSMActor* BeginEditingToolRestoreSession(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	ABuildingSMActor* Building = nullptr)
+{
+	if (!PlayerController || !Pawn)
+		return nullptr;
+
+	auto& State = GEditingToolRestoreStates[PlayerController];
+	if (State.Pawn.Get() != Pawn)
+		State = {};
+
+	State.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+	State.InactiveTicks = 0;
+	State.RepairAttempts = 0;
+	State.AwaitingToolTicks = 0;
+	State.bAwaitingEditTool = false;
+	ABuildingSMActor* SupersededBuilding = nullptr;
+	if (Building)
+	{
+		FEditingToolSession* ActiveSession = nullptr;
+		for (auto& Session : State.Sessions)
+		{
+			if (!Session.bClosed &&
+				Session.Generation == State.ActiveGeneration)
+			{
+				ActiveSession = &Session;
+				break;
+			}
+		}
+
+		const bool bRepeatedBegin =
+			ActiveSession &&
+			ActiveSession->BuildingIdentity == Building;
+		if (!bRepeatedBegin)
+		{
+			// Re-entering the same UObject identity proves this Begin is the new
+			// lifecycle boundary. An older marker for that identity must not eat
+			// the new session's legitimate End RPC.
+			State.Sessions.erase(
+				std::remove_if(
+					State.Sessions.begin(), State.Sessions.end(),
+					[&](const FEditingToolSession& Session)
+					{
+						return Session.bClosed &&
+							Session.BuildingIdentity == Building;
+					}),
+				State.Sessions.end());
+
+			const ULONGLONG Now = GetTickCount64();
+			for (auto& Session : State.Sessions)
+			{
+				if (Session.bClosed)
+					continue;
+				if (Session.Generation == State.ActiveGeneration)
+					SupersededBuilding = Session.BuildingIdentity;
+				Session.bClosed = true;
+				Session.ClosedAtMs = Now;
+			}
+
+			State.Generation++;
+			State.ActiveGeneration = State.Generation;
+			State.Sessions.push_back({
+				State.Generation,
+				TWeakObjectPtr<ABuildingSMActor>(Building),
+				Building,
+				0,
+				false });
+			if (State.Sessions.size() > 16)
+				State.Sessions.erase(State.Sessions.begin());
+		}
+	}
+
+	auto CurrentWeapon = Pawn->HasCurrentWeapon()
+		? Pawn->CurrentWeapon : nullptr;
+	if (CaptureEditingRestoreItem(
+			PlayerController, CurrentWeapon, State))
+	{
+		return SupersededBuilding;
+	}
+
+	// Repeated Begin RPCs can arrive while the edit tool is already equipped.
+	// Preserve the first session snapshot; otherwise use native PreviousWeapon.
+	if (State.bHasRestoreItem &&
+		FindEditingRestoreEntry(
+			PlayerController, State.RestoreItemGuid))
+	{
+		return SupersededBuilding;
+	}
+
+	State.bHasRestoreItem = false;
+	if (Pawn->HasPreviousWeapon() &&
+		CaptureEditingRestoreItem(
+			PlayerController, Pawn->PreviousWeapon, State))
+	{
+		return SupersededBuilding;
+	}
+
+	auto HarvestingTool =
+		FindHarvestingToolEntry(PlayerController->WorldInventory);
+	if (IsRestorableAfterEditing(HarvestingTool))
+	{
+		State.RestoreItemGuid = HarvestingTool->ItemGuid;
+		State.bHasRestoreItem = true;
+	}
+	return SupersededBuilding;
+}
+
+static void PruneClosedEditingSessions(
+	FEditingToolRestoreState& State)
+{
+	const ULONGLONG Now = GetTickCount64();
+	State.Sessions.erase(
+		std::remove_if(
+			State.Sessions.begin(), State.Sessions.end(),
+			[&](const FEditingToolSession& Session)
+			{
+				return Session.bClosed &&
+					Session.Generation !=
+						State.ActiveGeneration &&
+					Session.ClosedAtMs != 0 &&
+					Now - Session.ClosedAtMs > 5000ULL;
+			}),
+		State.Sessions.end());
+}
+
+static int32 FindEditingSessionForRpc(
+	FEditingToolRestoreState& State,
+	ABuildingSMActor* Building,
+	bool bPreferClosed)
+{
+	PruneClosedEditingSessions(State);
+	// A null target normally means a just-replaced actor no longer resolves on
+	// the server. End RPCs likewise trail a completed Edit. Let that older
+	// tombstone absorb the RPC instead of terminating a newer live session.
+	if (bPreferClosed)
+	{
+		for (int32 Index = 0;
+			Index < (int32)State.Sessions.size(); Index++)
+		{
+			auto& Session = State.Sessions[Index];
+			if (Session.bClosed &&
+				(!Building || Session.BuildingIdentity == Building))
+			{
+				return Index;
+			}
+		}
+	}
+
+	// Otherwise a live session wins over retained tombstones. A normal Edit RPC
+	// with a resolved target must not be swallowed by an older marker.
+	for (int32 Index = 0;
+		Index < (int32)State.Sessions.size(); Index++)
+	{
+		auto& Session = State.Sessions[Index];
+		if (!Session.bClosed &&
+			Session.Generation == State.ActiveGeneration &&
+			(!Building || Session.BuildingIdentity == Building))
+		{
+			return Index;
+		}
+	}
+
+	for (int32 Index = 0;
+		Index < (int32)State.Sessions.size(); Index++)
+	{
+		auto& Session = State.Sessions[Index];
+		if (!Building || Session.BuildingIdentity == Building)
+			return Index;
+	}
+	return -1;
+}
+
+static bool IsCurrentEditingSessionRpc(
+	AFortPlayerControllerAthena* PlayerController,
+	ABuildingSMActor* Building,
+	bool bCloseSession,
+	bool bConsumeSession,
+	ABuildingSMActor** ResolvedBuilding = nullptr)
+{
+	if (ResolvedBuilding)
+		*ResolvedBuilding = nullptr;
+	auto StateIt =
+		GEditingToolRestoreStates.find(PlayerController);
+	if (StateIt == GEditingToolRestoreStates.end() ||
+		StateIt->second.Sessions.empty())
+	{
+		// Preserve compatibility for a session that began before this state was
+		// initialized (for example after hot injection).
+		return true;
+	}
+
+	auto& State = StateIt->second;
+	const int32 SessionIndex =
+		FindEditingSessionForRpc(
+			State, Building,
+			bConsumeSession || !Building);
+	if (SessionIndex < 0)
+		return false;
+
+	auto& Session = State.Sessions[SessionIndex];
+	if (ResolvedBuilding)
+		*ResolvedBuilding = Session.Building.Get();
+	const uint64 SessionGeneration = Session.Generation;
+	const bool bWasClosed = Session.bClosed;
+	const bool bIsCurrent =
+		!bWasClosed &&
+		SessionGeneration == State.ActiveGeneration;
+	if (bCloseSession && !bWasClosed)
+	{
+		Session.bClosed = true;
+		Session.ClosedAtMs = GetTickCount64();
+		if (bIsCurrent)
+			State.ActiveGeneration = 0;
+	}
+	if (bConsumeSession)
+	{
+		State.Sessions.erase(
+			State.Sessions.begin() + SessionIndex);
+	}
+	return bIsCurrent;
+}
+
+static ABuildingSMActor* GetActiveEditingSessionBuilding(
+	FEditingToolRestoreState& State)
+{
+	for (auto& Session : State.Sessions)
+	{
+		if (!Session.bClosed &&
+			Session.Generation == State.ActiveGeneration)
+		{
+			return Session.Building.Get();
+		}
+	}
+	return nullptr;
+}
+
+static void SetEditingToolActor(
+	AFortWeap_EditingTool* EditTool,
+	ABuildingSMActor* Building)
+{
+	if (!IsUsableDeathObject(EditTool) ||
+		!EditTool->HasEditActor())
+	{
+		return;
+	}
+
+	EditTool->SetNetDormancy(ENetDormancy::DORM_Awake);
+	EditTool->FlushNetDormancy();
+	EditTool->EditActor = Building;
+	VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+		EditTool, L"EditActor");
+	EditTool->OnRep_EditActor();
+	EditTool->ForceNetUpdate();
+}
+
+static bool HasActiveEditingTarget(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortWeap_EditingTool* EditTool)
+{
+	if (!PlayerController || !IsUsableDeathObject(EditTool) ||
+		!EditTool->HasEditActor())
+	{
+		return false;
+	}
+
+	auto Building = EditTool->EditActor;
+	return IsUsableDeathObject(Building) &&
+		Building->IsA<ABuildingSMActor>() &&
+		!Building->bDestroyed &&
+		Building->EditingPlayer == PlayerController->PlayerState;
+}
+
+template <typename Visitor>
+static void ForEachEditingTool(
+	AFortPlayerPawnAthena* Pawn, Visitor&& Visit)
+{
+	if (!IsUsableDeathObject(Pawn))
+		return;
+
+	std::unordered_set<AFortWeap_EditingTool*> Seen;
+	auto VisitCandidate = [&](AActor* Candidate)
+	{
+		if (!IsUsableDeathObject(Candidate))
+			return;
+		auto EditTool = Candidate->Cast<AFortWeap_EditingTool>();
+		if (EditTool && Seen.insert(EditTool).second)
+			Visit(EditTool);
+	};
+
+	if (Pawn->HasCurrentWeapon())
+		VisitCandidate(Pawn->CurrentWeapon);
+	if (!Pawn->HasCurrentWeaponList())
+		return;
+
+	auto& WeaponList = Pawn->CurrentWeaponList;
+	for (int32 Index = 0; Index < WeaponList.Num(); Index++)
+		VisitCandidate(WeaponList.Get(Index));
+}
+
+static AFortWeap_EditingTool* GetCurrentEditingTool(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController ||
+		!IsUsableDeathObject(PlayerController->MyFortPawn))
+	{
+		return nullptr;
+	}
+
+	auto Pawn = PlayerController->MyFortPawn;
+	if (!Pawn->HasCurrentWeapon() ||
+		!IsUsableDeathObject(Pawn->CurrentWeapon))
+	{
+		return nullptr;
+	}
+	return Pawn->CurrentWeapon
+		->Cast<AFortWeap_EditingTool>();
+}
+
+static bool HasCurrentActiveEditingTarget(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	return HasActiveEditingTarget(
+		PlayerController,
+		GetCurrentEditingTool(PlayerController));
+}
+
+static bool ClearEditingToolActor(
+	AFortPlayerControllerAthena* PlayerController,
+	ABuildingSMActor* ExpectedBuilding)
+{
+	if (!PlayerController ||
+		!IsUsableDeathObject(PlayerController->MyFortPawn))
+	{
+		return false;
+	}
+
+	auto Pawn = PlayerController->MyFortPawn;
+	auto CurrentEditTool =
+		GetCurrentEditingTool(PlayerController);
+	bool bCleared = false;
+	ForEachEditingTool(
+		Pawn,
+		[&](AFortWeap_EditingTool* EditTool)
+		{
+			if (!EditTool->HasEditActor())
+				return;
+
+			auto Target = EditTool->EditActor;
+			const bool bMatchesExpected =
+				ExpectedBuilding && Target == ExpectedBuilding;
+			const bool bStaleWithoutExpected =
+				!ExpectedBuilding && Target &&
+				(EditTool != CurrentEditTool ||
+					!HasActiveEditingTarget(
+						PlayerController, EditTool));
+			if (bMatchesExpected || bStaleWithoutExpected)
+			{
+				if (!ExpectedBuilding &&
+					IsUsableDeathObject(Target) &&
+					Target->IsA<ABuildingSMActor>() &&
+					Target->EditingPlayer ==
+						PlayerController->PlayerState)
+				{
+					SetEditingPlayer(Target, nullptr);
+				}
+				SetEditingToolActor(EditTool, nullptr);
+				bCleared = true;
+			}
+		});
+
+	return bCleared;
+}
+
+static void ClearNonCurrentEditingTools(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortWeap_EditingTool* CurrentEditTool)
+{
+	if (!PlayerController ||
+		!IsUsableDeathObject(PlayerController->MyFortPawn))
+	{
+		return;
+	}
+
+	auto ActiveBuilding =
+		HasActiveEditingTarget(
+			PlayerController, CurrentEditTool)
+		? CurrentEditTool->EditActor : nullptr;
+	ForEachEditingTool(
+		PlayerController->MyFortPawn,
+		[&](AFortWeap_EditingTool* EditTool)
+		{
+			if (EditTool == CurrentEditTool ||
+				!EditTool->HasEditActor() ||
+				!EditTool->EditActor)
+			{
 				return;
 			}
 
-			auto Handle = NewEditingPlayer->Owner;
-
-			if (auto PlayerController = Handle->Cast<AFortPlayerControllerAthena>())
+			auto StaleBuilding = EditTool->EditActor;
+			if (StaleBuilding != ActiveBuilding &&
+				IsUsableDeathObject(StaleBuilding) &&
+				StaleBuilding->IsA<ABuildingSMActor>() &&
+				StaleBuilding->EditingPlayer ==
+					PlayerController->PlayerState)
 			{
-				_this->EditingPlayer = NewEditingPlayer;
-				_this->OnRep_EditingPlayer();
+				SetEditingPlayer(StaleBuilding, nullptr);
 			}
+			SetEditingToolActor(EditTool, nullptr);
+		});
+}
+
+static bool ActivateLegacyEditingRestoreSlot(
+	AFortPlayerControllerAthena* PlayerController,
+	const FFortItemEntry& Entry)
+{
+	auto QuickBars = PlayerController
+		? PlayerController->QuickBars : nullptr;
+	if (!QuickBars || !Entry.ItemDefinition ||
+		!QuickBars->HasPrimaryQuickBar() ||
+		!QuickBars->HasSecondaryQuickBar())
+	{
+		return false;
+	}
+
+	const bool bPrimary =
+		AFortInventory::IsPrimaryQuickbar(Entry.ItemDefinition) ||
+		(Entry.ItemDefinition->HasItemType() &&
+			Entry.ItemDefinition->ItemType ==
+				EFortItemType::GetWeaponHarvest());
+	auto& QuickBar = bPrimary
+		? QuickBars->PrimaryQuickBar
+		: QuickBars->SecondaryQuickBar;
+	if (!FQuickBar::HasSlots())
+		return false;
+
+	for (int32 SlotIndex = 0;
+		SlotIndex < QuickBar.Slots.Num(); SlotIndex++)
+	{
+		auto& Slot = QuickBar.Slots.Get(
+			SlotIndex, FQuickBarSlot::Size());
+		if (!FQuickBarSlot::HasItems())
+			continue;
+		for (const auto& SlotItem : Slot.Items)
+		{
+			if (VehicleLoadoutGuidsEqual(
+					SlotItem, Entry.ItemGuid))
+			{
+				QuickBars->ServerActivateSlotInternal(
+					!bPrimary, SlotIndex, 0.f, true);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void RefreshEditingRestoreOnClient(
+	AFortPlayerControllerAthena* PlayerController,
+	const FFortItemEntry& Entry)
+{
+	if (!PlayerController)
+		return;
+
+	if (VersionInfo.FortniteVersion > 3.0)
+	{
+		auto ClientEquipItem =
+			PlayerController->GetFunction("ClientEquipItem");
+		if (ClientEquipItem)
+		{
+			PlayerController->Call<void>(
+				ClientEquipItem, Entry.ItemGuid, true);
+			return;
+		}
+	}
+
+	// The three-parameter owner RPC is schema-confirmed only on 1.7.2/2.50.
+	// Other early builds retain their native quickbar activation path.
+	const bool bKnownLegacyExecuteSignature =
+		VersionInfo.FortniteVersion == 1.72 ||
+		VersionInfo.FortniteVersion == 2.50;
+	auto ClientExecuteInventoryItem =
+		bKnownLegacyExecuteSignature
+		? PlayerController->GetFunction(
+			"ClientExecuteInventoryItem")
+		: nullptr;
+	if (ClientExecuteInventoryItem)
+	{
+		PlayerController->Call<void>(
+			ClientExecuteInventoryItem,
+			Entry.ItemGuid, 0.f, true);
+		return;
+	}
+
+	ActivateLegacyEditingRestoreSlot(
+		PlayerController, Entry);
+}
+
+static bool RestoreInactiveEditingTool(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController || !PlayerController->WorldInventory ||
+		!IsUsableDeathObject(PlayerController->MyFortPawn) ||
+		HasCurrentActiveEditingTarget(PlayerController))
+	{
+		return false;
+	}
+
+	auto Pawn = PlayerController->MyFortPawn;
+	if (!Pawn->HasCurrentWeapon() ||
+		!IsUsableDeathObject(Pawn->CurrentWeapon) ||
+		!Pawn->CurrentWeapon->IsA<AFortWeap_EditingTool>())
+	{
+		return false;
+	}
+
+	ClearEditingToolActor(PlayerController, nullptr);
+	auto StateIt =
+		GEditingToolRestoreStates.find(PlayerController);
+	FFortItemEntry* RestoreEntry = nullptr;
+	if (StateIt != GEditingToolRestoreStates.end() &&
+		StateIt->second.bHasRestoreItem)
+	{
+		RestoreEntry = FindEditingRestoreEntry(
+			PlayerController,
+			StateIt->second.RestoreItemGuid);
+	}
+
+	if (!RestoreEntry && Pawn->HasPreviousWeapon())
+	{
+		auto PreviousWeapon = IsUsableDeathObject(Pawn->PreviousWeapon)
+			? Pawn->PreviousWeapon->Cast<AFortWeapon>() : nullptr;
+		if (PreviousWeapon &&
+			!PreviousWeapon->IsA<AFortWeap_EditingTool>())
+		{
+			RestoreEntry = FindEditingRestoreEntry(
+				PlayerController,
+				PreviousWeapon->ItemEntryGuid);
+		}
+	}
+
+	if (!RestoreEntry)
+		RestoreEntry =
+			FindHarvestingToolEntry(
+				PlayerController->WorldInventory);
+	if (!IsRestorableAfterEditing(RestoreEntry))
+		return false;
+
+	PlayerController->ServerExecuteInventoryItem(
+		RestoreEntry->ItemGuid);
+	RefreshEditingRestoreOnClient(
+		PlayerController, *RestoreEntry);
+	Pawn->ForceNetUpdate();
+	PlayerController->ForceNetUpdate();
+	return true;
+}
+
+void AFortPlayerControllerAthena::TickEditingToolStateRepair(
+	UNetDriver* Driver)
+{
+	auto World = UWorld::GetWorld();
+	if (!World)
+	{
+		GEditingToolRestoreStates.clear();
+		GEditingToolRestoreWorld = nullptr;
+		return;
+	}
+	if (Driver != World->NetDriver)
+		return;
+
+	if (GEditingToolRestoreWorld != World)
+	{
+		GEditingToolRestoreStates.clear();
+		GEditingToolRestoreWorld = World;
+	}
+
+	std::unordered_set<AFortPlayerControllerAthena*>
+		ConnectedControllers;
+	for (int32 Index = 0;
+		Index < Driver->ClientConnections.Num(); Index++)
+	{
+		auto Connection = Driver->ClientConnections[Index];
+		auto PlayerController =
+			Connection && Connection->PlayerController
+			? Connection->PlayerController
+				->Cast<AFortPlayerControllerAthena>()
+			: nullptr;
+		if (!IsUsableDeathObject(PlayerController))
+			continue;
+
+		ConnectedControllers.insert(PlayerController);
+		auto Pawn = PlayerController->MyFortPawn;
+		auto StateIt = GEditingToolRestoreStates.find(
+			PlayerController);
+		if (!IsUsableDeathObject(Pawn) ||
+			(IsUsableDeathObject(PlayerController->Pawn) &&
+				PlayerController->Pawn != Pawn) ||
+			Pawn->GetHealth() <= 0.f)
+		{
+			GEditingToolRestoreStates.erase(
+				PlayerController);
+			continue;
+		}
+
+		auto EditTool =
+			GetCurrentEditingTool(PlayerController);
+		if (StateIt != GEditingToolRestoreStates.end() &&
+			StateIt->second.bAwaitingEditTool)
+		{
+			auto& PendingState = StateIt->second;
+			auto PendingBuilding =
+				GetActiveEditingSessionBuilding(PendingState);
+			const bool bCanFinishBegin =
+				EditTool && EditTool->HasEditActor() &&
+				IsUsableDeathObject(PendingBuilding) &&
+				PendingBuilding->EditingPlayer ==
+					PlayerController->PlayerState;
+			if (bCanFinishBegin)
+			{
+				SetEditingToolActor(
+					EditTool, PendingBuilding);
+				PendingState.ObservedTool =
+					TWeakObjectPtr<AFortWeap_EditingTool>(
+						EditTool);
+				PendingState.bAwaitingEditTool = false;
+				PendingState.AwaitingToolTicks = 0;
+				PendingState.InactiveTicks = 0;
+				PendingState.RepairAttempts = 0;
+			}
+			else if (++PendingState.AwaitingToolTicks < 3)
+			{
+				continue;
+			}
+			else
+			{
+				if (IsUsableDeathObject(PendingBuilding) &&
+					PendingBuilding->EditingPlayer ==
+						PlayerController->PlayerState)
+				{
+					SetEditingPlayer(
+						PendingBuilding, nullptr);
+				}
+				IsCurrentEditingSessionRpc(
+					PlayerController, PendingBuilding,
+					true, false);
+				PendingState.bAwaitingEditTool = false;
+			}
+		}
+
+		if (!EditTool)
+		{
+			// A weapon swap is also an edit exit. Remove any orphaned edit-tool
+			// target left in the pawn's weapon list before forgetting the session.
+			ClearNonCurrentEditingTools(
+				PlayerController, nullptr);
+			GEditingToolRestoreStates.erase(
+				PlayerController);
+			continue;
+		}
+
+		StateIt = GEditingToolRestoreStates.find(
+			PlayerController);
+		if (StateIt == GEditingToolRestoreStates.end() ||
+			StateIt->second.Pawn.Get() != Pawn)
+		{
+			BeginEditingToolRestoreSession(
+				PlayerController, Pawn);
+			StateIt = GEditingToolRestoreStates.find(
+				PlayerController);
+		}
+		if (StateIt == GEditingToolRestoreStates.end())
+			continue;
+
+		auto& State = StateIt->second;
+		if (State.ObservedTool.Get() != EditTool)
+		{
+			State.ObservedTool =
+				TWeakObjectPtr<AFortWeap_EditingTool>(EditTool);
+			State.InactiveTicks = 0;
+			State.RepairAttempts = 0;
+		}
+
+		ClearNonCurrentEditingTools(
+			PlayerController, EditTool);
+		if (HasCurrentActiveEditingTarget(PlayerController))
+		{
+			State.InactiveTicks = 0;
+			State.RepairAttempts = 0;
+			continue;
+		}
+
+		// Wait for two fully settled server ticks. A newer Begin RPC received in
+		// the same burst re-establishes an authoritative target and cancels this
+		// repair before it can unequip that newer session.
+		State.InactiveTicks++;
+		if (State.InactiveTicks < 2 ||
+			State.RepairAttempts >= 5 ||
+			((State.InactiveTicks - 2) % 3) != 0)
+		{
+			continue;
+		}
+
+		State.RepairAttempts++;
+		const bool bRestored =
+			RestoreInactiveEditingTool(PlayerController);
+		SDK::DbgLog(
+			"[EditRepair] controller=%p pawn=%p tool=%p "
+			"generation=%llu attempt=%d restored=%d\n",
+			(void*)PlayerController, (void*)Pawn,
+			(void*)EditTool,
+			(unsigned long long)State.Generation,
+			State.RepairAttempts, bRestored ? 1 : 0);
+	}
+
+	for (auto It = GEditingToolRestoreStates.begin();
+		It != GEditingToolRestoreStates.end();)
+	{
+		if (ConnectedControllers.find(It->first) ==
+			ConnectedControllers.end())
+		{
+			It = GEditingToolRestoreStates.erase(It);
+		}
+		else
+		{
+			++It;
 		}
 	}
 }
 
 void AFortPlayerControllerAthena::ServerBeginEditingBuildingActor(UObject* Context, FFrame& Stack)
 {
-	ABuildingSMActor* Building;
+	ABuildingSMActor* Building = nullptr;
 	Stack.StepCompiledIn(&Building);
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
-	if (!PlayerController || !PlayerController->MyFortPawn || !Building->IsA<ABuildingSMActor>() /* || Building->Team != static_cast<AFortPlayerStateAthena*>(PlayerController->PlayerState)->TeamIndex*/)
+	if (!PlayerController ||
+		!IsUsableDeathObject(PlayerController->MyFortPawn) ||
+		!PlayerController->WorldInventory ||
+		!IsUsableDeathObject(Building) ||
+		!Building->IsA<ABuildingSMActor>())
 		return;
 
 	AFortPlayerStateAthena* PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
-	if (!PlayerState)
+	if (!IsUsableDeathObject(PlayerState))
 		return;
-	
+
 	SetEditingPlayer(Building, PlayerState);
-	
-	if (!PlayerController->MyFortPawn->CurrentWeapon->IsA<AFortWeap_EditingTool>())
+	if (Building->EditingPlayer != PlayerState)
+		return;
+
+	auto Pawn = PlayerController->MyFortPawn;
+	auto SupersededBuilding = BeginEditingToolRestoreSession(
+		PlayerController, Pawn, Building);
+	if (SupersededBuilding && SupersededBuilding != Building)
+	{
+		if (IsUsableDeathObject(SupersededBuilding) &&
+			SupersededBuilding->EditingPlayer == PlayerState)
+		{
+			SetEditingPlayer(SupersededBuilding, nullptr);
+		}
+		ClearEditingToolActor(
+			PlayerController, SupersededBuilding);
+	}
+	AFortWeap_EditingTool* EditTool = nullptr;
+	if (Pawn->HasCurrentWeapon() &&
+		IsUsableDeathObject(Pawn->CurrentWeapon) &&
+		Pawn->CurrentWeapon->IsA<AFortWeap_EditingTool>())
+	{
+		EditTool =
+			Pawn->CurrentWeapon
+				->Cast<AFortWeap_EditingTool>();
+	}
+
+	if (!EditTool)
 	{
 		auto EditToolEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
 			{
-				return entry.ItemDefinition->Class == UFortEditToolItemDefinition::StaticClass();
+				return entry.ItemDefinition &&
+					entry.ItemDefinition->IsA<
+						UFortEditToolItemDefinition>();
 			}, FFortItemEntry::Size());
+		if (!EditToolEntry)
+		{
+			SetEditingPlayer(Building, nullptr);
+			return;
+		}
 
-		auto EditWeapon = (AFortWeapon*)PlayerController->MyFortPawn->EquipWeaponDefinition(
+		auto EditWeapon = (AFortWeapon*)Pawn->EquipWeaponDefinition(
 			(UFortWeaponItemDefinition*)EditToolEntry->ItemDefinition,
 			EditToolEntry->ItemGuid,
 			EditToolEntry->HasTrackerGuid() ? EditToolEntry->TrackerGuid : FGuid(),
@@ -2983,12 +4305,47 @@ void AFortPlayerControllerAthena::ServerBeginEditingBuildingActor(UObject* Conte
 		if (EditWeapon)
 			FFortWeaponMods::ApplyEntrySlotsAfterEquip(
 				EditWeapon, *EditToolEntry);
+
+		// EquipWeaponDefinition can return a replacement actor before the pawn's
+		// authoritative CurrentWeapon has settled. Never attach an edit target to
+		// that non-current actor; the game-thread repair will finish the handoff.
+		if (Pawn->HasCurrentWeapon() &&
+			IsUsableDeathObject(Pawn->CurrentWeapon) &&
+			Pawn->CurrentWeapon
+				->IsA<AFortWeap_EditingTool>())
+		{
+			EditTool =
+				Pawn->CurrentWeapon
+					->Cast<AFortWeap_EditingTool>();
+		}
 	}
 
-	if (auto EditTool = PlayerController->MyFortPawn->CurrentWeapon->Cast<AFortWeap_EditingTool>())
+	if (!EditTool || !EditTool->HasEditActor())
 	{
-		EditTool->EditActor = Building;
-		EditTool->OnRep_EditActor();
+		auto RestoreState =
+			GEditingToolRestoreStates.find(PlayerController);
+		if (RestoreState != GEditingToolRestoreStates.end())
+		{
+			RestoreState->second.bAwaitingEditTool = true;
+			RestoreState->second.AwaitingToolTicks = 0;
+		}
+		else
+		{
+			SetEditingPlayer(Building, nullptr);
+		}
+		return;
+	}
+
+	SetEditingToolActor(EditTool, Building);
+	auto RestoreState =
+		GEditingToolRestoreStates.find(PlayerController);
+	if (RestoreState != GEditingToolRestoreStates.end())
+	{
+		RestoreState->second.ObservedTool =
+			TWeakObjectPtr<AFortWeap_EditingTool>(EditTool);
+		RestoreState->second.InactiveTicks = 0;
+		RestoreState->second.RepairAttempts = 0;
+		RestoreState->second.bAwaitingEditTool = false;
 	}
 }
 
@@ -2997,10 +4354,10 @@ uint64_t InitializeBuildingActor_ = 0;
 uint64_t PostInitializeSpawnedBuildingActor_ = 0;
 void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFrame& Stack)
 {
-	ABuildingSMActor* Building;
-	TSubclassOf<AActor> NewClass;
-	uint8 RotationIterations;
-	bool bMirrored;
+	ABuildingSMActor* Building = nullptr;
+	TSubclassOf<AActor> NewClass{};
+	uint8 RotationIterations = 0;
+	bool bMirrored = false;
 	Stack.StepCompiledIn(&Building);
 	Stack.StepCompiledIn(&NewClass);
 	Stack.StepCompiledIn(&RotationIterations);
@@ -3008,18 +4365,66 @@ void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFra
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
-	if (!PlayerController || !Building || !NewClass || !Building->IsA<ABuildingSMActor>() || !CanBePlacedByPlayer(NewClass) || Building->EditingPlayer != PlayerController->PlayerState || Building->bDestroyed)
+	if (!PlayerController)
+		return;
+	ABuildingSMActor* SessionBuilding = nullptr;
+	if (!IsCurrentEditingSessionRpc(
+			PlayerController, Building,
+			false, false, &SessionBuilding))
 	{
+		IsCurrentEditingSessionRpc(
+			PlayerController, Building,
+			true, false);
 		return;
 	}
+	if (!Building)
+	{
+		Building = SessionBuilding;
+		if (!Building)
+		{
+			auto CurrentEditTool =
+				GetCurrentEditingTool(PlayerController);
+			if (CurrentEditTool && CurrentEditTool->HasEditActor())
+				Building = CurrentEditTool->EditActor;
+		}
+	}
+
+	const bool bValidActiveBuilding =
+		IsUsableDeathObject(Building) &&
+		Building->IsA<ABuildingSMActor>() &&
+		!Building->bDestroyed &&
+		Building->EditingPlayer ==
+			PlayerController->PlayerState;
+	if (!bValidActiveBuilding)
+	{
+		IsCurrentEditingSessionRpc(
+			PlayerController, Building,
+			true, false);
+		// A reset/confirm can race the old actor's replacement. Clear only a
+		// tool which still targets that exact actor; a newer edit is untouched.
+		ClearEditingToolActor(
+			PlayerController, Building);
+		return;
+	}
+	if (!NewClass || !CanBePlacedByPlayer(NewClass))
+		return;
+	IsCurrentEditingSessionRpc(
+		PlayerController, Building,
+		true, false);
 
 	SetEditingPlayer(Building, nullptr);
+
+	// End the tool session while the old actor is still live. The replacement
+	// RPC destroys that actor, so waiting for the later client End RPC can
+	// otherwise strand the blueprint/map in the player's hands.
+	ClearEditingToolActor(
+		PlayerController, Building);
 
 	auto ReplaceBuildingActor = (ABuildingSMActor * (*&)(ABuildingSMActor*, unsigned int, TSubclassOf<AActor>, unsigned int, int, bool, AFortPlayerControllerAthena*)) ReplaceBuildingActor_;
 	auto ReplaceBuildingActor__New = (ABuildingSMActor * (*&)(ABuildingSMActor*, unsigned int, TSubclassOf<AActor>&, unsigned int, int, bool, AFortPlayerControllerAthena*)) ReplaceBuildingActor_;
 
-	ABuildingSMActor* NewBuild;
-	
+	ABuildingSMActor* NewBuild = nullptr;
+
 	if (VersionInfo.FortniteVersion < 27)
 		NewBuild = ReplaceBuildingActor(Building, 1, NewClass, Building->CurrentBuildingLevel, RotationIterations, bMirrored, PlayerController);
 	else
@@ -3051,7 +4456,7 @@ void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFra
 		UWorld::FinishSpawnActor(NewBuild, Building->K2_GetActorLocation(), Building->K2_GetActorRotation());
 		Building->SilentDie(true);
 	}*/
-	
+
 	if (NewBuild)
 	{
 		NewBuild->bPlayerPlaced = true;
@@ -3060,45 +4465,45 @@ void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFra
 
 void AFortPlayerControllerAthena::ServerEndEditingBuildingActor(UObject* Context, FFrame& Stack)
 {
-	ABuildingSMActor* Building;
+	ABuildingSMActor* Building = nullptr;
 	Stack.StepCompiledIn(&Building);
 	Stack.IncrementCode();
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
-	if (!PlayerController || !PlayerController->MyFortPawn || !Building || !Building->IsA<ABuildingSMActor>() || Building->EditingPlayer != PlayerController->PlayerState/* || Building->Team != static_cast<AFortPlayerStateAthena*>(PlayerController->PlayerState)->TeamIndex*/ || Building->bDestroyed)
+	if (!PlayerController ||
+		!IsUsableDeathObject(PlayerController->MyFortPawn))
 		return;
-
-	SetEditingPlayer(Building, nullptr);
-
-	/*if (VersionInfo.EngineVersion >= 4.24)
+	ABuildingSMActor* SessionBuilding = nullptr;
+	if (!IsCurrentEditingSessionRpc(
+			PlayerController, Building,
+			true, true, &SessionBuilding))
 	{
-		auto EditToolEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-			{
-				return entry.ItemDefinition->Class == UFortEditToolItemDefinition::StaticClass();
-			}, FFortItemEntry::Size());
-
-		PlayerController->MyFortPawn->EquipWeaponDefinition((UFortWeaponItemDefinition*)EditToolEntry->ItemDefinition, EditToolEntry->ItemGuid, EditToolEntry->HasTrackerGuid() ? EditToolEntry->TrackerGuid : FGuid(), false);
-	}*/
-
-	auto EditToolEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
-		{
-			return entry.ItemDefinition->Class == UFortEditToolItemDefinition::StaticClass();
-		}, FFortItemEntry::Size());
-
-	if (!EditToolEntry)
 		return;
-
-	auto EditToolPtr = PlayerController->Pawn->CurrentWeaponList.Search([&](AActor* Weapon__Uncasted)
-		{ return ((AFortWeapon*)Weapon__Uncasted)->ItemEntryGuid == EditToolEntry->ItemGuid; });
-
-	if (!EditToolPtr)
-		return;
-
-	if (auto EditTool = *(AFortWeap_EditingTool**)EditToolPtr)
-	{
-		EditTool->EditActor = nullptr;
-		EditTool->OnRep_EditActor();
 	}
+	if (!Building)
+	{
+		Building = SessionBuilding;
+		if (!Building)
+		{
+			auto CurrentEditTool =
+				GetCurrentEditingTool(PlayerController);
+			if (CurrentEditTool && CurrentEditTool->HasEditActor())
+				Building = CurrentEditTool->EditActor;
+		}
+	}
+
+	if (IsUsableDeathObject(Building) &&
+		Building->IsA<ABuildingSMActor>() &&
+		Building->EditingPlayer ==
+			PlayerController->PlayerState)
+	{
+		SetEditingPlayer(Building, nullptr);
+	}
+
+	// Cleanup cannot depend on the old actor still being alive or still naming
+	// this player. Successful edits intentionally invalidate both conditions.
+	ClearEditingToolActor(
+		PlayerController, Building);
 }
 
 
@@ -3202,6 +4607,21 @@ void AFortPlayerControllerAthena::ServerAttemptInventoryDrop(UObject* Context, F
 		{ return entry.ItemGuid == Guid; }, FFortItemEntry::Size());
 	if (!itemEntry || itemEntry->Count <= 0 || Count <= 0)
 		return;
+
+	if (FFortAthenaNativeLTMCompatibility::
+			ShouldBlockAshtonInventoryDrop(
+				PlayerController,
+				itemEntry->ItemDefinition))
+	{
+		return;
+	}
+
+	if (FFortAthenaNativeLTMCompatibility::ShouldSuppressArsenalWorldLoot() &&
+		itemEntry->ItemDefinition &&
+		itemEntry->ItemDefinition->IsA<UFortWeaponItemDefinition>())
+	{
+		return;
+	}
 
 	Count = min(Count, itemEntry->Count);
 	if (bTrash)
@@ -3526,10 +4946,42 @@ static bool IsUsableDeathObject(const UObject* Object)
 		return false;
 
 	auto Item = TUObjectArray::GetItemByIndex(Object->Index);
-	if (!Item || Item->Object != Object || (Item->Flags & 0x20))
+	const int32 InvalidObjectFlags =
+		Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+	if (!Item || Item->GetObject() != Object ||
+		(Item->GetFlags() & InvalidObjectFlags))
 		return false;
 
 	return Object->Class && !IsBadReadPtr(Object->Class);
+}
+
+static bool IsManagedNonRespawningBot(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	// Both Magnesium PlayerAI backends and `spawnbot` controllers are
+	// connectionless, server-owned participants. A player respawn handshake
+	// cannot complete normally for them; allowing the global override through
+	// creates an untracked replacement pawn that can retain transition
+	// invulnerability. Their first terminal death is therefore authoritative.
+	return PlayerController &&
+		(IsTrackedSpawnedBotController(PlayerController) ||
+			MagnesiumPlayerAIIntegration::IsPlayerAIController(
+				PlayerController));
+}
+
+static bool IsTerminalManagedBot(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController)
+		return false;
+
+	if (IsTrackedSpawnedBotController(PlayerController))
+		return true;
+
+	auto AI = PlayerAIManager::FindByController(PlayerController);
+	return AI &&
+		(AI->bDeathHandled ||
+		 AI->GetState() == EPlayerAIState::Dead);
 }
 
 static bool IsHumanVictoryController(
@@ -3546,7 +4998,7 @@ static bool IsHumanVictoryController(
 		Controller->PlayerState->Cast<AFortPlayerStateAthena>();
 	if (!PlayerState ||
 		(PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
-		GSpawnedBotControllers.contains(Controller) ||
+		IsTrackedSpawnedBotController(Controller) ||
 		MagnesiumPlayerAIIntegration::IsPlayerAIController(Controller))
 	{
 		return false;
@@ -4867,7 +6319,7 @@ static bool RequestLegacyClientEquipmentRefresh(
 {
 	if (!PlayerController || !UsesEarlyAthenaLandingClientRefresh())
 		return false;
-	if (GSpawnedBotControllers.contains(PlayerController))
+	if (IsTrackedSpawnedBotController(PlayerController))
 		return false;
 	if (MagnesiumPlayerAIIntegration::IsPlayerAIController(PlayerController))
 		return false;
@@ -5033,8 +6485,16 @@ static void ScheduleSpawnedBotCleanup(
 	AFortPlayerStateAthena* PlayerState,
 	AFortInventory* Inventory)
 {
-	if (VersionInfo.FortniteVersion != 2.50 || !PlayerController)
+	RefreshSpawnedBotTrackingWorld();
+
+	if (!PlayerController)
 		return;
+
+	for (const auto& Pending : GPendingSpawnedBotCleanup)
+	{
+		if (Pending.ControllerIdentity == PlayerController)
+			return;
+	}
 
 	if (IsUsableDeathObject(Pawn))
 	{
@@ -5061,17 +6521,21 @@ static void ScheduleSpawnedBotCleanup(
 		Pawn->ForceNetUpdate();
 	}
 
+	const float CleanupDelay =
+		VersionInfo.FortniteVersion == 2.50 ? 3.f : 0.35f;
 	GPendingSpawnedBotCleanup.push_back({
 		TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController),
+		PlayerController,
 		TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn),
 		TWeakObjectPtr<AFortPlayerStateAthena>(PlayerState),
 		TWeakObjectPtr<AFortInventory>(Inventory),
-		3.f
+		CleanupDelay
 	});
 
-	SDK::DbgLog("[Elimination] scheduled 2.50 spawnbot cleanup controller=%p pawn=%p playerState=%p inventory=%p\n",
+	SDK::DbgLog("[Elimination] scheduled terminal spawnbot cleanup controller=%p pawn=%p playerState=%p inventory=%p delay=%.2f FN=%.2f\n",
 		(void*)PlayerController, (void*)Pawn, (void*)PlayerState,
-		(void*)Inventory);
+		(void*)Inventory, CleanupDelay,
+		VersionInfo.FortniteVersion);
 }
 
 static bool IsControllerInAlivePlayers(
@@ -5193,15 +6657,14 @@ static void Complete172SpawnedBotVictoryAfterNative(
 	// double-decrement PlayersLeft. Its old client does not, however, receive
 	// Magnesium's modern winner notification block, so complete only that
 	// client-facing part for a final synthetic-bot death.
-	if (FConfiguration::bForceRespawns ||
-		!bWaitingPostMatch)
+	if (!bWaitingPostMatch)
 	{
 		return;
 	}
 
 	auto WinnerController =
 		IsUsableDeathObject(ReportedKillerController) &&
-		!GSpawnedBotControllers.contains(ReportedKillerController)
+		!IsTrackedSpawnedBotController(ReportedKillerController)
 		? ReportedKillerController : nullptr;
 	if (!WinnerController && ReportedKillerPawn &&
 		IsUsableDeathObject(ReportedKillerPawn) &&
@@ -5210,7 +6673,7 @@ static void Complete172SpawnedBotVictoryAfterNative(
 		auto PawnController =
 			ReportedKillerPawn->Controller->Cast<AFortPlayerControllerAthena>();
 		if (PawnController &&
-			!GSpawnedBotControllers.contains(PawnController))
+			!IsTrackedSpawnedBotController(PawnController))
 		{
 			WinnerController = PawnController;
 		}
@@ -5227,7 +6690,7 @@ static void Complete172SpawnedBotVictoryAfterNative(
 				continue;
 
 			auto Candidate = AliveActor->Cast<AFortPlayerControllerAthena>();
-			if (!Candidate || GSpawnedBotControllers.contains(Candidate))
+			if (!Candidate || IsTrackedSpawnedBotController(Candidate))
 				continue;
 
 			if (SoleSurvivor)
@@ -5306,7 +6769,7 @@ static bool IsLateSeasonHumanVictoryController(
 	auto PlayerState =
 		(AFortPlayerStateAthena*)Controller->PlayerState;
 	if ((PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
-		GSpawnedBotControllers.contains(Controller) ||
+		IsTrackedSpawnedBotController(Controller) ||
 		MagnesiumPlayerAIIntegration::IsPlayerAIController(Controller))
 	{
 		return false;
@@ -5326,7 +6789,6 @@ static void CompleteLateSeasonBotVictoryAfterNative(
 {
 	if (VersionInfo.FortniteVersion < 17.0 ||
 		VersionInfo.FortniteVersion >= 19.0 ||
-		FConfiguration::bForceRespawns ||
 		GUI::gsStatus == Ended ||
 		!IsUsableDeathObject(GameMode) ||
 		!IsUsableDeathObject(GameState) ||
@@ -5611,7 +7073,7 @@ static bool IsSameDeathSpectateSquad(
 	return true;
 }
 
-static AFortPlayerPawnAthena* ResolveLegacyDeathSpectateTarget(
+static AFortPlayerPawnAthena* ResolveDeathSpectateTarget(
 	AFortGameMode* GameMode,
 	AFortPlayerControllerAthena* VictimController,
 	AFortPlayerControllerAthena* KillerController,
@@ -5677,13 +7139,1026 @@ static AFortPlayerPawnAthena* ResolveLegacyDeathSpectateTarget(
 	return nullptr;
 }
 
+static bool IsControllerInSpectatingState(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!IsUsableDeathObject(PlayerController) ||
+		!PlayerController->HasStateName())
+	{
+		return false;
+	}
+
+	static const FName SpectatingName(L"Spectating");
+	return PlayerController->StateName == SpectatingName;
+}
+
+static bool InvokeSpectateOnDeathLifecycle(
+	AFortPlayerControllerAthena* PlayerController,
+	UFunction* Function)
+{
+	if (!IsUsableDeathObject(PlayerController) || !Function)
+		return false;
+
+	const auto Parameters = Function->GetParamsNamed();
+	if (Parameters.NameOffsetMap.empty())
+	{
+		PlayerController->ProcessEvent(Function, nullptr);
+		return true;
+	}
+
+	alignas(16) uint8 Params[0x40]{};
+	bool bWroteAllowStateChange = false;
+	for (const auto& Parameter : Parameters.NameOffsetMap)
+	{
+		if (Parameter.Name == "ReturnValue")
+			continue;
+
+		if (Parameter.Name == "bAllowStateChange" ||
+			Parameter.Name == "AllowStateChange")
+		{
+			if (Parameter.Offset + sizeof(bool) >
+				sizeof(Params))
+			{
+				return false;
+			}
+
+			const bool bAllowStateChange = true;
+			memcpy(
+				Params + Parameter.Offset,
+				&bAllowStateChange,
+				sizeof(bAllowStateChange));
+			bWroteAllowStateChange = true;
+			continue;
+		}
+
+		// Do not call an unfamiliar overload with an undersized or incorrectly
+		// typed parameter block.
+		return false;
+	}
+
+	if (!bWroteAllowStateChange)
+		return false;
+
+	PlayerController->ProcessEvent(Function, Params);
+	return true;
+}
+
+static bool InvokeDeathSpectateTargetFunction(
+	AFortPlayerControllerAthena* PlayerController,
+	UFunction* Function,
+	AFortPlayerPawnAthena* TargetPawn,
+	AFortPlayerStateAthena* TargetPlayerState,
+	AFortPlayerControllerAthena* TargetController,
+	bool bPreferPlayerState)
+{
+	if (!IsUsableDeathObject(PlayerController) || !Function ||
+		!IsUsableDeathObject(TargetPawn) ||
+		(bPreferPlayerState &&
+			!IsUsableDeathObject(TargetPlayerState)))
+	{
+		return false;
+	}
+
+	const auto Parameters = Function->GetParamsNamed();
+	if (Parameters.NameOffsetMap.empty())
+		return false;
+
+	alignas(16) uint8 Params[0x40]{};
+	bool bWroteTarget = false;
+	for (const auto& Parameter : Parameters.NameOffsetMap)
+	{
+		if (Parameter.Name == "ReturnValue")
+			continue;
+
+		if (Parameter.Name == "bAllowStateChange" ||
+			Parameter.Name == "AllowStateChange")
+		{
+			if (Parameter.Offset + sizeof(bool) >
+				sizeof(Params))
+			{
+				return false;
+			}
+
+			const bool bAllowStateChange = true;
+			memcpy(
+				Params + Parameter.Offset,
+				&bAllowStateChange,
+				sizeof(bAllowStateChange));
+			continue;
+		}
+
+		if (bWroteTarget ||
+			Parameter.Offset + sizeof(void*) >
+				sizeof(Params))
+		{
+			return false;
+		}
+
+		const auto& ParameterName = Parameter.Name;
+		const bool bNamesTarget =
+			ParameterName.find("Spectate") !=
+				UEAllocatedString::npos ||
+			ParameterName.find("Target") !=
+				UEAllocatedString::npos ||
+			ParameterName.find("Player") !=
+				UEAllocatedString::npos ||
+			ParameterName.find("Actor") !=
+				UEAllocatedString::npos ||
+			ParameterName.find("Pawn") !=
+				UEAllocatedString::npos ||
+			ParameterName.find("Controller") !=
+				UEAllocatedString::npos;
+		if (!bNamesTarget)
+			return false;
+
+		UObject* TargetObject = nullptr;
+		if (ParameterName.find("Controller") !=
+				UEAllocatedString::npos)
+		{
+			if (!IsUsableDeathObject(TargetController))
+				return false;
+			TargetObject = TargetController;
+		}
+		else if (bPreferPlayerState ||
+			ParameterName.find("PlayerState") !=
+				UEAllocatedString::npos)
+		{
+			TargetObject = TargetPlayerState;
+		}
+		else
+		{
+			TargetObject = TargetPawn;
+		}
+
+		if (!IsUsableDeathObject(TargetObject))
+			return false;
+
+		memcpy(
+			Params + Parameter.Offset,
+			&TargetObject,
+			sizeof(TargetObject));
+		bWroteTarget = true;
+	}
+
+	if (!bWroteTarget)
+		return false;
+
+	PlayerController->ProcessEvent(Function, Params);
+	return true;
+}
+
+struct FPendingDeathSpectateCameraHandoff
+{
+	TWeakObjectPtr<UWorld> World;
+	TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
+	TWeakObjectPtr<AFortPlayerControllerAthena> TargetController;
+	TWeakObjectPtr<AFortPlayerStateAthena> TargetPlayerState;
+	TWeakObjectPtr<AFortPlayerPawnAthena> TargetPawn;
+	TWeakObjectPtr<AFortPlayerPawnAthena> DeadPawn;
+	float RemainingSeconds = 0.15f;
+	int Attempts = 0;
+};
+
+static std::vector<FPendingDeathSpectateCameraHandoff>
+	GPendingDeathSpectateCameraHandoffs;
+
+static void QueueDeathSpectateCameraHandoff(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerControllerAthena* TargetController,
+	AFortPlayerStateAthena* TargetPlayerState,
+	AFortPlayerPawnAthena* TargetPawn,
+	AFortPlayerPawnAthena* DeadPawn)
+{
+	for (int Index =
+		static_cast<int>(
+			GPendingDeathSpectateCameraHandoffs.size()) - 1;
+		Index >= 0; --Index)
+	{
+		if (GPendingDeathSpectateCameraHandoffs[Index]
+				.PlayerController.Get() == PlayerController)
+		{
+			GPendingDeathSpectateCameraHandoffs.erase(
+				GPendingDeathSpectateCameraHandoffs.begin() + Index);
+		}
+	}
+
+	FPendingDeathSpectateCameraHandoff Pending;
+	Pending.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
+	Pending.PlayerController =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(
+			PlayerController);
+	Pending.TargetController =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(
+			TargetController);
+	Pending.TargetPlayerState =
+		TWeakObjectPtr<AFortPlayerStateAthena>(
+			TargetPlayerState);
+	Pending.TargetPawn =
+		TWeakObjectPtr<AFortPlayerPawnAthena>(TargetPawn);
+	Pending.DeadPawn =
+		TWeakObjectPtr<AFortPlayerPawnAthena>(DeadPawn);
+	GPendingDeathSpectateCameraHandoffs.emplace_back(Pending);
+}
+
+static void InitializeDeathSpectating(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* TargetPawn,
+	AFortPlayerPawnAthena* DeadPawn)
+{
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(TargetPawn) ||
+		TargetPawn == DeadPawn)
+	{
+		return;
+	}
+
+	AFortPlayerControllerAthena* TargetController = nullptr;
+	if (TargetPawn->HasController() &&
+		IsUsableDeathObject(TargetPawn->Controller))
+	{
+		TargetController =
+			TargetPawn->Controller
+				->Cast<AFortPlayerControllerAthena>();
+	}
+
+	AFortPlayerStateAthena* TargetPlayerState = nullptr;
+	if (TargetPawn->HasPlayerState() &&
+		IsUsableDeathObject(TargetPawn->PlayerState))
+	{
+		TargetPlayerState =
+			TargetPawn->PlayerState
+				->Cast<AFortPlayerStateAthena>();
+	}
+	if (!TargetPlayerState &&
+		TargetPawn->HasController() &&
+		IsUsableDeathObject(TargetPawn->Controller))
+	{
+		if (TargetController &&
+			TargetController->HasPlayerState() &&
+			IsUsableDeathObject(
+				TargetController->PlayerState))
+		{
+			TargetPlayerState =
+				TargetController->PlayerState
+					->Cast<AFortPlayerStateAthena>();
+		}
+	}
+
+	// 15.30 moved the state-change flag from the ServerSpectate calls onto
+	// SpectateOnDeath, while other seasons expose the inverse signature (or a
+	// no-argument legacy SpectateOnDeath). Reflection keeps one path valid for
+	// all of those layouts. StateName can change before native death handling
+	// detaches the dead pawn, so a "Spectating" name alone does not prove that
+	// the camera lifecycle completed.
+	const bool bAlreadySpectating =
+		IsControllerInSpectatingState(PlayerController);
+	const bool bStillPossessesDeadPawn =
+		DeadPawn && PlayerController->Pawn == DeadPawn;
+	if (!bAlreadySpectating || bStillPossessesDeadPawn)
+	{
+		if (auto SpectateOnDeathFunction =
+				PlayerController->GetFunction(
+					"SpectateOnDeath"))
+		{
+			InvokeSpectateOnDeathLifecycle(
+				PlayerController,
+				SpectateOnDeathFunction);
+		}
+	}
+
+	// A controller that still possesses its eliminated pawn auto-manages its
+	// camera back to that pawn, even after the spectator UI has accepted a
+	// different PlayerState. Give the native lifecycle first chance above,
+	// then explicitly detach only when it left the captured dead pawn attached.
+	bool bDetachedDeadPawn = false;
+	if (DeadPawn &&
+		PlayerController->Pawn == DeadPawn &&
+		PlayerController->GetFunction("UnPossess"))
+	{
+		PlayerController->UnPossess();
+		bDetachedDeadPawn =
+			PlayerController->Pawn != DeadPawn;
+	}
+
+	const char* HandoffPath = "none";
+	bool bInvokedPlayerStateTarget = false;
+	if (TargetPlayerState)
+	{
+		if (auto SpectatePlayerStateFunction =
+				PlayerController->GetFunction(
+					"ServerSpectatePlayerState"))
+		{
+			bInvokedPlayerStateTarget =
+				InvokeDeathSpectateTargetFunction(
+					PlayerController,
+					SpectatePlayerStateFunction,
+					TargetPawn, TargetPlayerState,
+					TargetController, true);
+			if (bInvokedPlayerStateTarget)
+				HandoffPath = "player-state";
+		}
+	}
+
+	// PlayerState selection drives the "SPECTATING: <name>" UI on 15.30, but
+	// does not reliably move the camera. Always follow it with the available
+	// pawn/actor-target RPC instead of treating the correct label as proof of a
+	// completed camera handoff.
+	bool bInvokedPawnTarget = false;
+	auto SpectateActorFunction =
+		PlayerController->GetFunction(
+			"ServerSpectateActor");
+	if (SpectateActorFunction &&
+		InvokeDeathSpectateTargetFunction(
+			PlayerController,
+			SpectateActorFunction,
+			TargetPawn, TargetPlayerState,
+			TargetController, false))
+	{
+		bInvokedPawnTarget = true;
+		HandoffPath = bInvokedPlayerStateTarget
+			? "player-state+actor" : "actor";
+	}
+	else if (auto SpectatePlayerFunction =
+			PlayerController->GetFunction(
+				"ServerSpectatePlayer"))
+	{
+		// 10.40 and nearby builds name the pawn-target RPC
+		// ServerSpectatePlayer rather than ServerSpectateActor.
+		if (InvokeDeathSpectateTargetFunction(
+				PlayerController,
+				SpectatePlayerFunction,
+				TargetPawn, TargetPlayerState,
+				TargetController, false))
+		{
+			bInvokedPawnTarget = true;
+			HandoffPath = bInvokedPlayerStateTarget
+				? "player-state+player" : "player";
+		}
+	}
+
+	// Always finish the handoff on both sides. Server view-target state cannot
+	// prove that the owning remote client received its initial camera update;
+	// that missing notification is the observed first-killer failure.
+	static FName MutableSpectatingName(L"Spectating");
+	if (PlayerController->HasStateName() &&
+		!IsControllerInSpectatingState(PlayerController))
+	{
+		PlayerController->StateName =
+			MutableSpectatingName;
+		HandoffPath = "explicit-state";
+	}
+	if (PlayerController->GetFunction("ClientGotoState"))
+	{
+		PlayerController->ClientGotoState(
+			MutableSpectatingName);
+	}
+	if (PlayerController->GetFunction(
+			"SetViewTargetWithBlend"))
+	{
+		PlayerController->SetViewTargetWithBlend(
+			(AActor*)TargetPawn,
+			0.f, (uint8)0, 0.f, false);
+	}
+	TargetPawn->ForceNetUpdate();
+	const bool bQueuedClientViewTarget =
+		ClientForceViewTarget(
+		PlayerController, (AActor*)TargetPawn);
+	if (strcmp(HandoffPath, "none") == 0)
+		HandoffPath = "explicit-camera";
+
+	QueueDeathSpectateCameraHandoff(
+		PlayerController, TargetController,
+		TargetPlayerState, TargetPawn, DeadPawn);
+
+	auto ActualViewTarget =
+		PlayerController->GetViewTarget();
+	PlayerController->ForceNetUpdate();
+	SDK::DbgLog(
+		"[Spectating] initialized first death target "
+		"controller=%p targetPawn=%p targetState=%p "
+		"viewTarget=%p pawn=%p detached=%d "
+		"playerStateRPC=%d pawnRPC=%d clientViewRPC=%d "
+		"path=%s FN=%.2f\n",
+		(void*)PlayerController,
+		(void*)TargetPawn,
+		(void*)TargetPlayerState,
+		(void*)ActualViewTarget,
+		(void*)PlayerController->Pawn,
+		(int)bDetachedDeadPawn,
+		(int)bInvokedPlayerStateTarget,
+		(int)bInvokedPawnTarget,
+		(int)bQueuedClientViewTarget,
+		HandoffPath,
+		VersionInfo.FortniteVersion);
+}
+
+static void TickDeathSpectateCameraHandoffs(float DeltaSeconds)
+{
+	static const float RetryDelays[] =
+		{ 0.35f, 0.5f, 1.f, 2.f };
+
+	for (int Index =
+		static_cast<int>(
+			GPendingDeathSpectateCameraHandoffs.size()) - 1;
+		Index >= 0; --Index)
+	{
+		auto& Pending =
+			GPendingDeathSpectateCameraHandoffs[Index];
+		auto PlayerController =
+			Pending.PlayerController.Get();
+		auto TargetController =
+			Pending.TargetController.Get();
+		auto DeadPawn = Pending.DeadPawn.Get();
+		auto World = Pending.World.Get();
+		auto CurrentWorld = UWorld::GetWorld();
+		auto GameMode =
+			CurrentWorld
+				? (AFortGameMode*)CurrentWorld->AuthorityGameMode
+				: nullptr;
+
+		const bool bInvalidLifecycle =
+			World != CurrentWorld ||
+			!IsUsableDeathObject(PlayerController) ||
+			!IsUsableDeathObject(TargetController) ||
+			!IsUsableDeathObject(GameMode) ||
+			GUI::gsStatus == Ended ||
+			GameMode->MatchState == FName(L"WaitingPostMatch") ||
+			(PlayerController->HasStateName() &&
+				!IsControllerInSpectatingState(
+					PlayerController));
+		if (bInvalidLifecycle)
+		{
+			GPendingDeathSpectateCameraHandoffs.erase(
+				GPendingDeathSpectateCameraHandoffs.begin() +
+					Index);
+			continue;
+		}
+
+		// A revive/respawn gives the controller a different live pawn. Never
+		// let a delayed death-camera repair pull an active player back into
+		// spectating.
+		auto PossessedPawn = PlayerController->Pawn;
+		if (IsUsableDeathObject(PossessedPawn) &&
+			PossessedPawn != DeadPawn &&
+			!(PossessedPawn->HasbIsDying() &&
+				PossessedPawn->bIsDying))
+		{
+			GPendingDeathSpectateCameraHandoffs.erase(
+				GPendingDeathSpectateCameraHandoffs.begin() +
+					Index);
+			continue;
+		}
+
+		auto TargetPawn =
+			ResolveValidDeathSpectatePawn(
+				GameMode, PlayerController,
+				TargetController);
+		if (!TargetPawn)
+		{
+			GPendingDeathSpectateCameraHandoffs.erase(
+				GPendingDeathSpectateCameraHandoffs.begin() +
+					Index);
+			continue;
+		}
+		Pending.TargetPawn =
+			TWeakObjectPtr<AFortPlayerPawnAthena>(
+				TargetPawn);
+
+		// If native spectator cycling has already selected another live pawn,
+		// respect that newer choice and retire this first-killer retry.
+		auto ViewTargetBefore =
+			PlayerController->GetViewTarget();
+		auto ViewPawnBefore =
+			IsUsableDeathObject(ViewTargetBefore)
+				? ViewTargetBefore
+					->Cast<AFortPlayerPawnAthena>()
+				: nullptr;
+		if (ViewPawnBefore &&
+			ViewPawnBefore != TargetPawn &&
+			ViewPawnBefore != DeadPawn &&
+			!IsPawnDBNOForSpectating(ViewPawnBefore) &&
+			!(ViewPawnBefore->HasbIsDying() &&
+				ViewPawnBefore->bIsDying))
+		{
+			GPendingDeathSpectateCameraHandoffs.erase(
+				GPendingDeathSpectateCameraHandoffs.begin() +
+					Index);
+			continue;
+		}
+
+		Pending.RemainingSeconds -= DeltaSeconds;
+		if (Pending.RemainingSeconds > 0.f)
+			continue;
+
+		// By now the server view target has had at least one replication frame
+		// to make the target pawn relevant to this connection. Re-send only the
+		// camera handoff; replaying the death lifecycle would reset UI/state.
+		if (PlayerController->GetFunction(
+				"SetViewTargetWithBlend"))
+		{
+			PlayerController->SetViewTargetWithBlend(
+				(AActor*)TargetPawn,
+				0.f, (uint8)0, 0.f, false);
+		}
+		TargetPawn->ForceNetUpdate();
+		const bool bQueuedClientViewTarget =
+			ClientForceViewTarget(
+				PlayerController,
+				(AActor*)TargetPawn);
+		PlayerController->ForceNetUpdate();
+
+		Pending.Attempts++;
+		auto ViewTargetAfter =
+			PlayerController->GetViewTarget();
+		SDK::DbgLog(
+			"[Spectating] deferred camera handoff "
+			"attempt=%d controller=%p targetPawn=%p "
+			"before=%p after=%p clientViewRPC=%d FN=%.2f\n",
+			Pending.Attempts,
+			(void*)PlayerController,
+			(void*)TargetPawn,
+			(void*)ViewTargetBefore,
+			(void*)ViewTargetAfter,
+			(int)bQueuedClientViewTarget,
+			VersionInfo.FortniteVersion);
+
+		if (Pending.Attempts >= 5)
+		{
+			GPendingDeathSpectateCameraHandoffs.erase(
+				GPendingDeathSpectateCameraHandoffs.begin() +
+					Index);
+			continue;
+		}
+
+		Pending.RemainingSeconds =
+			RetryDelays[Pending.Attempts - 1];
+	}
+}
+
+struct FConfiguredRespawnPlaylistSnapshot
+{
+	TWeakObjectPtr<UFortPlaylistAthena> Playlist;
+	bool bHasRespawnInAir = false;
+	bool bRespawnInAir = false;
+	bool bHasRespawnHeight = false;
+	FScalableFloat RespawnHeight{};
+	bool bHasRespawnTime = false;
+	FScalableFloat RespawnTime{};
+	bool bHasRespawnType = false;
+	uint8 RespawnType = 0;
+};
+
+static TWeakObjectPtr<UWorld> GConfiguredRespawnPolicyWorld;
+static TWeakObjectPtr<AFortGameStateAthena>
+	GConfiguredRespawnPolicyGameState;
+static std::vector<FConfiguredRespawnPlaylistSnapshot>
+	GConfiguredRespawnPlaylistSnapshots;
+static bool GConfiguredRespawnCheatCaptured = false;
+static bool GConfiguredRespawnOriginalCheat = false;
+
+static void RestoreConfiguredRespawnPlaylist(
+	const FConfiguredRespawnPlaylistSnapshot& Snapshot)
+{
+	auto Playlist = Snapshot.Playlist.Get();
+	if (!IsUsableDeathObject(Playlist))
+		return;
+
+	if (Snapshot.bHasRespawnInAir &&
+		Playlist->HasbRespawnInAir())
+	{
+		bool OriginalRespawnInAir =
+			Snapshot.bRespawnInAir;
+		Playlist->bRespawnInAir =
+			OriginalRespawnInAir;
+	}
+	if (Snapshot.bHasRespawnHeight &&
+		Playlist->HasRespawnHeight())
+	{
+		FScalableFloat OriginalRespawnHeight =
+			Snapshot.RespawnHeight;
+		Playlist->RespawnHeight =
+			OriginalRespawnHeight;
+	}
+	if (Snapshot.bHasRespawnTime &&
+		Playlist->HasRespawnTime())
+	{
+		FScalableFloat OriginalRespawnTime =
+			Snapshot.RespawnTime;
+		Playlist->RespawnTime =
+			OriginalRespawnTime;
+	}
+	if (Snapshot.bHasRespawnType &&
+		Playlist->HasRespawnType())
+	{
+		uint8 OriginalRespawnType =
+			Snapshot.RespawnType;
+		Playlist->RespawnType =
+			OriginalRespawnType;
+	}
+}
+
+static void ResetConfiguredRespawnPolicyTracking(
+	bool bRestoreCurrentWorld)
+{
+	if (bRestoreCurrentWorld)
+	{
+		for (const auto& Snapshot :
+			GConfiguredRespawnPlaylistSnapshots)
+		{
+			RestoreConfiguredRespawnPlaylist(Snapshot);
+		}
+
+		auto GameState =
+			GConfiguredRespawnPolicyGameState.Get();
+		if (GConfiguredRespawnCheatCaptured &&
+			IsUsableDeathObject(GameState) &&
+			GameState->HasbCheatRespawnEnabled())
+		{
+			GameState->bCheatRespawnEnabled =
+				GConfiguredRespawnOriginalCheat;
+			GameState->ForceNetUpdate();
+		}
+	}
+
+	GConfiguredRespawnPlaylistSnapshots.clear();
+	GConfiguredRespawnCheatCaptured = false;
+	GConfiguredRespawnOriginalCheat = false;
+}
+
+static std::vector<UFortPlaylistAthena*>
+	ResolveAuthoritativeRespawnPlaylists(
+		AFortGameStateAthena* GameState)
+{
+	std::vector<UFortPlaylistAthena*> Playlists;
+	auto AddUnique =
+		[&](const UFortPlaylistAthena* Candidate)
+		{
+			auto Playlist =
+				const_cast<UFortPlaylistAthena*>(Candidate);
+			if (!IsUsableDeathObject(Playlist) ||
+				std::find(
+					Playlists.begin(), Playlists.end(),
+					Playlist) != Playlists.end())
+			{
+				return;
+			}
+
+			Playlists.push_back(Playlist);
+		};
+
+	if (GameState)
+	{
+		if (GameState->HasCurrentPlaylistInfo())
+		{
+			auto& PlaylistInfo =
+				GameState->CurrentPlaylistInfo;
+			if (PlaylistInfo.HasBasePlaylist())
+				AddUnique(PlaylistInfo.BasePlaylist);
+			if (PlaylistInfo.HasOverridePlaylist())
+				AddUnique(PlaylistInfo.OverridePlaylist);
+		}
+		if (GameState->HasCurrentPlaylistData())
+			AddUnique(GameState->CurrentPlaylistData);
+	}
+
+	// Before publication, SetupPlaylist has loaded the selected asset but the
+	// replicated GameState references may not be populated yet. Resolve that
+	// same object on the server thread so the toggle is effective throughout
+	// startup as well as after native mutator registration.
+	if (FConfiguration::Playlist)
+	{
+		AddUnique(
+			FindObject<UFortPlaylistAthena>(
+				FConfiguration::Playlist));
+	}
+
+	return Playlists;
+}
+
+static FConfiguredRespawnPlaylistSnapshot*
+	FindOrCaptureConfiguredRespawnPlaylist(
+		UFortPlaylistAthena* Playlist)
+{
+	for (auto& Snapshot :
+		GConfiguredRespawnPlaylistSnapshots)
+	{
+		if (Snapshot.Playlist.Get() == Playlist)
+			return &Snapshot;
+	}
+
+	FConfiguredRespawnPlaylistSnapshot Snapshot;
+	Snapshot.Playlist =
+		TWeakObjectPtr<UFortPlaylistAthena>(Playlist);
+	Snapshot.bHasRespawnInAir =
+		Playlist->HasbRespawnInAir();
+	if (Snapshot.bHasRespawnInAir)
+		Snapshot.bRespawnInAir =
+			Playlist->bRespawnInAir;
+	Snapshot.bHasRespawnHeight =
+		Playlist->HasRespawnHeight();
+	if (Snapshot.bHasRespawnHeight)
+		Snapshot.RespawnHeight =
+			Playlist->RespawnHeight;
+	Snapshot.bHasRespawnTime =
+		Playlist->HasRespawnTime();
+	if (Snapshot.bHasRespawnTime)
+		Snapshot.RespawnTime =
+			Playlist->RespawnTime;
+	Snapshot.bHasRespawnType =
+		Playlist->HasRespawnType();
+	if (Snapshot.bHasRespawnType)
+		Snapshot.RespawnType =
+			Playlist->RespawnType;
+
+	GConfiguredRespawnPlaylistSnapshots.emplace_back(
+		Snapshot);
+	return &GConfiguredRespawnPlaylistSnapshots.back();
+}
+
+// Apply the GUI setting from the authoritative game thread. RespawnType alone
+// is insufficient on several native LTMs: Athena's death path also checks the
+// replicated GameState cheat-respawn switch before it creates RespawnData.
+void AFortPlayerControllerAthena::ApplyConfiguredRespawnPolicy()
+{
+	auto World = UWorld::GetWorld();
+	auto GameMode =
+		World
+			? (AFortGameMode*)World->AuthorityGameMode
+			: nullptr;
+	auto GameState =
+		GameMode
+			? (AFortGameStateAthena*)GameMode->GameState
+			: nullptr;
+
+	if (!IsUsableDeathObject(World) ||
+		!IsUsableDeathObject(GameState))
+	{
+		// Playlist assets can outlive the transient World/GameState that
+		// published them. Restore those snapshots even when the actor side is
+		// already unavailable so a forced value cannot become the next
+		// match's newly captured "authored" value.
+		for (const auto& Snapshot :
+			GConfiguredRespawnPlaylistSnapshots)
+		{
+			RestoreConfiguredRespawnPlaylist(Snapshot);
+		}
+		ResetConfiguredRespawnPolicyTracking(false);
+		GConfiguredRespawnPolicyWorld =
+			TWeakObjectPtr<UWorld>();
+		GConfiguredRespawnPolicyGameState =
+			TWeakObjectPtr<AFortGameStateAthena>();
+		return;
+	}
+
+	if (GConfiguredRespawnPolicyWorld.Get() != World ||
+		GConfiguredRespawnPolicyGameState.Get() != GameState)
+	{
+		// Playlist assets can survive world replacement. Restore those UObject
+		// values before discarding the old match tracking so a forced setting
+		// cannot leak into the next playlist. Do not touch the old GameState:
+		// that actor may already be tearing down.
+		for (const auto& Snapshot :
+			GConfiguredRespawnPlaylistSnapshots)
+		{
+			RestoreConfiguredRespawnPlaylist(Snapshot);
+		}
+		ResetConfiguredRespawnPolicyTracking(false);
+		GConfiguredRespawnPolicyWorld =
+			TWeakObjectPtr<UWorld>(World);
+		GConfiguredRespawnPolicyGameState =
+			TWeakObjectPtr<AFortGameStateAthena>(GameState);
+	}
+
+	if (!FConfiguration::bForceRespawns)
+	{
+		if (!GConfiguredRespawnPlaylistSnapshots.empty() ||
+			GConfiguredRespawnCheatCaptured)
+		{
+			ResetConfiguredRespawnPolicyTracking(true);
+			SDK::DbgLog(
+				"[RespawnPolicy] restored authored policy "
+				"world=%p gameState=%p FN=%.2f\n",
+				(void*)World, (void*)GameState,
+				VersionInfo.FortniteVersion);
+		}
+		return;
+	}
+
+	auto CurrentPlaylists =
+		ResolveAuthoritativeRespawnPlaylists(GameState);
+
+	bool bChanged = false;
+	if (GameState->HasbCheatRespawnEnabled())
+	{
+		if (!GConfiguredRespawnCheatCaptured)
+		{
+			GConfiguredRespawnOriginalCheat =
+				GameState->bCheatRespawnEnabled;
+			GConfiguredRespawnCheatCaptured = true;
+		}
+		if (!GameState->bCheatRespawnEnabled)
+		{
+			GameState->bCheatRespawnEnabled = true;
+			bChanged = true;
+		}
+	}
+
+	// Do not leave a previously selected asset modified after the GUI changes
+	// modes while force respawn remains enabled.
+	for (auto It =
+			GConfiguredRespawnPlaylistSnapshots.begin();
+		It != GConfiguredRespawnPlaylistSnapshots.end();)
+	{
+		auto Playlist = It->Playlist.Get();
+		if (!Playlist ||
+			std::find(
+				CurrentPlaylists.begin(),
+				CurrentPlaylists.end(),
+				Playlist) == CurrentPlaylists.end())
+		{
+			RestoreConfiguredRespawnPlaylist(*It);
+			It =
+				GConfiguredRespawnPlaylistSnapshots.erase(
+					It);
+			continue;
+		}
+		++It;
+	}
+
+	uint8 DesiredRespawnType =
+		FConfiguration::PermanentRespawn ? 1 : 2;
+	for (auto Playlist : CurrentPlaylists)
+	{
+		FindOrCaptureConfiguredRespawnPlaylist(Playlist);
+
+		if (Playlist->HasbRespawnInAir() &&
+			!Playlist->bRespawnInAir)
+		{
+			Playlist->bRespawnInAir = true;
+			bChanged = true;
+		}
+		if (Playlist->HasRespawnHeight())
+		{
+			auto& Height = Playlist->RespawnHeight;
+			if (Height.Curve.CurveTable ||
+				Height.Curve.RowName.IsValid() ||
+				Height.Value !=
+					(float)FConfiguration::RespawnHeight)
+			{
+				Height.Curve.CurveTable = nullptr;
+				Height.Curve.RowName = FName();
+				Height.Value =
+					(float)FConfiguration::RespawnHeight;
+				bChanged = true;
+			}
+		}
+		if (Playlist->HasRespawnTime())
+		{
+			auto& Time = Playlist->RespawnTime;
+			if (Time.Curve.CurveTable ||
+				Time.Curve.RowName.IsValid() ||
+				Time.Value !=
+					(float)FConfiguration::RespawnTime)
+			{
+				Time.Curve.CurveTable = nullptr;
+				Time.Curve.RowName = FName();
+				Time.Value =
+					(float)FConfiguration::RespawnTime;
+				bChanged = true;
+			}
+		}
+		if (Playlist->HasRespawnType() &&
+			Playlist->RespawnType !=
+				DesiredRespawnType)
+		{
+			Playlist->RespawnType =
+				DesiredRespawnType;
+			bChanged = true;
+		}
+	}
+
+	if (bChanged)
+	{
+		GameState->ForceNetUpdate();
+		SDK::DbgLog(
+			"[RespawnPolicy] enforced explicit toggle "
+			"world=%p gameState=%p playlists=%d "
+			"type=%d time=%d height=%d nativeCheat=%d "
+			"FN=%.2f\n",
+			(void*)World, (void*)GameState,
+			(int)CurrentPlaylists.size(),
+			(int)DesiredRespawnType,
+			FConfiguration::RespawnTime.load(),
+			FConfiguration::RespawnHeight.load(),
+			GameState->HasbCheatRespawnEnabled() &&
+				GameState->bCheatRespawnEnabled
+				? 1 : 0,
+			VersionInfo.FortniteVersion);
+	}
+}
+
 static bool IsRespawningAllowedForDeath(
 	AFortGameMode* GameMode,
 	AFortGameStateAthena* GameState,
-	AFortPlayerStateAthena* PlayerState)
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerStateAthena* PlayerState,
+	bool bConfirmedStormDeath = false)
 {
+	// A late native mutator may have rewritten the effective policy after
+	// SetupPlaylist. Reassert the explicit GUI override immediately before the
+	// engine's own IsRespawningAllowed query.
+	AFortPlayerControllerAthena::
+		ApplyConfiguredRespawnPolicy();
+
+	const bool bTerminalMatch =
+		GUI::gsStatus == Ended ||
+		(GameMode &&
+		 GameMode->MatchState ==
+			 FName(L"WaitingPostMatch")) ||
+		(GameState &&
+		 GameState->HasGamePhase() &&
+		 GameState->GamePhase >=
+			 static_cast<uint8>(
+				 EAthenaGamePhase::EndGame));
+	if (bTerminalMatch)
+	{
+		// Infinite Respawns never reopens a completed objective/match.
+		return false;
+	}
+
+	// The global GUI respawn override is a player policy. Native AI, managed
+	// PlayerAI, and command-spawned bots all have server-owned lifecycles and
+	// no client handshake that can safely finish a replacement pawn. Treat any
+	// reflected bot player state as terminal even when it is not registered in
+	// one of Magnesium's explicit bot containers.
+	if (PlayerState &&
+		PlayerState->HasbIsABot() &&
+		PlayerState->bIsABot)
+	{
+		return false;
+	}
+
+	if (IsManagedNonRespawningBot(PlayerController))
+		return false;
+
+	if (FConfiguration::bForceRespawns &&
+		!FConfiguration::PermanentRespawn &&
+		PlayerState &&
+		PlayerState->HasDeathInfo() &&
+		FDeathInfo::HasbInitialized() &&
+		PlayerState->DeathInfo.bInitialized &&
+		bConfirmedStormDeath &&
+		PlayerState->DeathInfo.DeathCause == 0)
+	{
+		// RespawnType 2 is InfiniteRespawnExceptStorm. Keep this decision in
+		// the shared policy so the native path and the watchdog cannot disagree
+		// and revive a storm-eliminated player one tick later.
+		return false;
+	}
+
+	bool bWaxRespawnAllowed = false;
+	if (PlayerState &&
+		FFortAthenaNativeLTMCompatibility::
+			TryGetWaxRespawnAllowed(
+				PlayerState,
+				bWaxRespawnAllowed))
+	{
+		// Wax/Bounty owns a finite, per-player lives counter even though the
+		// playlist advertises InfiniteRespawn. Neither the global force option
+		// nor the playlist fallback may resurrect a permanently eliminated
+		// player.
+		return bWaxRespawnAllowed;
+	}
+
+	bool bDeepFriedRespawnAllowed = false;
+	if (PlayerState &&
+		FFortAthenaNativeLTMCompatibility::
+			TryGetFoodFightRespawnAllowed(
+				PlayerState,
+				bDeepFriedRespawnAllowed))
+	{
+		// Objective loss is authoritative for this team. In particular, the
+		// global force-respawn option must not resurrect a Food Fight team
+		// whose mascot has been destroyed.
+		return bDeepFriedRespawnAllowed;
+	}
+
+	bool bDiscoRespawnAllowed = false;
+	if (PlayerState &&
+		FFortAthenaNativeLTMCompatibility::
+			TryGetDiscoRespawnAllowed(
+				PlayerState,
+				bDiscoRespawnAllowed))
+	{
+		// Disco's authored safe-zone cutoff remains authoritative even when
+		// the global force-respawn option is enabled.
+		return bDiscoRespawnAllowed;
+	}
+
 	if (!GameMode || !GameState || !PlayerState)
+	{
 		return FConfiguration::bForceRespawns;
+	}
 
 	auto IsRespawningAllowedFunction =
 		GameState->GetFunction("IsRespawningAllowed");
@@ -5717,17 +8192,917 @@ static bool IsRespawningAllowedForDeath(
 		bRespawnAllowed = Playlist
 			? (Playlist->HasRespawnType()
 				? Playlist->RespawnType > 0
-				: FConfiguration::bForceRespawns)
-			: FConfiguration::bForceRespawns;
+				: FConfiguration::bForceRespawns.load())
+			: FConfiguration::bForceRespawns.load();
 	}
 
-	return bRespawnAllowed || FConfiguration::bForceRespawns;
+	// Outside the explicit objective/lives/cutoff returns above, the visible
+	// Infinite Respawns setting is authoritative for every playlist, including
+	// the 10.40 native LTMs.
+	return bRespawnAllowed ||
+		FConfiguration::bForceRespawns;
+}
+
+struct FPendingForcedRespawnRepair
+{
+	TWeakObjectPtr<UWorld> World;
+	TWeakObjectPtr<AFortGameStateAthena> GameState;
+	TWeakObjectPtr<AFortPlayerControllerAthena>
+		PlayerController;
+	TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
+	TWeakObjectPtr<AFortPlayerPawnAthena> DeadPawn;
+	FVector DeathLocation{};
+	FRotator DeathRotation{};
+	float RemainingSeconds = 0.f;
+	bool bPrepareRequested = false;
+	bool bSeededByRepair = false;
+	bool bCountdownGraceGranted = false;
+	int DirectAttempts = 0;
+};
+
+static std::vector<FPendingForcedRespawnRepair>
+	GPendingForcedRespawnRepairs;
+static std::unordered_map<
+	AFortPlayerControllerAthena*,
+	TWeakObjectPtr<AFortGameStateAthena>>
+	GStormRespawnBlockedControllers;
+
+static void RefreshSpawnedBotTrackingWorld()
+{
+	auto CurrentWorld = UWorld::GetWorld();
+	if (GSpawnedBotTrackingWorldIdentity == CurrentWorld &&
+		GSpawnedBotTrackingWorld.Get() == CurrentWorld)
+	{
+		return;
+	}
+
+	const int PreviousBotCount =
+		(int)GSpawnedBotControllers.size();
+	const int PreviousCleanupCount =
+		(int)GPendingSpawnedBotCleanup.size();
+	auto PreviousWorld = GSpawnedBotTrackingWorldIdentity;
+
+	// Every container below uses a raw controller address as its key. Remove
+	// entries belonging to the old world's synthetic controllers before a new
+	// actor can reuse one of those addresses and pass a pointer-only membership
+	// check. This runs only when the world token changes and remains game-thread
+	// local; no hook, worker, or cross-module client dependency is introduced.
+	for (auto PlayerController : GSpawnedBotControllers)
+	{
+		GPendingRespawnLandingFinalization.erase(PlayerController);
+		GRespawnSkydivingObserved.erase(PlayerController);
+		GPendingLegacyAircraftLandingEquipment.erase(PlayerController);
+		GLegacyAircraftSkydivingObserved.erase(PlayerController);
+		GRespawnHiddenWeapons.erase(PlayerController);
+		GLastAcknowledgedPawn.erase(PlayerController);
+		GPendingLateGameAircraftLoadout.erase(PlayerController);
+		GSkipPossessRespawnControllers.erase(PlayerController);
+		GFinalizePossessTakeover.erase(PlayerController);
+		GRemoteControlReturnPawn.erase(PlayerController);
+		GVehiclePossessionReturnPawn.erase(PlayerController);
+		GVehiclePossessionVehicle.erase(PlayerController);
+		GTrackedVehicleLoadouts.erase(PlayerController);
+		PlayersInitialized.erase(PlayerController);
+		GStormRespawnBlockedControllers.erase(PlayerController);
+	}
+
+	// Forced-respawn records are serial-aware and world-bound. Retain any record
+	// already created for the new world while discarding all old-world work.
+	GPendingForcedRespawnRepairs.erase(
+		std::remove_if(
+			GPendingForcedRespawnRepairs.begin(),
+			GPendingForcedRespawnRepairs.end(),
+			[CurrentWorld](const FPendingForcedRespawnRepair& Pending)
+			{
+				return !CurrentWorld ||
+					Pending.World.Get() != CurrentWorld;
+			}),
+		GPendingForcedRespawnRepairs.end());
+
+	GPendingSpawnedBotCleanup.clear();
+	G172SpawnedBotRemovalAttempts.clear();
+	GSpawnedBotControllers.clear();
+	GSpawnedBotTrackingWorld = CurrentWorld
+		? TWeakObjectPtr<UWorld>(CurrentWorld)
+		: TWeakObjectPtr<UWorld>{};
+	GSpawnedBotTrackingWorldIdentity = CurrentWorld;
+
+	if (PreviousBotCount > 0 || PreviousCleanupCount > 0)
+	{
+		SDK::DbgLog(
+			"[Elimination] reset spawnbot tracking for world transition old=%p new=%p bots=%d pending=%d\n",
+			(void*)PreviousWorld, (void*)CurrentWorld,
+			PreviousBotCount, PreviousCleanupCount);
+	}
+}
+
+static void InvalidateRespawnHandshake(
+	AFortPlayerStateAthena* PlayerState)
+{
+	if (!IsUsableDeathObject(PlayerState) ||
+		!PlayerState->HasRespawnData())
+	{
+		return;
+	}
+
+	auto& RespawnData = PlayerState->RespawnData;
+	if (RespawnData.HasbRespawnDataAvailable())
+		RespawnData.bRespawnDataAvailable = false;
+	if (RespawnData.HasbServerIsReady())
+		RespawnData.bServerIsReady = false;
+	if (RespawnData.HasbClientIsReady())
+		RespawnData.bClientIsReady = false;
+	PlayerState->ForceNetUpdate();
+}
+
+static bool HasForcedRespawnReplacementPawn(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* DeadPawn)
+{
+	if (!IsUsableDeathObject(PlayerController))
+		return false;
+
+	auto IsReplacement =
+		[&](AActor* Candidate)
+		{
+			if (!IsUsableDeathObject(Candidate) ||
+				Candidate == DeadPawn)
+			{
+				return false;
+			}
+
+			auto CandidatePawn =
+				Candidate->Cast<AFortPlayerPawnAthena>();
+			return !CandidatePawn ||
+				!CandidatePawn->HasbIsDying() ||
+				!CandidatePawn->bIsDying;
+		};
+
+	return IsReplacement(PlayerController->Pawn) ||
+		IsReplacement(PlayerController->MyFortPawn);
+}
+
+static bool HasActiveForcedRespawnHandshake(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerStateAthena* PlayerState)
+{
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(PlayerState) ||
+		IsManagedNonRespawningBot(PlayerController))
+	{
+		return false;
+	}
+
+	if (auto IsInRespawnCountdown =
+			PlayerController->GetFunction(
+				"IsInRespawnCountdown"))
+	{
+		if (PlayerController->Call<bool>(
+				IsInRespawnCountdown))
+		{
+			return true;
+		}
+	}
+
+	// RespawnData's available/server-ready bits only mean that the server has
+	// prepared a handshake. They are not proof that the client acknowledged it
+	// or that a replacement pawn exists. Only an actual countdown is useful as
+	// progress telemetry, and even that must not retire the repair watchdog.
+	return false;
+}
+
+static void QueueForcedRespawnRepair(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerStateAthena* PlayerState,
+	AFortPlayerPawnAthena* DeadPawn,
+	FVector DeathLocation,
+	FRotator DeathRotation)
+{
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(PlayerState) ||
+		IsManagedNonRespawningBot(PlayerController))
+	{
+		return;
+	}
+
+	for (int Index =
+		(int)GPendingForcedRespawnRepairs.size() - 1;
+		Index >= 0; --Index)
+	{
+		if (GPendingForcedRespawnRepairs[Index]
+				.PlayerController.Get() == PlayerController)
+		{
+			GPendingForcedRespawnRepairs.erase(
+				GPendingForcedRespawnRepairs.begin() +
+					Index);
+		}
+	}
+
+	auto World = UWorld::GetWorld();
+	auto GameMode =
+		World
+			? (AFortGameMode*)World->AuthorityGameMode
+			: nullptr;
+	FPendingForcedRespawnRepair Pending;
+	Pending.World = TWeakObjectPtr<UWorld>(World);
+	Pending.GameState =
+		TWeakObjectPtr<AFortGameStateAthena>(
+			GameMode
+				? (AFortGameStateAthena*)GameMode->GameState
+				: nullptr);
+	Pending.PlayerController =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(
+			PlayerController);
+	Pending.PlayerState =
+		TWeakObjectPtr<AFortPlayerStateAthena>(
+			PlayerState);
+	Pending.DeadPawn =
+		TWeakObjectPtr<AFortPlayerPawnAthena>(
+			DeadPawn);
+	Pending.DeathLocation = DeathLocation;
+	Pending.DeathRotation = DeathRotation;
+	// Give the native countdown its configured amount of time after the
+	// one-tick preparation repair before using the exact-once hard fallback.
+	Pending.RemainingSeconds =
+		(std::max)(
+			1.5f,
+			(float)FConfiguration::RespawnTime + 1.f);
+	GPendingForcedRespawnRepairs.emplace_back(Pending);
+
+	SDK::DbgLog(
+		"[RespawnRepair] queued controller=%p "
+		"playerState=%p deadPawn=%p delay=%.2f "
+		"FN=%.2f\n",
+		(void*)PlayerController, (void*)PlayerState,
+		(void*)DeadPawn, Pending.RemainingSeconds,
+		VersionInfo.FortniteVersion);
+}
+
+static bool SeedForcedRespawnData(
+	FPendingForcedRespawnRepair& Pending,
+	AFortGameMode* GameMode,
+	AFortPlayerStateAthena* PlayerState)
+{
+	if (!IsUsableDeathObject(PlayerState) ||
+		!PlayerState->HasRespawnData())
+	{
+		return false;
+	}
+
+	FVector RespawnLocation = Pending.DeathLocation;
+	FVector ConfiguredRespawnLocation{};
+	if (TryGetConfiguredRespawnLocation(
+			GameMode, ConfiguredRespawnLocation))
+	{
+		RespawnLocation = ConfiguredRespawnLocation;
+	}
+	else
+	{
+		if (!IsFiniteRespawnLocation(RespawnLocation))
+			RespawnLocation = FVector();
+		RespawnLocation.Z +=
+			(double)FConfiguration::RespawnHeight;
+	}
+
+	auto& RespawnData = PlayerState->RespawnData;
+	if (RespawnData.HasRespawnLocation())
+		RespawnData.RespawnLocation =
+			RespawnLocation;
+	if (RespawnData.HasRespawnRotation())
+		RespawnData.RespawnRotation =
+			Pending.DeathRotation;
+	if (RespawnData.HasbRespawnDataAvailable())
+		RespawnData.bRespawnDataAvailable = true;
+	if (RespawnData.HasbServerIsReady())
+		RespawnData.bServerIsReady = true;
+	if (RespawnData.HasbClientIsReady())
+		RespawnData.bClientIsReady = false;
+	PlayerState->ForceNetUpdate();
+	return true;
+}
+
+static void TickForcedRespawnRepairs(float DeltaSeconds)
+{
+	AFortPlayerControllerAthena::
+		ApplyConfiguredRespawnPolicy();
+
+	for (int Index =
+		(int)GPendingForcedRespawnRepairs.size() - 1;
+		Index >= 0; --Index)
+	{
+		auto& Pending =
+			GPendingForcedRespawnRepairs[Index];
+		auto CurrentWorld = UWorld::GetWorld();
+		auto PlayerController =
+			Pending.PlayerController.Get();
+		auto PlayerState = Pending.PlayerState.Get();
+		auto DeadPawn = Pending.DeadPawn.Get();
+		auto GameMode =
+			CurrentWorld
+				? (AFortGameMode*)
+					CurrentWorld->AuthorityGameMode
+				: nullptr;
+		auto GameState =
+			GameMode
+				? (AFortGameStateAthena*)GameMode->GameState
+				: nullptr;
+
+		const bool bInvalidLifecycle =
+			Pending.World.Get() != CurrentWorld ||
+			Pending.GameState.Get() != GameState ||
+			!IsUsableDeathObject(PlayerController) ||
+			!IsUsableDeathObject(PlayerState) ||
+			PlayerController->PlayerState != PlayerState ||
+			!IsUsableDeathObject(GameMode) ||
+			!IsUsableDeathObject(GameState) ||
+			!FConfiguration::bForceRespawns ||
+			GUI::gsStatus == Ended ||
+			GameMode->MatchState ==
+				FName(L"WaitingPostMatch");
+		if (bInvalidLifecycle ||
+			!IsRespawningAllowedForDeath(
+				GameMode, GameState, PlayerController,
+				PlayerState))
+		{
+			GPendingForcedRespawnRepairs.erase(
+				GPendingForcedRespawnRepairs.begin() +
+					Index);
+			continue;
+		}
+
+		if (HasForcedRespawnReplacementPawn(
+				PlayerController, DeadPawn))
+		{
+			SDK::DbgLog(
+				"[RespawnRepair] native replacement "
+				"observed controller=%p deadPawn=%p\n",
+				(void*)PlayerController,
+				(void*)DeadPawn);
+			GPendingForcedRespawnRepairs.erase(
+				GPendingForcedRespawnRepairs.begin() +
+					Index);
+			continue;
+		}
+
+		if (!Pending.bPrepareRequested)
+		{
+			Pending.bPrepareRequested = true;
+			if (auto PrepareClientForRespawning =
+					PlayerController->GetFunction(
+						"PrepareClientForRespawning"))
+			{
+				PlayerController->Call<void>(
+					PrepareClientForRespawning);
+				SDK::DbgLog(
+					"[RespawnRepair] requested native "
+					"preparation controller=%p "
+					"playerState=%p\n",
+					(void*)PlayerController,
+					(void*)PlayerState);
+			}
+			else
+			{
+				SDK::DbgLog(
+					"[RespawnRepair] native preparation "
+					"function unavailable controller=%p "
+					"FN=%.2f\n",
+					(void*)PlayerController,
+					VersionInfo.FortniteVersion);
+			}
+
+			if (HasForcedRespawnReplacementPawn(
+					PlayerController, DeadPawn))
+			{
+				GPendingForcedRespawnRepairs.erase(
+					GPendingForcedRespawnRepairs.begin() +
+						Index);
+				continue;
+			}
+		}
+
+		Pending.RemainingSeconds -= DeltaSeconds;
+		if (Pending.RemainingSeconds > 0.f)
+			continue;
+
+		// A few clients begin their visible countdown late even though the
+		// server completed preparation. Give a real countdown one bounded
+		// grace window before invoking the hard fallback; handshake bits alone
+		// do not qualify because they can remain stuck indefinitely.
+		if (!Pending.bCountdownGraceGranted &&
+			HasActiveForcedRespawnHandshake(
+				PlayerController, PlayerState))
+		{
+			Pending.bCountdownGraceGranted = true;
+			Pending.RemainingSeconds = 2.f;
+			SDK::DbgLog(
+				"[RespawnRepair] active countdown grace "
+				"controller=%p playerState=%p\n",
+				(void*)PlayerController,
+				(void*)PlayerState);
+			continue;
+		}
+
+		const bool bSeededRespawnData =
+			SeedForcedRespawnData(
+				Pending, GameMode, PlayerState);
+		Pending.bSeededByRepair |=
+			bSeededRespawnData;
+		bool bInvokedReadyLifecycle = false;
+		if (bSeededRespawnData)
+		{
+			if (auto ServerClientIsReadyToRespawn =
+					PlayerController->GetFunction(
+						"ServerClientIsReadyToRespawn"))
+			{
+				PlayerController->Call<void>(
+					ServerClientIsReadyToRespawn);
+				bInvokedReadyLifecycle = true;
+			}
+		}
+
+		bool bRestartRequested = false;
+		if (!HasForcedRespawnReplacementPawn(
+				PlayerController, DeadPawn))
+		{
+			auto ControlledPawn =
+				PlayerController->Pawn;
+			auto ControlledFortPawn =
+				IsUsableDeathObject(ControlledPawn)
+					? ControlledPawn
+						->Cast<AFortPlayerPawnAthena>()
+					: nullptr;
+			if (IsUsableDeathObject(ControlledPawn) &&
+				(ControlledPawn == DeadPawn ||
+					(ControlledFortPawn &&
+						ControlledFortPawn->HasbIsDying() &&
+						ControlledFortPawn->bIsDying)))
+			{
+				PlayerController->UnPossess();
+			}
+
+			GameMode->RestartPlayer(PlayerController);
+			bRestartRequested = true;
+		}
+
+		Pending.DirectAttempts++;
+		const bool bReplacementCreated =
+			HasForcedRespawnReplacementPawn(
+				PlayerController, DeadPawn);
+		const bool bHandshakeCreated =
+			HasActiveForcedRespawnHandshake(
+				PlayerController, PlayerState);
+		SDK::DbgLog(
+			"[RespawnRepair] fallback attempt=%d "
+			"controller=%p seeded=%d ready=%d restart=%d "
+			"replacement=%d handshake=%d\n",
+			Pending.DirectAttempts,
+			(void*)PlayerController,
+			bSeededRespawnData ? 1 : 0,
+			bInvokedReadyLifecycle ? 1 : 0,
+			bRestartRequested ? 1 : 0,
+			bReplacementCreated ? 1 : 0,
+			bHandshakeCreated ? 1 : 0);
+
+		if (bReplacementCreated ||
+			Pending.DirectAttempts >= 3)
+		{
+			GPendingForcedRespawnRepairs.erase(
+				GPendingForcedRespawnRepairs.begin() +
+					Index);
+			continue;
+		}
+
+		// One bounded retry catches versions where RestartPlayer completes on
+		// the following server frame without risking a duplicate-pawn loop.
+		Pending.RemainingSeconds = 1.f;
+	}
+}
+
+static bool IsGetawayPlaylist(
+	const UFortPlaylistAthena* Playlist)
+{
+	if (!IsUsableDeathObject(Playlist))
+		return false;
+
+	// Use the mutator-aware detector on the builds it supports, then retain
+	// stable playlist identity fallbacks for later Getaway reruns.
+	if (FFortAthenaHeistCompatibility::IsSupportedBuild() &&
+		FFortAthenaHeistCompatibility::IsHeistPlaylist(
+			Playlist))
+	{
+		return true;
+	}
+
+	const auto ObjectName =
+		LowerAscii(Playlist->Name.ToString().c_str());
+	if (ObjectName.find("playlist_bling_") !=
+			std::string::npos ||
+		ObjectName.find("playlist_heist_") !=
+			std::string::npos ||
+		ObjectName.find("getaway") != std::string::npos)
+	{
+		return true;
+	}
+
+	if (Playlist->HasPlaylistName())
+	{
+		const auto PlaylistName =
+			LowerAscii(
+				Playlist->PlaylistName.ToString().c_str());
+		if (PlaylistName.find("the getaway") !=
+				std::string::npos ||
+			PlaylistName.find("getaway") !=
+				std::string::npos)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool IsCurrentGetawayMatch(
+	AFortGameStateAthena* GameState)
+{
+	if (!IsUsableDeathObject(GameState))
+		return false;
+
+	if (GameState->HasCurrentPlaylistInfo())
+	{
+		const UFortPlaylistAthena* OverridePlaylist =
+			FPlaylistPropertyArray::HasOverridePlaylist()
+				? GameState->CurrentPlaylistInfo.OverridePlaylist
+				: nullptr;
+		const UFortPlaylistAthena* BasePlaylist =
+			FPlaylistPropertyArray::HasBasePlaylist()
+				? GameState->CurrentPlaylistInfo.BasePlaylist
+				: nullptr;
+		if (IsGetawayPlaylist(OverridePlaylist) ||
+			IsGetawayPlaylist(BasePlaylist))
+		{
+			return true;
+		}
+	}
+
+	return GameState->HasCurrentPlaylistData() &&
+		IsGetawayPlaylist(
+			GameState->CurrentPlaylistData);
+}
+
+static bool IsCurrentNative1040LTM(
+	AFortGameStateAthena* GameState)
+{
+	if (!IsUsableDeathObject(GameState))
+		return false;
+
+	if (GameState->HasCurrentPlaylistInfo())
+	{
+		const UFortPlaylistAthena* OverridePlaylist =
+			FPlaylistPropertyArray::HasOverridePlaylist()
+				? GameState->CurrentPlaylistInfo.OverridePlaylist
+				: nullptr;
+		const UFortPlaylistAthena* BasePlaylist =
+			FPlaylistPropertyArray::HasBasePlaylist()
+				? GameState->CurrentPlaylistInfo.BasePlaylist
+				: nullptr;
+		if (FFortAthenaNativeLTMCompatibility::
+				IsTargetPlaylist(OverridePlaylist) ||
+			FFortAthenaNativeLTMCompatibility::
+				IsTargetPlaylist(BasePlaylist))
+		{
+			return true;
+		}
+	}
+
+	return GameState->HasCurrentPlaylistData() &&
+		FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(
+			GameState->CurrentPlaylistData);
+}
+
+static bool IsAshtonPlaylist(
+	const UFortPlaylistAthena* Playlist)
+{
+	return IsUsableDeathObject(Playlist) &&
+		LowerAscii(Playlist->Name.ToString().c_str()) ==
+			"playlist_ashton_lg";
+}
+
+static bool IsCurrentAshtonMatch(
+	AFortGameStateAthena* GameState)
+{
+	bool bHasAuthoritativePlaylist = false;
+	auto CheckPlaylist =
+		[&](const UFortPlaylistAthena* Playlist)
+		{
+			if (!IsUsableDeathObject(Playlist))
+				return false;
+			bHasAuthoritativePlaylist = true;
+			return IsAshtonPlaylist(Playlist);
+		};
+
+	if (IsUsableDeathObject(GameState))
+	{
+		if (GameState->HasCurrentPlaylistInfo())
+		{
+			const auto OverridePlaylist =
+				FPlaylistPropertyArray::HasOverridePlaylist()
+					? GameState->CurrentPlaylistInfo
+						.OverridePlaylist
+					: nullptr;
+			const auto BasePlaylist =
+				FPlaylistPropertyArray::HasBasePlaylist()
+					? GameState->CurrentPlaylistInfo
+						.BasePlaylist
+					: nullptr;
+			if (CheckPlaylist(OverridePlaylist) ||
+				CheckPlaylist(BasePlaylist))
+			{
+				return true;
+			}
+		}
+		if (GameState->HasCurrentPlaylistData() &&
+			CheckPlaylist(
+				GameState->CurrentPlaylistData))
+		{
+			return true;
+		}
+	}
+	if (bHasAuthoritativePlaylist)
+		return false;
+
+	if (!FConfiguration::Playlist)
+		return false;
+	const std::wstring ConfiguredPlaylist =
+		FConfiguration::Playlist;
+	return ConfiguredPlaylist.find(
+		L"Playlist_Ashton_Lg") !=
+		std::wstring::npos;
+}
+
+static bool IsCarmineGauntletDefinition(
+	const UFortItemDefinition* Definition)
+{
+	return VersionInfo.FortniteVersion == 10.40 &&
+		IsUsableDeathObject(Definition) &&
+		(Definition->Name.ToWString() ==
+			 L"AGID_CarminePack" ||
+		 Definition->Name.ToWString() ==
+			 L"AGID_AshtonPack");
+}
+
+static bool IsCarmineGauntletArtifact(
+	const UFortItemDefinition* Definition)
+{
+	if (IsCarmineGauntletDefinition(Definition))
+		return true;
+	return VersionInfo.FortniteVersion == 10.40 &&
+		IsUsableDeathObject(Definition) &&
+		(Definition->Name.ToWString() ==
+			 L"D_CarminePack" ||
+		 Definition->Name.ToWString() ==
+			 L"D_AshtonPack");
+}
+
+static std::vector<FGuid> SnapshotCarmineGauntletArtifacts(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	std::vector<FGuid> Result;
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(
+			PlayerController->WorldInventory))
+	{
+		return Result;
+	}
+
+	auto& Entries =
+		PlayerController->WorldInventory
+			->Inventory.ReplicatedEntries;
+	Result.reserve(Entries.Num());
+	for (int32 Index = 0;
+		Index < Entries.Num();
+		++Index)
+	{
+		auto& Entry =
+			Entries.Get(Index, FFortItemEntry::Size());
+		if (IsCarmineGauntletArtifact(
+				Entry.ItemDefinition))
+		{
+			Result.push_back(Entry.ItemGuid);
+		}
+	}
+	return Result;
+}
+
+static bool ContainsCarmineArtifactGuid(
+	const std::vector<FGuid>& Guids,
+	const FGuid& Guid)
+{
+	return std::any_of(
+		Guids.begin(),
+		Guids.end(),
+		[&](const FGuid& Candidate)
+		{
+			return VehicleLoadoutGuidsEqual(
+				Candidate, Guid);
+		});
+}
+
+static int32 RemoveCarmineGauntletArtifacts(
+	AFortPlayerControllerAthena* PlayerController,
+	const std::vector<FGuid>* PreserveGuids = nullptr)
+{
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(
+			PlayerController->WorldInventory))
+	{
+		return 0;
+	}
+
+	std::vector<FGuid> RemoveGuids;
+	auto& Entries =
+		PlayerController->WorldInventory
+			->Inventory.ReplicatedEntries;
+	for (int32 Index = 0;
+		Index < Entries.Num();
+		++Index)
+	{
+		auto& Entry =
+			Entries.Get(Index, FFortItemEntry::Size());
+		if (!IsCarmineGauntletArtifact(
+				Entry.ItemDefinition) ||
+			(PreserveGuids &&
+			 ContainsCarmineArtifactGuid(
+				 *PreserveGuids,
+				 Entry.ItemGuid)))
+		{
+			continue;
+		}
+		RemoveGuids.push_back(Entry.ItemGuid);
+	}
+
+	for (const auto& Guid : RemoveGuids)
+		PlayerController->WorldInventory->Remove(Guid);
+	return static_cast<int32>(RemoveGuids.size());
+}
+
+static bool DropManualCarmineGauntletOnDeath(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* PickupLockoutPawn,
+	const FVector& DropLocation)
+{
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(
+			PlayerController->WorldInventory))
+	{
+		return false;
+	}
+
+	auto Entry =
+		PlayerController->WorldInventory
+			->Inventory.ReplicatedEntries.Search(
+				[](FFortItemEntry& Candidate)
+				{
+					return IsCarmineGauntletDefinition(
+						Candidate.ItemDefinition);
+				},
+				FFortItemEntry::Size());
+	if (!Entry)
+		return false;
+
+	auto Definition = Entry->ItemDefinition;
+	const bool bCanSuppressImmediateAutoPickup =
+		Definition &&
+		Definition->HasbForceAutoPickup();
+	const bool bOriginalForceAutoPickup =
+		bCanSuppressImmediateAutoPickup
+			? Definition->bForceAutoPickup
+			: false;
+	if (bCanSuppressImmediateAutoPickup)
+	{
+		// Carmine is authored for forced auto-pickup. Disable that flag only
+		// during TossPickup so a nearby killer cannot consume the actor inside
+		// this same death call before stale inventory rows are cleaned.
+		Definition->bForceAutoPickup = false;
+	}
+	auto Pickup = AFortInventory::SpawnPickup(
+		DropLocation,
+		*Entry,
+		EFortPickupSourceTypeFlag::GetPlayer(),
+		EFortPickupSpawnSource::GetPlayerElimination(),
+		IsUsableDeathObject(PickupLockoutPawn)
+			? PickupLockoutPawn
+			: nullptr,
+		-1,
+		true,
+		true,
+		true,
+		nullptr);
+	if (bCanSuppressImmediateAutoPickup)
+	{
+		Definition->bForceAutoPickup =
+			bOriginalForceAutoPickup;
+	}
+	if (!Pickup)
+		return false;
+
+	const int32 Removed =
+		RemoveCarmineGauntletArtifacts(
+			PlayerController);
+	SDK::DbgLog(
+		"[Ashton1040] manual Carmine death drop "
+		"controller=%p pickup=%p removedRows=%d "
+		"keepInventory=%d\n",
+		(void*)PlayerController,
+		(void*)Pickup,
+		Removed,
+		(int)FConfiguration::bKeepInventory);
+	return true;
+}
+
+static bool HasNearbyCarmineGauntletPickup(
+	const FVector& Location)
+{
+	const UClass* PickupClass =
+		AFortPickupAthena::StaticClass();
+	if (!PickupClass)
+		return false;
+
+	TArray<AActor*> Pickups{};
+	Utils::GetAll(
+		const_cast<UClass*>(PickupClass),
+		Pickups);
+	if (Pickups.Num() < 0 ||
+		Pickups.Max() < Pickups.Num() ||
+		Pickups.Num() > 4096)
+	{
+		Pickups.Free();
+		return false;
+	}
+	constexpr double PickupRadiusSquared =
+		750.0 * 750.0;
+	bool bFound = false;
+	for (auto Actor : Pickups)
+	{
+		auto Pickup =
+			IsUsableDeathObject(Actor) &&
+					Actor->IsA(PickupClass)
+				? static_cast<AFortPickupAthena*>(
+					  Actor)
+				: nullptr;
+		if (!Pickup ||
+			(Pickup->HasbPickedUp() &&
+			 Pickup->bPickedUp) ||
+			(Pickup->HasbActorIsBeingDestroyed() &&
+			 Pickup->bActorIsBeingDestroyed) ||
+			!Pickup->HasPrimaryPickupItemEntry() ||
+			!IsCarmineGauntletDefinition(
+				Pickup->PrimaryPickupItemEntry
+					.ItemDefinition))
+		{
+			continue;
+		}
+
+		const FVector Delta =
+			Pickup->K2_GetActorLocation() -
+			Location;
+		if (Delta.SizeSquared() <=
+			PickupRadiusSquared)
+		{
+			bFound = true;
+			break;
+		}
+	}
+	Pickups.Free();
+	return bFound;
 }
 
 void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* PlayerController, FFortPlayerDeathReport& DeathReport)
 {
 	if (!PlayerController)
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
+
+	// A DBNO notification is not a pawn replacement. The custom revive path
+	// re-acknowledges this same pawn after clearing its downed state; if its
+	// remembered identity is erased here, ServerAcknowledgePossession mistakes
+	// that acknowledgement for a true death respawn and applies the configured
+	// mid-zone spawn transform.
+	const bool bIsDBNONotification =
+		IsPawnDBNOForSpectating(PlayerController->Pawn);
+	if (bIsDBNONotification)
+	{
+		// A knock is not an elimination. Keep the pawn identity and leave the
+		// native DBNO notification to handle its UI/state without entering our
+		// inventory, siphon, kill-credit, spectating, or respawn pipelines.
+		SDK::DbgLog(
+			"[DBNO] preserving same-pawn death notification "
+			"controller=%p pawn=%p version=%.2f\n",
+			(void*)PlayerController,
+			(void*)PlayerController->Pawn,
+			VersionInfo.FortniteVersion);
+		return ClientOnPawnDiedOG(
+			PlayerController,
+			DeathReport);
+	}
 
 	// Remote-controlled projectiles use the pawn-death notification to end their
 	// native possession. If the remembered character is still alive, this is the
@@ -5768,9 +9143,11 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	GLegacyAircraftSkydivingObserved.erase(
 		PlayerController);
 
-	// Allow the next replacement pawn to receive exactly one respawn setup
-	// even if the allocator happens to reuse the dead pawn's address.
-	GLastAcknowledgedPawn.erase(PlayerController);
+	// Only a permanent death can be followed by a replacement player pawn.
+	// Preserve the identity across DBNO/revive so a same-pawn acknowledgement
+	// remains a duplicate and cannot run respawn setup or teleport the player.
+	if (!bIsDBNONotification)
+		GLastAcknowledgedPawn.erase(PlayerController);
 
 	auto World = UWorld::GetWorld();
 	auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
@@ -5779,6 +9156,34 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 	if (!GameMode || !GameState || !PlayerState)
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
+
+	const bool bPlayerAIVictim =
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(
+			PlayerController);
+	const bool bSpawnedCommandBotVictim =
+		IsTrackedSpawnedBotController(PlayerController);
+	auto ManagedBotEliminatedPawn =
+		(AFortPlayerPawnAthena*)PlayerController->Pawn;
+	auto ManagedBotInventory = PlayerController->WorldInventory;
+
+	const bool bMatchWasLiveAtDeath =
+		GUI::gsStatus.load(
+			std::memory_order_acquire) == StartedMatch;
+	bool bVictimWasAliveParticipant =
+		IsControllerInAlivePlayers(
+			GameMode, PlayerController);
+	if (!bVictimWasAliveParticipant &&
+		GameMode->HasAliveBots())
+	{
+		for (auto AliveBot : GameMode->AliveBots)
+		{
+			if (AliveBot == PlayerController)
+			{
+				bVictimWasAliveParticipant = true;
+				break;
+			}
+		}
+	}
 
 	const bool bIsLateSeasonBotVictim =
 		VersionInfo.FortniteVersion >= 17.0 &&
@@ -5792,26 +9197,302 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	bool bCalledNativeDeathEarly = false;
 	const bool bIs172SpawnedBotVictim =
 		VersionInfo.FortniteVersion == 1.72 &&
-		GSpawnedBotControllers.contains(PlayerController);
+		IsTrackedSpawnedBotController(PlayerController);
 	const bool bIsFinal172SpawnedBotDeath =
 		bIs172SpawnedBotVictim &&
-		(!PlayerController->Pawn || !PlayerController->Pawn->IsDBNO()) &&
-		!FConfiguration::bForceRespawns;
+		(!PlayerController->Pawn || !PlayerController->Pawn->IsDBNO());
 	const bool bCanAttempt172SpawnedBotRemoval =
 		bIsFinal172SpawnedBotDeath &&
 		G172SpawnedBotRemovalAttempts.insert(PlayerController).second;
 
-	if (PlayerController->WorldInventory && PlayerController->Pawn && ((PlayerController->Pawn->HasbShouldDropItemsOnDeath() ? PlayerController->Pawn->bShouldDropItemsOnDeath : true) && !FConfiguration::bKeepInventory))
+	const bool bPawnNormallyDropsItems =
+		PlayerController->Pawn &&
+		(PlayerController->Pawn->HasbShouldDropItemsOnDeath()
+			? PlayerController->Pawn->bShouldDropItemsOnDeath
+			: true);
+	const bool bIsNative1040LTM =
+		IsCurrentNative1040LTM(GameState);
+	const bool bDropNormalInventory =
+		bPawnNormallyDropsItems &&
+		!FConfiguration::bKeepInventory &&
+		!bIsNative1040LTM;
+	const bool bIsGetawayMatch =
+		IsCurrentGetawayMatch(GameState);
+	const bool bKeepInventoryApplies =
+		FConfiguration::bKeepInventory &&
+		(!bIsNative1040LTM || bIsGetawayMatch);
+	const bool bIsAshtonMatch =
+		IsCurrentAshtonMatch(GameState);
+	const bool bWasAshtonLeader =
+		bIsAshtonMatch &&
+		FFortAthenaNativeLTMCompatibility::
+			IsCurrentAshtonLeader(
+				PlayerController);
+	if (bWasAshtonLeader)
 	{
+		// Publish the vacancy before gadget removal raises the base passive's
+		// death event. This blocks its stock killer-transfer/world-drop path;
+		// the next completed stone owns succession instead.
+		FFortAthenaNativeLTMCompatibility::
+			HandleAshtonLeaderEliminated(
+				PlayerController,
+				false);
+	}
+	auto KillerPlayerState =
+		DeathReport.HasKillerPlayerState()
+			? (AFortPlayerStateAthena*)
+				  DeathReport.KillerPlayerState
+			: nullptr;
+	auto KillerPawn =
+		DeathReport.HasKillerPawn()
+			? (AFortPlayerPawnAthena*)
+				  DeathReport.KillerPawn
+			: nullptr;
+	if (!IsUsableDeathObject(KillerPlayerState))
+		KillerPlayerState = nullptr;
+	if (!IsUsableDeathObject(KillerPawn))
+		KillerPawn = nullptr;
+	auto KillerPlayerController =
+		(KillerPlayerState &&
+		 KillerPlayerState->HasOwner() &&
+		 IsUsableDeathObject(KillerPlayerState->Owner))
+			? KillerPlayerState->Owner
+				  ->Cast<AFortPlayerControllerAthena>()
+			: nullptr;
+	// Capture legitimate killer ownership before the death pickup exists.
+	// Carmine's forced auto-pickup must never turn a just-collected row into
+	// a "preexisting" row that survives the post-native cleanup.
+	const auto KillerCarmineArtifactsBefore =
+		!bIsAshtonMatch
+			? SnapshotCarmineGauntletArtifacts(
+				  KillerPlayerController)
+			: std::vector<FGuid>{};
+	auto ManualCarmineDeadPawn =
+		IsUsableDeathObject(PlayerController->Pawn)
+			? PlayerController->Pawn
+				->Cast<AFortPlayerPawnAthena>()
+			: nullptr;
+	FVector ManualCarmineDropLocation =
+		ManualCarmineDeadPawn
+			? ManualCarmineDeadPawn->K2_GetActorLocation()
+			: FVector();
+	ManualCarmineDropLocation.Z += 50.f;
+	bool bManualCarminePickupSpawned =
+		!bIsAshtonMatch &&
+		DropManualCarmineGauntletOnDeath(
+			PlayerController,
+			IsUsableDeathObject(KillerPawn)
+				? KillerPawn
+				: ManualCarmineDeadPawn,
+			ManualCarmineDropLocation);
+	bool bPreserveStormElimination = false;
+
+	auto CallNativePawnDied =
+		[&]()
+		{
+			auto DeathPawn =
+				IsUsableDeathObject(PlayerController->Pawn)
+					? PlayerController->Pawn
+						->Cast<AFortPlayerPawnAthena>()
+					: nullptr;
+			const bool bCanSuppressNativeDrops =
+				bKeepInventoryApplies &&
+				DeathPawn &&
+				DeathPawn->HasbShouldDropItemsOnDeath();
+			const bool bOriginalShouldDrop =
+				bCanSuppressNativeDrops
+					? DeathPawn->bShouldDropItemsOnDeath
+					: false;
+			std::vector<FGuid> RetainedItemGuids;
+			if (bKeepInventoryApplies &&
+				PlayerController->WorldInventory)
+			{
+				auto& Entries =
+					PlayerController->WorldInventory
+						->Inventory.ReplicatedEntries;
+				RetainedItemGuids.reserve(Entries.Num());
+				for (int32 Index = 0;
+					Index < Entries.Num();
+					++Index)
+				{
+					auto& Entry = Entries.Get(
+						Index, FFortItemEntry::Size());
+					if (bIsGetawayMatch &&
+						IsGetawayJewelDefinition(
+							Entry.ItemDefinition))
+					{
+						continue;
+					}
+					if (!CanDropInventoryItem(
+							Entry.ItemDefinition))
+					{
+						continue;
+					}
+					RetainedItemGuids.push_back(
+						Entry.ItemGuid);
+				}
+			}
+
+			// The Getaway Jewel has already been spawned and removed by the
+			// explicit exception below. Prevent native death mutators from
+			// subsequently dropping ordinary retained rows. Other native 10.40
+			// LTMs keep ownership of tier/token/objective inventory.
+			if (bCanSuppressNativeDrops)
+				DeathPawn->bShouldDropItemsOnDeath = false;
+			AFortInventory::
+				BeginNativeDeathInventoryRetention(
+					PlayerController,
+					RetainedItemGuids);
+
+			const bool bRestoreNativeCheatAfterDeath =
+				bPreserveStormElimination &&
+				IsUsableDeathObject(GameState) &&
+				GameState->HasbCheatRespawnEnabled() &&
+				GameState->bCheatRespawnEnabled;
+			if (bRestoreNativeCheatAfterDeath)
+				GameState->bCheatRespawnEnabled = false;
+
+			ClientOnPawnDiedOG(
+				PlayerController, DeathReport);
+
+			if (bRestoreNativeCheatAfterDeath &&
+				IsUsableDeathObject(GameState) &&
+				FConfiguration::bForceRespawns)
+			{
+				GameState->bCheatRespawnEnabled = true;
+				GameState->ForceNetUpdate();
+			}
+
+			AFortInventory::
+				EndNativeDeathInventoryRetention(
+					PlayerController);
+			if (bCanSuppressNativeDrops &&
+				IsUsableDeathObject(DeathPawn))
+			{
+				bool OriginalShouldDrop =
+					bOriginalShouldDrop;
+				DeathPawn->bShouldDropItemsOnDeath =
+					OriginalShouldDrop;
+			}
+		};
+
+	// The exact 10.40 LTMs ship configured death/inventory mutators. Let those
+	// decide which normal rows survive or drop so our generic elimination path
+	// cannot duplicate or pre-empt Deep Fried/Arsenal progression. Getaway's
+	// Jewel exception below remains authoritative and removes only the carried
+	// objective representation before native death processing.
+	// The Jewel is the transferable Getaway objective, not ordinary retained
+	// inventory. It must leave the eliminated carrier even when Keep Inventory
+	// is enabled (including Late Game). In that configuration no other entry is
+	// selected by this exception.
+	if (PlayerController->WorldInventory &&
+		PlayerController->Pawn &&
+		(bDropNormalInventory || bIsGetawayMatch))
+	{
+		int32 GetawayJewelIndex = -1;
+		if (bIsGetawayMatch)
+		{
+			for (int32 Index = 0;
+				Index < PlayerController->WorldInventory
+					->Inventory.ReplicatedEntries.Num();
+				++Index)
+			{
+				auto& Candidate =
+					PlayerController->WorldInventory
+						->Inventory.ReplicatedEntries.Get(
+							Index, FFortItemEntry::Size());
+				if (IsGetawayJewelDefinition(
+						Candidate.ItemDefinition))
+				{
+					GetawayJewelIndex = Index;
+					break;
+				}
+			}
+		}
+
 		std::vector<FGuid> DroppedItemGuids;
 		for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
 		{
 			auto& entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
+			const bool bIsAnyGetawayJewel =
+				bIsGetawayMatch &&
+					entry.ItemDefinition
+					? IsGetawayJewelDefinition(
+						entry.ItemDefinition)
+					: false;
+			const bool bIsGetawayJewel =
+				i == GetawayJewelIndex;
+			const bool bShouldDropEntry =
+				bIsGetawayJewel ||
+				(bDropNormalInventory &&
+					!bIsAnyGetawayJewel &&
+					!IsCarmineGauntletArtifact(
+						entry.ItemDefinition) &&
+					CanDropInventoryItem(
+						entry.ItemDefinition));
 
-			if (entry.ItemDefinition->HasbCanBeDropped() ? entry.ItemDefinition->bCanBeDropped : (entry.ItemDefinition->GetPickupComponent() ? entry.ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false))
+			if (bShouldDropEntry)
 			{
-				AFortInventory::SpawnPickup(PlayerController->Pawn->K2_GetActorLocation(), entry, EFortPickupSourceTypeFlag::GetPlayer(), EFortPickupSpawnSource::GetPlayerElimination(), PlayerController->MyFortPawn);
-				DroppedItemGuids.push_back(entry.ItemGuid);
+				FVector DropLocation =
+					PlayerController->Pawn->K2_GetActorLocation();
+				if (bIsGetawayJewel)
+					DropLocation.Z += 50.f;
+
+				// The Jewel's B_Pickups_Bling class is a pickup *effect*, not
+				// an AFortPickupAthena subclass. The normal pickup reads that
+				// effect from Athena_Bling_Pack, so it must not be supplied as
+				// SpawnPickup's actor-class override.
+				auto Pickup = AFortInventory::SpawnPickup(
+					DropLocation,
+					entry,
+					EFortPickupSourceTypeFlag::GetPlayer(),
+					EFortPickupSpawnSource::GetPlayerElimination(),
+					PlayerController->MyFortPawn,
+					-1,
+					true,
+					true,
+					true,
+					nullptr);
+				if (!Pickup && bIsGetawayJewel)
+				{
+					// Retry slightly above the death location if collision at
+					// the pawn prevented the first spawn. Keep the inventory
+					// row unless one of the attempts succeeds.
+					DropLocation.Z += 50.f;
+					Pickup = AFortInventory::SpawnPickup(
+						DropLocation,
+						entry,
+						EFortPickupSourceTypeFlag::GetPlayer(),
+						EFortPickupSpawnSource::
+							GetPlayerElimination(),
+						PlayerController->MyFortPawn,
+						-1,
+						true,
+						true,
+						true,
+						nullptr);
+				}
+				if (Pickup)
+				{
+					DroppedItemGuids.push_back(
+						entry.ItemGuid);
+				}
+
+				if (bIsGetawayJewel)
+				{
+					SDK::DbgLog(
+						"[Heist] Jewel death drop "
+						"controller=%p def=%s pickup=%p "
+						"keepInventory=%d lateGame=%d\n",
+						(void*)PlayerController,
+						entry.ItemDefinition
+							? entry.ItemDefinition->Name
+								.ToString().c_str()
+							: "null",
+						(void*)Pickup,
+						(int)FConfiguration::bKeepInventory,
+						(int)FConfiguration::bLateGame);
+				}
 			}
 		}
 
@@ -5825,16 +9506,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 	// Exclusive gadgets must never survive death, including keep-inventory
 	// modes. Their native transformation otherwise carries into the next pawn.
-	PurgeExclusiveGadgets(PlayerController);
-
-	auto KillerPlayerState = DeathReport.HasKillerPlayerState() ? (AFortPlayerStateAthena*)DeathReport.KillerPlayerState : nullptr;
-	auto KillerPawn = DeathReport.HasKillerPawn() ? (AFortPlayerPawnAthena*)DeathReport.KillerPawn : nullptr;
-	if (!IsUsableDeathObject(KillerPlayerState))
-		KillerPlayerState = nullptr;
-	if (!IsUsableDeathObject(KillerPawn))
-		KillerPawn = nullptr;
-
-	auto KillerPlayerController = (KillerPlayerState && KillerPlayerState->HasOwner() && IsUsableDeathObject(KillerPlayerState->Owner)) ? KillerPlayerState->Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+	if (!bWasAshtonLeader)
+		PurgeExclusiveGadgets(PlayerController);
 
 	// PlayerAI victim diagnostic: kill credit for the killer flows from this
 	// report - a missing killer here explains "no credit for killing AI".
@@ -5844,8 +9517,11 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			(KillerPawn && KillerPawn->Controller) ? 1 : 0);
 	FGameplayTagContainer EmptyDeathTags{};
 	auto& DeathTags = DeathReport.HasTags() ? DeathReport.Tags : EmptyDeathTags;
-	const bool bRespawnAllowed = IsRespawningAllowedForDeath(
-		GameMode, GameState, PlayerState);
+	const bool bConfirmedStormDeath =
+		HasConfirmedStormDeathEvidence(
+			DeathTags, DeathReport);
+	bool bRespawnAllowed = IsRespawningAllowedForDeath(
+		GameMode, GameState, PlayerController, PlayerState);
 
 	if (VersionInfo.FortniteVersion > 1.8 || VersionInfo.EngineVersion >= 4.19)
 	{
@@ -5861,7 +9537,26 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (FDeathInfo::HasDeathLocation())
 				PlayerState->DeathInfo.DeathLocation = PlayerState->HasPawnDeathLocation() ? PlayerState->PawnDeathLocation : (PlayerController->Pawn ? PlayerController->Pawn->K2_GetActorLocation() : FVector());
 			if (FDeathInfo::HasDeathTags())
-				PlayerState->DeathInfo.DeathTags = /*DeathReport.Tags*/ PlayerController->Pawn ? *(FGameplayTagContainer*)(__int64(&PlayerController->Pawn->MoveSoundStimulusBroadcastInterval) + (VersionInfo.FortniteVersion >= 11 && VersionInfo.FortniteVersion < 18 ? 0x18 : 0x10)) : FGameplayTagContainer();
+			{
+				// TArray assignment in the SDK is a shallow header copy. On
+				// 15.30 this source belongs to the dying pawn, while DeathInfo
+				// persists on PlayerState after that pawn is destroyed. Keeping
+				// the copied headers therefore leaves DeathInfo pointing at
+				// freed tag buffers. The fields were zero-initialized above;
+				// leave them empty on 15.30 instead of publishing borrowed
+				// storage.
+				if (VersionInfo.FortniteVersion != 15.30)
+					PlayerState->DeathInfo.DeathTags =
+						/*DeathReport.Tags*/ PlayerController->Pawn
+							? *(FGameplayTagContainer*)(
+								__int64(&PlayerController->Pawn
+									->MoveSoundStimulusBroadcastInterval) +
+								(VersionInfo.FortniteVersion >= 11 &&
+										VersionInfo.FortniteVersion < 18
+									? 0x18
+									: 0x10))
+							: FGameplayTagContainer();
+			}
 			if (FDeathInfo::HasDeathClassSlot())
 				PlayerState->DeathInfo.DeathClassSlot = -1;
 			PlayerState->DeathInfo.DeathCause = ToDeathCause(PlayerController->Pawn, DeathTags, PlayerState->DeathInfo.bDBNO);
@@ -5869,19 +9564,25 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (FDeathInfo::HasFinisherOrDowner())
 				PlayerState->DeathInfo.FinisherOrDowner = KillerPlayerState ? KillerPlayerState : PlayerState;
 			if (FDeathInfo::HasFinisherOrDownerTags())
-				PlayerState->DeathInfo.FinisherOrDownerTags =
-					KillerPawn
-						? KillerPawn->GameplayTags
-						: (PlayerController->Pawn
+			{
+				if (VersionInfo.FortniteVersion != 15.30)
+					PlayerState->DeathInfo.FinisherOrDownerTags =
+						KillerPawn
+							? KillerPawn->GameplayTags
+							: (PlayerController->Pawn
+								? PlayerController->Pawn
+									->GameplayTags
+								: FGameplayTagContainer{});
+			}
+			if (FDeathInfo::HasVictimTags())
+			{
+				if (VersionInfo.FortniteVersion != 15.30)
+					PlayerState->DeathInfo.VictimTags =
+						PlayerController->Pawn
 							? PlayerController->Pawn
 								->GameplayTags
-							: FGameplayTagContainer{});
-			if (FDeathInfo::HasVictimTags())
-				PlayerState->DeathInfo.VictimTags =
-					PlayerController->Pawn
-						? PlayerController->Pawn
-							->GameplayTags
-						: FGameplayTagContainer{};
+							: FGameplayTagContainer{};
+			}
 			if (FDeathInfo::HasDistance())
 				PlayerState->DeathInfo.Distance = PlayerController->Pawn ? (PlayerState->DeathInfo.DeathCause != /*EDeathCause::FallDamage*/ 1 ? (KillerPawn ? KillerPawn->GetDistanceTo(PlayerController->Pawn) : 0) : (PlayerController->MyFortPawn->HasLastFallDistance() ? PlayerController->MyFortPawn->LastFallDistance : 0)) : 0;
 			if (FDeathInfo::HasbInitialized())
@@ -5889,10 +9590,59 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			PlayerState->OnRep_DeathInfo();
 		}
 
+		// Wax/Bounty's native death callback decrements the authored life,
+		// awards/drops tokens, updates the replicated leaderboard and resolves
+		// its mutator-controlled win condition. It must run after DeathInfo is
+		// complete but before respawn eligibility is sampled.
+		FFortAthenaNativeLTMCompatibility::
+			HandleWaxElimination(
+				PlayerState,
+				(AFortPlayerPawnAthena*)
+					PlayerController->Pawn);
+
+		bPreserveStormElimination =
+			FConfiguration::bForceRespawns &&
+			!FConfiguration::PermanentRespawn &&
+			bConfirmedStormDeath &&
+			PlayerState->HasDeathInfo() &&
+			FDeathInfo::HasbInitialized() &&
+			PlayerState->DeathInfo.bInitialized &&
+			PlayerState->DeathInfo.DeathCause == 0;
+		if (bPreserveStormElimination)
+		{
+			GStormRespawnBlockedControllers[
+				PlayerController] =
+				TWeakObjectPtr<AFortGameStateAthena>(
+					GameState);
+			InvalidateRespawnHandshake(PlayerState);
+		}
+		else
+		{
+			// A later non-storm elimination starts a fresh respawn decision for
+			// this controller. Do not let a prior life or recycled pointer keep
+			// the new handshake blocked.
+			GStormRespawnBlockedControllers.erase(
+				PlayerController);
+		}
+		bRespawnAllowed =
+			IsRespawningAllowedForDeath(
+				GameMode, GameState, PlayerController,
+				PlayerState,
+				bConfirmedStormDeath);
+
+		// RespawnType 2 is "InfiniteRespawnExceptStorm". The global override is
+		// intentionally broad for normal deaths, so preserve the GUI's separate
+		// Storm Respawns switch after ToDeathCause has populated reliable death
+		// data (OutsideSafeZone is the stable zero enum value).
 		if (PlayerController->Pawn &&
 			KillerPlayerState && KillerPawn &&
 			KillerPawn->Controller &&
-			KillerPawn->Controller != PlayerController)
+			KillerPawn->Controller != PlayerController &&
+			FFortAthenaNativeLTMCompatibility::
+				TryClaimArsenalElimination(
+					PlayerState,
+					(AFortPlayerPawnAthena*)
+						PlayerController->Pawn))
 		{
 			if (KillerPlayerState->HasKillScore())
 				KillerPlayerState->KillScore++;
@@ -5944,13 +9694,27 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				//Interface->GetOwnedGameplayTags(&TargetTags);
 			}
 
-			KillerPlayerController->GetQuestManager(1)->SendStatEvent(KillerPlayerController, EFortQuestObjectiveStatEvent::GetKill(), 1, false, PlayerController->Pawn, TargetTags);
+				KillerPlayerController->GetQuestManager(1)->SendStatEvent(KillerPlayerController, EFortQuestObjectiveStatEvent::GetKill(), 1, false, PlayerController->Pawn, TargetTags);
 
-			TargetTags.GameplayTags.Free();
-			TargetTags.ParentTags.Free();
-		}
+				TargetTags.GameplayTags.Free();
+				TargetTags.ParentTags.Free();
 
-		if ((GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) && VersionInfo.FortniteVersion < 20.40) // crashes on 20.40, test other versions
+				// AwardAtElim is authored against the post-increment KillScore.
+				// This block is reached only for a full credited elimination; DBNO
+				// notifications returned before inventory/kill processing above.
+				FFortAthenaNativeLTMCompatibility::
+					HandleArsenalElimination(
+						KillerPlayerController,
+						KillerPlayerState,
+						PlayerController,
+						PlayerState,
+						(AFortPlayerPawnAthena*)
+							PlayerController->Pawn);
+			}
+
+		if (IsUsableDeathObject(KillerPlayerState) &&
+			(GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) &&
+			VersionInfo.FortniteVersion < 20.40) // crashes on 20.40, test other versions
 		{
 			KillerPlayerState->ClientReportTournamentStatUpdate();
 		}
@@ -6047,14 +9811,26 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				// remain attached to a death animation that never completes.
 				if (VersionInfo.FortniteVersion == 2.50)
 				{
-					ClientOnPawnDiedOG(PlayerController, DeathReport);
+					if (bPlayerAIVictim ||
+						bSpawnedCommandBotVictim)
+					{
+						InvalidateRespawnHandshake(
+							PlayerState);
+					}
+					if (bPlayerAIVictim)
+					{
+						PlayerAIManager::HandleControllerDeath(
+							PlayerController,
+							ManagedBotEliminatedPawn);
+					}
+					CallNativePawnDied();
 					bCalledNativeDeathEarly = true;
 				}
 
 				((void (*)(AFortGameMode*, AFortPlayerControllerAthena*, AFortPlayerStateAthena*, AFortPlayerPawnAthena*, UFortItemDefinition*, uint8, char))RemoveFromAlivePlayers_)(GameMode, PlayerController, KillerPlayerState == PlayerState ? nullptr : KillerPlayerState, KillerPawn, DamageCauserWeaponData, PlayerState->HasDeathInfo() ? PlayerState->DeathInfo.DeathCause : 0, 0);
 
 				if (VersionInfo.FortniteVersion == 2.50 &&
-					GSpawnedBotControllers.erase(PlayerController) > 0)
+					IsTrackedSpawnedBotController(PlayerController))
 				{
 					ScheduleSpawnedBotCleanup(
 						PlayerController, DeadPawn, DeadPlayerState,
@@ -6208,7 +9984,13 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			}
 		}
 
-		if ((FConfiguration::bSiphon && FConfiguration::SiphonAmount > 0) && PlayerController->Pawn && KillerPlayerState && KillerPlayerState->AbilitySystemComponent && KillerPawn && KillerPawn->Controller != PlayerController)
+		if ((FConfiguration::bSiphon && FConfiguration::SiphonAmount > 0) &&
+			PlayerController->Pawn && KillerPlayerState &&
+			KillerPlayerState->AbilitySystemComponent &&
+			KillerPlayerController &&
+			KillerPlayerController->WorldInventory &&
+			KillerPawn &&
+			KillerPawn->Controller != PlayerController)
 		{
 			auto Health = KillerPawn->GetHealth();
 			auto Shield = KillerPawn->GetShield();
@@ -6248,13 +10030,31 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			KillerPawn->SetHealth(Health);
 			KillerPawn->SetShield(Shield);
 
-			static auto WoodItemData = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/WoodItemData.WoodItemData");
-			static auto StoneItemData = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/StoneItemData.StoneItemData");
-			static auto MetalItemData = FindObject<UFortItemDefinition>(L"/Game/Items/ResourcePickups/MetalItemData.MetalItemData");
+			const auto WoodItemData =
+				UFortKismetLibrary::K2_GetResourceItemDefinition(
+					EFortResourceType::Wood);
+			const auto StoneItemData =
+				UFortKismetLibrary::K2_GetResourceItemDefinition(
+					EFortResourceType::Stone);
+			const auto MetalItemData =
+				UFortKismetLibrary::K2_GetResourceItemDefinition(
+					EFortResourceType::Metal);
 
-			KillerPlayerController->WorldInventory->GiveItem(WoodItemData, FConfiguration::SiphonAmount);
-			KillerPlayerController->WorldInventory->GiveItem(StoneItemData, FConfiguration::SiphonAmount);
-			KillerPlayerController->WorldInventory->GiveItem(MetalItemData, FConfiguration::SiphonAmount);
+			auto GrantSiphonMaterial =
+				[&](const UFortItemDefinition* Definition)
+				{
+					if (Definition)
+					{
+						KillerPlayerController->WorldInventory
+							->GiveItemToSingleStack(
+								Definition,
+								FConfiguration::SiphonAmount,
+								false);
+					}
+				};
+			GrantSiphonMaterial(WoodItemData);
+			GrantSiphonMaterial(StoneItemData);
+			GrantSiphonMaterial(MetalItemData);
 
 			switch (FConfiguration::SiphonAnimType)
 			{
@@ -6292,6 +10092,20 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 						float AddedBonus = 5.f;
 						float NewHealth = KillerPawn->GetHealth() - AddedBonus;
 						float NewShield = KillerPawn->GetShield() - AddedBonus;
+						// This effect is cosmetic here; the siphon amount was
+						// already applied above. Some versions do not grant the
+						// expected +5 before this compensation runs, so never
+						// let the compensation itself damage or kill the player.
+						if (!FPlatformMath::IsFinite(NewHealth) ||
+							NewHealth < HealthBeforeEffect)
+						{
+							NewHealth = HealthBeforeEffect;
+						}
+						if (!FPlatformMath::IsFinite(NewShield) ||
+							NewShield < ShieldBeforeEffect)
+						{
+							NewShield = ShieldBeforeEffect;
+						}
 						KillerPawn->SetHealth(NewHealth);
 						KillerPawn->SetShield(NewShield);
 					}
@@ -6503,19 +10317,57 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 	}
 
-	// Core's tested legacy shim only seeds the target/timer; native death logic
-	// remains responsible for possession, state, spectator flags, and camera.
-	// Builds after 6.00 (including Season 7) stay entirely native-authoritative.
-	auto KismetSystemLibrary = UKismetSystemLibrary::GetDefaultObj();
-	const bool bCanSeedLegacySpectating =
-		UsesCoreLegacyDeathSpectating() &&
+	// Resolve the first target before native ClientOnPawnDied can tear down the
+	// victim's pawn state. Old builds use the delayed SpectateOnDeath timer;
+	// modern builds are repaired immediately after native death initialization.
+	const bool bIsHumanVictim =
+		!(PlayerState->HasbIsABot() && PlayerState->bIsABot) &&
+		!MagnesiumPlayerAIIntegration::IsPlayerAIController(
+			PlayerController);
+	const bool bDeathSpectatingAllowed =
+		!GameMode->HasbAllowSpectateAfterDeath() ||
+		GameMode->bAllowSpectateAfterDeath;
+	const bool bInLiveDeathPhase =
+		GameState->HasGamePhase()
+			? GameState->GamePhase > 2
+			: GUI::gsStatus == StartedMatch;
+	const bool bCanInitializeDeathSpectating =
+		bIsHumanVictim &&
 		!bRespawnAllowed &&
 		(!PlayerController->Pawn ||
 			!IsPawnDBNOForSpectating(PlayerController->Pawn)) &&
-		GameState->HasGamePhase() &&
-		GameState->GamePhase > 2 &&
-		GameMode->HasbAllowSpectateAfterDeath() &&
-		GameMode->bAllowSpectateAfterDeath &&
+		bInLiveDeathPhase &&
+		bDeathSpectatingAllowed &&
+		GUI::gsStatus != Ended &&
+		GameMode->MatchState != FName(L"WaitingPostMatch");
+
+	TWeakObjectPtr<AFortPlayerPawnAthena>
+		DeathSpectateTarget;
+	TWeakObjectPtr<AFortPlayerPawnAthena>
+		DeathSpectateDeadPawn(
+			PlayerController->Pawn);
+	if (bCanInitializeDeathSpectating)
+	{
+		DeathSpectateTarget =
+			ResolveDeathSpectateTarget(
+				GameMode, PlayerController,
+				KillerPlayerController, KillerPawn);
+		if (auto TargetPawn = DeathSpectateTarget.Get();
+			TargetPawn &&
+			PlayerController->HasPlayerToSpectateOnDeath())
+		{
+			// This property is only present on the human controller in legacy
+			// layouts. In 15.30 it belongs to the AI controller, so it is a
+			// useful seed when available but never a modern-path requirement.
+			PlayerController->PlayerToSpectateOnDeath =
+				TargetPawn;
+		}
+	}
+
+	auto KismetSystemLibrary = UKismetSystemLibrary::GetDefaultObj();
+	const bool bCanSeedLegacySpectating =
+		UsesCoreLegacyDeathSpectating() &&
+		DeathSpectateTarget.Get() &&
 		PlayerController->HasPlayerToSpectateOnDeath() &&
 		PlayerController->GetFunction("SpectateOnDeath") &&
 		KismetSystemLibrary &&
@@ -6523,12 +10375,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 	if (bCanSeedLegacySpectating)
 	{
-		auto SpectateTarget = ResolveLegacyDeathSpectateTarget(
-			GameMode, PlayerController,
-			KillerPlayerController, KillerPawn);
+		auto SpectateTarget = DeathSpectateTarget.Get();
 		if (SpectateTarget)
 		{
-			PlayerController->PlayerToSpectateOnDeath = SpectateTarget;
 			UKismetSystemLibrary::K2_SetTimer(
 				PlayerController,
 				FString(L"SpectateOnDeath"),
@@ -6553,8 +10402,143 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			LateSeasonDeathCause = PlayerState->DeathInfo.DeathCause;
 	}
 
+	// The explicit GUI override is authoritative across modes, but native LTM
+	// mutators do not all create the RespawnData/client-countdown handshake.
+	// Queue a one-tick supervisor before returning to native death handling.
+	// It observes and retires itself when native succeeds; only a missing
+	// handshake reaches the bounded fallback. Getaway's Jewel was already
+	// dropped and removed above, so this never repeats inventory processing.
+	if (FConfiguration::bForceRespawns &&
+		bRespawnAllowed &&
+		GUI::gsStatus != Ended &&
+		GameMode->MatchState != FName(L"WaitingPostMatch"))
+	{
+		auto DeadPawnForRespawn =
+			(AFortPlayerPawnAthena*)PlayerController->Pawn;
+		const FVector DeathLocation =
+			IsUsableDeathObject(DeadPawnForRespawn)
+				? DeadPawnForRespawn->K2_GetActorLocation()
+				: (PlayerState->HasPawnDeathLocation()
+					? PlayerState->PawnDeathLocation
+					: FVector());
+		const FRotator DeathRotation =
+			IsUsableDeathObject(DeadPawnForRespawn)
+				? DeadPawnForRespawn->K2_GetActorRotation()
+				: FRotator();
+		QueueForcedRespawnRepair(
+			PlayerController, PlayerState,
+			DeadPawnForRespawn,
+			DeathLocation, DeathRotation);
+	}
+
+	if (bPlayerAIVictim || bSpawnedCommandBotVictim)
+		InvalidateRespawnHandshake(PlayerState);
+
+	// Command-spawned bots are not owned by PlayerAIManager, so retain their
+	// actor graph until native death has emitted its effects and then tear it
+	// down as one unit. The cleanup also catches any unauthorized replacement
+	// pawn native respawn code managed to create.
+	if (bSpawnedCommandBotVictim)
+	{
+		ScheduleSpawnedBotCleanup(
+			PlayerController, ManagedBotEliminatedPawn,
+			PlayerState, ManagedBotInventory);
+	}
+
+	if (bPlayerAIVictim)
+	{
+		PlayerAIManager::HandleControllerDeath(
+			PlayerController, ManagedBotEliminatedPawn);
+	}
+
 	if (!bCalledNativeDeathEarly)
-		ClientOnPawnDiedOG(PlayerController, DeathReport);
+		CallNativePawnDied();
+
+	// A solo host can eliminate themselves with nobody left to receive a
+	// Victory Royale. Several legacy builds then show Match Stats to the dead
+	// client but leave MatchState in progress forever. This edge is derived
+	// from an actual permanent death—not an empty connection list—so ordinary
+	// disconnects cannot close an Auto Host match.
+	const bool bNoAlivePlayers =
+		IsUsableDeathObject(GameMode) &&
+		GameMode->HasAlivePlayers() &&
+		GameMode->AlivePlayers.Num() == 0;
+	const bool bNoAliveBots =
+		IsUsableDeathObject(GameMode) &&
+		(!GameMode->HasAliveBots() ||
+			GameMode->AliveBots.Num() == 0);
+	if (!bRespawnAllowed &&
+		bMatchWasLiveAtDeath &&
+		bVictimWasAliveParticipant &&
+		GUI::gsStatus.load(
+			std::memory_order_acquire) == StartedMatch &&
+		bNoAlivePlayers &&
+		bNoAliveBots &&
+		GameMode->MatchState != FName(L"WaitingPostMatch"))
+	{
+		GUI::gsStatus.store(
+			Ended, std::memory_order_release);
+		SDK::DbgLog(
+			"[MatchLifecycle] Permanent elimination left no alive participants; match ended without a winner\n");
+	}
+
+	if (bWasAshtonLeader)
+	{
+		// Native death mutators may restore the old row or publish a delayed
+		// candidate. Run the cleanup again after native processing.
+		FFortAthenaNativeLTMCompatibility::
+			HandleAshtonLeaderEliminated(
+				PlayerController,
+				true);
+	}
+
+	// Native death handling must run first so the client has its death UI and
+	// the server has removed the victim from the alive set. Unlike the legacy
+	// PlayerToSpectateOnDeath field, these reflected spectator calls exist on
+	// the human controller and perform the first target/state handoff.
+	if (!UsesCoreLegacyDeathSpectating() &&
+		bCanInitializeDeathSpectating &&
+		IsUsableDeathObject(GameMode) &&
+		GUI::gsStatus != Ended &&
+		GameMode->MatchState != FName(L"WaitingPostMatch"))
+	{
+		auto TargetPawn = DeathSpectateTarget.Get();
+		AFortPlayerControllerAthena* TargetController = nullptr;
+		if (IsUsableDeathObject(TargetPawn) &&
+			TargetPawn->HasController() &&
+			IsUsableDeathObject(TargetPawn->Controller))
+		{
+			TargetController =
+				TargetPawn->Controller
+					->Cast<AFortPlayerControllerAthena>();
+		}
+		if (ResolveValidDeathSpectatePawn(
+				GameMode, PlayerController,
+				TargetController) != TargetPawn)
+		{
+			// Native death processing can invalidate or down the originally
+			// selected pawn. Resolve again instead of cutting the client camera
+			// to a stale target.
+			TargetPawn = ResolveDeathSpectateTarget(
+				GameMode, PlayerController,
+				KillerPlayerController, KillerPawn);
+		}
+
+		if (IsUsableDeathObject(TargetPawn))
+		{
+			InitializeDeathSpectating(
+				PlayerController, TargetPawn,
+				DeathSpectateDeadPawn.Get());
+		}
+		else
+		{
+			SDK::DbgLog(
+				"[Spectating] no valid first death target "
+				"controller=%p version=%.2f\n",
+				(void*)PlayerController,
+				VersionInfo.FortniteVersion);
+		}
+	}
 
 	// Some later builds finalize the winner in native ClientOnPawnDied rather
 	// than in RemoveFromAlivePlayers. Apply the already-prepared state after
@@ -6597,7 +10581,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 		if (bVictimRemoved)
 		{
-			GSpawnedBotControllers.erase(PlayerController);
 			G172SpawnedBotRemovalAttempts.erase(PlayerController);
 			Complete172SpawnedBotVictoryAfterNative(
 				GameMode, GameState, PlayerController,
@@ -6612,6 +10595,57 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 	}
 
+	if (!bIsAshtonMatch)
+	{
+		if (!bManualCarminePickupSpawned &&
+			HasNearbyCarmineGauntletPickup(
+				ManualCarmineDropLocation))
+		{
+			// PassiveSetup/native death may have spawned the transferable
+			// pickup while also restoring the victim row. Reuse that world
+			// pickup and limit the compatibility repair to stale inventory.
+			bManualCarminePickupSpawned = true;
+			SDK::DbgLog(
+				"[Ashton1040] found native Carmine death "
+				"pickup near controller=%p; suppressing retry\n",
+				(void*)PlayerController);
+		}
+		if (!bManualCarminePickupSpawned)
+		{
+			// Native teardown can restore the gadget row. Retry against the
+			// same death location, but never create a second pickup.
+			bManualCarminePickupSpawned =
+				DropManualCarmineGauntletOnDeath(
+					PlayerController,
+					IsUsableDeathObject(KillerPawn)
+						? KillerPawn
+						: ManualCarmineDeadPawn,
+					ManualCarmineDropLocation);
+		}
+
+		// A successful pre-native drop can still be followed by a restored
+		// victim row or a non-authored killer transfer. Keep the one world
+		// pickup and remove only rows introduced by this death.
+		const int32 VictimRowsRemoved =
+			RemoveCarmineGauntletArtifacts(
+				PlayerController);
+		const int32 KillerRowsRemoved =
+			RemoveCarmineGauntletArtifacts(
+				KillerPlayerController,
+				&KillerCarmineArtifactsBefore);
+		if (VictimRowsRemoved > 0 ||
+			KillerRowsRemoved > 0)
+		{
+			SDK::DbgLog(
+				"[Ashton1040] cleaned post-death Carmine "
+				"restoration victimRows=%d killerRows=%d "
+				"pickupSpawned=%d\n",
+				VictimRowsRemoved,
+				KillerRowsRemoved,
+				bManualCarminePickupSpawned ? 1 : 0);
+		}
+	}
+
 	// Run once more after native death handling, which may restore persistent
 	// gadget items as part of its pawn-replacement teardown.
 	PurgeExclusiveGadgets(PlayerController);
@@ -6622,32 +10656,156 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 	Stack.IncrementCode();
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
+	auto World = UWorld::GetWorld();
+	auto GameMode =
+		World
+			? (AFortGameMode*)World->AuthorityGameMode
+			: nullptr;
+	auto GameState =
+		GameMode
+			? (AFortGameStateAthena*)GameMode->GameState
+			: nullptr;
+	auto PlayerState =
+		IsUsableDeathObject(PlayerController)
+			? (AFortPlayerStateAthena*)
+				PlayerController->PlayerState
+			: nullptr;
+	if (!IsUsableDeathObject(GameMode) ||
+		!IsUsableDeathObject(GameState) ||
+		!IsUsableDeathObject(PlayerState) ||
+		!PlayerState->HasRespawnData())
+	{
+		return;
+	}
 
-	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-	auto PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+	bool bStormRespawnBlocked = false;
+	auto StormBlock =
+		GStormRespawnBlockedControllers.find(
+			PlayerController);
+	if (StormBlock !=
+		GStormRespawnBlockedControllers.end())
+	{
+		bStormRespawnBlocked =
+			StormBlock->second.Get() == GameState;
+		if (!bStormRespawnBlocked)
+		{
+			// Match objects can be recycled independently of controllers.
+			// Discard a stale life-specific decision before consulting the
+			// current match's policy.
+			GStormRespawnBlockedControllers.erase(
+				StormBlock);
+		}
+	}
+
+	const bool bMatchLifecycleAllowsRespawn =
+		GUI::gsStatus >= Joinable &&
+		GUI::gsStatus < Ended &&
+		GameMode->MatchState !=
+			FName(L"WaitingPostMatch") &&
+		(!GameState->HasGamePhase() ||
+			GameState->GamePhase <
+				(uint8)EAthenaGamePhase::EndGame);
+	if (!bMatchLifecycleAllowsRespawn ||
+		!IsRespawningAllowedForDeath(
+			GameMode, GameState, PlayerController, PlayerState,
+			bStormRespawnBlocked))
+	{
+		// Ready is a client RPC and may arrive after the user changed the
+		// Infinite/Storm Respawns toggle, after objective elimination, or after
+		// post-match began. Re-evaluate the live policy instead of trusting the
+		// stale packet and invalidate all halves of its old handshake.
+		InvalidateRespawnHandshake(PlayerState);
+		return;
+	}
+
+	bool bWaxRespawnAllowed = false;
+	const bool bWaxRespawnManaged =
+		PlayerState &&
+		FFortAthenaNativeLTMCompatibility::
+			TryGetWaxRespawnAllowed(
+				PlayerState,
+				bWaxRespawnAllowed);
+	if (bWaxRespawnManaged && !bWaxRespawnAllowed)
+	{
+		// A ready packet may already be queued when the final authored life is
+		// consumed. Invalidate every side of the handshake so InfiniteRespawn
+		// cannot recreate a permanently waxed player.
+		InvalidateRespawnHandshake(PlayerState);
+		return;
+	}
+
+	bool bDeepFriedRespawnAllowed = false;
+	if (PlayerState &&
+		FFortAthenaNativeLTMCompatibility::
+			TryGetFoodFightRespawnAllowed(
+				PlayerState,
+				bDeepFriedRespawnAllowed) &&
+		!bDeepFriedRespawnAllowed)
+	{
+		// A client-ready packet can already be queued when its mascot dies.
+		// Invalidate the whole handshake so that packet cannot recreate the
+		// pawn after the Barrier mutator has disabled this team's respawns.
+		InvalidateRespawnHandshake(PlayerState);
+		return;
+	}
+
+	bool bDiscoRespawnAllowed = false;
+	if (PlayerState &&
+		FFortAthenaNativeLTMCompatibility::
+			TryGetDiscoRespawnAllowed(
+				PlayerState,
+				bDiscoRespawnAllowed) &&
+		!bDiscoRespawnAllowed)
+	{
+		// Consume any ready packet already queued when the authored final
+		// respawn window closed.
+		InvalidateRespawnHandshake(PlayerState);
+		return;
+	}
 
 	if (PlayerState->RespawnData.bRespawnDataAvailable && PlayerState->RespawnData.bServerIsReady)
 	{
+		// Consume the server half of this handshake before any spawn call. A
+		// delayed duplicate client-ready packet must not be able to create a
+		// second pawn from the same RespawnData.
+		auto RespawnData = PlayerState->RespawnData;
+		PlayerState->RespawnData.bRespawnDataAvailable =
+			false;
+		PlayerState->RespawnData.bServerIsReady = false;
+		PlayerState->RespawnData.bClientIsReady = true;
+		PlayerState->ForceNetUpdate();
+
 		PurgeExclusiveGadgets(PlayerController);
 		auto OldPawn = PlayerController->MyFortPawn;
 		ResetLowerSeasonStormStateForRespawn(PlayerController, OldPawn, nullptr);
 
-		auto RespawnData = PlayerState->RespawnData;
 		FTransform SpawnTransform{};
 
-		FQuat Rotation = PlayerState->RespawnData.RespawnRotation;
-		SpawnTransform.Translation = PlayerState->RespawnData.RespawnLocation;
+		FQuat Rotation = RespawnData.RespawnRotation;
+		SpawnTransform.Translation = RespawnData.RespawnLocation;
 		SpawnTransform.Rotation = Rotation;
 
 		FVector ConfiguredRespawnLocation{};
-		if (TryGetConfiguredRespawnLocation(GameMode, ConfiguredRespawnLocation))
+		if (!bWaxRespawnManaged &&
+			TryGetConfiguredRespawnLocation(
+				GameMode,
+				ConfiguredRespawnLocation))
 			SpawnTransform.Translation = ConfiguredRespawnLocation;
 
 		auto Scale = FVector(1, 1, 1);
 		SpawnTransform.Scale3D = Scale;
 
 		auto NewPawn = GameMode->SpawnDefaultPawnAtTransform(PlayerController, SpawnTransform);
+		if (!IsUsableDeathObject(NewPawn))
+		{
+			SDK::DbgLog(
+				"[RespawnReady] pawn spawn failed "
+				"controller=%p playerState=%p FN=%.2f\n",
+				(void*)PlayerController,
+				(void*)PlayerState,
+				VersionInfo.FortniteVersion);
+			return;
+		}
 		PlayerController->Possess(NewPawn);
 		PlayerController->RespawnPlayerAfterDeath(true);
 
@@ -6674,19 +10832,6 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 				}
 			}
 
-			if (FConfiguration::bDisableJumpFatigue && NewPawn->HasCharacterMovement())
-			{
-				auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(NewPawn->GetCharacterMovement());
-				if (MovementCompAthena->HasJumpPenaltyResetTime())
-					MovementCompAthena->JumpPenaltyResetTime = 0.0f;
-			}
-		}
-
-		if (FConfiguration::bDisableJumpFatigue && NewPawn->HasCharacterMovement())
-		{
-			auto MovementCompAthena = (UFortMovementComp_CharacterAthena*)(NewPawn->GetCharacterMovement());
-			if (MovementCompAthena->HasJumpPenaltyResetTime())
-				MovementCompAthena->JumpPenaltyResetTime = 0.0f;
 		}
 
 		EnsurePawnGameplayAbilitiesInitialized(
@@ -6706,6 +10851,20 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		// the legacy quickbar produces competing CurrentWeapon actors.
 		if (!UsesEarlyAthenaLandingClientRefresh())
 			RestoreEquipmentAfterRespawn(PlayerController);
+
+		FFortAthenaNativeLTMCompatibility::
+			HandleWaxPlayerReady(PlayerController);
+		FFortAthenaNativeLTMCompatibility::
+			HandleAshtonPlayerReady(PlayerController);
+		if (AFortPlayerPawnAthena::
+				HasMinimumHealthGodMode(PlayerController))
+		{
+			AFortPlayerPawnAthena::
+				SetMinimumHealthGodMode(
+					PlayerController, true);
+		}
+		GStormRespawnBlockedControllers.erase(
+			PlayerController);
 	}
 
 	PlayerState->RespawnData.bClientIsReady = true;
@@ -6721,6 +10880,25 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 {
 	if (!PickupEntry || !PickupEntry->ItemDefinition || !WorldInventory)
 		return;
+	auto PickupPawn = MyFortPawn
+		? MyFortPawn
+		: Pawn
+			? Pawn->Cast<AFortPlayerPawnAthena>()
+			: nullptr;
+	if (FFortAthenaNativeLTMCompatibility::
+			ShouldRejectAshtonPickup(
+				PickupPawn,
+				PickupEntry->ItemDefinition))
+	{
+		return;
+	}
+	if (FFortAthenaNativeLTMCompatibility::
+			ShouldBlockAshtonGenericPickup(
+				PickupPawn,
+				PickupEntry->ItemDefinition))
+	{
+		return;
+	}
 
 	auto MaxStack = (int32)PickupEntry->ItemDefinition->GetMaxStackSize();
 	int ItemCount = 0;
@@ -6788,29 +10966,42 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 					auto itemEntry = WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
 						{ return entry.ItemGuid == ((AFortWeapon*)MyFortPawn->CurrentWeapon)->ItemEntryGuid; }, FFortItemEntry::Size());
 
-
+					if (!itemEntry)
+						return;
 					AFortInventory::SpawnPickup(Pawn->K2_GetActorLocation() + Pawn->GetActorForwardVector() * 70.f + FVector(0, 0, 50), *itemEntry, EFortPickupSourceTypeFlag::GetPlayer(), EFortPickupSpawnSource::GetUnset(), MyFortPawn, -1, true, true, true, nullptr, FinalLoc);
 					WorldInventory->Remove(((AFortWeapon*)MyFortPawn->CurrentWeapon)->ItemEntryGuid);
-					auto Item = WorldInventory->GiveItem(*PickupEntry, PickupEntry->Count, true);
-					ServerExecuteInventoryItem(Item->ItemEntry.ItemGuid);
-					if (VersionInfo.FortniteVersion < 3)
+					bool bForceFocusHandled = false;
+					auto Item = WorldInventory->GiveItem(
+						*PickupEntry,
+						PickupEntry->Count,
+						true,
+						true,
+						&bForceFocusHandled);
+					if (!Item)
+						return;
+					if (!bForceFocusHandled)
 					{
-						auto& QuickBar = (AFortInventory::IsPrimaryQuickbar(Item->ItemEntry.ItemDefinition) || Item->ItemEntry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest()) ? QuickBars->PrimaryQuickBar : QuickBars->SecondaryQuickBar;
-						int i = 0;
-						for (i = 0; i < QuickBar.Slots.Num(); i++)
+						ServerExecuteInventoryItem(
+							Item->ItemEntry.ItemGuid);
+						if (VersionInfo.FortniteVersion < 3)
 						{
-							auto& Slot = QuickBar.Slots.Get(i, FQuickBarSlot::Size());
+							auto& QuickBar = (AFortInventory::IsPrimaryQuickbar(Item->ItemEntry.ItemDefinition) || Item->ItemEntry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest()) ? QuickBars->PrimaryQuickBar : QuickBars->SecondaryQuickBar;
+							int i = 0;
+							for (i = 0; i < QuickBar.Slots.Num(); i++)
+							{
+								auto& Slot = QuickBar.Slots.Get(i, FQuickBarSlot::Size());
 
-							for (auto& SlotItem : Slot.Items)
-								if (SlotItem == Item->ItemEntry.ItemGuid)
-								{
-									QuickBars->ServerActivateSlotInternal(!(AFortInventory::IsPrimaryQuickbar(Item->ItemEntry.ItemDefinition) || Item->ItemEntry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest()), i, 0.f, true);
-									break;
-								}
+								for (auto& SlotItem : Slot.Items)
+									if (SlotItem == Item->ItemEntry.ItemGuid)
+									{
+										QuickBars->ServerActivateSlotInternal(!(AFortInventory::IsPrimaryQuickbar(Item->ItemEntry.ItemDefinition) || Item->ItemEntry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest()), i, 0.f, true);
+										break;
+									}
+							}
 						}
+						else
+							ClientEquipItem(Item->ItemEntry.ItemGuid, true);
 					}
-					else
-						ClientEquipItem(Item->ItemEntry.ItemGuid, true);
 				}
 				else
 				{
@@ -6873,7 +11064,7 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 
 				if (StateValue.StateType != 2)
 					continue;
-				
+
 				StateValue.IntValue = 1;
 				bFound = true;
 				break;
@@ -6925,6 +11116,47 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 
 std::unordered_map<std::string, std::vector<FVector>> Waypoints;
 std::unordered_set<AFortPlayerControllerAthena*> MarkToTeleportPlayers;
+
+static void RegenerateMinimumGodHealthAfterWaypoint(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!PlayerController ||
+		!AFortPlayerPawnAthena::
+			HasMinimumHealthGodMode(PlayerController))
+	{
+		return;
+	}
+
+	auto PlayerPawnClass =
+		AFortPlayerPawnAthena::StaticClass();
+	AFortPlayerPawnAthena* HealthPawn = nullptr;
+	if (PlayerPawnClass &&
+		PlayerController->HasMyFortPawn() &&
+		PlayerController->MyFortPawn &&
+		PlayerController->MyFortPawn->IsA(
+			PlayerPawnClass))
+	{
+		HealthPawn = PlayerController->MyFortPawn;
+	}
+	else if (PlayerPawnClass && Pawn &&
+		Pawn->IsA(PlayerPawnClass))
+	{
+		HealthPawn = Pawn;
+	}
+	if (!HealthPawn)
+		return;
+
+	const float MaxHealth = HealthPawn->GetMaxHealth();
+	if (!FPlatformMath::IsFinite(MaxHealth) ||
+		MaxHealth <= 0.f)
+	{
+		return;
+	}
+
+	HealthPawn->SetHealth(MaxHealth);
+	HealthPawn->ForceNetUpdate();
+}
 
 static void (*ServerAddMapMarkerOG)(UObject*, FFrame&) = nullptr;
 static int32 MarkerWorldPositionOffset = -2;
@@ -7379,7 +11611,10 @@ static const UFortItemDefinition* FindItemDefinitionByCommandArg(const std::stri
 
 	if (!ItemDefinition)
 	{
-		auto ShortNames = Misc::ItemNames.find(ItemArg.c_str());
+		// Preserve casing for full object names/paths above, but keep short IDs
+		// case-insensitive just like the command name itself.
+		auto NormalizedItemArg = NormalizePlayerCommandString(ItemArg);
+		auto ShortNames = Misc::ItemNames.find(NormalizedItemArg.c_str());
 
 		if (ShortNames != Misc::ItemNames.end())
 		{
@@ -9533,21 +13768,106 @@ static AActor* FindPawnByNameSubstringForCommand(const std::string& Name, std::s
 // The params are [AActor* A][FViewTargetTransitionParams]. A zeroed transition
 // struct means BlendTime 0 - an instant cut. ProcessEvent copies only the
 // function's real ParmsSize, so an over-sized zeroed buffer is safe.
-static void ClientForceViewTargetForCommand(AFortPlayerControllerAthena* PC, AActor* Target)
+static bool ClientForceViewTarget(
+	AFortPlayerControllerAthena* PC, AActor* Target)
 {
 	if (!PC || !Target)
-		return;
+		return false;
 
-	static auto Fn = PC->GetFunction("ClientSetViewTarget");
+	auto Fn = PC->GetFunction("ClientSetViewTarget");
 
 	if (!Fn)
-		return;
+		return false;
 
-	uint8_t Params[0x40];
-	memset(Params, 0, sizeof(Params));
-	*(AActor**)(Params + 0) = Target;
+	const auto ReflectedParams = Fn->GetParamsNamed();
+	// FN32 relocates/encrypts UStruct::PropertiesSize and FProperty element
+	// sizes. Parameter names and decrypted offsets remain usable, while the
+	// reflected total size does not; mirror UObject::Call's fixed safe buffer.
+	const bool bFN32ReflectionLayout =
+		VersionInfo.FortniteVersion >= 32.00;
+	const uint32 ParamsSize =
+		bFN32ReflectionLayout
+			? 0x1000
+			: ReflectedParams.Size > 0
+			? ReflectedParams.Size
+			: 0x40;
+	if (ParamsSize < sizeof(AActor*) ||
+		ParamsSize > 0x1000)
+	{
+		return false;
+	}
 
-	PC->ProcessEvent(Fn, Params);
+	std::vector<uint8> Params(ParamsSize, 0);
+	int32 TargetOffset = -1;
+	for (const auto& Parameter :
+		ReflectedParams.NameOffsetMap)
+	{
+		if (Parameter.Name == "ReturnValue")
+			continue;
+
+		const bool bKnownTargetName =
+			Parameter.Name == "A" ||
+			Parameter.Name == "NewViewTarget" ||
+			Parameter.Name == "ViewTarget" ||
+			Parameter.Name == "Target" ||
+			Parameter.Name.find("ViewTarget") !=
+				UEAllocatedString::npos;
+		if (bKnownTargetName &&
+			Parameter.Offset + sizeof(AActor*) <=
+				Params.size())
+		{
+			TargetOffset =
+				static_cast<int32>(Parameter.Offset);
+			break;
+		}
+	}
+
+	// Legacy layouts consistently place the actor at offset zero, but prefer
+	// reflection and use this only when parameter names are unavailable.
+	if (TargetOffset < 0 &&
+		!bFN32ReflectionLayout)
+	{
+		for (const auto& Parameter :
+			ReflectedParams.NameOffsetMap)
+		{
+			if (Parameter.Name != "ReturnValue" &&
+				Parameter.ElementSize == sizeof(AActor*) &&
+				Parameter.Offset + sizeof(AActor*) <=
+					Params.size())
+			{
+				TargetOffset =
+					static_cast<int32>(Parameter.Offset);
+				break;
+			}
+		}
+	}
+	if (TargetOffset < 0 &&
+		ReflectedParams.NameOffsetMap.empty())
+	{
+		TargetOffset = 0;
+	}
+	if (TargetOffset < 0)
+		return false;
+
+	memcpy(
+		Params.data() + TargetOffset,
+		&Target, sizeof(Target));
+
+	static std::unordered_set<UFunction*>
+		LoggedClientSetViewTargetFunctions;
+	if (LoggedClientSetViewTargetFunctions.insert(Fn).second)
+	{
+		SDK::DbgLog(
+			"[Spectating] ClientSetViewTarget params "
+			"size=0x%x targetOffset=0x%x count=%zu FN=%.2f\n",
+			(unsigned)ParamsSize,
+			(unsigned)TargetOffset,
+			ReflectedParams.NameOffsetMap.size(),
+			VersionInfo.FortniteVersion);
+	}
+
+	PC->ProcessEvent(Fn, Params.data());
+	return true;
 }
 
 // Cleans up the state a freshly possessed pawn is left in.
@@ -9618,7 +13938,7 @@ static void MakeControllerSpectatePawnForCommand(AFortPlayerControllerAthena* PC
 	PC->SetViewTargetWithBlend((AActor*)Pawn, 0.f, (uint8_t)0, 0.f, false);
 
 	// The one that actually moves a remote client's camera.
-	ClientForceViewTargetForCommand(PC, (AActor*)Pawn);
+	ClientForceViewTarget(PC, (AActor*)Pawn);
 
 	PC->ForceNetUpdate();
 }
@@ -9688,7 +14008,7 @@ static AFortPlayerPawnAthena* RespawnControllerOnFreshPawnForCommand(AFortGameMo
 	// does not clear the spectator view target we set earlier.
 	PC->ClientGotoState(FName(L"Playing"));
 	PC->SetViewTargetWithBlend((AActor*)NewPawn, 0.f, (uint8_t)0, 0.f, false);
-	ClientForceViewTargetForCommand(PC, (AActor*)NewPawn);
+	ClientForceViewTarget(PC, (AActor*)NewPawn);
 
 	ReEquipAfterPossessForCommand(PC);
 
@@ -10133,8 +14453,26 @@ static void ApplyNukePlayerDamageAtLocation(const FVector& ImpactLocation, AActo
 		if (!Pawn)
 			continue;
 
+		const float InitialHealth = Pawn->GetHealth();
+		if (!FPlatformMath::IsFinite(InitialHealth) ||
+			InitialHealth <= 0.f ||
+			IsPawnDBNOForSpectating(Pawn) ||
+			(Pawn->HasbIsDying() && Pawn->bIsDying) ||
+			(Pawn->HasbPlayedDying() &&
+				Pawn->bPlayedDying) ||
+			(Pawn->HasbIsHiddenForDeath() &&
+				Pawn->bIsHiddenForDeath))
+		{
+			continue;
+		}
+
 		if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
 			continue;
+		if (AFortPlayerPawnAthena::
+				HasFullHealthGodMode(Pawn))
+		{
+			continue;
+		}
 
 		if (Pawn->K2_GetActorLocation().GetDistanceTo(ImpactLocation) > NukeRocketDamageRadius)
 			continue;
@@ -10154,7 +14492,19 @@ static void ApplyNukePlayerDamageAtLocation(const FVector& ImpactLocation, AActo
 			auto Health = Pawn->GetHealth();
 
 			if (Health <= RemainingDamage)
-				TryForceKillPawnForNuke(Pawn, InstigatorController, DamageCauser);
+			{
+				if (AFortPlayerPawnAthena::
+						HasMinimumHealthGodMode(Pawn))
+				{
+					Pawn->SetHealth(1.f);
+				}
+				else
+				{
+					TryForceKillPawnForNuke(
+						Pawn, InstigatorController,
+						DamageCauser);
+				}
+			}
 			else
 				Pawn->SetHealth(Health - RemainingDamage);
 		}
@@ -10280,6 +14630,9 @@ static bool ApplyGuidedNukeRocket(AActor* Rocket, AActor* InstigatorPawn, AFortP
 
 void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 {
+	RefreshSpawnedBotTrackingWorld();
+	TickForcedRespawnRepairs(DeltaSeconds);
+	TickDeathSpectateCameraHandoffs(DeltaSeconds);
 	TickOneShotLowGravityVfxRetries(DeltaSeconds);
 	TickLoadedGameplayEffectCatalogForCommand();
 	TickGameplayEffectOutputForCommand(DeltaSeconds);
@@ -10294,13 +14647,85 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 			continue;
 
 		auto PlayerController = Cleanup.Controller.Get();
+		auto ControllerIdentity = Cleanup.ControllerIdentity;
 		auto Pawn = Cleanup.Pawn.Get();
 		auto PlayerState = Cleanup.PlayerState.Get();
 		auto Inventory = Cleanup.Inventory.Get();
+		AFortPlayerPawnAthena* ReplacementPawn = nullptr;
+		AFortPlayerPawnAthena* SecondaryReplacementPawn = nullptr;
+		AFortInventory* ReplacementInventory = nullptr;
+		AFortPlayerStateAthena* ReplacementPlayerState = nullptr;
+		bool bRemovedFromRoster = false;
 
 		if (PlayerController)
 		{
-			GSpawnedBotControllers.erase(PlayerController);
+			auto CaptureReplacementPawn =
+				[Pawn, &ReplacementPawn,
+				 &SecondaryReplacementPawn](AActor* Candidate)
+				{
+					if (!IsUsableDeathObject(Candidate) ||
+						Candidate == Pawn ||
+						!Candidate->IsA(
+							AFortPlayerPawnAthena::StaticClass()))
+					{
+						return;
+					}
+
+					auto CandidatePawn =
+						(AFortPlayerPawnAthena*)Candidate;
+					if (!ReplacementPawn)
+						ReplacementPawn = CandidatePawn;
+					else if (CandidatePawn != ReplacementPawn)
+						SecondaryReplacementPawn = CandidatePawn;
+				};
+			CaptureReplacementPawn(PlayerController->Pawn);
+			if (PlayerController->MyFortPawn !=
+				PlayerController->Pawn)
+			{
+				CaptureReplacementPawn(
+					PlayerController->MyFortPawn);
+			}
+
+			if (IsUsableDeathObject(
+					PlayerController->WorldInventory))
+			{
+				ReplacementInventory =
+					PlayerController->WorldInventory;
+			}
+			if (IsUsableDeathObject(
+					PlayerController->PlayerState))
+			{
+				ReplacementPlayerState =
+					(AFortPlayerStateAthena*)
+						PlayerController->PlayerState;
+			}
+
+			auto World = UWorld::GetWorld();
+			auto GameMode =
+				World
+					? (AFortGameMode*)World->AuthorityGameMode
+					: nullptr;
+			if (IsUsableDeathObject(GameMode))
+			{
+				auto RemoveController =
+					[PlayerController, &bRemovedFromRoster](
+						TArray<AActor*>& Roster)
+					{
+						for (int Index = Roster.Num() - 1;
+							Index >= 0; --Index)
+						{
+							if (Roster[Index] == PlayerController)
+							{
+								Roster.Remove(Index);
+								bRemovedFromRoster = true;
+							}
+						}
+					};
+				RemoveController(GameMode->AlivePlayers);
+				if (GameMode->HasAliveBots())
+					RemoveController(GameMode->AliveBots);
+			}
+
 			GPendingRespawnLandingFinalization.erase(PlayerController);
 			GRespawnSkydivingObserved.erase(PlayerController);
 			GPendingLegacyAircraftLandingEquipment.erase(PlayerController);
@@ -10313,23 +14738,70 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 			GTrackedVehicleLoadouts.erase(PlayerController);
 			GPendingLateGameAircraftLoadout.erase(PlayerController);
 			PlayersInitialized.erase(PlayerController);
+
+			for (int PendingIndex =
+				(int)GPendingForcedRespawnRepairs.size() - 1;
+				PendingIndex >= 0; --PendingIndex)
+			{
+				if (GPendingForcedRespawnRepairs[PendingIndex]
+						.PlayerController.Get() == PlayerController)
+				{
+					GPendingForcedRespawnRepairs.erase(
+						GPendingForcedRespawnRepairs.begin() +
+							PendingIndex);
+				}
+			}
 		}
 
-		// Destroy the synthetic actor graph together after one complete legacy
-		// elimination effect. Keeping the controller/PlayerState alive is what
-		// leaves its health timers and drone beam repeating indefinitely.
+		// A weak actor reference can already be null if native death destroyed
+		// the controller synchronously. Erasing containers by the retained
+		// identity is pointer-only and prevents a recycled address from being
+		// mistaken for a managed bot in a later match.
+		UnregisterTrackedSpawnedBotController(ControllerIdentity);
+		G172SpawnedBotRemovalAttempts.erase(ControllerIdentity);
+
+		// Destroy the synthetic actor graph together after native death has had
+		// time to emit its elimination effects. If native respawn produced a
+		// second pawn/inventory/state, destroy those current objects as well.
+		if (ReplacementPawn != Pawn &&
+			IsUsableDeathObject(ReplacementPawn))
+		{
+			ReplacementPawn->K2_DestroyActor();
+		}
+		if (SecondaryReplacementPawn != Pawn &&
+			SecondaryReplacementPawn != ReplacementPawn &&
+			IsUsableDeathObject(SecondaryReplacementPawn))
+		{
+			SecondaryReplacementPawn->K2_DestroyActor();
+		}
 		if (IsUsableDeathObject(Pawn))
 			Pawn->K2_DestroyActor();
+		if (ReplacementInventory != Inventory &&
+			IsUsableDeathObject(ReplacementInventory))
+		{
+			ReplacementInventory->K2_DestroyActor();
+		}
 		if (IsUsableDeathObject(Inventory))
 			Inventory->K2_DestroyActor();
+		if (ReplacementPlayerState != PlayerState &&
+			IsUsableDeathObject(ReplacementPlayerState))
+		{
+			ReplacementPlayerState->K2_DestroyActor();
+		}
 		if (IsUsableDeathObject(PlayerState))
 			PlayerState->K2_DestroyActor();
 		if (IsUsableDeathObject(PlayerController))
 			PlayerController->K2_DestroyActor();
 
-		SDK::DbgLog("[Elimination] completed 2.50 spawnbot cleanup controller=%p pawn=%p playerState=%p inventory=%p\n",
-			(void*)PlayerController, (void*)Pawn, (void*)PlayerState,
-			(void*)Inventory);
+		if (bRemovedFromRoster)
+			VersionFeatureAdapter::SyncPlayersLeft(true);
+
+		SDK::DbgLog("[Elimination] completed terminal spawnbot cleanup controller=%p pawn=%p replacementPawn=%p secondaryPawn=%p playerState=%p inventory=%p rosterRemoved=%d\n",
+			(void*)PlayerController, (void*)Pawn,
+			(void*)ReplacementPawn,
+			(void*)SecondaryReplacementPawn,
+			(void*)PlayerState, (void*)Inventory,
+			bRemovedFromRoster ? 1 : 0);
 		GPendingSpawnedBotCleanup.erase(
 			GPendingSpawnedBotCleanup.begin() + CleanupIndex);
 	}
@@ -10573,16 +15045,150 @@ int AFortPlayerControllerAthena::TeleportAllPlayersTo(AFortPlayerControllerAthen
 	return TeleportCount;
 }
 
+static bool HasLoopbackSavedAddressForCheatCommands(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!IsUsableDeathObject(PlayerController) ||
+		!PlayerController->HasPlayerState() ||
+		!IsUsableDeathObject(PlayerController->PlayerState))
+	{
+		return false;
+	}
+
+	auto PlayerState = PlayerController->PlayerState;
+	const uint32 AddressOffset =
+		PlayerState->GetOffset("SavedNetworkAddress");
+	if (AddressOffset == static_cast<uint32>(-1) ||
+		!IsUsableDeathObject(PlayerState->Class))
+	{
+		return false;
+	}
+
+	const int32 ObjectSize =
+		PlayerState->Class->GetPropertiesSize();
+	if (ObjectSize < static_cast<int32>(sizeof(FString)) ||
+		AddressOffset > static_cast<uint32>(
+			ObjectSize - sizeof(FString)))
+	{
+		return false;
+	}
+
+	const auto AddressField =
+		reinterpret_cast<const FString*>(
+			reinterpret_cast<const uint8*>(PlayerState) +
+				AddressOffset);
+	if (!SDK::MemReadable(AddressField, sizeof(FString)))
+		return false;
+
+	const int32 Length = AddressField->Num();
+	if (Length <= 1 || Length > 128 ||
+		AddressField->Max() < Length ||
+		!AddressField->CStr() ||
+		!SDK::MemReadable(
+			AddressField->CStr(),
+			static_cast<size_t>(Length) *
+				sizeof(wchar_t)) ||
+		AddressField->CStr()[Length - 1] != L'\0')
+	{
+		return false;
+	}
+
+	const auto Address = AddressField->ToString();
+	return Address == "127.0.0.1" ||
+		Address.starts_with("127.0.0.1:") ||
+		Address == "::1" ||
+		Address.starts_with("[::1]:") ||
+		Address == "::ffff:127.0.0.1" ||
+		Address.starts_with("[::ffff:127.0.0.1]:");
+}
+
+static bool IsCheatCommandHost(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!IsUsableDeathObject(PlayerController))
+		return false;
+
+	auto World = UWorld::GetWorld();
+	if (IsUsableDeathObject(World) &&
+		World->HasOwningGameInstance())
+	{
+		auto GameInstance = World->OwningGameInstance;
+		if (IsUsableDeathObject(GameInstance) &&
+			GameInstance->HasLocalPlayers())
+		{
+			const auto& LocalPlayers =
+				GameInstance->LocalPlayers;
+			const int32 Count = LocalPlayers.Num();
+			if (Count > 0)
+			{
+				if (Count > 8 ||
+					LocalPlayers.Max() < Count ||
+					!SDK::MemReadable(
+						LocalPlayers.GetData(),
+						static_cast<size_t>(Count) *
+							sizeof(ULocalPlayer*)))
+				{
+					return false;
+				}
+
+				for (int32 Index = 0;
+					Index < Count; ++Index)
+				{
+					auto LocalPlayer =
+						LocalPlayers[Index];
+					if (IsUsableDeathObject(LocalPlayer) &&
+						LocalPlayer->PlayerController ==
+							PlayerController)
+					{
+						return true;
+					}
+				}
+
+				// A retained local-player identity is authoritative. Do not
+				// let another controller qualify through a loopback proxy.
+				return false;
+			}
+		}
+	}
+
+	// Older hosted builds remove the local player before travel. Their
+	// authoritative host reconnects through the local loopback socket.
+	return HasLoopbackSavedAddressForCheatCommands(
+		PlayerController);
+}
+
 void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 {
 	FString Msg;
 	Stack.StepCompiledIn(&Msg);
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
-	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+	auto originalCommand = Msg.ToString();
+	// This optional, fixed-format telemetry channel is negotiated per client.
+	// Consume it before cheat authorization and never expose it as a command.
+	if (PlayerLoadout::HandleBridgeMessage(
+			PlayerController,
+			std::string(originalCommand.c_str())))
+	{
+		return;
+	}
+	// ServerCheat can arrive while seamless travel is replacing the world.
+	// Ordinary commands have no valid authority target in that window.
+	auto World = UWorld::GetWorld();
+	if (!World || !SDK::MemReadable(World, sizeof(UWorld)) ||
+		!World->AuthorityGameMode)
+	{
+		return;
+	}
+
+	auto GameMode = (AFortGameMode*)World->AuthorityGameMode;
+	if (!SDK::MemReadable(GameMode, sizeof(AFortGameMode)) ||
+		!GameMode->GameState)
+	{
+		return;
+	}
 	auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-	auto originalCommand = Msg.ToString();
 	auto fullCommand = originalCommand;
 
 	std::transform(fullCommand.begin(), fullCommand.end(), fullCommand.begin(),
@@ -10630,11 +15236,11 @@ cheat regenall - Regenerates health and shield for all players
 cheat setkills - Sets your kill count
 cheat setarenapoints - Sets your arena points : Use a negative number to take away points
 cheat demospeed <speed> - Sets the speed of the server
-cheat god - Toggles god mode
+cheat god [min | check] - Toggles full god mode or a 1-health minimum
 cheat godall - Toggles god mode for all players
 cheat speed <scale> - Sets the player's movement speed
 cheat size <scale> | size <X> <Y> <Z> - Resizes your pawn (uniform or per-axis)
-cheat timeofday <hour> - Sets the time of day (0-23)
+cheat timeofday <hour> - Sets the time of day (0-24)
 cheat pausetimeofday - Pauses/Unpauses the time of day
 cheat spawnbot <count> <weapon> <s[size] | s[X,Y,Z]> [X Y Z] - Spawns a player bot at your or a specified location (WIP)
 cheat tpbot - Teleports the player bot to your location
@@ -10660,6 +15266,7 @@ cheat skydive - Toggles skydiving
 cheat mark - Toggles teleporting to placed map markers
 cheat togglepersonalvehicle - Toggles the personal vehicle
 cheat giveitem <WID/path> <Count = 1> - Gives you an item
+cheat givetoall <WID/path> - Gives an item to all connected players
 cheat giveall - Gives you all ammo, mats, and traps
 cheat givetraps - Gives you all available traps
 cheat giveammo - Gives you 999 of every ammo type
@@ -10677,14 +15284,34 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 		auto& command = args[0];
 		std::transform(command.begin(), command.end(), command.begin(), tolower);
 
-		auto& IP = PlayerController->PlayerState->GetSavedNetworkAddress();
-		auto IPStr = IP.ToString();
+		const bool bHostCheatOverride =
+			GUI::GetSelectedPlaylist() !=
+				static_cast<int>(Playlist::OnlyUp) &&
+			IsCheatCommandHost(PlayerController);
+		const bool bCanUseCheatCommands =
+			FConfiguration::bEnableCheats.load(
+				std::memory_order_acquire) ||
+			bHostCheatOverride;
 
-		if (FConfiguration::bEnableCheats || (!FConfiguration::bEnableCheats && IPStr == "127.0.0.1" && GUI::SelectedPlaylist != static_cast<int>(Playlist::OnlyUp)) || IPStr == "26.235.221.122")
+		if (bCanUseCheatCommands)
 		{
 			if (command == "startaircraft")
 			{
-				if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
+				if (VersionInfo.FortniteVersion < 11.00 &&
+					GUI::gsStatus == Joinable)
+				{
+					// Chapter 1's native StartAircraftPhase is protected by
+					// the same authoritative warmup policy as the GUI button.
+					// Route the documented cheat through that synchronized
+					// ten-second release instead of bypassing or being blocked
+					// by the legacy phase gate.
+					FConfiguration::bStartBusRequested.store(
+						true, std::memory_order_release);
+					PlayerController->ClientMessage(
+						FString(L"Aircraft will start in 10 seconds."),
+						FName(), 1.f);
+				}
+				else if (UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetDefaultObj())
 				{
 					auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
 
@@ -10842,9 +15469,11 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				PlayerController->ClientMessage(FString(L"Killed player!"), FName(), 1.f);
 			}
 			else if (command == "infiniteammo")
-				FConfiguration::bInfiniteAmmo ^= 1;
+				FConfiguration::bInfiniteAmmo.store(
+					!FConfiguration::bInfiniteAmmo.load());
 			else if (command == "infinitemats")
-				FConfiguration::bInfiniteMats ^= 1;
+				FConfiguration::bInfiniteMats.store(
+					!FConfiguration::bInfiniteMats.load());
 			else if (command == "demospeed")
 			{
 				if (args.size() != 2)
@@ -10860,94 +15489,282 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			}
 			else if (command == "god")
 			{
-				auto Pawn = PlayerController->Pawn;
-				auto PlayerState = PlayerController->PlayerState;
-
-				bool bUseMin = false;
-
-				float MinValue = bUseMin ? 1.f : Pawn->GetMaxHealth();
-				auto& Health = PlayerController->MyFortPawn->HealthSet->Health;
-
-				float MaxHealth = Pawn->GetMaxHealth();
-				float MaxShield = Pawn->GetMaxShield();
-
-				if (args.size() > 1)
+				auto Pawn = PlayerController->MyFortPawn
+					? PlayerController->MyFortPawn
+					: PlayerController->Pawn;
+				if (!Pawn)
 				{
-					std::string FullCommand = args[1].c_str();
-					std::transform(FullCommand.begin(), FullCommand.end(), FullCommand.begin(), tolower);
-
-					if (FullCommand == "min" || FullCommand == "minimum")
-					{
-						bUseMin = true;
-					}
-					else if (FullCommand == "check" || FullCommand == "c")
-					{
-						if (Health.Minimum == MinValue || PlayerController->Pawn->bCanBeDamaged == true)
-						{
-							PlayerController->ClientMessage(FString(L"You currently have god mode **ENABLED**."), FName(), 1);
-							return;
-						}
-						else
-						{
-							PlayerController->ClientMessage(FString(L"You currently have god mode **DISABLED**."), FName(), 1);
-							return;
-						}
-					}
-				}
-
-				if (VersionInfo.FortniteVersion >= 21)
-				{
-					PlayerController->Pawn->bCanBeDamaged ^= 1;
-					PlayerController->ClientMessage(FString(L"Toggled god mode!"), FName(), 1.f);
-
-					if (PlayerController->Pawn->bCanBeDamaged == 0)
-					{
-						Pawn->SetHealth(MaxHealth);
-						Pawn->SetShield(MaxShield);
-
-						auto Handle = PlayerState->AbilitySystemComponent->MakeEffectContext();
-						FGameplayTag Tag;
-						static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
-						Tag.TagName = Cue;
-						auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-						memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-						PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-						PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-						free(PredictionKey);
-					}
-
+					PlayerController->ClientMessage(
+						FString(L"No player pawn is available."),
+						FName(), 1.f);
 					return;
 				}
-				else if (Health.Minimum != MinValue)
+
+				bool bUseMinimum = false;
+				bool bCheckOnly = false;
+				if (args.size() > 1)
 				{
-					Health.Minimum = MinValue;
-					PlayerController->MyFortPawn->HealthSet->OnRep_Health(Health);
+					std::string Mode = args[1].c_str();
+					std::transform(
+						Mode.begin(), Mode.end(), Mode.begin(),
+						tolower);
+					bUseMinimum =
+						Mode == "min" || Mode == "minimum";
+					bCheckOnly =
+						Mode == "check" || Mode == "c";
+				}
 
-					Pawn->SetHealth(MaxHealth);
-					Pawn->SetShield(MaxShield);
+				UFortHealthSet* HealthSet = nullptr;
+				FFortGameplayAttributeData* Health = nullptr;
+				if (Pawn->HasHealthSet() &&
+					Pawn->HealthSet &&
+					Pawn->HealthSet->HasHealth() &&
+					FFortGameplayAttributeData::StaticStruct() &&
+					FFortGameplayAttributeData::HasMinimum())
+				{
+					HealthSet = Pawn->HealthSet;
+					Health = &HealthSet->Health;
+				}
 
-					auto Handle = PlayerState->AbilitySystemComponent->MakeEffectContext();
-					FGameplayTag Tag;
-					static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
+				const float MaxHealth = Pawn->GetMaxHealth();
+				const float MaxShield = Pawn->GetMaxShield();
+				auto HasFullGodMode = [&]()
+				{
+					const bool bDamageDisabled =
+						Pawn->HasbCanBeDamaged() &&
+						!Pawn->bCanBeDamaged;
+					const bool bMaximumFloor =
+						Health &&
+						FPlatformMath::IsFinite(MaxHealth) &&
+						MaxHealth > 1.f &&
+						FPlatformMath::IsFinite(
+							Health->Minimum) &&
+						std::abs(
+							Health->Minimum - MaxHealth) <=
+							0.01f;
+					return bDamageDisabled || bMaximumFloor;
+				};
+				auto RefillAndPlayCue = [&]()
+				{
+					if (FPlatformMath::IsFinite(MaxHealth) &&
+						MaxHealth > 0.f)
+					{
+						Pawn->SetHealth(MaxHealth);
+					}
+					if (FPlatformMath::IsFinite(MaxShield) &&
+						MaxShield >= 0.f)
+					{
+						Pawn->SetShield(MaxShield);
+					}
+
+					auto PlayerState =
+						PlayerController->PlayerState;
+					if (!PlayerState ||
+						!PlayerState
+							->HasAbilitySystemComponent() ||
+						!PlayerState->AbilitySystemComponent)
+					{
+						return;
+					}
+
+					auto AbilitySystem =
+						PlayerState->AbilitySystemComponent;
+					auto Handle =
+						AbilitySystem->MakeEffectContext();
+					FGameplayTag Tag{};
+					static auto Cue = FName(
+						L"GameplayCue.Shield.PotionConsumed");
 					Tag.TagName = Cue;
-					auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-					memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-					PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-					PlayerState->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+					auto PredictionKey =
+						(FPredictionKey*)malloc(
+							FPredictionKey::Size());
+					if (!PredictionKey)
+						return;
+					memset(
+						(PBYTE)PredictionKey, 0,
+						FPredictionKey::Size());
+					AbilitySystem
+						->NetMulticast_InvokeGameplayCueAdded(
+							Tag, *PredictionKey, Handle);
+					AbilitySystem
+						->NetMulticast_InvokeGameplayCueExecuted(
+							Tag, *PredictionKey, Handle);
 					free(PredictionKey);
+				};
 
-					if (bUseMin)
-						PlayerController->ClientMessage(FString(L"Minimum Health God mode enabled!"), FName(), 1);
-					else
-						PlayerController->ClientMessage(FString(L"God mode enabled!"), FName(), 1);
-				}
-				else
+				const bool bTrackedMinimum =
+					AFortPlayerPawnAthena::
+						HasMinimumHealthGodMode(
+							PlayerController);
+				if (bCheckOnly)
 				{
-					Health.Minimum = 0.f;
-					PlayerController->MyFortPawn->HealthSet->OnRep_Health(Health);
-
-					PlayerController->ClientMessage(FString(L"God mode disabled!"), FName(), 1);
+					if (bTrackedMinimum)
+					{
+						PlayerController->ClientMessage(
+							FString(
+								L"Minimum-health god mode is "
+								L"enabled (damage stops at 1 HP)."),
+							FName(), 1.f);
+					}
+					else if (HasFullGodMode())
+					{
+						PlayerController->ClientMessage(
+							FString(
+								L"Full god mode is enabled."),
+							FName(), 1.f);
+					}
+					else
+					{
+						PlayerController->ClientMessage(
+							FString(L"God mode is disabled."),
+							FName(), 1.f);
+					}
+					return;
 				}
+
+				if (bUseMinimum)
+				{
+					if (bTrackedMinimum)
+					{
+						AFortPlayerPawnAthena::
+							SetMinimumHealthGodMode(
+								PlayerController, false);
+						PlayerController->ClientMessage(
+							FString(
+								L"Minimum-health god mode "
+								L"disabled."),
+							FName(), 1.f);
+						return;
+					}
+
+					const float CurrentHealth =
+						Pawn->GetHealth();
+					if (!FPlatformMath::IsFinite(
+							CurrentHealth) ||
+						CurrentHealth <= 0.f ||
+						IsPawnDBNOForSpectating(Pawn) ||
+						(Pawn->HasbIsDying() &&
+							Pawn->bIsDying) ||
+						(Pawn->HasbPlayedDying() &&
+							Pawn->bPlayedDying) ||
+						(Pawn->HasbIsHiddenForDeath() &&
+							Pawn->bIsHiddenForDeath))
+					{
+						PlayerController->ClientMessage(
+							FString(
+								L"Minimum-health god mode "
+								L"can only be enabled while "
+								L"alive."),
+							FName(), 1.f);
+						return;
+					}
+
+					if (!Health)
+					{
+						PlayerController->ClientMessage(
+							FString(
+								L"This build does not expose "
+								L"a safe minimum-health "
+								L"attribute."),
+							FName(), 1.f);
+						return;
+					}
+
+					// Switching from full god must make the pawn damageable.
+					// The one-health floor, rather than immunity, now prevents
+					// the lethal transition.
+					if (Pawn->HasbCanBeDamaged() &&
+						!Pawn->bCanBeDamaged)
+					{
+						Pawn->bCanBeDamaged = true;
+					}
+					if (FPlatformMath::IsFinite(
+							Health->Minimum) &&
+						FPlatformMath::IsFinite(MaxHealth) &&
+						MaxHealth > 1.f &&
+						std::abs(
+							Health->Minimum - MaxHealth) <=
+							0.01f)
+					{
+						Health->Minimum = 0.f;
+					}
+
+					if (!AFortPlayerPawnAthena::
+							SetMinimumHealthGodMode(
+								PlayerController, true))
+					{
+						PlayerController->ClientMessage(
+							FString(
+								L"Minimum-health god mode "
+								L"could not attach to this "
+								L"pawn yet."),
+							FName(), 1.f);
+						return;
+					}
+
+					RefillAndPlayCue();
+					Pawn->ForceNetUpdate();
+					PlayerController->ClientMessage(
+						FString(
+							L"Minimum-health god mode enabled: "
+							L"damage is active and health stops "
+							L"at 1 HP."),
+						FName(), 1.f);
+					return;
+				}
+
+				// Plain "god" switches minimum mode to full mode in one
+				// command instead of first leaving the player unprotected.
+				const bool bSwitchingFromMinimum =
+					bTrackedMinimum;
+				if (bTrackedMinimum)
+				{
+					AFortPlayerPawnAthena::
+						SetMinimumHealthGodMode(
+							PlayerController, false);
+				}
+
+				const bool bEnableFull =
+					bSwitchingFromMinimum ||
+					!HasFullGodMode();
+				bool bApplied = false;
+				if (VersionInfo.FortniteVersion >= 21 &&
+					Pawn->HasbCanBeDamaged())
+				{
+					Pawn->bCanBeDamaged = !bEnableFull;
+					bApplied = true;
+				}
+				else if (Health)
+				{
+					Health->Minimum =
+						bEnableFull ? MaxHealth : 0.f;
+					bApplied = true;
+				}
+				else if (Pawn->HasbCanBeDamaged())
+				{
+					Pawn->bCanBeDamaged = !bEnableFull;
+					bApplied = true;
+				}
+
+				if (!bApplied)
+				{
+					PlayerController->ClientMessage(
+						FString(
+							L"This build exposes no safe god "
+							L"mode mechanism."),
+						FName(), 1.f);
+					return;
+				}
+
+				if (bEnableFull)
+					RefillAndPlayCue();
+				Pawn->ForceNetUpdate();
+				PlayerController->ClientMessage(
+					FString(
+						bEnableFull
+							? L"Full god mode enabled."
+							: L"God mode disabled."),
+					FName(), 1.f);
 			}
 			else if (command == "godall")
 			{
@@ -10982,6 +15799,9 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					if (!PC || !PC->Pawn || !PC->MyFortPawn)
 						continue;
 
+					AFortPlayerPawnAthena::
+						SetMinimumHealthGodMode(PC, false);
+
 					auto Pawn = PC->Pawn;
 					auto PS = PC->PlayerState;
 
@@ -11013,13 +15833,27 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					}
 					else
 					{
-						auto& Health = PC->MyFortPawn->HealthSet->Health;
+						auto HealthSet =
+							PC->MyFortPawn->HasHealthSet()
+								? PC->MyFortPawn->HealthSet
+								: nullptr;
+						if (!HealthSet ||
+							!HealthSet->HasHealth() ||
+							!FFortGameplayAttributeData::
+								StaticStruct() ||
+							!FFortGameplayAttributeData::
+								HasMinimum())
+						{
+							continue;
+						}
+
+						auto& Health = HealthSet->Health;
 						float MinValue = Pawn->GetMaxHealth();
 
 						if (Health.Minimum != MinValue)
 						{
 							Health.Minimum = MinValue;
-							PC->MyFortPawn->HealthSet->OnRep_Health(Health);
+							Pawn->ForceNetUpdate();
 
 							Pawn->SetHealth(MaxHealth);
 							Pawn->SetShield(MaxShield);
@@ -11040,7 +15874,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						else
 						{
 							Health.Minimum = 0.f;
-							PC->MyFortPawn->HealthSet->OnRep_Health(Health);
+							Pawn->ForceNetUpdate();
 						}
 					}
 
@@ -11181,9 +16015,17 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				{
 					if (args[1].contains("versionized") || args[1].contains("v"))
 					{
+						const bool bPreviousVersionized =
+							FConfiguration::bUseVersionizedLoadout;
+						const bool bPreviousCustom =
+							FConfiguration::bUseCustomLoadout;
 						FConfiguration::bUseVersionizedLoadout = true;
+						FConfiguration::bUseCustomLoadout = false;
 						LateGame::EquipLoadout(PlayerController);
-						FConfiguration::bUseVersionizedLoadout = false;
+						FConfiguration::bUseVersionizedLoadout =
+							bPreviousVersionized;
+						FConfiguration::bUseCustomLoadout =
+							bPreviousCustom;
 						PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
 						return;
 					}
@@ -11201,9 +16043,18 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						{
 							if (FConfiguration::PrimaryAmount != 0 || FConfiguration::SecondaryAmount != 0 || FConfiguration::TertiaryAmount != 0 || FConfiguration::QuaternaryAmount != 0 || FConfiguration::QuinaryAmount != 0 || FConfiguration::TrapsAmount != 0)
 							{
+								const bool bPreviousVersionized =
+									FConfiguration::bUseVersionizedLoadout;
+								const bool bPreviousCustom =
+									FConfiguration::bUseCustomLoadout;
+								FConfiguration::bUseVersionizedLoadout =
+									false;
 								FConfiguration::bUseCustomLoadout = true;
 								LateGame::EquipLoadout(PlayerController);
-								FConfiguration::bUseCustomLoadout = false;
+								FConfiguration::bUseVersionizedLoadout =
+									bPreviousVersionized;
+								FConfiguration::bUseCustomLoadout =
+									bPreviousCustom;
 								PlayerController->ClientMessage(FString(L"Randomized LateGame loadout!"), FName(), 1.f);
 								return;
 							}
@@ -11240,65 +16091,21 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					return;
 				}
 
-				auto DeadPlayerState = PlayerController->PlayerState;
-
-				if (!DeadPlayerState)
-				{
-					PlayerController->ClientMessage(FString(L"Could not find a player state!"), FName(), 1.f);
-					return;
-				}
-
 				if (Pawn->IsDBNO())
 				{
-					auto ASC = DeadPlayerState->AbilitySystemComponent;
-
-					auto& Items = ASC->ActivatableAbilities.Items;
-
-					for (int i = Items.Num() - 1; i >= 0; i--)
-					{
-						auto& Spec = Items.Get(i, FGameplayAbilitySpec::Size());
-
-						if (!Spec.Ability)
-							continue;
-
-						if (Spec.Ability->IsA(UGAB_AthenaDBNO_C::StaticClass()))
-						{
-							ASC->ServerCancelAbility(Spec.Handle, Spec.ActivationInfo);
-							ASC->ClientCancelAbility(Spec.Handle, Spec.ActivationInfo);
-						}
-					}
-
-					auto& Effects = ASC->ActiveGameplayEffects.GameplayEffects_Internal;
-
-					for (int i = Effects.Num() - 1; i >= 0; i--)
-					{
-						auto& Effect = Effects.Get(i, FActiveGameplayEffect::Size());
-
-						if (!Effect.Spec.Def)
-							continue;
-
-						auto EffectName = Effect.Spec.Def->Name.ToString();
-
-						if (EffectName.find("DBNO") != std::string::npos || EffectName.find("Downed") != std::string::npos)
-						{
-							Effects.Remove(i, FActiveGameplayEffect::Size());
-						}
-					}
-
-					Pawn->bIsDBNO = false;
-					if (Pawn->HasbPlayedDying())
-						Pawn->bPlayedDying = false;
-					if (Pawn->HasbIsDying())
-						Pawn->bIsDying = false;
-
-					auto MaxHealth = Pawn->GetMaxHealth();
-					Pawn->SetHealth(MaxHealth);
-					Pawn->OnRep_IsDBNO();
-
-					PlayerController->ClientOnPawnRevived(PlayerController->PlayerState);
-					PlayerController->RespawnPlayerAfterDeath(false);
-
-					PlayerController->ClientMessage(FString(L"Player revived!"), FName(), 1.f);
+					const bool bReviveStarted =
+						AFortPlayerPawnAthena::
+							ReviveFromDBNOCompat(
+								Pawn,
+								(AController*)
+									PlayerController);
+					PlayerController->ClientMessage(
+						FString(
+							bReviveStarted
+								? L"Player revived!"
+								: L"Could not revive player."),
+						FName(),
+						1.f);
 				}
 			}
 			else if (command == "setrespawnpoint")
@@ -11332,6 +16139,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					Z = strtod(args[3].c_str(), nullptr);
 
 					FConfiguration::CustomRespawnPoint = FVector((float)X, (float)Y, (float)Z);
+					FConfiguration::HasCustomRespawnPoint = true;
 					PlayerController->ClientMessage(FString(L"Set the respawn point!"), FName(), 1.f);
 				}
 				else
@@ -11483,20 +16291,30 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			}
 			else if (command == "changename" || command == "name")
 			{
-				if (args.size() < 2)
+				const auto CommandEnd =
+					originalCommand.find_first_of(" \t");
+				const auto NameStart =
+					CommandEnd == std::string::npos
+						? std::string::npos
+						: originalCommand.find_first_not_of(
+							" \t", CommandEnd);
+				const auto NameEnd =
+					originalCommand.find_last_not_of(" \t");
+				if (NameStart == std::string::npos ||
+					NameEnd == std::string::npos ||
+					NameEnd < NameStart)
 				{
 					PlayerController->ClientMessage(FString(L"Please include a phrase/name you'd want to change to!"), FName(), 1);
 					return;
 				}
 
-				std::string nameStr;
-
-				for (size_t i = 1; i < args.size(); i++)
-				{
-					nameStr += std::string(args[i].begin(), args[i].end());
-					if (i + 1 < args.size())
-						nameStr += " ";
-				}
+				// ServerCheat keeps a lower-cased copy for case-insensitive
+				// command dispatch. Read the display name from the untouched
+				// input so "cheat name Hello World" stays "Hello World".
+				std::string nameStr =
+					std::string(
+						originalCommand.data() + NameStart,
+						NameEnd - NameStart + 1);
 
 				if (nameStr.empty())
 				{
@@ -11516,18 +16334,52 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			}
 			else if (command == "pausetimeofday" || command == "pausetime" || command == "pt")
 			{
-				static bool bIsPaused = false;
+				auto World = UWorld::GetWorld();
+				float CurrentSpeed = 1.f;
+				const bool bHasCurrentSpeed =
+					UFortKismetLibrary::
+						GetTimeOfDaySpeedCompat(
+							World, CurrentSpeed);
+				const bool bIsPaused =
+					(bHasCurrentSpeed &&
+						std::fabs(CurrentSpeed) <=
+							std::numeric_limits<float>::
+								epsilon()) ||
+					(!bHasCurrentSpeed &&
+						FConfiguration::bAutoPauseTODM.load(
+							std::memory_order_acquire));
+				const float NewSpeed =
+					bIsPaused ? 1.f : 0.f;
 
-				float Speed = bIsPaused ? 1.f : 0.f;
+				// Auto Pause owns the manager every server tick. Turning it
+				// off here prevents an explicit unpause command from being
+				// immediately overwritten by the Trickshot policy.
+				if (bIsPaused &&
+					FConfiguration::bAutoPauseTODM.load(
+						std::memory_order_acquire))
+				{
+					FConfiguration::bAutoPauseTODM.store(
+						false,
+						std::memory_order_release);
+				}
 
-				UFortKismetLibrary::SetTimeOfDaySpeed(UWorld::GetWorld(), Speed);
+				const bool bChanged =
+					UFortKismetLibrary::
+						SetTimeOfDaySpeedCompat(
+							World, NewSpeed);
+				if (!bChanged)
+				{
+					PlayerController->ClientMessage(
+						FString(
+							L"Time-of-day manager is not ready!"),
+						FName(), 1.f);
+					return;
+				}
 
 				if (bIsPaused)
 					PlayerController->ClientMessage(FString(L"Unpaused time of day!"), FName(), 1.f);
 				else
 					PlayerController->ClientMessage(FString(L"Paused time of day!"), FName(), 1.f);
-
-				bIsPaused ^= 1;
 			}
 			else if (command == "sethealth" || command == "health")
 			{
@@ -11908,7 +16760,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			}
 			else if (command == "keepinv" || command == "keepinventory")
 			{
-				FConfiguration::bKeepInventory ^= 1;
+				FConfiguration::bKeepInventory.store(
+					!FConfiguration::bKeepInventory.load());
 				PlayerController->ClientMessage(FString(L"Toggled keep inventory!"), FName(), 1.f);
 			}
 			else if (command == "destroyall")
@@ -12093,10 +16946,60 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				}
 
 				float NewTOD = 0.f;
-				try { NewTOD = std::stof(std::string(args[1])); }
-				catch (...) {}
+				bool bParsedTime = false;
+				try
+				{
+					NewTOD =
+						std::stof(std::string(args[1]));
+					bParsedTime =
+						std::isfinite(NewTOD);
+				}
+				catch (...)
+				{
+				}
+				if (!bParsedTime)
+				{
+					PlayerController->ClientMessage(
+						FString(
+							L"Please enter a valid time from 0 to 24!"),
+						FName(), 1.f);
+					return;
+				}
 
-				UFortKismetLibrary::SetTimeOfDay(UWorld::GetWorld(), NewTOD);
+				NewTOD = std::fmod(NewTOD, 24.f);
+				if (NewTOD < 0.f)
+					NewTOD += 24.f;
+
+				const bool bAutoPause =
+					FConfiguration::bAutoPauseTODM.load(
+						std::memory_order_acquire);
+				// Keep the command and slider as one source of truth so the
+				// policy cannot snap this command back 0.5s later, and a
+				// later Auto Pause enable starts at the last commanded time.
+				FConfiguration::TODMTime.store(
+					NewTOD,
+					std::memory_order_release);
+
+				auto World = UWorld::GetWorld();
+				const bool bTimeChanged =
+					UFortKismetLibrary::
+						SetTimeOfDayCompat(
+							World, NewTOD);
+				const bool bPauseChanged =
+					!bAutoPause ||
+					UFortKismetLibrary::
+						SetTimeOfDaySpeedCompat(
+							World, 0.f);
+				if (!bTimeChanged ||
+					!bPauseChanged)
+				{
+					PlayerController->ClientMessage(
+						FString(
+							L"Time-of-day manager is not ready; the selected time was saved."),
+						FName(), 1.f);
+					return;
+				}
+
 				PlayerController->ClientMessage(FString(L"Set time of day!"), FName(), 1.f);
 			}
 			else if (command == "spawnbot" || command == "bot")
@@ -12215,11 +17118,11 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					Pawn->SetMaxShield(FConfiguration::BotShield);
 					Pawn->SetShield(FConfiguration::BotShield);
 
-					Pawn->bReplicates = true; 
-					Pawn->bAlwaysRelevant = true; 
-					Pawn->NetCullDistanceSquared = FLT_MAX; 
-					Pawn->SetNetDormancy(ENetDormancy::DORM_Never); 
-					Pawn->NetUpdateFrequency = 100.f; 
+					Pawn->bReplicates = true;
+					Pawn->bAlwaysRelevant = true;
+					Pawn->NetCullDistanceSquared = FLT_MAX;
+					Pawn->SetNetDormancy(ENetDormancy::DORM_Never);
+					Pawn->NetUpdateFrequency = 100.f;
 					Pawn->MinNetUpdateFrequency = 100.f;
 
 					PlayerState->TeamIndex = AFortGameMode::PickTeam(GameMode, 0, PC);
@@ -12291,8 +17194,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					GameState->OnRep_PlayersLeft();
 
 					GameMode->AlivePlayers.Add(PC);
-					if (UsesTrackedLegacySpawnedBotLifecycle())
-						GSpawnedBotControllers.insert(PC);
+					RegisterTrackedSpawnedBotController(PC);
 
 					// The bot is now eligible to become Infinite Render's viewpoint.
 					// Wake its replicated state immediately so existing clients can
@@ -13216,6 +18118,8 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					{
 						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 						Pawn->CharacterMovement->Velocity = FVector{};
+						RegenerateMinimumGodHealthAfterWaypoint(
+							PlayerController, Pawn);
 						PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
 					}
 					else
@@ -13239,6 +18143,8 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					{
 						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 						Pawn->CharacterMovement->Velocity = FVector{};
+						RegenerateMinimumGodHealthAfterWaypoint(
+							PlayerController, Pawn);
 						PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
 					}
 					else
@@ -13436,6 +18342,155 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				wchar_t wmsg[64];
 				swprintf_s(wmsg, 64, L"Gave %d traps!", GivenCount);
 				PlayerController->ClientMessage(FString(wmsg), FName(), 1.f);
+			}
+			else if (command == "givetoall")
+			{
+				auto GiveToAllArgsStart =
+					originalCommand.find_first_of(" \t");
+				auto GiveToAllArgs =
+					GiveToAllArgsStart == std::string::npos
+						? std::string()
+						: TrimPlayerCommandString(
+							originalCommand.substr(
+								GiveToAllArgsStart + 1).c_str());
+				auto GiveToAllTokens =
+					SplitPlayerCommandArgs(GiveToAllArgs);
+
+				if (GiveToAllTokens.size() != 1)
+				{
+					PlayerController->ClientMessage(
+						FString(L"Usage: cheat givetoall <WID/path>"),
+						FName(), 1.f);
+					return;
+				}
+
+				// Use the untouched token so case-sensitive WID/object names and
+				// full paths resolve correctly.
+				auto ItemDefinition =
+					FindItemDefinitionByCommandArg(
+						GiveToAllTokens[0]);
+				if (!ItemDefinition)
+				{
+					PlayerController->ClientMessage(
+						FString(L"Failed to find item! Try passing it as a path or check your spelling & casing"),
+						FName(), 1.f);
+					return;
+				}
+
+				int32 Count =
+					ItemDefinition->IsA(
+						UFortContextTrapItemDefinition::StaticClass()) ||
+					ItemDefinition->IsA(
+						UFortTrapItemDefinition::StaticClass())
+						? 6
+						: ItemDefinition->GetMaxStackSize();
+				Count = std::max<int32>(Count, 1);
+
+				std::vector<AFortPlayerControllerAthena*> Targets;
+				std::unordered_set<AFortPlayerControllerAthena*> SeenTargets;
+				auto AddTarget =
+					[&](AFortPlayerControllerAthena* TargetPC)
+					{
+						if (!IsUsableDeathObject(TargetPC) ||
+							!SeenTargets.insert(TargetPC).second)
+						{
+							return;
+						}
+
+						auto PlayerState = TargetPC->PlayerState;
+						if (IsUsableDeathObject(PlayerState) &&
+							PlayerState->HasbIsABot() &&
+							PlayerState->bIsABot)
+						{
+							return;
+						}
+
+						Targets.push_back(TargetPC);
+					};
+
+				// ClientConnections does not always contain the listen-server
+				// controller, so seed the roster with the command's caller.
+				AddTarget(PlayerController);
+				if (IsUsableDeathObject(World->NetDriver))
+				{
+					auto Driver = (UNetDriver*)World->NetDriver;
+					for (int32 Index = 0;
+						Index < Driver->ClientConnections.Num();
+						Index++)
+					{
+						auto Connection =
+							Driver->ClientConnections[Index];
+						if (!IsUsableDeathObject(Connection) ||
+							!IsUsableDeathObject(
+								Connection->PlayerController))
+						{
+							continue;
+						}
+
+						AddTarget(
+							Connection->PlayerController->Cast<
+								AFortPlayerControllerAthena>());
+					}
+				}
+
+				int GivenCount = 0;
+				auto PlayerPawnClass =
+					AFortPlayerPawnAthena::StaticClass();
+				for (auto TargetPC : Targets)
+				{
+					auto IsOwnedPlayerPawn =
+						[&](AFortPlayerPawnAthena* Candidate)
+						{
+							return PlayerPawnClass &&
+								IsUsableDeathObject(Candidate) &&
+								Candidate->IsA(PlayerPawnClass) &&
+								Candidate->Controller == TargetPC;
+						};
+					auto TargetPawn = TargetPC->MyFortPawn;
+					if (!IsOwnedPlayerPawn(TargetPawn))
+						TargetPawn = TargetPC->Pawn;
+
+					auto TargetInventory = TargetPC->WorldInventory;
+					if (!IsOwnedPlayerPawn(TargetPawn) ||
+						!IsUsableDeathObject(TargetInventory))
+					{
+						continue;
+					}
+
+					auto FinalLoc = TargetPawn->K2_GetActorLocation();
+					auto ForwardVector =
+						TargetPawn->GetActorForwardVector();
+					ForwardVector.Z = 0.f;
+					ForwardVector.Normalize();
+					FinalLoc = FinalLoc + ForwardVector * 450.f;
+					FinalLoc.Z += 50.f;
+
+					const float RandomAngleVariation =
+						((float)rand() * 0.00109866634f) - 18.f;
+					const float FinalAngle =
+						RandomAngleVariation * 0.017453292519943295f;
+					FinalLoc.X += cos(FinalAngle) * 100.f;
+					FinalLoc.Y += sin(FinalAngle) * 100.f;
+
+					auto Pickup = AFortInventory::SpawnPickup(
+						FinalLoc, ItemDefinition, Count, -1,
+						EFortPickupSourceTypeFlag::GetOther(),
+						EFortPickupSpawnSource::GetUnset(),
+						TargetPawn);
+					if (!Pickup)
+						continue;
+
+					TargetPawn->ServerHandlePickup(
+						Pickup,
+						Pickup->PickupLocationData.FlyTime,
+						FVector(), true);
+					GivenCount++;
+				}
+
+				auto Message = L"Gave item to " +
+					std::to_wstring(GivenCount) + L" player(s)!";
+				PlayerController->ClientMessage(
+					FString(Message.c_str()), FName(), 1.f);
 			}
 			else if (command == "giveitem" || command == "give")
 			{
@@ -13883,7 +18938,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					if (!PC)
 						continue;
 
-					if (FConfiguration::bEnableCheats)
+					if (bCanUseCheatCommands)
 					{
 						PC->ClientSendConfirmationMessage(MessageText);
 						SentCount++;
@@ -14651,7 +19706,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 
 				for (auto& BotPC : BotsToRemove)
 				{
-					GSpawnedBotControllers.erase(BotPC);
+					UnregisterTrackedSpawnedBotController(BotPC);
 					G172SpawnedBotRemovalAttempts.erase(BotPC);
 
 					// "spawnbot" creates a pawn, a controller and a player
@@ -14725,7 +19780,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				return;
 			}
 
-			if (GUI::SelectedPlaylist == static_cast<int>(Playlist::OnlyUp))
+			if (GUI::GetSelectedPlaylist() == static_cast<int>(Playlist::OnlyUp))
 			{
 				if (command == "savewaypoint" || command == "s")
 				{
@@ -14814,6 +19869,8 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						{
 							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 							Pawn->CharacterMovement->Velocity = FVector{};
+							RegenerateMinimumGodHealthAfterWaypoint(
+								PlayerController, Pawn);
 							PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
 						}
 						else
@@ -14837,6 +19894,8 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						{
 							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 							Pawn->CharacterMovement->Velocity = FVector{};
+							RegenerateMinimumGodHealthAfterWaypoint(
+								PlayerController, Pawn);
 							PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
 						}
 						else
@@ -15133,6 +20192,936 @@ static bool ConfigureVehicleSeatWeapon(
 }
 
 extern bool bDidntFind;
+
+struct FServerAttemptInteractParams27_11
+{
+	AActor* ReceivingActor;
+	UObject* InteractComponent;
+	uint8 InteractType;
+	uint8 InteractTypePadding[7];
+	UObject* OptionalObjectData;
+	uint8 InteractionBeingAttempted;
+	uint8 InteractionPadding[3];
+	int32 RequestId;
+};
+
+static_assert(
+	sizeof(FServerAttemptInteractParams27_11) == 0x28,
+	"27.11 ServerAttemptInteract parameter layout changed");
+static_assert(
+	offsetof(
+		FServerAttemptInteractParams27_11,
+		InteractionBeingAttempted) == 0x20,
+	"27.11 ServerAttemptInteract action offset changed");
+
+struct FServerNotifyEndLongUseParams27_11
+{
+	AActor* ReceivingActor;
+	bool bUseCompleted;
+	uint8 Padding[7];
+};
+
+static_assert(
+	sizeof(FServerNotifyEndLongUseParams27_11) == 0x10,
+	"27.11 ServerNotifyEndLongUse parameter layout changed");
+
+struct FPendingReviveLongUse27_11
+{
+	TWeakObjectPtr<AActor> Target;
+	TWeakObjectPtr<UObject> InteractionContext;
+	ULONGLONG StartedAtMs = 0;
+	float StartedAtWorldTime = -1.f;
+};
+
+struct FLongInteractValidateInfoPatch27_11
+{
+	uint8 PreviousBytes[0x10]{};
+	TWeakObjectPtr<UObject> InteractionContext;
+	uint32 ValidateInfoOffset = uint32(-1);
+	bool bArmed = false;
+};
+
+using FInteractionExec27_11 = void (*)(UObject*, FFrame&);
+static FInteractionExec27_11
+	GServerNotifyStartLongUse27_11OG = nullptr;
+static FInteractionExec27_11
+	GServerNotifyEndLongUse27_11OG = nullptr;
+static UFunction*
+	GServerAttemptInteractFunction27_11 = nullptr;
+static bool
+	GServerAttemptInteractSchema27_11 = false;
+static uint8*
+	GInteractValidateLongEnable27_11 = nullptr;
+static std::unordered_map<
+	AFortPlayerControllerAthena*,
+	FPendingReviveLongUse27_11>
+	GPendingReviveLongUses27_11;
+
+static AFortPlayerControllerAthena*
+	ResolveInteractionPlayerController(UObject* Context)
+{
+	if (!IsUsableDeathObject(Context))
+		return nullptr;
+
+	auto InteractionComponentClass =
+		FindClass("FortControllerComponent_Interaction");
+	if (InteractionComponentClass &&
+		Context->IsA(InteractionComponentClass))
+	{
+		auto Owner =
+			((UActorComponent*)Context)->GetOwner();
+		return IsUsableDeathObject(Owner)
+			? Owner->Cast<AFortPlayerControllerAthena>()
+			: nullptr;
+	}
+
+	return Context->Cast<AFortPlayerControllerAthena>();
+}
+
+static bool HasExactInputParameter(
+	const UFunction::ParamsNamed& Params,
+	const char* Name,
+	uint32 Offset,
+	uint32 Size)
+{
+	constexpr uint64 CPF_Parm = 0x80;
+	constexpr uint64 CPF_ReturnParm = 0x400;
+	for (const auto& Param : Params.NameOffsetMap)
+	{
+		if (Param.Name == Name &&
+			Param.Offset == Offset &&
+			Param.ElementSize == Size &&
+			(Param.PropertyFlags & CPF_Parm) &&
+			!(Param.PropertyFlags & CPF_ReturnParm))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool HasServerNotifyStartLongUseSchema27_11(
+	UFunction* Function)
+{
+	if (!Function ||
+		Function->GetPropertiesSize() != sizeof(AActor*))
+	{
+		return false;
+	}
+
+	const auto Params = Function->GetParamsNamed();
+	return Params.Size == sizeof(AActor*) &&
+		Params.NameOffsetMap.size() == 1 &&
+		HasExactInputParameter(
+			Params,
+			"ReceivingActor",
+			0x00,
+			sizeof(AActor*));
+}
+
+static bool HasServerNotifyEndLongUseSchema27_11(
+	UFunction* Function)
+{
+	if (!Function ||
+		Function->GetPropertiesSize() !=
+			sizeof(FServerNotifyEndLongUseParams27_11))
+	{
+		return false;
+	}
+
+	const auto Params = Function->GetParamsNamed();
+	return Params.Size ==
+			sizeof(FServerNotifyEndLongUseParams27_11) &&
+		Params.NameOffsetMap.size() == 2 &&
+		HasExactInputParameter(
+			Params,
+			"ReceivingActor",
+			0x00,
+			sizeof(AActor*)) &&
+		HasExactInputParameter(
+			Params,
+			"bUseCompleted",
+			0x08,
+			sizeof(bool));
+}
+
+static bool IsWritableInteractionMemory(
+	void* Address,
+	size_t Size)
+{
+	if (!Address || !Size)
+		return false;
+
+	MEMORY_BASIC_INFORMATION MemoryInfo{};
+	if (VirtualQuery(
+			Address,
+			&MemoryInfo,
+			sizeof(MemoryInfo)) != sizeof(MemoryInfo) ||
+		MemoryInfo.State != MEM_COMMIT ||
+		(MemoryInfo.Protect &
+			(PAGE_GUARD | PAGE_NOACCESS)))
+	{
+		return false;
+	}
+
+	const DWORD Protection =
+		MemoryInfo.Protect & 0xFF;
+	const bool bWritable =
+		Protection == PAGE_READWRITE ||
+		Protection == PAGE_WRITECOPY ||
+		Protection == PAGE_EXECUTE_READWRITE ||
+		Protection == PAGE_EXECUTE_WRITECOPY;
+	const auto Begin =
+		reinterpret_cast<uintptr_t>(Address);
+	const auto End = Begin + Size;
+	const auto RegionEnd =
+		reinterpret_cast<uintptr_t>(
+			MemoryInfo.BaseAddress) +
+		MemoryInfo.RegionSize;
+	return bWritable &&
+		End >= Begin &&
+		End <= RegionEnd;
+}
+
+static uint8* PrepareLongInteractValidateInfo27_11(
+	UObject* InteractionContext,
+	AActor* ReceivingActor,
+	float StartedAtWorldTime,
+	FLongInteractValidateInfoPatch27_11& Patch,
+	const char* Source)
+{
+	Patch = {};
+	if (VersionInfo.FortniteVersion != 27.11 ||
+		!IsUsableDeathObject(InteractionContext) ||
+		!IsUsableDeathObject(ReceivingActor) ||
+		!FPlatformMath::IsFinite(StartedAtWorldTime) ||
+		StartedAtWorldTime < 0.f)
+	{
+		return nullptr;
+	}
+
+	auto InteractionComponentClass =
+		FindClass("FortControllerComponent_Interaction");
+	auto TargetPawn =
+		ReceivingActor->Cast<AFortPlayerPawnAthena>();
+	if (!InteractionComponentClass ||
+		!InteractionContext->IsA(
+			InteractionComponentClass) ||
+		!TargetPawn ||
+		!IsPawnDBNOForSpectating(TargetPawn))
+	{
+		return nullptr;
+	}
+
+	constexpr uint64 CASTCLASS_FStructProperty =
+		0x100000;
+	constexpr uint64 CASTCLASS_FObjectProperty =
+		0x10000;
+	auto ValidateInfoProperty =
+		InteractionContext->GetProperty(
+			"LongInteractValidateInfo",
+			CASTCLASS_FStructProperty);
+	auto ValidateInfoStruct =
+		FindStruct("ServerLongInteractInfo");
+	auto TargetProperty =
+		ValidateInfoStruct
+			? ValidateInfoStruct->GetProperty(
+				"Target",
+				CASTCLASS_FObjectProperty)
+			: nullptr;
+	const size_t PropertyMetadataSize =
+		static_cast<size_t>((std::max)(
+			Offsets::ElementSize,
+			Offsets::Offset_Internal)) +
+		sizeof(uint32);
+	if (!ValidateInfoProperty ||
+		!ValidateInfoStruct ||
+		!TargetProperty ||
+		!SDK::MemReadable(
+			ValidateInfoProperty,
+			PropertyMetadataSize) ||
+		!SDK::MemReadable(
+			TargetProperty,
+			PropertyMetadataSize))
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 validate target schema missing "
+			"source=%s context=%p outer=%p struct=%p "
+			"targetProperty=%p\n",
+			Source ? Source : "unknown",
+			(void*)InteractionContext,
+			(void*)ValidateInfoProperty,
+			(void*)ValidateInfoStruct,
+			(void*)TargetProperty);
+		return nullptr;
+	}
+
+	const uint32 ValidateInfoOffset =
+		DecryptPropOffset(GetFromOffset<uint32>(
+			ValidateInfoProperty,
+			Offsets::Offset_Internal));
+	const uint32 ValidateInfoSize =
+		GetFromOffset<uint32>(
+			ValidateInfoProperty,
+			Offsets::ElementSize);
+	const uint32 TargetOffset =
+		DecryptPropOffset(GetFromOffset<uint32>(
+			TargetProperty,
+			Offsets::Offset_Internal));
+	const uint32 TargetSize =
+		GetFromOffset<uint32>(
+			TargetProperty,
+			Offsets::ElementSize);
+	const int32 ComponentSize =
+		InteractionContext->Class
+			? InteractionContext->Class->
+				GetPropertiesSize()
+			: 0;
+	const bool bSchemaValid =
+		ValidateInfoSize == 0x10 &&
+		ValidateInfoStruct->GetPropertiesSize() == 0x10 &&
+		TargetOffset == 0 &&
+		TargetSize == sizeof(AActor*) &&
+		ComponentSize > 0 &&
+		ValidateInfoOffset <=
+			static_cast<uint32>(ComponentSize) &&
+		ValidateInfoSize <=
+			static_cast<uint32>(ComponentSize) -
+				ValidateInfoOffset;
+	if (!bSchemaValid)
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 validate target schema rejected "
+			"source=%s outerOffset=0x%X outerSize=0x%X "
+			"structSize=0x%X targetOffset=0x%X "
+			"targetSize=0x%X componentSize=0x%X\n",
+			Source ? Source : "unknown",
+			ValidateInfoOffset,
+			ValidateInfoSize,
+			ValidateInfoStruct->GetPropertiesSize(),
+			TargetOffset,
+			TargetSize,
+			ComponentSize);
+		return nullptr;
+	}
+
+	auto TargetAddress =
+		reinterpret_cast<uint8*>(
+			InteractionContext) +
+		ValidateInfoOffset +
+		TargetOffset;
+	constexpr uint32 StartedAtTimeOffset = 0x08;
+	if (!IsWritableInteractionMemory(
+			TargetAddress,
+			ValidateInfoSize))
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 validate info memory "
+			"rejected source=%s context=%p address=%p\n",
+			Source ? Source : "unknown",
+			(void*)InteractionContext,
+			(void*)TargetAddress);
+		return nullptr;
+	}
+
+	AActor* PreviousTarget = nullptr;
+	float PreviousStartedAtWorldTime = -1.f;
+	Patch.InteractionContext = InteractionContext;
+	Patch.ValidateInfoOffset = ValidateInfoOffset;
+	Patch.bArmed = true;
+	memcpy(
+		Patch.PreviousBytes,
+		TargetAddress,
+		ValidateInfoSize);
+	memcpy(
+		&PreviousTarget,
+		TargetAddress,
+		sizeof(PreviousTarget));
+	memcpy(
+		&PreviousStartedAtWorldTime,
+		TargetAddress + StartedAtTimeOffset,
+		sizeof(PreviousStartedAtWorldTime));
+	memcpy(
+		TargetAddress,
+		&ReceivingActor,
+		sizeof(ReceivingActor));
+	memcpy(
+		TargetAddress + StartedAtTimeOffset,
+		&StartedAtWorldTime,
+		sizeof(StartedAtWorldTime));
+	AActor* VerifiedTarget = nullptr;
+	float VerifiedStartedAtWorldTime = -1.f;
+	memcpy(
+		&VerifiedTarget,
+		TargetAddress,
+		sizeof(VerifiedTarget));
+	memcpy(
+		&VerifiedStartedAtWorldTime,
+		TargetAddress + StartedAtTimeOffset,
+		sizeof(VerifiedStartedAtWorldTime));
+	const bool bSucceeded =
+		VerifiedTarget == ReceivingActor &&
+		VerifiedStartedAtWorldTime ==
+			StartedAtWorldTime;
+	SDK::DbgLog(
+		"[Revive] 27.11 validate info prepare "
+		"source=%s context=%p target=%p previous=%p "
+		"started=%.3f previousStarted=%.3f "
+		"offset=0x%X success=%d\n",
+		Source ? Source : "unknown",
+		(void*)InteractionContext,
+		(void*)ReceivingActor,
+		(void*)PreviousTarget,
+		StartedAtWorldTime,
+		PreviousStartedAtWorldTime,
+		ValidateInfoOffset,
+		(int)bSucceeded);
+	if (!bSucceeded)
+	{
+		memcpy(
+			TargetAddress,
+			Patch.PreviousBytes,
+			sizeof(Patch.PreviousBytes));
+		const bool bRolledBack =
+			memcmp(
+				TargetAddress,
+				Patch.PreviousBytes,
+				sizeof(Patch.PreviousBytes)) == 0;
+		SDK::DbgLog(
+			"[Revive] 27.11 validate info prepare rollback "
+			"source=%s context=%p success=%d\n",
+			Source ? Source : "unknown",
+			(void*)InteractionContext,
+			(int)bRolledBack);
+		Patch = {};
+		return nullptr;
+	}
+	return TargetAddress;
+}
+
+static bool RestoreLongInteractValidateInfo27_11(
+	const FLongInteractValidateInfoPatch27_11& Patch,
+	const char* Source)
+{
+	if (VersionInfo.FortniteVersion != 27.11 ||
+		!Patch.bArmed ||
+		Patch.ValidateInfoOffset == uint32(-1))
+	{
+		return false;
+	}
+
+	auto InteractionContext =
+		Patch.InteractionContext.Get();
+	auto InteractionComponentClass =
+		FindClass("FortControllerComponent_Interaction");
+	const int32 ComponentSize =
+		IsUsableDeathObject(InteractionContext) &&
+			InteractionContext->Class
+			? InteractionContext->Class->
+				GetPropertiesSize()
+			: 0;
+	if (!InteractionComponentClass ||
+		!IsUsableDeathObject(InteractionContext) ||
+		!InteractionContext->IsA(
+			InteractionComponentClass) ||
+		ComponentSize <= 0 ||
+		Patch.ValidateInfoOffset >
+			static_cast<uint32>(ComponentSize) ||
+		sizeof(Patch.PreviousBytes) >
+			static_cast<uint32>(ComponentSize) -
+				Patch.ValidateInfoOffset)
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 validate info restore rejected "
+			"source=%s context=%p offset=0x%X size=0x%X\n",
+			Source ? Source : "unknown",
+			(void*)InteractionContext,
+			Patch.ValidateInfoOffset,
+			ComponentSize);
+		return false;
+	}
+
+	auto Address =
+		reinterpret_cast<uint8*>(InteractionContext) +
+		Patch.ValidateInfoOffset;
+	if (!IsWritableInteractionMemory(
+			Address,
+			sizeof(Patch.PreviousBytes)))
+	{
+		return false;
+	}
+	memcpy(
+		Address,
+		Patch.PreviousBytes,
+		sizeof(Patch.PreviousBytes));
+	const bool bSucceeded =
+		memcmp(
+			Address,
+			Patch.PreviousBytes,
+			sizeof(Patch.PreviousBytes)) == 0;
+	SDK::DbgLog(
+		"[Revive] 27.11 validate info restore "
+		"source=%s context=%p address=%p success=%d\n",
+		Source ? Source : "unknown",
+		(void*)InteractionContext,
+		(void*)Address,
+		(int)bSucceeded);
+	return bSucceeded;
+}
+
+static void ServerNotifyStartLongUse27_11(
+	UObject* Context,
+	FFrame& Stack)
+{
+	AActor* ReceivingActor =
+		Stack.Locals &&
+			SDK::MemReadable(
+				Stack.Locals,
+				sizeof(ReceivingActor))
+			? *(AActor**)Stack.Locals
+			: nullptr;
+	auto PlayerController =
+		ResolveInteractionPlayerController(Context);
+
+	if (GServerNotifyStartLongUse27_11OG &&
+		GServerNotifyStartLongUse27_11OG !=
+			ServerNotifyStartLongUse27_11)
+	{
+		GServerNotifyStartLongUse27_11OG(
+			Context, Stack);
+	}
+
+	if (VersionInfo.FortniteVersion != 27.11 ||
+		!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(ReceivingActor))
+	{
+		return;
+	}
+
+	auto ExistingPending =
+		GPendingReviveLongUses27_11.find(
+			PlayerController);
+	if (ExistingPending !=
+		GPendingReviveLongUses27_11.end())
+	{
+		GPendingReviveLongUses27_11.erase(
+			ExistingPending);
+	}
+
+	auto TargetPawn =
+		ReceivingActor->Cast<AFortPlayerPawnAthena>();
+	if (!TargetPawn ||
+		!IsPawnDBNOForSpectating(TargetPawn))
+	{
+		return;
+	}
+
+	auto World = UWorld::GetWorld();
+	const double StartedAtWorldTimeDouble =
+		World
+			? UGameplayStatics::GetTimeSeconds(
+				World)
+			: -1.0;
+	const float StartedAtWorldTime =
+		std::isfinite(StartedAtWorldTimeDouble) &&
+			StartedAtWorldTimeDouble >= 0.0 &&
+			StartedAtWorldTimeDouble <=
+				static_cast<double>(
+					FLT_MAX)
+			? static_cast<float>(
+				StartedAtWorldTimeDouble)
+			: -1.f;
+
+	FPendingReviveLongUse27_11 Pending{};
+	Pending.Target = ReceivingActor;
+	Pending.InteractionContext = Context;
+	Pending.StartedAtMs = GetTickCount64();
+	Pending.StartedAtWorldTime =
+		StartedAtWorldTime;
+	GPendingReviveLongUses27_11[
+		PlayerController] = Pending;
+	SDK::DbgLog(
+		"[Revive] 27.11 long-use start reviver=%p "
+		"target=%p started=%llu worldTime=%.3f\n",
+		(void*)PlayerController,
+		(void*)TargetPawn,
+		Pending.StartedAtMs,
+		Pending.StartedAtWorldTime);
+}
+
+static void ServerNotifyEndLongUse27_11(
+	UObject* Context,
+	FFrame& Stack)
+{
+	FServerNotifyEndLongUseParams27_11 Params{};
+	if (Stack.Locals &&
+		SDK::MemReadable(
+			Stack.Locals,
+			sizeof(Params)))
+	{
+		Params =
+			*reinterpret_cast<
+				const FServerNotifyEndLongUseParams27_11*>(
+					Stack.Locals);
+	}
+	auto PlayerController =
+		ResolveInteractionPlayerController(Context);
+
+	if (GServerNotifyEndLongUse27_11OG &&
+		GServerNotifyEndLongUse27_11OG !=
+			ServerNotifyEndLongUse27_11)
+	{
+		GServerNotifyEndLongUse27_11OG(
+			Context, Stack);
+	}
+
+	if (VersionInfo.FortniteVersion != 27.11 ||
+		!PlayerController)
+	{
+		return;
+	}
+
+	auto Pending =
+		GPendingReviveLongUses27_11.find(
+			PlayerController);
+	if (Pending ==
+		GPendingReviveLongUses27_11.end())
+	{
+		return;
+	}
+
+	auto PendingTarget = Pending->second.Target.Get();
+	if (!Params.ReceivingActor ||
+		PendingTarget == Params.ReceivingActor)
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 long-use end reviver=%p "
+			"target=%p completed=%d retained=%d\n",
+			(void*)PlayerController,
+			(void*)Params.ReceivingActor,
+			(int)Params.bUseCompleted,
+			(int)Params.bUseCompleted);
+		// The normal 27.11 client emits Attempt before End(true), but retain
+		// completed proof briefly in case packet processing is reordered.
+		// Attempt consumes it; a cancellation cannot reuse it.
+		if (!Params.bUseCompleted)
+		{
+			GPendingReviveLongUses27_11.erase(Pending);
+		}
+	}
+	else
+	{
+		GPendingReviveLongUses27_11.erase(Pending);
+	}
+}
+
+static bool HasServerAttemptInteractSchema27_11(
+	UFunction* Function)
+{
+	if (!Function ||
+		Function->GetPropertiesSize() !=
+			sizeof(FServerAttemptInteractParams27_11))
+	{
+		return false;
+	}
+
+	const auto Params = Function->GetParamsNamed();
+	if (Params.Size !=
+			sizeof(FServerAttemptInteractParams27_11) ||
+		Params.NameOffsetMap.size() != 6)
+	{
+		return false;
+	}
+
+	constexpr uint64 CPF_Parm = 0x80;
+	constexpr uint64 CPF_ReturnParm = 0x400;
+	auto HasParam =
+		[&](const char* Name, uint32 Offset, uint32 Size)
+		{
+			for (const auto& Param :
+				Params.NameOffsetMap)
+			{
+				if (Param.Name == Name &&
+					Param.Offset == Offset &&
+					Param.ElementSize == Size &&
+					(Param.PropertyFlags & CPF_Parm) &&
+					!(Param.PropertyFlags &
+						CPF_ReturnParm))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
+	const bool bHasRequestId =
+		HasParam("RequestId", 0x24, sizeof(int32)) ||
+		HasParam("RequestID", 0x24, sizeof(int32));
+	return
+		HasParam(
+			"ReceivingActor", 0x00, sizeof(void*)) &&
+		HasParam(
+			"InteractComponent", 0x08, sizeof(void*)) &&
+		HasParam("InteractType", 0x10, sizeof(uint8)) &&
+		HasParam(
+			"OptionalObjectData", 0x18, sizeof(void*)) &&
+		HasParam(
+			"InteractionBeingAttempted",
+			0x20,
+			sizeof(uint8)) &&
+		bHasRequestId;
+}
+
+static bool ConsumeCompletedReviveLongUse27_11(
+	AFortPlayerControllerAthena* ReviverController,
+	UObject* InteractionContext,
+	AActor* ReceivingActor,
+	uint8 InteractionBeingAttempted,
+	int32 RequestId,
+	FPendingReviveLongUse27_11& ConsumedPending,
+	ULONGLONG& ElapsedMs)
+{
+	ConsumedPending = {};
+	ElapsedMs = 0;
+	auto Pending =
+		GPendingReviveLongUses27_11.find(
+			ReviverController);
+	if (Pending ==
+		GPendingReviveLongUses27_11.end())
+	{
+		if (InteractionBeingAttempted == 0)
+		{
+			SDK::DbgLog(
+				"[Revive] 27.11 interaction fallback "
+				"missing long-use start request=%d "
+				"reviver=%p target=%p\n",
+				RequestId,
+				(void*)ReviverController,
+				(void*)ReceivingActor);
+		}
+		return false;
+	}
+
+	ConsumedPending = Pending->second;
+	const auto PendingTarget =
+		ConsumedPending.Target.Get();
+	const auto PendingContext =
+		ConsumedPending.InteractionContext.Get();
+	const ULONGLONG StartedAtMs =
+		ConsumedPending.StartedAtMs;
+	GPendingReviveLongUses27_11.erase(Pending);
+
+	const ULONGLONG NowMs = GetTickCount64();
+	ElapsedMs =
+		NowMs >= StartedAtMs
+			? NowMs - StartedAtMs
+			: 0;
+	constexpr ULONGLONG MinReviveLongUseMs = 8000;
+	constexpr ULONGLONG MaxReviveLongUseMs = 30000;
+	const bool bValid =
+		InteractionBeingAttempted == 0 &&
+		PendingTarget == ReceivingActor &&
+		PendingContext == InteractionContext &&
+		FPlatformMath::IsFinite(
+			ConsumedPending.StartedAtWorldTime) &&
+		ConsumedPending.StartedAtWorldTime >= 0.f &&
+		ElapsedMs >= MinReviveLongUseMs &&
+		ElapsedMs <= MaxReviveLongUseMs;
+	if (!bValid &&
+		InteractionBeingAttempted == 0)
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 interaction fallback "
+			"rejected long-use proof request=%d "
+			"reviver=%p target=%p recorded=%p "
+			"context=%p recordedContext=%p "
+			"worldTime=%.3f elapsed=%llu\n",
+			RequestId,
+			(void*)ReviverController,
+			(void*)ReceivingActor,
+			(void*)PendingTarget,
+			(void*)InteractionContext,
+			(void*)PendingContext,
+			ConsumedPending.StartedAtWorldTime,
+			ElapsedMs);
+	}
+	return bValid;
+}
+
+static bool ValidateReviveInteraction27_11(
+	UObject* InteractionContext,
+	AFortPlayerControllerAthena* ReviverController,
+	AActor* ReceivingActor,
+	uint8 InteractType,
+	uint8 InteractionBeingAttempted,
+	int32 RequestId,
+	FPendingReviveLongUse27_11& ConsumedPending)
+{
+	ConsumedPending = {};
+	// This repair is intentionally tied to the exact 27.11 RPC ABI. On that
+	// build, the native long-use validator loses ValidateInfo.Target even
+	// though ServerAttemptInteract still contains the exact ReceivingActor.
+	// Fully authorize that request here; the caller then scopes either the
+	// native validation switch or the reflected target repair to the single
+	// synchronous native attempt.
+	if (VersionInfo.FortniteVersion != 27.11 ||
+		InteractType != 2 || // ETInteractionType::LongPress
+		!IsUsableDeathObject(ReviverController) ||
+		!IsUsableDeathObject(ReceivingActor))
+	{
+		return false;
+	}
+
+	ULONGLONG LongUseElapsedMs = 0;
+	if (!ConsumeCompletedReviveLongUse27_11(
+			ReviverController,
+			InteractionContext,
+			ReceivingActor,
+			InteractionBeingAttempted,
+			RequestId,
+			ConsumedPending,
+			LongUseElapsedMs))
+	{
+		return false;
+	}
+
+	auto TargetPawn =
+		ReceivingActor->Cast<AFortPlayerPawnAthena>();
+	if (!TargetPawn ||
+		!IsPawnDBNOForSpectating(TargetPawn))
+	{
+		return false;
+	}
+
+	auto ReviverPawn =
+		ResolveVehicleRiderPawn(ReviverController);
+	auto TargetController =
+		TargetPawn->Controller
+			? TargetPawn->Controller->Cast<
+				AFortPlayerControllerAthena>()
+			: nullptr;
+	if (!IsUsableDeathObject(ReviverPawn) ||
+		!IsUsableDeathObject(TargetController) ||
+		ReviverPawn == TargetPawn ||
+		!ReviverController->HasAuthority() ||
+		!ReviverPawn->HasAuthority() ||
+		!TargetPawn->HasAuthority() ||
+		(AActor*)ReviverController->Pawn !=
+			(AActor*)ReviverPawn ||
+		(ReviverController->HasMyFortPawn() &&
+			ReviverController->MyFortPawn !=
+				ReviverPawn) ||
+		ReviverPawn->Controller != ReviverController ||
+		IsPawnDBNOForSpectating(ReviverPawn) ||
+		(ReviverPawn->HasbIsDying() &&
+			ReviverPawn->bIsDying) ||
+		(TargetPawn->HasbIsDying() &&
+			TargetPawn->bIsDying))
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 interaction fallback rejected "
+			"actor state request=%d reviver=%p pawn=%p "
+			"target=%p targetController=%p\n",
+			RequestId,
+			(void*)ReviverController,
+			(void*)ReviverPawn,
+			(void*)TargetPawn,
+			(void*)TargetController);
+		return false;
+	}
+
+	const float ReviverHealth = ReviverPawn->GetHealth();
+	if (!FPlatformMath::IsFinite(ReviverHealth) ||
+		ReviverHealth <= 0.f ||
+		!ReviverController->HasPlayerState() ||
+		!TargetController->HasPlayerState() ||
+		!IsUsableDeathObject(
+			ReviverController->PlayerState) ||
+		!IsUsableDeathObject(
+			TargetController->PlayerState))
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 interaction fallback rejected "
+			"health/ownership request=%d health=%.2f\n",
+			RequestId,
+			ReviverHealth);
+		return false;
+	}
+
+	auto ReviverPlayerState =
+		ReviverController->PlayerState->Cast<
+			AFortPlayerStateAthena>();
+	auto TargetPlayerState =
+		TargetController->PlayerState->Cast<
+			AFortPlayerStateAthena>();
+	constexpr uint8 InvalidTeam = uint8(-1);
+	constexpr uint8 FirstPlayableTeam = 3;
+	constexpr uint8 FirstReservedTeam = 250;
+	const bool bSameValidTeam =
+		ReviverPlayerState &&
+		TargetPlayerState &&
+		ReviverPlayerState->HasTeamIndex() &&
+		TargetPlayerState->HasTeamIndex() &&
+		ReviverPlayerState->TeamIndex >=
+			FirstPlayableTeam &&
+		ReviverPlayerState->TeamIndex <
+			FirstReservedTeam &&
+		ReviverPlayerState->TeamIndex ==
+			TargetPlayerState->TeamIndex;
+	const bool bSameValidSquad =
+		!bSameValidTeam
+			? false
+			: (!ReviverPlayerState->HasSquadId() &&
+					!TargetPlayerState->HasSquadId()) ||
+				(ReviverPlayerState->HasSquadId() &&
+					TargetPlayerState->HasSquadId() &&
+					ReviverPlayerState->SquadId != InvalidTeam &&
+					ReviverPlayerState->SquadId ==
+						TargetPlayerState->SquadId);
+	if (!bSameValidTeam || !bSameValidSquad)
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 interaction fallback rejected "
+			"team request=%d reviverState=%p targetState=%p "
+			"sameTeam=%d sameSquad=%d\n",
+			RequestId,
+			(void*)ReviverPlayerState,
+			(void*)TargetPlayerState,
+			(int)bSameValidTeam,
+			(int)bSameValidSquad);
+		return false;
+	}
+
+	const auto Delta =
+		ReviverPawn->K2_GetActorLocation() -
+		TargetPawn->K2_GetActorLocation();
+	const auto DistanceSquared = Delta.SizeSquared();
+	constexpr double MaxReviveDistance = 500.0;
+	if (!std::isfinite(
+			static_cast<double>(DistanceSquared)) ||
+		DistanceSquared >
+			MaxReviveDistance * MaxReviveDistance)
+	{
+		SDK::DbgLog(
+			"[Revive] 27.11 interaction fallback rejected "
+			"distance request=%d distanceSquared=%.2f\n",
+			RequestId,
+			(double)DistanceSquared);
+		return false;
+	}
+
+	SDK::DbgLog(
+		"[Revive] 27.11 validated native long interaction "
+		"request=%d reviver=%p target=%p elapsed=%llu "
+		"distanceSquared=%.2f\n",
+		RequestId,
+		(void*)ReviverController,
+		(void*)TargetPawn,
+		LongUseElapsedMs,
+		(double)DistanceSquared);
+	return true;
+}
+
 void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFrame& Stack)
 {
 	// The weapon-mod runtime package can stream in after the global post-load
@@ -15140,7 +21129,33 @@ void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFram
 	// can submit a workbench purchase.
 	FFortWeaponMods::EnsureBenchHooks();
 
-	AActor* ReceivingActor = *(AActor**)Stack.Locals;
+	AActor* ReceivingActor =
+		Stack.Locals &&
+			SDK::MemReadable(
+				Stack.Locals,
+				sizeof(ReceivingActor))
+			? *(AActor**)Stack.Locals
+			: nullptr;
+	uint8 InteractType27_11 = uint8(-1);
+	uint8 InteractionBeingAttempted27_11 = uint8(-1);
+	int32 RequestId27_11 = -1;
+	if (VersionInfo.FortniteVersion == 27.11 &&
+		GServerAttemptInteractSchema27_11 &&
+		Stack.Locals &&
+		SDK::MemReadable(
+			Stack.Locals,
+			sizeof(FServerAttemptInteractParams27_11)))
+	{
+		const auto Params =
+			reinterpret_cast<
+				const FServerAttemptInteractParams27_11*>(
+					Stack.Locals);
+		ReceivingActor = Params->ReceivingActor;
+		InteractType27_11 = Params->InteractType;
+		InteractionBeingAttempted27_11 =
+			Params->InteractionBeingAttempted;
+		RequestId27_11 = Params->RequestId;
+	}
 	/*AActor* ReceivingActor;
 	UObject* InteractComponent;
 	uint8_t InteractType;
@@ -15156,15 +21171,189 @@ void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFram
 	Stack.StepCompiledIn(&RequestID);
 	Stack.IncrementCode();*/
 
-	AFortPlayerControllerAthena* PlayerController = nullptr;
-
-	static auto bIsComp = Context->IsA(FindClass("FortControllerComponent_Interaction"));
-	if (bIsComp)
-		PlayerController = (AFortPlayerControllerAthena*)((UActorComponent*)Context)->GetOwner();
-	else
-		PlayerController = (AFortPlayerControllerAthena*)Context;
+	auto PlayerController =
+		ResolveInteractionPlayerController(Context);
+	if (!PlayerController)
+	{
+		if (ServerAttemptInteract_OG &&
+			ServerAttemptInteract_OG !=
+				ServerAttemptInteract_)
+		{
+			return ServerAttemptInteract_OG(
+				Context, Stack);
+		}
+		return;
+	}
 
 	auto Pawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
+	auto CollectingPawn =
+		PlayerController->MyFortPawn
+			? PlayerController->MyFortPawn
+			: Pawn;
+	auto InteractingPickup =
+		ReceivingActor
+			? ReceivingActor->Cast<AFortPickupAthena>()
+			: nullptr;
+	static const UClass* GameModePickupClass1040 = nullptr;
+	if (!GameModePickupClass1040)
+		GameModePickupClass1040 =
+			FindClass("FortGameModePickup");
+	if (std::fabs(
+			VersionInfo.FortniteVersion - 10.40) < 0.001 &&
+		ReceivingActor &&
+		GameModePickupClass1040 &&
+		ReceivingActor->IsA(GameModePickupClass1040) &&
+		InteractingPickup &&
+		FFortAthenaNativeLTMCompatibility::
+			ShouldRejectAshtonPickup(
+				CollectingPawn,
+				InteractingPickup
+					->PrimaryPickupItemEntry
+					.ItemDefinition))
+	{
+		// The 10.40 long-use RPC has exactly four parameters. Consume it
+		// locally and do not enter the native interaction path: otherwise the
+		// Ashton pickup blueprint can mark the stone captured before any of
+		// the ordinary inventory/pickup guards get a chance to reject it.
+		AActor* ParsedReceivingActor = nullptr;
+		UObject* InteractComponent = nullptr;
+		uint8 InteractType = 0;
+		UObject* OptionalObjectData = nullptr;
+		Stack.StepCompiledIn(&ParsedReceivingActor);
+		Stack.StepCompiledIn(&InteractComponent);
+		Stack.StepCompiledIn(&InteractType);
+		Stack.StepCompiledIn(&OptionalObjectData);
+		Stack.IncrementCode();
+
+		SDK::DbgLog(
+			"[Ashton1040] rejected non-villain stone "
+			"interaction type=%u actor=%p parsed=%p item=%p\n",
+			static_cast<unsigned>(InteractType),
+			static_cast<void*>(ReceivingActor),
+			static_cast<void*>(ParsedReceivingActor),
+			static_cast<const void*>(
+				InteractingPickup
+					->PrimaryPickupItemEntry
+					.ItemDefinition));
+		return;
+	}
+	auto AshtonStoneDefinition =
+		InteractingPickup
+			? InteractingPickup
+				  ->PrimaryPickupItemEntry
+				  .ItemDefinition
+			: nullptr;
+	if (std::fabs(
+			VersionInfo.FortniteVersion - 10.40) < 0.001 &&
+		ReceivingActor &&
+		GameModePickupClass1040 &&
+		ReceivingActor->IsA(GameModePickupClass1040) &&
+		InteractingPickup &&
+		FFortAthenaNativeLTMCompatibility::
+			IsCurrentAshtonStone(
+				CollectingPawn,
+				AshtonStoneDefinition))
+	{
+		// The stock game-mode interaction remains the authority for the
+		// authored long-use timer and distance checks. Remember the collector
+		// on the objective actor so its native destroy callback can select the
+		// exact Chitauri that completed the interaction.
+		const bool bWasAlreadyCaptured =
+			FFortAthenaNativeLTMCompatibility::
+				IsAshtonStoneCaptured(
+					AshtonStoneDefinition);
+		InteractingPickup
+			->PickupLocationData.PickupTarget =
+			CollectingPawn;
+		ServerAttemptInteract_OG(Context, Stack);
+
+		const bool bPickupStillUsable =
+			IsUsableDeathObject(InteractingPickup);
+		const bool bNativeConsumedPickup =
+			!bPickupStillUsable ||
+			(bPickupStillUsable &&
+			 InteractingPickup
+				 ->HasbActorIsBeingDestroyed() &&
+			 InteractingPickup
+				 ->bActorIsBeingDestroyed) ||
+			(bPickupStillUsable &&
+			 InteractingPickup->HasbPickedUp() &&
+			 InteractingPickup->bPickedUp);
+		const bool bNativeCapturedStone =
+			FFortAthenaNativeLTMCompatibility::
+				IsAshtonStoneCaptured(
+					AshtonStoneDefinition);
+
+		// A live, unclaimed actor with an unchanged row means native rejected
+		// or has not completed the long use. Do not advance objective state
+		// from the RPC alone; the validated world-pickup spline completes it.
+		if (bWasAlreadyCaptured ||
+			bNativeCapturedStone ||
+			bNativeConsumedPickup)
+		{
+			auto CompletionPawn =
+				IsUsableDeathObject(CollectingPawn)
+					? CollectingPawn
+					: PlayerController->MyFortPawn;
+			FFortAthenaNativeLTMCompatibility::
+				TryCompleteAshtonStonePickup(
+					CompletionPawn,
+					bPickupStillUsable
+						? InteractingPickup
+						: nullptr,
+					AshtonStoneDefinition,
+					"long-use-native-result");
+		}
+		return;
+	}
+	const UClass* WaxPickupClass =
+		AFortGameModePickup_Wax::StaticClass();
+	if (std::fabs(
+			VersionInfo.FortniteVersion - 10.40) < 0.001 &&
+		ReceivingActor &&
+		WaxPickupClass &&
+		ReceivingActor->IsA(WaxPickupClass))
+	{
+		// The 10.40 coin is a zero-duration simple Use interaction. Consume
+		// the four-parameter component RPC before routing it to the private
+		// Wax scorer; the stripped interaction callback never reaches that
+		// scorer on its own.
+		AActor* ParsedReceivingActor = nullptr;
+		UObject* InteractComponent = nullptr;
+		uint8 InteractType = 0;
+		UObject* OptionalObjectData = nullptr;
+		Stack.StepCompiledIn(&ParsedReceivingActor);
+		Stack.StepCompiledIn(&InteractComponent);
+		Stack.StepCompiledIn(&InteractType);
+		Stack.StepCompiledIn(&OptionalObjectData);
+		Stack.IncrementCode();
+
+		if (InteractType != 1 ||
+			ParsedReceivingActor != ReceivingActor)
+		{
+			SDK::DbgLog(
+				"[Wax1040] rejected malformed coin interaction "
+				"type=%u actor=%p parsed=%p\n",
+				static_cast<unsigned>(InteractType),
+				static_cast<void*>(ReceivingActor),
+				static_cast<void*>(
+					ParsedReceivingActor));
+			return;
+		}
+
+		auto WaxPickup =
+			ParsedReceivingActor &&
+					ParsedReceivingActor->IsA(
+						WaxPickupClass)
+				? ParsedReceivingActor
+					  ->Cast<AFortPickupAthena>()
+				: nullptr;
+		FFortAthenaNativeLTMCompatibility::
+			TryCollectWaxPickup(
+				CollectingPawn,
+				WaxPickup);
+		return;
+	}
 	auto Vehicle = ReceivingActor
 		? ReceivingActor->Cast<AFortAthenaVehicle>() : nullptr;
 	auto CharacterVehicle = ReceivingActor
@@ -15366,29 +21555,255 @@ void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFram
 		LockDevice->OnRep_CurrentLockState();
 	}
 
+	FPendingReviveLongUse27_11
+		ConsumedReviveLongUse27_11{};
+	const bool bValidatedReviveAttempt27_11 =
+		ValidateReviveInteraction27_11(
+			Context,
+			PlayerController,
+			ReceivingActor,
+			InteractType27_11,
+			InteractionBeingAttempted27_11,
+			RequestId27_11,
+			ConsumedReviveLongUse27_11);
+	FLongInteractValidateInfoPatch27_11
+		ValidateInfoPatch27_11{};
+	const bool bValidateInfoPrepared27_11 =
+		bValidatedReviveAttempt27_11 &&
+		PrepareLongInteractValidateInfo27_11(
+			Context,
+			ReceivingActor,
+			ConsumedReviveLongUse27_11.
+				StartedAtWorldTime,
+			ValidateInfoPatch27_11,
+			"attempt") != nullptr;
+	uint8 PreviousValidateLongValue27_11 = uint8(-1);
+	bool bScopedValidationEnabled27_11 = false;
+	bool bScopedValidationWriteAttempted27_11 = false;
+	if (bValidateInfoPrepared27_11 &&
+		GInteractValidateLongEnable27_11 &&
+		IsWritableInteractionMemory(
+			GInteractValidateLongEnable27_11,
+			sizeof(uint8)))
+	{
+		memcpy(
+			&PreviousValidateLongValue27_11,
+			GInteractValidateLongEnable27_11,
+			sizeof(uint8));
+		if (PreviousValidateLongValue27_11 <= 1)
+		{
+			const uint8 Enabled = 1;
+			bScopedValidationWriteAttempted27_11 = true;
+			memcpy(
+				GInteractValidateLongEnable27_11,
+				&Enabled,
+				sizeof(Enabled));
+			uint8 VerifiedValue = uint8(-1);
+			memcpy(
+				&VerifiedValue,
+				GInteractValidateLongEnable27_11,
+				sizeof(VerifiedValue));
+			bScopedValidationEnabled27_11 =
+				VerifiedValue == 1;
+			SDK::DbgLog(
+				"[Revive] 27.11 native validation enabled "
+				"request=%d cvar=%p previous=%u active=%d "
+				"infoPrepared=%d\n",
+				RequestId27_11,
+				(void*)GInteractValidateLongEnable27_11,
+				PreviousValidateLongValue27_11,
+				(int)bScopedValidationEnabled27_11,
+				(int)bValidateInfoPrepared27_11);
+		}
+	}
 	ServerAttemptInteract_OG(Context, Stack);
+	if (bScopedValidationWriteAttempted27_11)
+	{
+		memcpy(
+			GInteractValidateLongEnable27_11,
+			&PreviousValidateLongValue27_11,
+			sizeof(PreviousValidateLongValue27_11));
+		uint8 RestoredValue = uint8(-1);
+		memcpy(
+			&RestoredValue,
+			GInteractValidateLongEnable27_11,
+			sizeof(RestoredValue));
+		SDK::DbgLog(
+			"[Revive] 27.11 validation value restore "
+			"request=%d cvar=%p value=%u success=%d\n",
+			RequestId27_11,
+			(void*)GInteractValidateLongEnable27_11,
+			RestoredValue,
+			(int)(RestoredValue ==
+				PreviousValidateLongValue27_11));
+	}
+	bool bValidateInfoRestored27_11 = false;
+	if (bValidateInfoPrepared27_11)
+	{
+		bValidateInfoRestored27_11 =
+			RestoreLongInteractValidateInfo27_11(
+				ValidateInfoPatch27_11,
+				"attempt");
+	}
 	sendStat();
-	//return bIsComp ? (void)callOG(((UFortControllerComponent_Interaction*)Context), Stack.GetCurrentNativeFunction(), ServerAttemptInteract, ReceivingActor, InteractComponent, InteractType, OptionalObjectData, InteractionBeingAttempted, RequestID) : callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerAttemptInteract, ReceivingActor, InteractComponent, InteractType, OptionalObjectData, InteractionBeingAttempted, RequestID);
+	if (bValidatedReviveAttempt27_11)
+	{
+		auto TargetPawn =
+			IsUsableDeathObject(ReceivingActor)
+				? ReceivingActor->Cast<
+					AFortPlayerPawnAthena>()
+				: nullptr;
+		bool bStillDBNO =
+			TargetPawn &&
+			IsPawnDBNOForSpectating(TargetPawn);
+		float TargetHealth =
+			TargetPawn
+				? TargetPawn->GetHealth()
+				: 0.f;
+		const bool bNativeSucceeded =
+			TargetPawn && !bStillDBNO &&
+			FPlatformMath::IsFinite(TargetHealth) &&
+			TargetHealth > 0.f;
+		bool bFallbackAttempted = false;
+		bool bFallbackSucceeded = false;
+		if (TargetPawn && bStillDBNO)
+		{
+			bFallbackAttempted = true;
+			bFallbackSucceeded =
+				AFortPlayerPawnAthena::
+					ReviveFromDBNOCompat(
+						TargetPawn,
+						reinterpret_cast<AController*>(
+							PlayerController));
+			if (IsUsableDeathObject(TargetPawn))
+			{
+				bStillDBNO =
+					IsPawnDBNOForSpectating(
+						TargetPawn);
+				TargetHealth =
+					TargetPawn->GetHealth();
+			}
+		}
+		const bool bFinalSucceeded =
+			TargetPawn && !bStillDBNO &&
+			FPlatformMath::IsFinite(TargetHealth) &&
+			TargetHealth > 0.f;
+		SDK::DbgLog(
+			"[Revive] 27.11 interaction result "
+			"request=%d target=%p stillDBNO=%d "
+			"health=%.2f prepared=%d restored=%d "
+			"validationEnabled=%d native=%d "
+			"fallback=%d/%d success=%d\n",
+			RequestId27_11,
+			(void*)TargetPawn,
+			(int)bStillDBNO,
+			TargetHealth,
+			(int)bValidateInfoPrepared27_11,
+			(int)bValidateInfoRestored27_11,
+			(int)bScopedValidationEnabled27_11,
+			(int)bNativeSucceeded,
+			(int)bFallbackAttempted,
+			(int)bFallbackSucceeded,
+			(int)bFinalSucceeded);
+	}
 }
 
 void AFortPlayerControllerAthena::ServerDropAllItems(UObject* Context, FFrame& Stack)
 {
+	auto PlayerController =
+		(AFortPlayerControllerAthena*)Context;
+	auto World = UWorld::GetWorld();
+	auto GameMode =
+		World
+			? (AFortGameMode*)World->AuthorityGameMode
+			: nullptr;
+	auto GameState =
+		GameMode
+			? (AFortGameStateAthena*)GameMode->GameState
+			: nullptr;
+	const bool bIsNative1040LTM =
+		IsCurrentNative1040LTM(GameState);
+	const bool bIsGetawayMatch =
+		IsCurrentGetawayMatch(GameState);
+	const bool bKeepInventoryApplies =
+		FConfiguration::bKeepInventory &&
+		(!bIsNative1040LTM || bIsGetawayMatch);
+
+	// Food Fight, Arsenal and Wax/Bounty have native death inventory
+	// mutators. Getaway also owns its normal full-drop path. Preserve those
+	// implementations unless the explicit Keep Inventory policy needs the
+	// Jewel-only exception.
+	if (bIsNative1040LTM &&
+		(!bIsGetawayMatch || !bKeepInventoryApplies) &&
+		ServerDropAllItemsOG)
+	{
+		ServerDropAllItemsOG(Context, Stack);
+		return;
+	}
+
 	UFortItemDefinition* IgnoreItemDef;
 
 	Stack.StepCompiledIn(&IgnoreItemDef);
 	Stack.IncrementCode();
-	auto PlayerController = (AFortPlayerControllerAthena*)Context;
-	printf("ServerDropAllItems[Ignore %s]\n", IgnoreItemDef ? IgnoreItemDef->Name.ToString().c_str() : nullptr);
+	printf(
+		"ServerDropAllItems[Ignore %s]\n",
+		IgnoreItemDef
+			? IgnoreItemDef->Name.ToString().c_str()
+			: "none");
+
+	if (!IsUsableDeathObject(PlayerController) ||
+		!PlayerController->WorldInventory ||
+		!IsUsableDeathObject(PlayerController->MyFortPawn))
+	{
+		return;
+	}
 
 	auto Loc = PlayerController->MyFortPawn->K2_GetActorLocation();
-	for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
+	for (int i =
+		PlayerController->WorldInventory->Inventory
+			.ReplicatedEntries.Num() - 1;
+		i >= 0;
+		--i)
 	{
 		auto& Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
+		const bool bIsGetawayJewel =
+			bIsGetawayMatch &&
+			IsGetawayJewelDefinition(
+				Entry.ItemDefinition);
 
-		if (Entry.ItemDefinition != IgnoreItemDef && (Entry.ItemDefinition->HasbCanBeDropped() ? Entry.ItemDefinition->bCanBeDropped : (Entry.ItemDefinition->GetPickupComponent() ? Entry.ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false)))
+		// Keep Inventory is authoritative for ordinary inventory, but the
+		// Getaway objective is always transferable on death. Food Fight,
+		// Arsenal and Wax/Bounty retain their native inventory ownership.
+		if (bKeepInventoryApplies && !bIsGetawayJewel)
+			continue;
+
+		if ((bIsGetawayJewel ||
+				Entry.ItemDefinition != IgnoreItemDef) &&
+			CanDropInventoryItem(Entry.ItemDefinition))
 		{
-			AFortInventory::SpawnPickup(Loc, Entry, EFortPickupSourceTypeFlag::GetPlayer(), EFortPickupSpawnSource::GetUnset(), PlayerController->MyFortPawn);
-			PlayerController->WorldInventory->Remove(Entry.ItemGuid);
+			auto DropLocation = Loc;
+			if (bIsGetawayJewel)
+				DropLocation.Z += 50.f;
+			auto Pickup = AFortInventory::SpawnPickup(
+				DropLocation, Entry,
+				EFortPickupSourceTypeFlag::GetPlayer(),
+				EFortPickupSpawnSource::GetUnset(),
+				PlayerController->MyFortPawn);
+			if (!Pickup && bIsGetawayJewel)
+			{
+				DropLocation.Z += 50.f;
+				Pickup = AFortInventory::SpawnPickup(
+					DropLocation, Entry,
+					EFortPickupSourceTypeFlag::GetPlayer(),
+					EFortPickupSpawnSource::GetUnset(),
+					PlayerController->MyFortPawn);
+			}
+			// Never delete an entry unless its world representation exists.
+			// This is essential for the Jewel: losing both copies makes
+			// Getaway unwinnable.
+			if (Pickup)
+				PlayerController->WorldInventory->Remove(
+					Entry.ItemGuid);
 		}
 	}
 }
@@ -15637,46 +22052,31 @@ void AFortPlayerControllerAthena::SpawnToyInstance(UObject* Context, FFrame& Sta
 
 void AFortPlayerControllerAthena::EnterAircraft(UObject* Object, AActor* Aircraft)
 {
-	AFortPlayerControllerAthena* PlayerController = nullptr;
+	auto PlayerController =
+		ResolveAircraftPlayerController(Object);
 
-	static auto bIsComp = Object->IsA(FindClass("FortControllerComponent_Aircraft"));
-	if (bIsComp)
-		PlayerController = (AFortPlayerControllerAthena*)((UActorComponent*)Object)->GetOwner();
-	else
-		PlayerController = (AFortPlayerControllerAthena*)Object;
-
-	// PlayerAI entities are never real aircraft passengers: the native
-	// aircraft kills anyone still flagged aboard when the drop zone ends,
-	// and the jump RPC rejects connectionless controllers on old versions.
-	// Their bus ride + skydive is handled by the PlayerAI transport flow.
-	if (MagnesiumPlayerAIIntegration::IsPlayerAIController(PlayerController))
+	// PlayerAI entities are virtual passengers: native entry can destroy or
+	// replace their warmup pawn/inventory and native jump RPCs reject
+	// connectionless controllers on old versions. Their bus ride and skydive
+	// are owned by the bounded PlayerAI transport flow.
+	if (PlayerController &&
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(
+			PlayerController))
 		return;
 
-	if (!FConfiguration::bKeepInventory && PlayerController->WorldInventory)
+	const bool bWasInAircraft =
+		PlayerController &&
+		PlayerController->IsInAircraft();
+	EnterAircraftOG(Object, Aircraft);
+	const bool bEnteredAircraft =
+		PlayerController &&
+		!bWasInAircraft &&
+		PlayerController->IsInAircraft();
+	if (bEnteredAircraft)
 	{
-		UEAllocatedVector<FGuid> GuidsToRemove;
-		for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
-			{
-			auto& Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
-
-			if (Entry.ItemDefinition->HasbCanBeDropped() ? Entry.ItemDefinition->bCanBeDropped : (Entry.ItemDefinition->GetPickupComponent() ? Entry.ItemDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false))
-			{
-				//NewPlayer->WorldInventory->Inventory.ReplicatedEntries.Remove(i, FFortItemEntry::Size());
-				//i--;
-				GuidsToRemove.push_back(Entry.ItemGuid);
-			}
-			if (VersionInfo.FortniteVersion < 3 && Entry.ItemDefinition->ItemType == EFortItemType::GetWeaponHarvest())
-			{
-				//PlayerController->ServerExecuteInventoryItem(Entry.ItemGuid);
-				//PlayerController->QuickBars->ServerActivateSlotInternal(0, 0, 0.f, true);
-			}
-		}
-
-		for (auto& Guid : GuidsToRemove)
-			PlayerController->WorldInventory->Remove(Guid);
+		ClearDroppableInventoryForAircraft(
+			PlayerController, "enter", true);
 	}
-
-	return EnterAircraftOG(Object, Aircraft);
 }
 
 class AFortPlayerStartCreative : public AActor
@@ -17488,6 +23888,26 @@ void AFortPlayerControllerAthena::ServerAwardVehicleTrickPoints_(UObject* Contex
 
 void ServerRestartPlayer_(AFortPlayerControllerAthena* _this)
 {
+	if (!_this)
+		return;
+
+	if (IsTerminalManagedBot(_this))
+	{
+		auto PlayerState =
+			IsUsableDeathObject(_this->PlayerState)
+				? (AFortPlayerStateAthena*)_this->PlayerState
+				: nullptr;
+		if (PlayerState)
+			InvalidateRespawnHandshake(PlayerState);
+
+		SDK::DbgLog(
+			"[Respawn] blocked terminal managed-bot restart "
+			"controller=%p playerState=%p FN=%.2f\n",
+			(void*)_this, (void*)PlayerState,
+			VersionInfo.FortniteVersion);
+		return;
+	}
+
 	PurgeExclusiveGadgets(_this);
 
 	if (_this->Pawn)
@@ -17664,13 +24084,141 @@ void AFortPlayerControllerAthena::PostLoadHook()
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerCheat"), ServerCheat);
 
-	auto ServerAttemptInteractPC = GetDefaultObj()->GetFunction("ServerAttemptInteract");
-	if (!ServerAttemptInteractPC)
-		Utils::ExecHook(DefaultObjImpl("FortControllerComponent_Interaction")->GetFunction("ServerAttemptInteract"), ServerAttemptInteract_, ServerAttemptInteract_OG);
-	else
-		Utils::ExecHook(ServerAttemptInteractPC, ServerAttemptInteract_, ServerAttemptInteract_OG);
+	auto InteractionComponentDefault =
+		DefaultObjImpl("FortControllerComponent_Interaction");
+	auto ServerAttemptInteractPC =
+		GetDefaultObj()->GetFunction(
+			"ServerAttemptInteract");
+	auto ServerAttemptInteractComponent =
+		InteractionComponentDefault
+			? InteractionComponentDefault->GetFunction(
+				"ServerAttemptInteract")
+			: nullptr;
+	auto ServerAttemptInteractFunction =
+		VersionInfo.FortniteVersion == 27.11 &&
+			ServerAttemptInteractComponent
+			? ServerAttemptInteractComponent
+			: (ServerAttemptInteractPC
+				? ServerAttemptInteractPC
+				: ServerAttemptInteractComponent);
+	if (VersionInfo.FortniteVersion == 27.11)
+	{
+		GServerAttemptInteractFunction27_11 =
+			ServerAttemptInteractFunction;
+		GServerAttemptInteractSchema27_11 =
+			HasServerAttemptInteractSchema27_11(
+				ServerAttemptInteractFunction);
+	}
+	if (ServerAttemptInteractFunction &&
+		ServerAttemptInteractFunction->ExecFunction !=
+			reinterpret_cast<void*>(
+				ServerAttemptInteract_))
+	{
+		Utils::ExecHook(
+			ServerAttemptInteractFunction,
+			ServerAttemptInteract_,
+			ServerAttemptInteract_OG);
+	}
 
-	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerDropAllItems"), ServerDropAllItems);
+	if (VersionInfo.FortniteVersion == 27.11 &&
+		InteractionComponentDefault)
+	{
+		constexpr uintptr_t
+			InteractValidateLongEnableRva27_11 =
+				0x108D6700;
+		auto ModuleBase = reinterpret_cast<uintptr_t>(
+			GetModuleHandleW(nullptr));
+		auto ExpectedValidateLongCVar =
+			reinterpret_cast<uint8*>(
+				ModuleBase +
+				InteractValidateLongEnableRva27_11);
+		auto FoundValidateLongCVar =
+			FindCVar<uint8>(
+				L"Interact.ValidateLong.Enable");
+		uint8 InitialValidateLongValue = uint8(-1);
+		if (FoundValidateLongCVar ==
+				ExpectedValidateLongCVar &&
+			IsWritableInteractionMemory(
+				FoundValidateLongCVar,
+				sizeof(uint8)))
+		{
+			memcpy(
+				&InitialValidateLongValue,
+				FoundValidateLongCVar,
+				sizeof(InitialValidateLongValue));
+			if (InitialValidateLongValue <= 1)
+			{
+				GInteractValidateLongEnable27_11 =
+					FoundValidateLongCVar;
+			}
+		}
+
+		auto StartLongUseFunction =
+			InteractionComponentDefault->GetFunction(
+				"ServerNotifyStartLongUse");
+		auto EndLongUseFunction =
+			InteractionComponentDefault->GetFunction(
+				"ServerNotifyEndLongUse");
+		const bool bStartSchemaValid =
+			HasServerNotifyStartLongUseSchema27_11(
+				StartLongUseFunction);
+		const bool bEndSchemaValid =
+			HasServerNotifyEndLongUseSchema27_11(
+				EndLongUseFunction);
+
+		bool bStartHooked = false;
+		if (bStartSchemaValid &&
+			StartLongUseFunction->ExecFunction !=
+				reinterpret_cast<void*>(
+					ServerNotifyStartLongUse27_11))
+		{
+			Utils::ExecHook(
+				StartLongUseFunction,
+				ServerNotifyStartLongUse27_11,
+				GServerNotifyStartLongUse27_11OG);
+		}
+		bStartHooked =
+			StartLongUseFunction &&
+			StartLongUseFunction->ExecFunction ==
+				reinterpret_cast<void*>(
+					ServerNotifyStartLongUse27_11);
+
+		bool bEndHooked = false;
+		if (bEndSchemaValid &&
+			EndLongUseFunction->ExecFunction !=
+				reinterpret_cast<void*>(
+					ServerNotifyEndLongUse27_11))
+		{
+			Utils::ExecHook(
+				EndLongUseFunction,
+				ServerNotifyEndLongUse27_11,
+				GServerNotifyEndLongUse27_11OG);
+		}
+		bEndHooked =
+			EndLongUseFunction &&
+			EndLongUseFunction->ExecFunction ==
+				reinterpret_cast<void*>(
+					ServerNotifyEndLongUse27_11);
+
+		SDK::DbgLog(
+			"  [FPC] 27.11 revive long-use hooks "
+			"startSchema=%d startHooked=%d "
+			"endSchema=%d endHooked=%d "
+			"attemptSchema=%d attempt=%p "
+			"validateCVar=%p initial=%u\n",
+			(int)bStartSchemaValid,
+			(int)bStartHooked,
+			(int)bEndSchemaValid,
+			(int)bEndHooked,
+			(int)GServerAttemptInteractSchema27_11,
+			(void*)GServerAttemptInteractFunction27_11,
+			(void*)GInteractValidateLongEnable27_11,
+			InitialValidateLongValue);
+	}
+
+	Utils::ExecHook(
+		GetDefaultObj()->GetFunction("ServerDropAllItems"),
+		ServerDropAllItems, ServerDropAllItemsOG);
 
 	auto DefaultWeaponComp = DefaultObjImpl("FortWeaponComponent");
 

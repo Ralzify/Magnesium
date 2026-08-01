@@ -68,6 +68,33 @@ static int32 ClearInventoryForLateGameLoadout(
     return static_cast<int32>(GuidsToRemove.size());
 }
 
+static bool HasResolvableLateGamePrimaryItem(
+    const TArray<TArray<TPair<FString, int>>>& Slots)
+{
+    // Slots 1-5 are the combat/heal/utility quickbar pools. Materials and
+    // ammunition alone do not constitute a usable late-game loadout.
+    const int32 PrimarySlotCount =
+        Slots.Num() < 5 ? Slots.Num() : 5;
+    for (int32 SlotIndex = 0;
+        SlotIndex < PrimarySlotCount;
+        ++SlotIndex)
+    {
+        const auto& Slot = Slots[SlotIndex];
+        for (int32 CandidateIndex = 0;
+            CandidateIndex < Slot.Num();
+            ++CandidateIndex)
+        {
+            if (FindObject<UFortWorldItemDefinition>(
+                Slot[CandidateIndex].Key().CStr()))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 static UFortControllerComponent_VictoryCrowns*
 GetLateGameVictoryCrownComponent(
     AFortPlayerControllerAthena* PlayerController)
@@ -685,10 +712,19 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
 
     TArray<TArray<TPair<FString, int>>> Slots;
 
+    // The cert-build table stores 1.10 as the double 1.10 (numeric 1.1) and
+    // 1.11 as 1.11. Both are chronologically newer than 1.9.1, but ordinary
+    // numeric lower-bound checks such as >= 1.6 reject them. Keep this local
+    // exception on the Season 1 pools so exact 1.11-era additions remain
+    // distinct from 1.10.
+    const bool bSeasonOneDoubleDigitPatch =
+        VersionInfo.FortniteVersion == 1.10 ||
+        VersionInfo.FortniteVersion == 1.11;
+
     // Slot 1 (Assault Rifles)
     TArray<TPair<FString, int>> Slot1;
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         int Roll = Distribution(Randomization);
 
@@ -700,7 +736,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Auto_Athena_R_Ore_T03.WID_Assault_Auto_Athena_R_Ore_T03"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 23) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 23) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_AutoHigh_Athena_VR_Ore_T03.WID_Assault_AutoHigh_Athena_VR_Ore_T03"), 1));
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_AutoHigh_Athena_SR_Ore_T03.WID_Assault_AutoHigh_Athena_SR_Ore_T03"), 1));
@@ -712,7 +748,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_AutoHigh_Athena_R_Ore_T03.WID_Assault_AutoHigh_Athena_R_Ore_T03"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.10) || (VersionInfo.FortniteVersion == 9.30) || (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 15.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 19.00) || (VersionInfo.FortniteVersion >= 23.10 && VersionInfo.FortniteVersion < 24.00))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.10) || (VersionInfo.FortniteVersion == 9.30) || (VersionInfo.FortniteVersion >= 11.00 && VersionInfo.FortniteVersion < 15.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 19.00) || (VersionInfo.FortniteVersion >= 23.10 && VersionInfo.FortniteVersion < 24.00))
     {
         int Roll = Distribution(Randomization);
 
@@ -729,7 +765,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_SemiAuto_Athena_SR_Ore_T03.WID_Assault_SemiAuto_Athena_SR_Ore_T03"), 1));
 	}
 
-    if (VersionInfo.FortniteVersion >= 1.63 && VersionInfo.FortniteVersion < 11.00)
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.63 && VersionInfo.FortniteVersion < 11.00))
     {
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Surgical_Athena_R_Ore_T03.WID_Assault_Surgical_Athena_R_Ore_T03"), 1));
         Slot1.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Assault_Surgical_Athena_VR_Ore_T03.WID_Assault_Surgical_Athena_VR_Ore_T03"), 1));
@@ -1026,7 +1062,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
 
     TArray<TPair<FString, int>> Slot2;
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 9.00) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 13.00) || (std::floor(VersionInfo.FortniteVersion) == 14) || (VersionInfo.FortniteVersion >= 16.00 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 9.00) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 13.00) || (std::floor(VersionInfo.FortniteVersion) == 14) || (VersionInfo.FortniteVersion >= 16.00 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_Standard_Athena_C_Ore_T03.WID_Shotgun_Standard_Athena_C_Ore_T03"), 1));
         Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_Standard_Athena_UC_Ore_T03.WID_Shotgun_Standard_Athena_UC_Ore_T03"), 1));
@@ -1038,7 +1074,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_Standard_Athena_SR_Ore_T03.WID_Shotgun_Standard_Athena_SR_Ore_T03"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 14.00) || (std::floor(VersionInfo.FortniteVersion) == 15) || (VersionInfo.FortniteVersion >= 16.30 && VersionInfo.FortniteVersion < 18.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 14.00) || (std::floor(VersionInfo.FortniteVersion) == 15) || (VersionInfo.FortniteVersion >= 16.30 && VersionInfo.FortniteVersion < 18.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_SemiAuto_Athena_R_Ore_T03.WID_Shotgun_SemiAuto_Athena_R_Ore_T03"), 1));
         Slot2.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Shotgun_SemiAuto_Athena_VR_Ore_T03.WID_Shotgun_SemiAuto_Athena_VR_Ore_T03"), 1));
@@ -1232,18 +1268,18 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     // Slot 3 (Precision / Flex Weapons)
     TArray<TPair<FString, int>> Slot3;
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.30) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.30) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00))
     {
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_R_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_R_Ore_T03"), 1));
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_VR_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_VR_Ore_T03"), 1));
 
-        if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 5.40) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00))
+        if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 5.40) || (VersionInfo.FortniteVersion >= 9.30 && VersionInfo.FortniteVersion < 12.00) || (VersionInfo.FortniteVersion >= 13.00 && VersionInfo.FortniteVersion < 16.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 17.40) || (VersionInfo.FortniteVersion == 17.50) || (VersionInfo.FortniteVersion == 27.00))
         {
             Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_BoltAction_Scope_Athena_SR_Ore_T03.WID_Sniper_BoltAction_Scope_Athena_SR_Ore_T03"), 1));
         }
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 6.21) || (VersionInfo.FortniteVersion >= 9.10 && VersionInfo.FortniteVersion < 10.00) || (VersionInfo.FortniteVersion == 27.00))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 6.21) || (VersionInfo.FortniteVersion >= 9.10 && VersionInfo.FortniteVersion < 10.00) || (VersionInfo.FortniteVersion == 27.00))
     {
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_Standard_Scope_Athena_VR_Ore_T03.WID_Sniper_Standard_Scope_Athena_VR_Ore_T03"), 1));
         Slot3.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Sniper_Standard_Scope_Athena_SR_Ore_T03.WID_Sniper_Standard_Scope_Athena_SR_Ore_T03"), 1));
@@ -1432,17 +1468,17 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     // Slot 4 (Heals)
     TArray<TPair<FString, int>> Slot4;
 
-    if (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 28.00)
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 28.00))
     {
         Slot4.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/Medkit/Athena_Medkit.Athena_Medkit"), 3));
     }
 
-    if (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 28.00)
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 28.00))
     {
         Slot4.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/Shields/Athena_Shields.Athena_Shields"), 3));
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.80 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion == 23.30) || (VersionInfo.FortniteVersion >= 24.00 && VersionInfo.FortniteVersion < 27.00))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.80 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion == 23.30) || (VersionInfo.FortniteVersion >= 24.00 && VersionInfo.FortniteVersion < 27.00))
     {
         Slot4.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/PurpleStuff/Athena_PurpleStuff.Athena_PurpleStuff"), 2));
     }
@@ -1537,7 +1573,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     // Utility pool (slot 4 in Chapter 5, slot 5 in earlier seasons).
     TArray<TPair<FString, int>> Slot5;
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 11.10) || (VersionInfo.FortniteVersion >= 11.11 && VersionInfo.FortniteVersion < 12.00))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 11.10) || (VersionInfo.FortniteVersion >= 11.11 && VersionInfo.FortniteVersion < 12.00))
     {
         if (VersionInfo.FortniteVersion < 5.40 || VersionInfo.FortniteVersion >= 11.00)
         {
@@ -1550,7 +1586,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         }
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 11.10) || (VersionInfo.FortniteVersion >= 11.11 && VersionInfo.FortniteVersion < 14.40) || (VersionInfo.FortniteVersion >= 14.50 && VersionInfo.FortniteVersion < 18.21) || (VersionInfo.FortniteVersion >= 18.30 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 23) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 11.10) || (VersionInfo.FortniteVersion >= 11.11 && VersionInfo.FortniteVersion < 14.40) || (VersionInfo.FortniteVersion >= 14.50 && VersionInfo.FortniteVersion < 18.21) || (VersionInfo.FortniteVersion >= 18.30 && VersionInfo.FortniteVersion < 19.00) || (std::floor(VersionInfo.FortniteVersion) == 23) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/WID_Launcher_Rocket_Athena_VR_Ore_T03.WID_Launcher_Rocket_Athena_VR_Ore_T03"), 1));
 
@@ -1579,7 +1615,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         }
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion >= 19.10 && VersionInfo.FortniteVersion < 20.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion >= 19.10 && VersionInfo.FortniteVersion < 20.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         if (VersionInfo.FortniteVersion < 19.10 || (std::floor(VersionInfo.FortniteVersion) == 27))
         {
@@ -1604,7 +1640,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Weapons/Seasonal/WID_Launcher_Egg_Athena_SR_Ore_T03.WID_Launcher_Egg_Athena_SR_Ore_T03"), 1));
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.40) || (VersionInfo.FortniteVersion >= 9.00 && VersionInfo.FortniteVersion < 26.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 7.40) || (VersionInfo.FortniteVersion >= 9.00 && VersionInfo.FortniteVersion < 26.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/Grenade/Athena_Grenade.Athena_Grenade"), 6));
     }
@@ -2005,7 +2041,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
     // Slot 6 (Traps)
     TArray<TPair<FString, int>> Traps;
 
-    if ((VersionInfo.FortniteVersion >= 1.9 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion >= 11.50 && VersionInfo.FortniteVersion < 14.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 21.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.9 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion >= 11.50 && VersionInfo.FortniteVersion < 14.00) || (VersionInfo.FortniteVersion >= 17.00 && VersionInfo.FortniteVersion < 21.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Traps.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Traps/TID_Floor_Player_Launch_Pad_Athena.TID_Floor_Player_Launch_Pad_Athena"), 2));
     }
@@ -2015,7 +2051,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Traps.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Traps/TID_Context_BouncePad_Athena.TID_Context_BouncePad_Athena"), 3));
     }
 
-    if ((VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 12.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
+    if (bSeasonOneDoubleDigitPatch || (VersionInfo.FortniteVersion >= 1.6 && VersionInfo.FortniteVersion < 12.00) || (std::floor(VersionInfo.FortniteVersion) == 27))
     {
         Traps.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Traps/TID_ContextTrap_Athena.TID_ContextTrap_Athena"), 2));
     }
@@ -2419,6 +2455,7 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
         return;
 
     TArray<TArray<TPair<FString, int>>> Slots;
+    bool bUsingVersionizedLoadout = false;
 
     if (IsOneShot())
     {
@@ -2431,10 +2468,31 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
     else if (FConfiguration::bUseVersionizedLoadout)
     {
         Slots = LateGame::GetVersionizedLoadout();
+        bUsingVersionizedLoadout = true;
     }
     else
     {
         Slots = LateGame::GetLoadout();
+    }
+
+    // Never erase the current gameplay inventory for a versionized roll that
+    // cannot produce even one loadable primary item. This also protects future
+    // builds whose content paths have not yet been added to the version table.
+    if (bUsingVersionizedLoadout &&
+        !HasResolvableLateGamePrimaryItem(Slots))
+    {
+        SDK::DbgLog(
+            "[LateGame] no resolvable versionized primary item on FN %.2f; trying compatibility loadout\n",
+            VersionInfo.FortniteVersion);
+        Slots = LateGame::GetLoadout();
+
+        if (!HasResolvableLateGamePrimaryItem(Slots))
+        {
+            SDK::DbgLog(
+                "[LateGame] compatibility loadout is also empty on FN %.2f; preserving inventory\n",
+                VersionInfo.FortniteVersion);
+            return;
+        }
     }
 
     // A late-game loadout is a replacement, not an additive grant. The world

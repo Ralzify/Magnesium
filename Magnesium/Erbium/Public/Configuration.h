@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../SDK/Engine.h"
+#include <atomic>
 
 struct FConfiguration
 {
@@ -9,11 +10,16 @@ struct FConfiguration
         return std::floor(VersionInfo.FortniteVersion) == 27;
     }
 
-    static inline auto bSnowMap = false;
+    static inline std::atomic_bool bSnowMap{ false };
 
-    static inline auto bReadyToStart = false;
-    static inline auto MaxTickRate = 30.f;
-    static inline auto Port = 7777;
+    static inline std::atomic_bool bReadyToStart{ false };
+    static inline std::atomic<float> MaxTickRate{ 30.f };
+    static inline std::atomic_int Port{ 7777 };
+    static inline std::atomic_bool bAutoHost{ false };
+    static inline constexpr int DefaultAutoHostDelaySeconds = 30;
+    static inline std::atomic_int AutoHostDelaySeconds{
+        DefaultAutoHostDelaySeconds
+    };
     static inline constexpr auto bGUI = true;
     static inline auto bUseSplashAnim = true;
     static inline auto bUseDarkMode = false;
@@ -41,102 +47,104 @@ struct FConfiguration
 
     static inline auto CreativePlot = L"/Game/Playgrounds/Items/Plots/Temperate_Medium.Temperate_Medium";
 
-    static inline auto bIsCustomMap = false;
-    static inline auto AutoEndGame = false;
+    static inline std::atomic_bool bIsCustomMap{ false };
+    static inline std::atomic_bool AutoEndGame{ false };
     static inline auto CustomMap = L"";
 
-    static inline auto bAutoStartEvent = false;
-    static inline auto EventStartTime = 120.f;
-    static inline auto EventStartBaseTime = 0.f;
-    static inline auto bEventStarted = false;
+    static inline std::atomic_bool bAutoStartEvent{ false };
+    static inline std::atomic<float> EventStartTime{ 120.f };
+    static inline std::atomic<float> EventStartBaseTime{ 0.f };
+    static inline std::atomic_bool bEventStarted{ false };
 
-    static inline auto bAutoDump = true;
+    static inline std::atomic_bool bAutoDump{ true };
 
     static inline std::string BotName = "Magnesium Bot ";
-    static inline auto UseCustomBotNames = false;
-    static inline auto BotHealth = 21;
-    static inline auto BotShield = 21;
-    static inline auto bHasPickaxe = true;
+    static inline std::atomic_bool UseCustomBotNames{ false };
+    static inline std::atomic_int BotHealth{ 21 };
+    static inline std::atomic_int BotShield{ 21 };
+    static inline std::atomic_bool bHasPickaxe{ true };
 
-    static inline auto bLateGame = true;
-    static inline auto LateGameZone = 4; // default starting zone; Season 27 selects its version-specific phase in the GUI
-    static inline auto bLateGameLongZone = false; // zone doesnt close for a long time
+    static inline std::atomic_bool bLateGame{ true };
+    static inline std::atomic_int LateGameZone{ 4 }; // default starting zone; Season 27 selects its version-specific phase in the GUI
+    static inline std::atomic_bool bLateGameLongZone{ false }; // zone doesnt close for a long time
 
-    static inline auto bCustomSafeZone = false;
+    static inline std::atomic_bool bCustomSafeZone{ false };
     static inline auto CustomSafeZoneCenter = FVector(0.f, 0.f, 0.f);
-    static inline auto CustomSafeZoneRadius = 100000.f;
+    static inline std::atomic<float> CustomSafeZoneRadius{ 100000.f };
 
-    static inline auto bGliderRedeploy = false;
-    static inline auto bEnableCheats = true;
-	static inline auto bMovingBus = true;
-	static inline auto BusStartDelay = 90.f;
+    static inline std::atomic_bool bGliderRedeploy{ false };
+    static inline std::atomic_bool bEnableCheats{ true };
+	static inline std::atomic_bool bMovingBus{ true };
+	static inline std::atomic<float> BusStartDelay{ 90.f };
 
-    static inline auto HasCustomRespawnPoint = false;
+    static inline std::atomic_bool HasCustomRespawnPoint{ false };
 	static inline auto CustomRespawnPoint = FVector(0.f, 0.f, 0.f);
 
-    static inline auto bRideableProjectiles = false;
+    static inline std::atomic_bool bRideableProjectiles{ false };
 
-    static inline auto bSiphon = false;
-    static inline auto SiphonAnimType = 0;
-    static inline auto SiphonAmount = 50;
+    static inline std::atomic_bool bSiphon{ false };
+    static inline std::atomic_int SiphonAnimType{ 0 };
+    static inline std::atomic_int SiphonAmount{ 50 };
 
-    static inline auto bEnableTrickshotTab = false;
-    static inline auto bUseWinLines = true;
-    static inline auto RandomizeArenaPoints = false;
-    static inline auto RandomizeKills = false;
-    static inline auto RandomizeLevels = false;
-    static inline auto bEnableDBNO = true;
-    static inline auto bInfiniteRender = false;
-    static inline auto bFModCannon = false;
-	static inline auto CannonLaunchMultiplier = 1.f;
-    static inline auto bCrownSlomo = true;
-    static inline auto bDisableJumpFatigue = false;
-    static inline auto bCancelVelocityOnWin = false;
-    static inline auto bAutoPauseTODM = false;
-    static inline auto TODMTime = 7;
+    static inline std::atomic_bool bEnableTrickshotTab{ false };
+    static inline std::atomic_bool bUseWinLines{ true };
+    static inline std::atomic_bool RandomizeArenaPoints{ false };
+    static inline std::atomic_bool RandomizeKills{ false };
+    static inline std::atomic_bool RandomizeLevels{ false };
+    static inline std::atomic_bool bEnableDBNO{ true };
+    static inline std::atomic_bool bInfiniteRender{ false };
+    static inline std::atomic_bool bFModCannon{ false };
+	static inline std::atomic<float> CannonLaunchMultiplier{ 1.f };
+    static inline std::atomic_bool bCrownSlomo{ true };
+    static inline std::atomic_bool bDisableJumpFatigue{ false };
+    static inline std::atomic_bool bCancelVelocityOnWin{ false };
+    static inline std::atomic_bool bDisableSupplyDrops{ false };
+    static inline std::atomic_bool bAutoPauseTODM{ false };
+    static inline std::atomic<float> TODMTime{ 7.f };
 
-    static inline auto bInfiniteMats = true;
-    static inline auto bInfiniteAmmo = true;
+    static inline std::atomic_bool bInfiniteMats{ true };
+    static inline std::atomic_bool bInfiniteAmmo{ true };
 
     static inline void SetLateGameEnabled(bool bEnabled)
     {
-        if (bLateGame && !bEnabled)
-        {
-            bInfiniteMats = false;
-            bInfiniteAmmo = false;
-        }
-
         bLateGame = bEnabled;
     }
 
-    static inline auto bUseVersionizedLoadout = true;
-    static inline auto bUseCustomLoadout = false;
+    static inline std::atomic_bool bUseVersionizedLoadout{ true };
+    static inline std::atomic_bool bUseCustomLoadout{ false };
     static inline FString Primary;
     static inline FString Secondary;
     static inline FString Tertiary;
     static inline FString Quaternary;
     static inline FString Quinary;
     static inline FString Traps;
-    static inline auto PrimaryAmount = 1;
-    static inline auto SecondaryAmount = 1;
-    static inline auto TertiaryAmount = 1;
-    static inline auto QuaternaryAmount = 1;
-    static inline auto QuinaryAmount = 1;
-    static inline auto TrapsAmount = 6;
+    static inline std::atomic_int PrimaryAmount{ 1 };
+    static inline std::atomic_int SecondaryAmount{ 1 };
+    static inline std::atomic_int TertiaryAmount{ 1 };
+    static inline std::atomic_int QuaternaryAmount{ 1 };
+    static inline std::atomic_int QuinaryAmount{ 1 };
+    static inline std::atomic_int TrapsAmount{ 6 };
 
-    static inline auto bForceRespawns = false; // build your client with this too!
-    static inline auto bKeepInventory = false;
-	static inline auto bMidZoneRespawning = false;
-    static inline auto bJoinInProgress = false;
-	static inline auto PermanentRespawn = false;
-    static inline auto RespawnTime = 3;
-    static inline auto RespawnHeight = 20000;
+    static inline std::atomic_bool bForceRespawns{ false }; // build your client with this too!
+    static inline std::atomic_bool bKeepInventory{ false };
+	static inline std::atomic_bool bMidZoneRespawning{ false };
+    static inline std::atomic_bool bJoinInProgress{ false };
+	static inline std::atomic_bool PermanentRespawn{ false };
+    static inline std::atomic_int RespawnTime{ 3 };
+    static inline std::atomic_int RespawnHeight{ 20000 };
 
-    static inline auto bAutoBusStart = true;
+    static inline std::atomic_bool bAutoBusStart{ true };
+    // Special playlists may keep their authored bus schedule until the user
+    // explicitly changes a bus control. This flag is session-only and makes
+    // that explicit choice authoritative without persisting it across starts.
+    static inline std::atomic_bool bBusSettingsUserOverride{ false };
+    // Written by the GUI and consumed by the authoritative game-thread
+    // policy tick. This keeps Start Bus Early off the render thread.
+    static inline std::atomic_bool bStartBusRequested{ false };
 
-    static inline auto bAutoRestart = false;
+    static inline std::atomic_bool bAutoRestart{ false };
 
-    static inline auto bEnableIris = true;
+    static inline std::atomic_bool bEnableIris{ true };
 
     static inline constexpr auto WebhookURL = "";
 };

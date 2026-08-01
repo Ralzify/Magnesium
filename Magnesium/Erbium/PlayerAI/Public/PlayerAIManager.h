@@ -17,8 +17,9 @@
 #include <vector>
 #include <memory>
 
-// Shared per-tick world view for all AI (refreshed on a slow cadence so ~99
-// AI do not rescan the world every frame).
+// Shared per-tick world view for all AI. Loot actors are discovered in small
+// object-array slices and published after a complete pass, so ~99 AI never
+// trigger a synchronous world scan.
 struct FPlayerAIWorldSnapshot
 {
     AFortGameMode* GameMode = nullptr;
@@ -31,7 +32,7 @@ struct FPlayerAIWorldSnapshot
     FVector SafeZoneCenter{};
     float SafeZoneRadius = 0.f;
 
-    // Loot actors (refreshed every PlayerAIConfig::WorldSnapshotInterval).
+    // Loot actors (incrementally refreshed on a slow cadence).
     std::vector<ABuildingContainer*> Containers;
     std::vector<AFortPickupAthena*> Pickups;
     float LastLootScanTime = -1000.f;
@@ -66,6 +67,29 @@ public:
     static int GetEliminatedCount();
     static bool IsPlayerAI(AFortPlayerControllerAthena* PC);
     static PlayerAIController* FindByController(AFortPlayerControllerAthena* PC);
+
+    // Called after the native pawn-death callback. Marks the managed entity
+    // terminal before a playlist/global respawn policy can turn a replacement
+    // pawn into an untracked, invulnerable roster ghost. Idempotent.
+    static bool HandleControllerDeath(
+        AFortPlayerControllerAthena* PC,
+        AFortPlayerPawnAthena* EliminatedPawn);
+
+    // Shared, bounded missing-pawn recovery gate used by manager and landing
+    // behavior. Successful native possession automatically resets the same
+    // controller fields on its next update.
+    static bool TryBeginPawnRecovery(PlayerAIController& AI, float Now);
+    static void FinishPawnRecovery(PlayerAIController& AI, bool bSucceeded);
+
+    // Caps real bus exits/airborne pawn creation across a full lobby. The
+    // budget reopens once per manager tick.
+    static bool TryBeginTransportJump();
+
+    // Cached world actors are raw engine pointers. Revalidate them before
+    // behavior code dereferences a cache entry that may have been destroyed.
+    static bool IsLiveWorldActor(
+        const AActor* Actor,
+        const UClass* ExpectedClass);
 
     static FPlayerAIWorldSnapshot& GetWorld() { return World; }
     static std::vector<std::unique_ptr<PlayerAIController>>& GetControllers() { return Controllers; }

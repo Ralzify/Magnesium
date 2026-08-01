@@ -2,22 +2,1437 @@
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/GUI.h"
+#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
+#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
 
 uint64_t SetGamePhase_ = 0;
+
+bool AFortSafeZoneIndicator::TrySetSafeZoneRadiusAndCenter(
+	float InRadius, const FVector& InLocation) const
+{
+	auto Function = GetFunction("SetSafeZoneRadiusAndCenter");
+	if (!Function || !std::isfinite(InRadius) || InRadius < 0.f)
+		return false;
+
+	const auto Parameters = Function->GetParamsNamed();
+	if (Parameters.Size == 0 || Parameters.Size > 0x100)
+		return false;
+
+	constexpr uint64 CPF_Parm = 0x0000000000000080;
+	constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+	uint32 RadiusOffset = UINT32_MAX;
+	uint32 LocationOffset = UINT32_MAX;
+	const uint32 LocationSize = (uint32)FVector::Size();
+	for (const auto& Parameter : Parameters.NameOffsetMap)
+	{
+		if (!(Parameter.PropertyFlags & CPF_Parm) ||
+			(Parameter.PropertyFlags & CPF_ReturnParm))
+		{
+			continue;
+		}
+
+		uint32 ExpectedSize = 0;
+		uint32* DestinationOffset = nullptr;
+		if (Parameter.Name == "InRadius")
+		{
+			ExpectedSize = sizeof(float);
+			DestinationOffset = &RadiusOffset;
+		}
+		else if (Parameter.Name == "InLocation")
+		{
+			ExpectedSize = LocationSize;
+			DestinationOffset = &LocationOffset;
+		}
+		else
+		{
+			return false;
+		}
+
+		if (*DestinationOffset != UINT32_MAX ||
+			Parameter.ElementSize != ExpectedSize ||
+			Parameter.Offset > Parameters.Size ||
+			ExpectedSize > Parameters.Size - Parameter.Offset)
+		{
+			return false;
+		}
+		*DestinationOffset = Parameter.Offset;
+	}
+
+	if (RadiusOffset == UINT32_MAX ||
+		LocationOffset == UINT32_MAX)
+	{
+		return false;
+	}
+
+	void* Memory = FMemory::Malloc(Parameters.Size);
+	if (!Memory)
+		return false;
+	memset(Memory, 0, Parameters.Size);
+	memcpy((PBYTE)Memory + RadiusOffset,
+		&InRadius, sizeof(InRadius));
+	memcpy((PBYTE)Memory + LocationOffset,
+		&InLocation, LocationSize);
+	ProcessEvent(Function, Memory);
+	FMemory::Free(Memory);
+	return true;
+}
+
+namespace
+{
+	struct FSafeZoneFloatRestore
+	{
+		UObject* Owner = nullptr;
+		const char* PropertyName = nullptr;
+		const wchar_t* ReplicatedPropertyName = nullptr;
+		float Value = 0.f;
+		bool bHasValue = false;
+	};
+
+	struct FSafeZonePauseState
+	{
+		UWorld* World = nullptr;
+		AFortGameStateAthena* GameState = nullptr;
+		AFortSafeZoneIndicator* Indicator = nullptr;
+		UObject* SafeZonesStartOwner = nullptr;
+		bool bHasRequest = false;
+		bool bRequestedPaused = false;
+		bool bHasStartOffset = false;
+		bool bHasFinishOffset = false;
+		bool bHasSafeZonesStartOffset = false;
+		float StartOffset = 0.f;
+		float FinishOffset = 0.f;
+		float SafeZonesStartOffset = 0.f;
+		float PauseWorldTime = 0.f;
+		bool bPhasePauseGateApplied = false;
+		bool bWallPauseGateApplied = false;
+		bool bUsingLegacyGeometryFallback = false;
+		bool bLegacyNativeSetterApplied = false;
+		bool bHasFrozenCenter = false;
+		bool bHasFrozenRadius = false;
+		FVector FrozenCenter{};
+		float FrozenRadius = 0.f;
+		bool bHadLastCenter = false;
+		bool bHadPreviousCenter = false;
+		bool bHadNextCenter = false;
+		bool bHadLastRadius = false;
+		bool bHadPreviousRadius = false;
+		bool bHadNextRadius = false;
+		FVector SavedLastCenter{};
+		FVector SavedPreviousCenter{};
+		FVector SavedNextCenter{};
+		float SavedLastRadius = 0.f;
+		float SavedPreviousRadius = 0.f;
+		float SavedNextRadius = 0.f;
+		std::array<FSafeZoneFloatRestore, 16>
+			FloatRestores{};
+		int32 FloatRestoreCount = 0;
+		bool bLoggedWallPause = false;
+		bool bLoggedBackstop = false;
+	};
+
+	FSafeZonePauseState GSafeZonePauseState{};
+	std::atomic<int32> GSafeZonePauseRequest{ -1 };
+	std::atomic_bool GSafeZonePauseSnapshot{ false };
+
+	void ResetSafeZonePauseStateForWorld(UWorld* World)
+	{
+		auto GameState = World
+			? (AFortGameStateAthena*)World->GameState
+			: nullptr;
+		if (GSafeZonePauseState.World == World &&
+			GSafeZonePauseState.GameState == GameState)
+		{
+			return;
+		}
+
+		GSafeZonePauseState = {};
+		GSafeZonePauseState.World = World;
+		GSafeZonePauseState.GameState = GameState;
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bPausedZone = false;
+		GSafeZonePauseSnapshot.store(
+			false, std::memory_order_release);
+	}
+
+	bool TryReadSafeZonePauseFlag(
+		UObject* Object, const char* PropertyName, bool& OutValue)
+	{
+		if (!Object)
+			return false;
+
+		auto Property = Object->GetProperty(PropertyName, 0x20000);
+		if (!Property)
+			return false;
+
+		const uint32 Offset = SDK::DecryptPropOffset(
+			GetFromOffset<uint32>(
+				Property, Offsets::Offset_Internal));
+		if (Offset == UINT32_MAX ||
+			Offset >= 0x10000)
+		{
+			return false;
+		}
+		auto Address = (PBYTE)Object + Offset;
+		if (!SDK::MemReadable(Address, sizeof(uint8_t)))
+			return false;
+
+		const uint8_t Mask = Property->GetFieldMask();
+		const uint8_t Byte = *Address;
+		OutValue = Mask ? (Byte & Mask) != 0 : Byte != 0;
+		return true;
+	}
+
+	bool TryWriteSafeZonePauseFlag(
+		UObject* Object,
+		const char* PropertyName,
+		bool Value,
+		bool* OutChanged = nullptr)
+	{
+		if (OutChanged)
+			*OutChanged = false;
+		if (!Object)
+			return false;
+
+		auto Property = Object->GetProperty(PropertyName, 0x20000);
+		if (!Property)
+			return false;
+
+		const uint32 Offset = SDK::DecryptPropOffset(
+			GetFromOffset<uint32>(
+				Property, Offsets::Offset_Internal));
+		if (Offset == UINT32_MAX ||
+			Offset >= 0x10000)
+		{
+			return false;
+		}
+		auto Address = (PBYTE)Object + Offset;
+		if (!SDK::MemReadable(Address, sizeof(uint8_t)))
+			return false;
+
+		const uint8_t Mask = Property->GetFieldMask();
+		const uint8_t PreviousByte = *Address;
+		if (Mask)
+		{
+			if (Value)
+				*Address |= Mask;
+			else
+				*Address &= ~Mask;
+		}
+		else
+		{
+			*Address = Value ? 1 : 0;
+		}
+
+		const bool bChanged = PreviousByte != *Address;
+		if (OutChanged)
+			*OutChanged = bChanged;
+		return true;
+	}
+
+	bool TryReadSafeZoneFloat(
+		UObject* Object,
+		const char* PropertyName,
+		float& OutValue)
+	{
+		if (!Object || !PropertyName)
+			return false;
+
+		auto Property = Object->GetProperty(
+			PropertyName, GUESS_PROP_FLAGS(float));
+		if (!Property)
+			return false;
+
+		const uint32 Offset = SDK::DecryptPropOffset(
+			GetFromOffset<uint32>(
+				Property, Offsets::Offset_Internal));
+		if (Offset == UINT32_MAX || Offset >= 0x10000)
+			return false;
+
+		auto Address = (const float*)((const PBYTE)Object + Offset);
+		if (!SDK::MemReadable(Address, sizeof(float)))
+			return false;
+
+		OutValue = *Address;
+		return std::isfinite(OutValue);
+	}
+
+	bool TryWriteSafeZoneFloat(
+		UObject* Object,
+		const char* PropertyName,
+		float Value,
+		bool* OutChanged = nullptr)
+	{
+		if (OutChanged)
+			*OutChanged = false;
+		if (!Object || !PropertyName || !std::isfinite(Value))
+			return false;
+
+		auto Property = Object->GetProperty(
+			PropertyName, GUESS_PROP_FLAGS(float));
+		if (!Property)
+			return false;
+
+		const uint32 Offset = SDK::DecryptPropOffset(
+			GetFromOffset<uint32>(
+				Property, Offsets::Offset_Internal));
+		if (Offset == UINT32_MAX || Offset >= 0x10000)
+			return false;
+
+		auto Address = (float*)((PBYTE)Object + Offset);
+		if (!SDK::MemReadable(Address, sizeof(float)))
+			return false;
+
+		const bool bChanged = *Address != Value;
+		*Address = Value;
+		if (OutChanged)
+			*OutChanged = bChanged;
+		return true;
+	}
+
+	bool IsFiniteSafeZoneVector(const FVector& Value)
+	{
+		return std::isfinite(Value.X) &&
+			std::isfinite(Value.Y) &&
+			std::isfinite(Value.Z);
+	}
+
+	bool IsLiveSafeZoneObject(const UObject* Object)
+	{
+		if (!Object ||
+			!SDK::MemReadable(Object, sizeof(UObject)))
+		{
+			return false;
+		}
+
+		const int32 ObjectIndex = Object->Index;
+		if (ObjectIndex < 0 ||
+			ObjectIndex >= TUObjectArray::Num())
+		{
+			return false;
+		}
+
+		auto Item =
+			TUObjectArray::GetItemByIndex(ObjectIndex);
+		const int32 InvalidObjectFlags =
+			Offsets::bEncryptedObjects
+				? 0x10200000
+				: 0x20;
+		return Item &&
+			Item->GetObject() == Object &&
+			!(Item->GetFlags() & InvalidObjectFlags) &&
+			Object->Class;
+	}
+
+	bool IsOwnedBySafeZoneGameState(
+		const UObject* Object,
+		const AFortGameStateAthena* GameState)
+	{
+		const UObject* Current = Object;
+		for (int32 Depth = 0;
+			Current && Depth < 16;
+			Depth++)
+		{
+			if (Current == GameState)
+				return true;
+			if (!IsLiveSafeZoneObject(Current))
+				return false;
+			Current = Current->Outer;
+		}
+		return false;
+	}
+
+	UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+		GetCurrentSafeZonePhaseLogic(UWorld* World)
+	{
+		if (!World ||
+			VersionInfo.FortniteVersion < 25.20)
+		{
+			return nullptr;
+		}
+
+		auto Candidate =
+			VersionInfo.FortniteVersion >= 32.00
+			? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+				GetFixed()
+			: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+				Get(World);
+		auto GameState =
+			(AFortGameStateAthena*)World->GameState;
+		return IsLiveSafeZoneObject(Candidate) &&
+			IsOwnedBySafeZoneGameState(
+				Candidate, GameState)
+			? Candidate
+			: nullptr;
+	}
+
+	AFortSafeZoneIndicator* GetCurrentSafeZoneIndicator(
+		UWorld* World, AFortGameMode* GameMode)
+	{
+		// Prefer the newest authoritative owner first. Superseded indicators can
+		// remain live for a short time during a phase-owner handoff; choosing the
+		// GameMode pointer first would keep pausing the old wall while the new one
+		// advanced (and then appeared to teleport at the end of its close).
+		auto PhaseLogic =
+			GetCurrentSafeZonePhaseLogic(World);
+		if (PhaseLogic &&
+			PhaseLogic->HasSafeZoneIndicator() &&
+			IsLiveSafeZoneObject(
+				PhaseLogic->SafeZoneIndicator))
+		{
+			return PhaseLogic->SafeZoneIndicator;
+		}
+
+		auto GameState = World
+			? (AFortGameStateAthena*)World->GameState
+			: nullptr;
+		if (GameState && GameState->HasSafeZoneIndicator() &&
+			IsLiveSafeZoneObject(GameState->SafeZoneIndicator))
+		{
+			return (AFortSafeZoneIndicator*)GameState->SafeZoneIndicator;
+		}
+
+		if (GameMode && GameMode->HasSafeZoneIndicator() &&
+			IsLiveSafeZoneObject(GameMode->SafeZoneIndicator))
+		{
+			return GameMode->SafeZoneIndicator;
+		}
+
+		return nullptr;
+	}
+
+	void MarkSafeZoneIndicatorDirty(
+		AFortSafeZoneIndicator* Indicator,
+		const wchar_t* PropertyName)
+	{
+		if (Indicator && PropertyName)
+		{
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					Indicator, PropertyName);
+		}
+	}
+
+	void RememberAndWriteSafeZoneFloat(
+		UObject* Owner,
+		const char* PropertyName,
+		const wchar_t* ReplicatedPropertyName,
+		float Value)
+	{
+		if (!Owner || !PropertyName || !std::isfinite(Value))
+			return;
+
+		auto& State = GSafeZonePauseState;
+		FSafeZoneFloatRestore* Restore = nullptr;
+		for (int32 Index = 0;
+			Index < State.FloatRestoreCount;
+			Index++)
+		{
+			auto& Existing = State.FloatRestores[Index];
+			if (Existing.Owner == Owner &&
+				Existing.PropertyName &&
+				strcmp(Existing.PropertyName,
+					PropertyName) == 0)
+			{
+				Restore = &Existing;
+				break;
+			}
+		}
+
+		float PreviousValue = 0.f;
+		if (!Restore &&
+			State.FloatRestoreCount <
+				(int32)State.FloatRestores.size() &&
+			TryReadSafeZoneFloat(
+				Owner, PropertyName, PreviousValue))
+		{
+			Restore = &State.FloatRestores[
+				State.FloatRestoreCount++];
+			Restore->Owner = Owner;
+			Restore->PropertyName = PropertyName;
+			Restore->ReplicatedPropertyName =
+				ReplicatedPropertyName;
+			Restore->Value = PreviousValue;
+			Restore->bHasValue = true;
+		}
+		// Never overwrite bookkeeping that we cannot put back exactly. This also
+		// protects an unexpected schema/type mismatch and the fixed snapshot
+		// capacity from leaving a permanent pause value behind.
+		if (!Restore)
+			return;
+
+		bool bChanged = false;
+		if (TryWriteSafeZoneFloat(
+			Owner, PropertyName, Value, &bChanged) &&
+			bChanged && ReplicatedPropertyName)
+		{
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					Owner,
+					ReplicatedPropertyName);
+		}
+	}
+
+	void ApplySafeZonePauseBookkeeping(
+		AFortGameMode* GameMode,
+		AFortGameStateAthena* GameState,
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+			PhaseLogic,
+		AFortSafeZoneIndicator* Indicator)
+	{
+		auto& State = GSafeZonePauseState;
+		// Match native PauseSafeZone: this field stores time to the end of the
+		// phase, while SafeZonePauseTime and the captured start offset preserve
+		// the visible holding countdown separately.
+		const float TimeRemaining =
+			State.bHasFinishOffset
+				? (std::max)(0.f, State.FinishOffset)
+				: 0.f;
+
+		RememberAndWriteSafeZoneFloat(
+			GameMode,
+			"TimeRemainingWhenPhasePaused",
+			L"TimeRemainingWhenPhasePaused",
+			TimeRemaining);
+		RememberAndWriteSafeZoneFloat(
+			GameState,
+			"TimeRemainingWhenPhasePaused",
+			L"TimeRemainingWhenPhasePaused",
+			TimeRemaining);
+		RememberAndWriteSafeZoneFloat(
+			PhaseLogic,
+			"TimeRemainingWhenPhasePaused",
+			L"TimeRemainingWhenPhasePaused",
+			TimeRemaining);
+		RememberAndWriteSafeZoneFloat(
+			Indicator,
+			"TimeRemainingWhenPhasePaused",
+			L"TimeRemainingWhenPhasePaused",
+			TimeRemaining);
+
+		RememberAndWriteSafeZoneFloat(
+			GameState,
+			"SafeZonePauseTime",
+			L"SafeZonePauseTime",
+			State.PauseWorldTime);
+		RememberAndWriteSafeZoneFloat(
+			PhaseLogic,
+			"SafeZonePauseTime",
+			L"SafeZonePauseTime",
+			State.PauseWorldTime);
+		RememberAndWriteSafeZoneFloat(
+			Indicator,
+			"SafeZonePauseTime",
+			L"SafeZonePauseTime",
+			State.PauseWorldTime);
+
+		if (GameState)
+			GameState->ForceNetUpdate();
+		if (Indicator)
+			Indicator->ForceNetUpdate();
+	}
+
+	void RestoreSafeZonePauseBookkeeping(
+		AFortGameStateAthena* GameState,
+		AFortSafeZoneIndicator* Indicator)
+	{
+		auto& State = GSafeZonePauseState;
+		for (int32 Index = State.FloatRestoreCount - 1;
+			Index >= 0;
+			Index--)
+		{
+			auto& Restore = State.FloatRestores[Index];
+			if (!Restore.bHasValue ||
+				!IsLiveSafeZoneObject(Restore.Owner))
+			{
+				continue;
+			}
+
+			bool bChanged = false;
+			if (TryWriteSafeZoneFloat(
+				Restore.Owner,
+				Restore.PropertyName,
+				Restore.Value,
+				&bChanged) &&
+				bChanged &&
+				Restore.ReplicatedPropertyName)
+			{
+				VersionFeatureAdapter::
+					MarkReplicatedPropertyDirty(
+						Restore.Owner,
+						Restore.ReplicatedPropertyName);
+			}
+		}
+
+		State.FloatRestoreCount = 0;
+		State.FloatRestores = {};
+		if (GameState)
+			GameState->ForceNetUpdate();
+		if (Indicator)
+			Indicator->ForceNetUpdate();
+	}
+
+	void RestoreSafeZonePauseBookkeepingForOwner(
+		UObject* Owner)
+	{
+		if (!Owner)
+			return;
+
+		auto& State = GSafeZonePauseState;
+		int32 WriteIndex = 0;
+		for (int32 ReadIndex = 0;
+			ReadIndex < State.FloatRestoreCount;
+			ReadIndex++)
+		{
+			auto Restore = State.FloatRestores[ReadIndex];
+			if (Restore.Owner != Owner)
+			{
+				State.FloatRestores[WriteIndex++] = Restore;
+				continue;
+			}
+
+			if (Restore.bHasValue &&
+				IsLiveSafeZoneObject(Restore.Owner))
+			{
+				bool bChanged = false;
+				if (TryWriteSafeZoneFloat(
+					Restore.Owner,
+					Restore.PropertyName,
+					Restore.Value,
+					&bChanged) &&
+					bChanged &&
+					Restore.ReplicatedPropertyName)
+				{
+					VersionFeatureAdapter::
+						MarkReplicatedPropertyDirty(
+							Restore.Owner,
+							Restore.ReplicatedPropertyName);
+				}
+			}
+		}
+
+		for (int32 Index = WriteIndex;
+			Index < State.FloatRestoreCount;
+			Index++)
+		{
+			State.FloatRestores[Index] = {};
+		}
+		State.FloatRestoreCount = WriteIndex;
+	}
+
+	void ResetLegacySafeZoneGeometrySnapshot()
+	{
+		auto& State = GSafeZonePauseState;
+		State.bUsingLegacyGeometryFallback = false;
+		State.bLegacyNativeSetterApplied = false;
+		State.bHasFrozenCenter = false;
+		State.bHasFrozenRadius = false;
+		State.bHadLastCenter = false;
+		State.bHadPreviousCenter = false;
+		State.bHadNextCenter = false;
+		State.bHadLastRadius = false;
+		State.bHadPreviousRadius = false;
+		State.bHadNextRadius = false;
+	}
+
+	void CaptureLegacySafeZoneGeometry(
+		AFortSafeZoneIndicator* Indicator)
+	{
+		ResetLegacySafeZoneGeometrySnapshot();
+		if (!Indicator)
+			return;
+
+		auto& State = GSafeZonePauseState;
+		State.bHadLastCenter = Indicator->HasLastCenter();
+		State.bHadPreviousCenter =
+			Indicator->HasPreviousCenter();
+		State.bHadNextCenter = Indicator->HasNextCenter();
+		State.bHadLastRadius = Indicator->HasLastRadius();
+		State.bHadPreviousRadius =
+			Indicator->HasPreviousRadius();
+		State.bHadNextRadius = Indicator->HasNextRadius();
+
+		if (State.bHadLastCenter)
+			State.SavedLastCenter = Indicator->LastCenter;
+		if (State.bHadPreviousCenter)
+			State.SavedPreviousCenter = Indicator->PreviousCenter;
+		if (State.bHadNextCenter)
+			State.SavedNextCenter = Indicator->NextCenter;
+		if (State.bHadLastRadius)
+			State.SavedLastRadius = Indicator->LastRadius;
+		if (State.bHadPreviousRadius)
+			State.SavedPreviousRadius = Indicator->PreviousRadius;
+		if (State.bHadNextRadius)
+			State.SavedNextRadius = Indicator->NextRadius;
+
+		float Alpha = 0.f;
+		const float SegmentDuration =
+			State.FinishOffset - State.StartOffset;
+		if (State.bHasStartOffset &&
+			State.bHasFinishOffset &&
+			std::isfinite(SegmentDuration) &&
+			SegmentDuration > 0.001f)
+		{
+			Alpha = (std::clamp)(
+				-State.StartOffset / SegmentDuration,
+				0.f, 1.f);
+		}
+
+		// Prefer the physical wall's authoritative live state. Endpoint math is
+		// only a last resort because old builds may apply easing or a slightly
+		// different clock when updating the material actor.
+		if (auto GetCenter =
+			Indicator->GetFunction("GetSafeZoneCenter"))
+		{
+			FVector LiveCenter =
+				Indicator->Call<FVector>(GetCenter);
+			if (IsFiniteSafeZoneVector(LiveCenter))
+			{
+				State.FrozenCenter = LiveCenter;
+				State.bHasFrozenCenter = true;
+			}
+		}
+
+		if (!State.bHasFrozenCenter)
+		{
+			FVector ActorCenter =
+				Indicator->K2_GetActorLocation();
+			if (IsFiniteSafeZoneVector(ActorCenter))
+			{
+				State.FrozenCenter = ActorCenter;
+				State.bHasFrozenCenter = true;
+			}
+		}
+
+		const FVector* SourceCenter = nullptr;
+		if (State.bHadLastCenter &&
+			IsFiniteSafeZoneVector(State.SavedLastCenter))
+		{
+			SourceCenter = &State.SavedLastCenter;
+		}
+		else if (State.bHadPreviousCenter &&
+			IsFiniteSafeZoneVector(State.SavedPreviousCenter))
+		{
+			SourceCenter = &State.SavedPreviousCenter;
+		}
+
+		if (!State.bHasFrozenCenter &&
+			SourceCenter && State.bHadNextCenter &&
+			IsFiniteSafeZoneVector(State.SavedNextCenter))
+		{
+			State.FrozenCenter =
+				*SourceCenter +
+				(State.SavedNextCenter - *SourceCenter) * Alpha;
+			State.bHasFrozenCenter =
+				IsFiniteSafeZoneVector(State.FrozenCenter);
+		}
+		const float* SourceRadius = nullptr;
+		if (State.bHadLastRadius &&
+			std::isfinite(State.SavedLastRadius) &&
+			State.SavedLastRadius >= 0.f)
+		{
+			SourceRadius = &State.SavedLastRadius;
+		}
+		else if (State.bHadPreviousRadius &&
+			std::isfinite(State.SavedPreviousRadius) &&
+			State.SavedPreviousRadius >= 0.f)
+		{
+			SourceRadius = &State.SavedPreviousRadius;
+		}
+
+		if (Indicator->HasRadius() &&
+			std::isfinite(Indicator->Radius) &&
+			Indicator->Radius >= 0.f)
+		{
+			State.FrozenRadius = Indicator->Radius;
+			State.bHasFrozenRadius = true;
+		}
+		else if (SourceRadius && State.bHadNextRadius &&
+			std::isfinite(State.SavedNextRadius) &&
+			State.SavedNextRadius >= 0.f)
+		{
+			State.FrozenRadius =
+				*SourceRadius +
+				(State.SavedNextRadius - *SourceRadius) * Alpha;
+			State.bHasFrozenRadius =
+				std::isfinite(State.FrozenRadius) &&
+				State.FrozenRadius >= 0.f;
+		}
+		// A partial snapshot is not an exact pause: a closing radius with a fixed
+		// center (or vice versa) still moves the physical wall. Every supported
+		// legacy schema exposes enough live data for both dimensions, so fail
+		// closed instead of advertising a partially frozen circle.
+		State.bUsingLegacyGeometryFallback =
+			State.bHasFrozenCenter &&
+			State.bHasFrozenRadius;
+	}
+
+	void ApplyLegacySafeZoneGeometryFreeze(
+		AFortSafeZoneIndicator* Indicator)
+	{
+		auto& State = GSafeZonePauseState;
+		if (!Indicator || Indicator != State.Indicator ||
+			!State.bUsingLegacyGeometryFallback)
+		{
+			return;
+		}
+
+		// 2.5-era indicators expose a native setter that updates the physical
+		// wall/material immediately. The 1.x builds do not, so the reflected
+		// endpoint + actor fallback below remains the universal path.
+		if (!State.bLegacyNativeSetterApplied)
+		{
+			State.bLegacyNativeSetterApplied =
+				Indicator->TrySetSafeZoneRadiusAndCenter(
+					State.FrozenRadius,
+					State.FrozenCenter);
+		}
+
+		if (State.bHasFrozenCenter)
+		{
+			if (State.bHadLastCenter)
+			{
+				Indicator->LastCenter = State.FrozenCenter;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"LastCenter");
+			}
+			if (State.bHadPreviousCenter)
+			{
+				Indicator->PreviousCenter = State.FrozenCenter;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"PreviousCenter");
+			}
+			if (State.bHadNextCenter)
+			{
+				Indicator->NextCenter = State.FrozenCenter;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"NextCenter");
+			}
+			Indicator->K2_SetActorLocation(
+				State.FrozenCenter, false, nullptr, true);
+		}
+
+		if (State.bHasFrozenRadius)
+		{
+			if (State.bHadLastRadius)
+			{
+				Indicator->LastRadius = State.FrozenRadius;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"LastRadius");
+			}
+			if (State.bHadPreviousRadius)
+			{
+				Indicator->PreviousRadius = State.FrozenRadius;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"PreviousRadius");
+			}
+			if (State.bHadNextRadius)
+			{
+				Indicator->NextRadius = State.FrozenRadius;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"NextRadius");
+			}
+			if (Indicator->HasRadius())
+				Indicator->Radius = State.FrozenRadius;
+		}
+
+		Indicator->ForceNetUpdate();
+	}
+
+	void PrepareLegacySafeZoneResume(
+		AFortSafeZoneIndicator* Indicator,
+		float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		if (!Indicator || Indicator != State.Indicator ||
+			!State.bUsingLegacyGeometryFallback ||
+			!std::isfinite(TimeSeconds))
+		{
+			return;
+		}
+
+		// Seed the native physical wall at the frozen circle before restoring the
+		// saved preview endpoint. On 2.5-6.x, reflected fields alone do not update
+		// the wall material/collision state immediately.
+		Indicator->TrySetSafeZoneRadiusAndCenter(
+			State.FrozenRadius,
+			State.FrozenCenter);
+
+		if (State.bHasFrozenCenter)
+		{
+			if (State.bHadLastCenter)
+			{
+				Indicator->LastCenter = State.FrozenCenter;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"LastCenter");
+			}
+			if (State.bHadPreviousCenter)
+			{
+				Indicator->PreviousCenter = State.FrozenCenter;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"PreviousCenter");
+			}
+			if (State.bHadNextCenter)
+			{
+				Indicator->NextCenter = State.SavedNextCenter;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"NextCenter");
+			}
+			Indicator->K2_SetActorLocation(
+				State.FrozenCenter, false, nullptr, true);
+		}
+
+		if (State.bHasFrozenRadius)
+		{
+			if (State.bHadLastRadius)
+			{
+				Indicator->LastRadius = State.FrozenRadius;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"LastRadius");
+			}
+			if (State.bHadPreviousRadius)
+			{
+				Indicator->PreviousRadius = State.FrozenRadius;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"PreviousRadius");
+			}
+			if (State.bHadNextRadius)
+			{
+				Indicator->NextRadius = State.SavedNextRadius;
+				MarkSafeZoneIndicatorDirty(
+					Indicator, L"NextRadius");
+			}
+			if (Indicator->HasRadius())
+				Indicator->Radius = State.FrozenRadius;
+		}
+
+		float ResumeStart = TimeSeconds;
+		float ResumeFinish = TimeSeconds + 0.05f;
+		if (State.bHasStartOffset &&
+			State.bHasFinishOffset &&
+			State.StartOffset > 0.f)
+		{
+			ResumeStart = TimeSeconds + State.StartOffset;
+			ResumeFinish = TimeSeconds +
+				(std::max)(State.FinishOffset,
+					State.StartOffset + 0.05f);
+		}
+		else if (State.bHasFinishOffset &&
+			State.FinishOffset > 0.f)
+		{
+			ResumeFinish = TimeSeconds +
+				(std::max)(State.FinishOffset, 0.05f);
+		}
+
+		if (Indicator->HasSafeZoneStartShrinkTime())
+		{
+			Indicator->SafeZoneStartShrinkTime = ResumeStart;
+			MarkSafeZoneIndicatorDirty(
+				Indicator, L"SafeZoneStartShrinkTime");
+		}
+		if (Indicator->HasSafeZoneFinishShrinkTime())
+		{
+			Indicator->SafeZoneFinishShrinkTime = ResumeFinish;
+			MarkSafeZoneIndicatorDirty(
+				Indicator, L"SafeZoneFinishShrinkTime");
+		}
+
+		Indicator->ForceNetUpdate();
+	}
+
+	bool TrySetIndicatorPauseState(
+		AFortSafeZoneIndicator* Indicator,
+		bool bPaused)
+	{
+		if (!IsLiveSafeZoneObject(Indicator))
+			return false;
+
+		bool bTouchedIndicator = false;
+		// Preserve the engine's preview bookkeeping when available, but do not
+		// mistake this for the authoritative BR wall gate: modern indicators
+		// expose a separate replicated bPaused bit.
+		auto Function = Indicator->GetFunction(
+			"SetSafeZonePausedForPreview");
+		if (Function)
+		{
+			struct
+			{
+				uint8 bSetTo = 0;
+				uint8 Padding[7]{};
+			} Params;
+			Params.bSetTo = bPaused ? 1 : 0;
+			Indicator->ProcessEvent(Function, &Params);
+			bTouchedIndicator = true;
+		}
+
+		bool bWallPauseChanged = false;
+		bool bPreviewPauseChanged = false;
+		const bool bWroteWallPause =
+			TryWriteSafeZonePauseFlag(
+				Indicator,
+				"bPaused",
+				bPaused,
+				&bWallPauseChanged);
+		const bool bWrotePreviewPause =
+			TryWriteSafeZonePauseFlag(
+				Indicator,
+				"bPausedForPreview",
+				bPaused,
+				&bPreviewPauseChanged);
+		if (bWallPauseChanged)
+		{
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					Indicator, L"bPaused");
+		}
+		if (bPreviewPauseChanged)
+		{
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					Indicator,
+					L"bPausedForPreview");
+		}
+		if (bTouchedIndicator ||
+			bWroteWallPause ||
+			bWrotePreviewPause)
+		{
+			Indicator->ForceNetUpdate();
+		}
+
+		bool bReadBackPaused = false;
+		return bWroteWallPause &&
+			TryReadSafeZonePauseFlag(
+				Indicator,
+				"bPaused",
+				bReadBackPaused) &&
+			bReadBackPaused == bPaused;
+	}
+
+	bool ApplySafeZoneOwnerPauseFlags(
+		AFortGameMode* GameMode,
+		AFortGameStateAthena* GameState,
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+			PhaseLogic,
+		bool bPaused)
+	{
+		bool bApplied = false;
+		bool bGameStateChanged = false;
+		bool bPhaseLogicChanged = false;
+		bApplied =
+			TryWriteSafeZonePauseFlag(
+				GameMode,
+				"bSafeZonePaused",
+				bPaused) ||
+			bApplied;
+		bApplied =
+			TryWriteSafeZonePauseFlag(
+				GameState,
+				"bSafeZonePaused",
+				bPaused,
+				&bGameStateChanged) ||
+			bApplied;
+		bApplied =
+			TryWriteSafeZonePauseFlag(
+				PhaseLogic,
+				"bSafeZonePaused",
+				bPaused,
+				&bPhaseLogicChanged) ||
+			bApplied;
+		if (bGameStateChanged && GameState)
+		{
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					GameState,
+					L"bSafeZonePaused");
+			GameState->ForceNetUpdate();
+		}
+		if (bPhaseLogicChanged && PhaseLogic)
+		{
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					PhaseLogic,
+					L"bSafeZonePaused");
+			if (GameState)
+				GameState->ForceNetUpdate();
+		}
+		return bApplied;
+	}
+
+	void CaptureSafeZonePauseOffsets(
+		AFortSafeZoneIndicator* Indicator, float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		State.Indicator = Indicator;
+		State.bHasStartOffset = false;
+		State.bHasFinishOffset = false;
+
+		if (!Indicator)
+			return;
+
+		if (Indicator->HasSafeZoneStartShrinkTime())
+		{
+			const float StartTime = Indicator->SafeZoneStartShrinkTime;
+			if (std::isfinite(StartTime) &&
+				StartTime >= 0.f)
+			{
+				State.StartOffset = StartTime - TimeSeconds;
+				State.bHasStartOffset = true;
+			}
+		}
+
+		if (Indicator->HasSafeZoneFinishShrinkTime())
+		{
+			const float FinishTime = Indicator->SafeZoneFinishShrinkTime;
+			if (std::isfinite(FinishTime) &&
+				FinishTime >= 0.f)
+			{
+				State.FinishOffset = FinishTime - TimeSeconds;
+				State.bHasFinishOffset = true;
+			}
+		}
+	}
+
+	void PinSafeZonesStartTime(
+		AFortGameStateAthena* GameState,
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+			PhaseLogic,
+		float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		UObject* Owner = nullptr;
+		float CurrentStartTime = -1.f;
+
+		// Component-driven seasons own this schedule on the component. Legacy
+		// seasons publish it on the GameState instead.
+		if (PhaseLogic &&
+			PhaseLogic->HasSafeZonesStartTime())
+		{
+			Owner = PhaseLogic;
+			CurrentStartTime =
+				PhaseLogic->SafeZonesStartTime;
+		}
+		else if (GameState &&
+			GameState->HasSafeZonesStartTime())
+		{
+			Owner = GameState;
+			CurrentStartTime =
+				GameState->SafeZonesStartTime;
+		}
+
+		const bool bCurrentStartIsUsable =
+			Owner &&
+			std::isfinite(CurrentStartTime) &&
+			CurrentStartTime >= 0.f;
+		// Do not recapture remaining time when ownership migrates from GameState
+		// to the component (or while that component is temporarily unresolved).
+		// The value captured at the pause edge is the countdown the user expects
+		// to resume with.
+		if (Owner && State.SafeZonesStartOwner != Owner)
+		{
+			State.SafeZonesStartOwner = Owner;
+			if (!State.bHasSafeZonesStartOffset &&
+				bCurrentStartIsUsable)
+			{
+				State.bHasSafeZonesStartOffset = true;
+				State.SafeZonesStartOffset =
+					CurrentStartTime - TimeSeconds;
+			}
+		}
+		else if (Owner &&
+			!State.bHasSafeZonesStartOffset &&
+			bCurrentStartIsUsable)
+		{
+			State.bHasSafeZonesStartOffset = true;
+			State.SafeZonesStartOffset =
+				CurrentStartTime - TimeSeconds;
+		}
+
+		if (!Owner || !State.bHasSafeZonesStartOffset)
+			return;
+
+		float PinnedStartTime =
+			TimeSeconds + State.SafeZonesStartOffset;
+		if (Owner == PhaseLogic)
+		{
+			PhaseLogic->SafeZonesStartTime =
+				PinnedStartTime;
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					PhaseLogic,
+					L"SafeZonesStartTime");
+			if (GameState)
+				GameState->ForceNetUpdate();
+		}
+		else if (Owner == GameState)
+		{
+			GameState->SafeZonesStartTime =
+				PinnedStartTime;
+			VersionFeatureAdapter::
+				MarkReplicatedPropertyDirty(
+					GameState,
+					L"SafeZonesStartTime");
+			GameState->ForceNetUpdate();
+		}
+	}
+
+	void RestoreSafeZoneIndicatorPauseOffsets(
+		AFortSafeZoneIndicator* Indicator,
+		float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		if (!std::isfinite(TimeSeconds) ||
+			Indicator != State.Indicator ||
+			!IsLiveSafeZoneObject(Indicator))
+		{
+			return;
+		}
+
+		if (State.bHasStartOffset &&
+			Indicator->HasSafeZoneStartShrinkTime())
+		{
+			Indicator->SafeZoneStartShrinkTime =
+				TimeSeconds + State.StartOffset;
+			MarkSafeZoneIndicatorDirty(
+				Indicator, L"SafeZoneStartShrinkTime");
+		}
+		if (State.bHasFinishOffset &&
+			Indicator->HasSafeZoneFinishShrinkTime())
+		{
+			Indicator->SafeZoneFinishShrinkTime =
+				TimeSeconds + State.FinishOffset;
+			MarkSafeZoneIndicatorDirty(
+				Indicator, L"SafeZoneFinishShrinkTime");
+		}
+		Indicator->ForceNetUpdate();
+	}
+
+	void RestoreSafeZonePauseOffsets(
+		AFortSafeZoneIndicator* Indicator,
+		AFortGameStateAthena* GameState,
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+			PhaseLogic,
+		float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		if (!std::isfinite(TimeSeconds))
+			return;
+
+		RestoreSafeZoneIndicatorPauseOffsets(
+			Indicator, TimeSeconds);
+
+		if (State.bHasSafeZonesStartOffset)
+		{
+			float RestoredStartTime =
+				TimeSeconds +
+				State.SafeZonesStartOffset;
+			if (State.SafeZonesStartOwner ==
+				PhaseLogic)
+			{
+				PhaseLogic->SafeZonesStartTime =
+					RestoredStartTime;
+				VersionFeatureAdapter::
+					MarkReplicatedPropertyDirty(
+						PhaseLogic,
+						L"SafeZonesStartTime");
+				if (GameState)
+					GameState->ForceNetUpdate();
+			}
+			else if (State.SafeZonesStartOwner ==
+				GameState)
+			{
+				GameState->SafeZonesStartTime =
+					RestoredStartTime;
+				VersionFeatureAdapter::
+					MarkReplicatedPropertyDirty(
+						GameState,
+						L"SafeZonesStartTime");
+				GameState->ForceNetUpdate();
+			}
+		}
+
+		if (Indicator)
+			Indicator->ForceNetUpdate();
+	}
+
+	void PinSafeZoneIndicatorDeadlines(
+		AFortSafeZoneIndicator* Indicator,
+		float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		if (!Indicator || Indicator != State.Indicator ||
+			!std::isfinite(TimeSeconds))
+		{
+			return;
+		}
+
+		if (State.bHasStartOffset &&
+			Indicator->HasSafeZoneStartShrinkTime())
+		{
+			Indicator->SafeZoneStartShrinkTime =
+				TimeSeconds + State.StartOffset;
+			MarkSafeZoneIndicatorDirty(
+				Indicator, L"SafeZoneStartShrinkTime");
+		}
+		if (State.bHasFinishOffset &&
+			Indicator->HasSafeZoneFinishShrinkTime())
+		{
+			Indicator->SafeZoneFinishShrinkTime =
+				TimeSeconds + State.FinishOffset;
+			MarkSafeZoneIndicatorDirty(
+				Indicator, L"SafeZoneFinishShrinkTime");
+		}
+
+		Indicator->ForceNetUpdate();
+	}
+
+	void RetirePausedSafeZoneIndicator(
+		AFortSafeZoneIndicator* Indicator,
+		float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		if (!Indicator || Indicator != State.Indicator)
+			return;
+
+		if (IsLiveSafeZoneObject(Indicator))
+		{
+			// Use the same ordering as a normal resume: rebuild the schedule and
+			// legacy target, clear the native gate, then repair anything the preview
+			// helper changed and finally restore that actor's bookkeeping.
+			RestoreSafeZoneIndicatorPauseOffsets(
+				Indicator, TimeSeconds);
+			PrepareLegacySafeZoneResume(
+				Indicator, TimeSeconds);
+			TrySetIndicatorPauseState(
+				Indicator, false);
+			RestoreSafeZoneIndicatorPauseOffsets(
+				Indicator, TimeSeconds);
+			PrepareLegacySafeZoneResume(
+				Indicator, TimeSeconds);
+		}
+		RestoreSafeZonePauseBookkeepingForOwner(
+			Indicator);
+		if (IsLiveSafeZoneObject(Indicator))
+			Indicator->ForceNetUpdate();
+		State.bWallPauseGateApplied = false;
+	}
+
+	void AdoptPausedSafeZoneIndicator(
+		AFortSafeZoneIndicator* Indicator,
+		AFortGameMode* GameMode,
+		AFortGameStateAthena* GameState,
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+			PhaseLogic,
+		float TimeSeconds)
+	{
+		auto& State = GSafeZonePauseState;
+		State.Indicator = Indicator;
+		State.bHasStartOffset = false;
+		State.bHasFinishOffset = false;
+		ResetLegacySafeZoneGeometrySnapshot();
+
+		if (std::isfinite(TimeSeconds))
+		{
+			CaptureSafeZonePauseOffsets(
+				Indicator, TimeSeconds);
+			PinSafeZonesStartTime(
+				GameState,
+				PhaseLogic,
+				TimeSeconds);
+		}
+
+		ApplySafeZonePauseBookkeeping(
+			GameMode,
+			GameState,
+			PhaseLogic,
+			Indicator);
+		State.bWallPauseGateApplied =
+			Indicator &&
+			TrySetIndicatorPauseState(
+				Indicator, true);
+		if (!State.bWallPauseGateApplied && Indicator)
+		{
+			CaptureLegacySafeZoneGeometry(Indicator);
+			ApplyLegacySafeZoneGeometryFreeze(Indicator);
+			PinSafeZoneIndicatorDeadlines(
+				Indicator, TimeSeconds);
+		}
+	}
+}
 
 UFortGameStateComponent_BattleRoyaleGamePhaseLogic* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed()
 {
 	static UFortGameStateComponent_BattleRoyaleGamePhaseLogic* s_cached = nullptr;
-	if (s_cached)
-		return s_cached;
-	for (int i = 0; i < TUObjectArray::Num(); i++)
+	static TWeakObjectPtr<UWorld> s_scanWorld;
+	static TWeakObjectPtr<AFortGameStateAthena> s_scanGameState;
+	static int32 s_scanCursor = 0;
+	static ULONGLONG s_nextFullScanTimeMs = 0;
+	auto World = UWorld::GetWorld();
+	auto GameState = World
+		? (AFortGameStateAthena*)World->GameState
+		: nullptr;
+	if (s_scanWorld.Get() != World ||
+		s_scanGameState.Get() != GameState)
 	{
-		auto Obj = TUObjectArray::GetObjectByIndex(i);
-		if (Obj && !Obj->IsDefaultObject() && Obj->IsA<UFortGameStateComponent_BattleRoyaleGamePhaseLogic>())
+		s_scanWorld = World
+			? TWeakObjectPtr<UWorld>(World)
+			: TWeakObjectPtr<UWorld>{};
+		s_scanGameState = GameState
+			? TWeakObjectPtr<AFortGameStateAthena>(
+				GameState)
+			: TWeakObjectPtr<
+				AFortGameStateAthena>{};
+		s_scanCursor = 0;
+		s_nextFullScanTimeMs = 0;
+		s_cached = nullptr;
+	}
+	if (IsLiveSafeZoneObject(s_cached) &&
+		IsOwnedBySafeZoneGameState(
+			s_cached, GameState))
+	{
+		return s_cached;
+	}
+	s_cached = nullptr;
+
+	if (!GameState)
+		return nullptr;
+
+	const ULONGLONG CurrentTimeMs =
+		GetTickCount64();
+	if (CurrentTimeMs < s_nextFullScanTimeMs)
+		return nullptr;
+
+	const int32 ObjectCount = TUObjectArray::Num();
+	if (s_scanCursor < 0 ||
+		s_scanCursor >= ObjectCount)
+	{
+		s_scanCursor = 0;
+	}
+	constexpr int32 ScanBudget = 2048;
+	const int32 ScanEnd = (std::min)(
+		s_scanCursor + ScanBudget,
+		ObjectCount);
+	for (int32 Index = s_scanCursor;
+		Index < ScanEnd;
+		++Index)
+	{
+		auto Obj =
+			TUObjectArray::GetObjectByIndex(Index);
+		if (IsLiveSafeZoneObject(Obj) &&
+			!Obj->IsDefaultObject() &&
+			Obj->IsA<
+				UFortGameStateComponent_BattleRoyaleGamePhaseLogic>() &&
+			IsOwnedBySafeZoneGameState(
+				Obj, GameState))
 		{
 			s_cached = (UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)Obj;
 			break;
 		}
+	}
+	s_scanCursor = ScanEnd;
+	if (!s_cached &&
+		s_scanCursor >= ObjectCount)
+	{
+		s_scanCursor = 0;
+		s_nextFullScanTimeMs =
+			CurrentTimeMs + 1000ULL;
 	}
 	return s_cached;
 }
@@ -25,39 +1440,408 @@ UFortGameStateComponent_BattleRoyaleGamePhaseLogic* UFortGameStateComponent_Batt
 bool UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused()
 {
 	auto World = UWorld::GetWorld();
+	ResetSafeZonePauseStateForWorld(World);
+	if (GSafeZonePauseState.bHasRequest)
+	{
+		GSafeZonePauseSnapshot.store(
+			GSafeZonePauseState.bRequestedPaused,
+			std::memory_order_release);
+		return GSafeZonePauseState.bRequestedPaused;
+	}
+
 	auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
-	if (GameMode && GameMode->HasbSafeZonePaused())
+	bool bNativePaused = false;
+	if (TryReadSafeZonePauseFlag(
+		GameMode, "bSafeZonePaused", bNativePaused))
 	{
 		// The native GameMode flag is scoped to the current match. Mirroring it
 		// also prevents the process-static UI flag from leaking across travel.
-		bPausedZone = GameMode->bSafeZonePaused;
-		return GameMode->bSafeZonePaused;
+		bPausedZone = bNativePaused;
+		GSafeZonePauseSnapshot.store(
+			bNativePaused,
+			std::memory_order_release);
+		return bNativePaused;
 	}
 
+	GSafeZonePauseSnapshot.store(
+		bPausedZone,
+		std::memory_order_release);
 	return bPausedZone;
+}
+
+bool UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+	GetSafeZonePausedSnapshot()
+{
+	return GSafeZonePauseSnapshot.load(
+		std::memory_order_acquire);
+}
+
+void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+	RequestSafeZonePaused(bool bPaused)
+{
+	// ImGui runs from the render hook. Only publish intent here; Unreal object
+	// traversal, ProcessEvent, replication and console commands are consumed
+	// by TickSafeZonePause on the game/network thread.
+	GSafeZonePauseRequest.store(
+		bPaused ? 1 : 0,
+		std::memory_order_release);
 }
 
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(bool bPaused)
 {
 	auto World = UWorld::GetWorld();
-	auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
-	const bool bHasNativeFlag = GameMode && GameMode->HasbSafeZonePaused();
-	const bool bAlreadyPaused = bHasNativeFlag && GameMode->bSafeZonePaused == bPaused;
+	ResetSafeZonePauseStateForWorld(World);
+	auto& State = GSafeZonePauseState;
+	const bool bStateTransition =
+		!State.bHasRequest ||
+		State.bRequestedPaused != bPaused;
+	auto GameMode = World
+		? (AFortGameMode*)World->AuthorityGameMode
+		: nullptr;
+	auto GameState = World
+		? (AFortGameStateAthena*)World->GameState
+		: nullptr;
+	auto PhaseLogic =
+		GetCurrentSafeZonePhaseLogic(World);
+	auto Indicator =
+		GetCurrentSafeZoneIndicator(World, GameMode);
+	const float TimeSeconds =
+		World
+			? (float)UGameplayStatics::
+				GetTimeSeconds(World)
+			: 0.f;
 
-	// Let Fortnite observe the native state edge first so it can capture or
-	// restore TimeRemainingWhenPhasePaused and its other pause bookkeeping.
-	if (World && !bAlreadyPaused)
-		UKismetSystemLibrary::ExecuteConsoleCommand(World,
-			FString(bPaused ? L"pausesafezone" : L"startsafezone"), nullptr);
-
-	if (bHasNativeFlag && GameMode->bSafeZonePaused != bPaused)
+	// An indicator can be replaced between the final paused tick and a resume
+	// request. Migrate the paused snapshot first so the request always resumes
+	// the authoritative wall rather than clearing an uncaptured replacement and
+	// leaving the old actor collapsed/paused.
+	if (State.bHasRequest &&
+		State.bRequestedPaused &&
+		Indicator != State.Indicator)
 	{
-		SDK::DbgLog("[SafeZone] Native %s command did not update bSafeZonePaused; using flag fallback.\n",
-			bPaused ? "pause" : "resume");
-		GameMode->bSafeZonePaused = bPaused;
+		RetirePausedSafeZoneIndicator(
+			State.Indicator, TimeSeconds);
+		AdoptPausedSafeZoneIndicator(
+			Indicator,
+			GameMode,
+			GameState,
+			PhaseLogic,
+			TimeSeconds);
 	}
 
+	if (bPaused)
+	{
+		if (bStateTransition)
+		{
+			State.Indicator = Indicator;
+			State.bHasStartOffset = false;
+			State.bHasFinishOffset = false;
+			State.SafeZonesStartOwner = nullptr;
+			State.bHasSafeZonesStartOffset = false;
+			State.FloatRestoreCount = 0;
+			State.FloatRestores = {};
+			ResetLegacySafeZoneGeometrySnapshot();
+			State.PauseWorldTime =
+				std::isfinite(TimeSeconds)
+					? TimeSeconds
+					: 0.f;
+			if (std::isfinite(TimeSeconds))
+			{
+				CaptureSafeZonePauseOffsets(
+					Indicator, TimeSeconds);
+				PinSafeZonesStartTime(
+					GameState,
+					PhaseLogic,
+					TimeSeconds);
+			}
+		}
+
+		// Bookkeeping must be ready before either pause bit changes. Builds in
+		// the 13-19 range use these values to keep their HUD and phase handoff
+		// from jumping when the wall resumes.
+		ApplySafeZonePauseBookkeeping(
+			GameMode,
+			GameState,
+			PhaseLogic,
+			Indicator);
+
+		State.bPhasePauseGateApplied =
+			ApplySafeZoneOwnerPauseFlags(
+				GameMode,
+				GameState,
+				PhaseLogic,
+				true);
+		State.bWallPauseGateApplied =
+			Indicator &&
+			TrySetIndicatorPauseState(
+				Indicator, true);
+
+		if (!State.bWallPauseGateApplied && Indicator)
+		{
+			if (!State.bUsingLegacyGeometryFallback)
+				CaptureLegacySafeZoneGeometry(Indicator);
+			ApplyLegacySafeZoneGeometryFreeze(Indicator);
+			PinSafeZoneIndicatorDeadlines(
+				Indicator, TimeSeconds);
+		}
+		else if (State.bWallPauseGateApplied)
+		{
+			ResetLegacySafeZoneGeometrySnapshot();
+		}
+	}
+	else if (bStateTransition)
+	{
+		// Rebuild the complete schedule and, on the oldest builds, restore the
+		// intended target before any phase/wall gate is allowed to clear.
+		RestoreSafeZonePauseOffsets(
+			Indicator,
+			GameState,
+			PhaseLogic,
+			TimeSeconds);
+		PrepareLegacySafeZoneResume(
+			Indicator, TimeSeconds);
+
+		const bool bWallCleared =
+			!Indicator ||
+			TrySetIndicatorPauseState(
+				Indicator, false);
+		ApplySafeZoneOwnerPauseFlags(
+			GameMode,
+			GameState,
+			PhaseLogic,
+			false);
+
+		// The preview helper on some modern indicators performs its own
+		// deadline bookkeeping. Our captured pair is authoritative, so apply it
+		// once more after that helper and before returning to the world tick.
+		RestoreSafeZonePauseOffsets(
+			Indicator,
+			GameState,
+			PhaseLogic,
+			TimeSeconds);
+		PrepareLegacySafeZoneResume(
+			Indicator, TimeSeconds);
+		RestoreSafeZonePauseBookkeeping(
+			GameState, Indicator);
+
+		State.bPhasePauseGateApplied = false;
+		if (State.bWallPauseGateApplied &&
+			Indicator && !bWallCleared)
+		{
+			SDK::DbgLog(
+				"[SafeZone] warning: replicated wall pause "
+				"did not acknowledge resume indicator=%p\n",
+				(void*)Indicator);
+		}
+		State.bWallPauseGateApplied = false;
+		State.bUsingLegacyGeometryFallback = false;
+	}
+	else
+	{
+		// A duplicate resume request is still allowed to repair stale reflected
+		// bits without disturbing an already-running timeline.
+		ApplySafeZoneOwnerPauseFlags(
+			GameMode,
+			GameState,
+			PhaseLogic,
+			false);
+		if (Indicator)
+			TrySetIndicatorPauseState(
+				Indicator, false);
+	}
+
+	State.bHasRequest = true;
+	State.bRequestedPaused = bPaused;
+	State.Indicator = Indicator;
+	State.bLoggedWallPause = false;
+	State.bLoggedBackstop = false;
 	bPausedZone = bPaused;
+	GSafeZonePauseSnapshot.store(
+		bPaused,
+		std::memory_order_release);
+
+	if (Indicator)
+	{
+		Indicator->ForceNetUpdate();
+	}
+}
+
+void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+	TickSafeZonePause()
+{
+	auto World = UWorld::GetWorld();
+	ResetSafeZonePauseStateForWorld(World);
+	if (World)
+	{
+		const int32 RequestedPause =
+			GSafeZonePauseRequest.exchange(
+				-1, std::memory_order_acq_rel);
+		if (RequestedPause >= 0)
+		{
+			SetSafeZonePaused(
+				RequestedPause != 0);
+		}
+	}
+	auto& State = GSafeZonePauseState;
+	if (!World || !State.bHasRequest ||
+		!State.bRequestedPaused)
+	{
+		return;
+	}
+
+	auto GameMode =
+		(AFortGameMode*)World->AuthorityGameMode;
+
+	auto GameState =
+		(AFortGameStateAthena*)World->GameState;
+	auto PhaseLogic =
+		GetCurrentSafeZonePhaseLogic(World);
+	State.bPhasePauseGateApplied =
+		ApplySafeZoneOwnerPauseFlags(
+			GameMode,
+			GameState,
+			PhaseLogic,
+			true);
+
+	auto Indicator =
+		GetCurrentSafeZoneIndicator(World, GameMode);
+	if (Indicator != State.Indicator)
+	{
+		const float TimeSeconds =
+			(float)UGameplayStatics::
+				GetTimeSeconds(World);
+		RetirePausedSafeZoneIndicator(
+			State.Indicator, TimeSeconds);
+		AdoptPausedSafeZoneIndicator(
+			Indicator,
+			GameMode,
+			GameState,
+			PhaseLogic,
+			TimeSeconds);
+		State.bLoggedWallPause = false;
+	}
+	else
+	{
+		bool bIndicatorWallPauseChanged = false;
+		bool bIndicatorPreviewPauseChanged = false;
+		const bool bIndicatorWallPauseApplied =
+			Indicator &&
+			TryWriteSafeZonePauseFlag(
+				Indicator,
+				"bPaused",
+				true,
+				&bIndicatorWallPauseChanged);
+		if (Indicator)
+		{
+			TryWriteSafeZonePauseFlag(
+				Indicator,
+				"bPausedForPreview",
+				true,
+				&bIndicatorPreviewPauseChanged);
+			if (bIndicatorWallPauseChanged)
+			{
+				VersionFeatureAdapter::
+					MarkReplicatedPropertyDirty(
+						Indicator,
+						L"bPaused");
+			}
+			if (bIndicatorPreviewPauseChanged)
+			{
+				VersionFeatureAdapter::
+					MarkReplicatedPropertyDirty(
+						Indicator,
+						L"bPausedForPreview");
+			}
+			if (bIndicatorWallPauseChanged ||
+				bIndicatorPreviewPauseChanged)
+			{
+				Indicator->ForceNetUpdate();
+			}
+		}
+		bool bReadBackWallPaused = false;
+		State.bWallPauseGateApplied =
+			bIndicatorWallPauseApplied &&
+			TryReadSafeZonePauseFlag(
+				Indicator,
+				"bPaused",
+				bReadBackWallPaused) &&
+			bReadBackWallPaused;
+	}
+
+	ApplySafeZonePauseBookkeeping(
+		GameMode,
+		GameState,
+		PhaseLogic,
+		Indicator);
+
+	if (!Indicator)
+	{
+		const float TimeSeconds =
+			(float)UGameplayStatics::
+				GetTimeSeconds(World);
+		if (std::isfinite(TimeSeconds))
+		{
+			// Storm formation can be scheduled before the indicator exists.
+			// Its owner flag does not consistently freeze this timestamp.
+			PinSafeZonesStartTime(
+				GameState,
+				PhaseLogic,
+				TimeSeconds);
+		}
+		return;
+	}
+
+	if (State.bWallPauseGateApplied)
+	{
+		if (!State.bLoggedWallPause)
+		{
+			State.bLoggedWallPause = true;
+			SDK::DbgLog(
+				"[SafeZone] replicated wall pause armed "
+				"version=%.2f indicator=%p phaseGate=%d\n",
+				VersionInfo.FortniteVersion,
+				(void*)Indicator,
+				State.bPhasePauseGateApplied ? 1 : 0);
+		}
+		return;
+	}
+
+	const float TimeSeconds =
+		(float)UGameplayStatics::GetTimeSeconds(World);
+	if (!std::isfinite(TimeSeconds))
+		return;
+
+	PinSafeZonesStartTime(
+		(AFortGameStateAthena*)World->GameState,
+		PhaseLogic,
+		TimeSeconds);
+
+	if (!State.bHasStartOffset &&
+		!State.bHasFinishOffset)
+	{
+		CaptureSafeZonePauseOffsets(
+			Indicator, TimeSeconds);
+	}
+
+	if (!State.bUsingLegacyGeometryFallback)
+		CaptureLegacySafeZoneGeometry(Indicator);
+	ApplyLegacySafeZoneGeometryFreeze(Indicator);
+	PinSafeZoneIndicatorDeadlines(
+		Indicator, TimeSeconds);
+
+	if (!State.bLoggedBackstop)
+	{
+		State.bLoggedBackstop = true;
+		SDK::DbgLog(
+			"[SafeZone] exact legacy pause fallback armed "
+			"version=%.2f indicator=%p phaseGate=%d "
+			"startOffset=%.2f finishOffset=%.2f\n",
+			VersionInfo.FortniteVersion,
+			(void*)Indicator,
+			State.bPhasePauseGateApplied ? 1 : 0,
+			State.bHasStartOffset ? State.StartOffset : -1.f,
+			State.bHasFinishOffset ? State.FinishOffset : -1.f);
+	}
 }
 
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetGamePhase(EAthenaGamePhase GamePhase)
@@ -89,13 +1873,18 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetGamePhaseStep(EAthen
 
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::HandleMatchHasStarted(AFortGameMode* GameMode)
 {
+	AFortGameMode::TickSupplyDropSuppression();
 	HandleMatchHasStartedOG(GameMode);
+	AFortGameMode::TickSupplyDropSuppression(true);
 	auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(GameMode);
 
 	if (!bSkipWarmup)
 	{
 		auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-		auto WarmupDuration = FConfiguration::bAutoBusStart ? FConfiguration::BusStartDelay : 99999999.f;
+		const float WarmupDuration =
+			FConfiguration::bAutoBusStart.load()
+				? FConfiguration::BusStartDelay.load()
+				: 99999999.f;
 
 		GamePhaseLogic->WarmupCountdownStartTime = Time;
 		GamePhaseLogic->WarmupCountdownEndTime = Time + WarmupDuration;
@@ -498,7 +2287,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 			SafeZoneIndicator->NextNextMegaStormGridCellThickness = NextPhaseInfo.MegaStormGridCellThickness;
 		}
 
-		SafeZoneIndicator->SafeZoneStartShrinkTime = FConfiguration::bLateGame && FConfiguration::bLateGameLongZone ? 676767.f : TimeSeconds + PhaseInfo.WaitTime;
+		SafeZoneIndicator->SafeZoneStartShrinkTime = TimeSeconds + PhaseInfo.WaitTime;
 		SafeZoneIndicator->SafeZoneFinishShrinkTime = SafeZoneIndicator->SafeZoneStartShrinkTime + PhaseInfo.ShrinkTime;
 
 		SafeZoneIndicator->CurrentDamageInfo = PhaseInfo.DamageInfo;
@@ -544,6 +2333,11 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 		}
 
 		SetGamePhaseStep(EAthenaGamePhaseStep::StormHolding);
+		if (FConfiguration::bLateGame &&
+			FConfiguration::bLateGameLongZone)
+		{
+			SetSafeZonePaused(true);
+		}
 
 		auto GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
 		if (!bInitial)
@@ -677,10 +2471,31 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 		Aircraft->ReplicatedFlightTimestamp = (float)Time;
 		bAircraftIsLocked = false;
 
+		AFortPlayerControllerAthena::
+			BeginAircraftInventoryCleanupForMatch(GameState);
+
 		for (auto& Player__Uncasted : ((AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode)->AlivePlayers)
 		{
 			auto Player = (AFortPlayerControllerAthena*)Player__Uncasted;
+
+			// PlayerAI uses a version-neutral parked-seat transition and keeps
+			// its valid pawn. Destroying/resetting it here leaves a stale
+			// MyFortPawn on component-driven builds (27.11/30.00).
+			if (!Player ||
+				MagnesiumPlayerAIIntegration::
+					IsPlayerAIController(Player))
+			{
+				continue;
+			}
+
 			auto Pawn = (AFortPlayerPawnAthena*)Player->Pawn;
+
+			// Component-driven seasons do not pass through the legacy
+			// AFortGameMode::StartAircraftPhase hook. Clear warmup loot at the
+			// same authoritative transition before destroying the island pawn.
+			AFortPlayerControllerAthena::
+				ClearDroppableInventoryForAircraft(
+					Player, "component-phase");
 
 			if (Pawn)
 			{
@@ -723,12 +2538,46 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 	static auto GamePhaseOffset = this->GetOffset("GamePhase");
 	auto& _GamePhase = *(EAthenaGamePhase*)(__int64(this) + GamePhaseOffset);
 
-	static bool finishedFlight = false;
+	struct FPlayerAIPhaseTickState
+	{
+		const void* Owner = nullptr;
+		EAthenaGamePhase LastPhase = EAthenaGamePhase::None;
+		bool bHasLastPhase = false;
+		bool finishedFlight = false;
+		bool gettingReady = false;
+		bool busUnlocked = false;
+		bool startedForming = false;
+		bool formedZone = false;
+		bool bUpdatedPhase = false;
+	};
+
+	static FPlayerAIPhaseTickState TickState;
+	const bool bReturnedToWarmup =
+		TickState.Owner == this &&
+		TickState.bHasLastPhase &&
+		_GamePhase <= EAthenaGamePhase::Warmup &&
+		TickState.LastPhase > EAthenaGamePhase::Warmup;
+
+	if (TickState.Owner != this || bReturnedToWarmup)
+	{
+		TickState = {};
+		TickState.Owner = this;
+	}
+
+	TickState.LastPhase = _GamePhase;
+	TickState.bHasLastPhase = true;
+
+	auto& finishedFlight = TickState.finishedFlight;
+	auto& gettingReady = TickState.gettingReady;
+	auto& busUnlocked = TickState.busUnlocked;
+	auto& startedForming = TickState.startedForming;
+	auto& formedZone = TickState.formedZone;
+	auto& bUpdatedPhase = TickState.bUpdatedPhase;
+
 	if (!bSkipAircraft)
 	{
 		if (_GamePhase <= EAthenaGamePhase::Warmup)
 		{
-			static bool gettingReady = false;
 			if (!bStartAircraft && !gettingReady)
 			{
 				if (((AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode)->AlivePlayers.Num() > 0 && WarmupEarlyCountdownDuration != -1 && WarmupEarlyCountdownDuration < Time)
@@ -752,7 +2601,6 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 
 		if (_GamePhase == EAthenaGamePhase::Aircraft)
 		{
-			static bool busUnlocked = false;
 			if (!busUnlocked)
 			{
 				if (((AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode)->AlivePlayers.Num() > 0 && Aircrafts_GameState[0].Get() && Aircrafts_GameState[0]->DropStartTime < Time)
@@ -765,7 +2613,6 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 				}
 			}
 
-			static bool startedForming = false;
 			if (!startedForming)
 			{
 				if (((AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode)->AlivePlayers.Num() > 0 && Aircrafts_GameState[0].Get() && Aircrafts_GameState[0]->DropEndTime != -1 && Aircrafts_GameState[0]->DropEndTime < Time)
@@ -773,6 +2620,12 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 					startedForming = true;
 					auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 					auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
+
+					// The legacy GameMode drop-zone hook is not invoked by
+					// component-driven seasons. Force every AI off its virtual
+					// seat before the phase changes and aircraft is destroyed.
+					MagnesiumPlayerAIIntegration::
+						OnAircraftDropZoneEnding();
 
 					for (auto& Player__Uncasted : GameMode->AlivePlayers)
 					{
@@ -831,7 +2684,6 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 	{
 		if (_GamePhase == EAthenaGamePhase::SafeZones)
 		{
-			static bool formedZone = false;
 			if (!bPausedZone && finishedFlight && !formedZone)
 			{
 				if (((AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode)->AlivePlayers.Num() > 0 && SafeZonesStartTime != -1 && SafeZonesStartTime < Time)
@@ -843,7 +2695,6 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 				}
 			}
 
-			static bool bUpdatedPhase = false;
 			if (formedZone && SafeZoneIndicator)
 			{
 				if (SafeZoneIndicator->SafeZonePhases.IsValidIndex(SafeZoneIndicator->CurrentPhase))

@@ -262,7 +262,17 @@ void UAbilitySystemComponent::Hook()
         SDK::DbgLog("  [ASC] 7! SKIP HookEvery — istaIdx invalid (0x%X)\n", istaIdx);
     SDK::DbgLog("  [ASC] 8 post-HookEvery\n");
 
-    if (VersionInfo.FortniteVersion >= 8)
+    // 10.40 and 15.30's native K2 gameplay-cue implementations perform the
+    // authoritative cue dispatch. Hooking them here calls the native function
+    // and then sends a second multicast from the wrappers above. That creates
+    // duplicate one-shot cue components, while duplicated added cues do not
+    // receive a corresponding second removal. Both are unsafe around pawn
+    // replacement. In 10.40 this is especially harmful to Thanos' infinite
+    // jump/skydive cues and can starve the later purple beam cue. Leave both
+    // builds entirely on their native, balanced cue lifecycle.
+    if (VersionInfo.FortniteVersion >= 8 &&
+        VersionInfo.FortniteVersion != 10.40 &&
+        VersionInfo.FortniteVersion != 15.30)
     {
         Utils::ExecHook(UFortGameplayAbility::GetDefaultObj()->GetFunction("K2_ExecuteGameplayCue"), UFortGameplayAbility::K2_ExecuteGameplayCue_,
             UFortGameplayAbility::K2_ExecuteGameplayCue_OG);
@@ -272,6 +282,13 @@ void UAbilitySystemComponent::Hook()
             UFortGameplayAbility::GetDefaultObj()->GetFunction("K2_AddGameplayCue"), UFortGameplayAbility::K2_AddGameplayCue_, UFortGameplayAbility::K2_AddGameplayCue_OG);
         Utils::ExecHook(UFortGameplayAbility::GetDefaultObj()->GetFunction("K2_AddGameplayCueWithParams"), UFortGameplayAbility::K2_AddGameplayCueWithParams_,
             UFortGameplayAbility::K2_AddGameplayCueWithParams_OG);
+    }
+    else if (VersionInfo.FortniteVersion == 10.40 ||
+             VersionInfo.FortniteVersion == 15.30)
+    {
+        SDK::DbgLog(
+            "  [ASC] %.2f using native balanced gameplay-cue dispatch\n",
+            VersionInfo.FortniteVersion);
     }
     SDK::DbgLog("  [ASC] 9 Hook() complete\n");
 }

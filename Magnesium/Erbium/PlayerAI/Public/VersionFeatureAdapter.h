@@ -13,6 +13,13 @@
 #include "PlayerAITypes.h"
 #include "../../../FortniteGame/Public/FortGameMode.h"
 
+enum class EPlayerAIAircraftDropState : uint8_t
+{
+    Unknown,
+    Locked,
+    Open,
+};
+
 class VersionFeatureAdapter
 {
 public:
@@ -20,6 +27,11 @@ public:
     static AFortGameMode* GetGameMode();
     static AFortGameStateAthena* GetGameState();
     static float GetTimeSeconds();
+
+    // Opens one bounded PlayerAI work budget for the current server frame.
+    // Expensive native probes consume this shared budget instead of every AI
+    // issuing the same work in one TickFlush.
+    static void BeginServerTick(float TimeSeconds);
 
     // ---- Guarded native invocation ------------------------------------------
     // Calls a UFunction with a correctly sized, zeroed parameter buffer
@@ -35,6 +47,15 @@ public:
     // Version independent match phase (derived from gsStatus + GamePhase).
     static EPlayerAIMatchPhase GetMatchPhase();
 
+    // Authoritative alive-controller count shared by the legacy
+    // AlivePlayers list and the native-bot AliveBots list. Replication is
+    // explicitly dirtied for push-model builds (Chapter 4+).
+    static int CountAliveParticipants();
+    static bool MarkReplicatedPropertyDirty(const UObject* Object, const wchar_t* PropertyName);
+    static void ReplicatePlayersLeft(AFortGameStateAthena* GameState, int PlayersLeft, bool bForce = false);
+    static void SyncPlayersLeft(bool bForce = false);
+    static void RetryPendingPlayersLeftReplication();
+
     // ---- Emotes -------------------------------------------------------------
     static bool SupportsEmotes();
     // Random emote asset that exists on this version, nullptr if unsupported.
@@ -45,6 +66,9 @@ public:
     static bool SupportsThankDriver(AFortPlayerControllerAthena* PC);
     static bool ThankDriver(AFortPlayerControllerAthena* PC);
     static AFortAthenaAircraft* GetAircraft();
+    // Tri-state authoritative drop-window query. Locked signals always win;
+    // callers must not treat unavailable/contradictory metadata as unlocked.
+    static EPlayerAIAircraftDropState GetAircraftDropState(float TimeSeconds);
     static bool IsInAircraft(AFortPlayerControllerAthena* PC);
     // Puts an AI player into the aircraft using the same native path real
     // players use. Returns false when unavailable (caller uses fallback).
@@ -58,12 +82,24 @@ public:
     // Last-resort unboard: clears the replicated in-aircraft flag directly
     // (controller and player state) when the native jump refuses to.
     static void ForceLeaveAircraft(AFortPlayerControllerAthena* PC);
+    // Completes the private legacy controller exit transition used by the
+    // route-end failed-loader check. This is a cheap PlayerAI-only operation;
+    // false means unsupported or that the per-build layout failed validation.
+    static bool MarkVirtualAircraftExited(AFortPlayerControllerAthena* PC);
 
     // ---- Movement / world ----------------------------------------------------
     // Ground location under/near a world position (safe fallback: input).
     // Pass the asking pawn when available so the trace ignores it; if the
     // native trace faults on a version it disables itself for the session.
     static FVector FindGroundLocation(const FVector& Near, bool& bOutFound, AFortPlayerPawnAthena* IgnorePawn = nullptr);
+    // Resolves an actual traced landing point at the requested XY or a
+    // deterministic nearby spiral. Returns false instead of inventing a Z.
+    static bool TryResolveGroundedLandingSpot(const FVector& Desired, AFortPlayerPawnAthena* IgnorePawn, FVector& OutSpot);
+    // Queries CharacterMovement::IsMovingOnGround (or its explicit walking
+    // movement mode) through guarded reflection.
+    // The return value reports whether the query was supported; OutGrounded
+    // is meaningful only when this returns true.
+    static bool TryIsPawnGrounded(AFortPlayerPawnAthena* Pawn, bool& OutGrounded);
 
     // True while ground tracing works on this version. When false, all
     // movement/landing logic runs trace-free (native physics + landing
@@ -76,28 +112,21 @@ public:
     // Current safe zone target circle. Returns false while no storm exists.
     static bool TryGetSafeZone(FVector& OutCenter, float& OutRadius);
     static bool IsInsideSafeZone(const FVector& Location);
+    static bool IsStormClosed(float TimeSeconds);
     static float GetStormDamagePerSecond();
 
     // ---- DBNO -------------------------------------------------------------------
     static bool SupportsDBNO();
-
-    // ---- Weapon fire ---------------------------------------------------------------
-    // Attempts to activate the equipped weapon's real fire ability through
-    // the same server activation path real clients use, so connected
-    // players see and hear actual gunfire. Fault guarded; disables itself
-    // for the session when the version rejects it (simulated combat keeps
-    // working either way).
-    static bool TryFireEquippedWeapon(AFortPlayerControllerAthena* PC, AFortPlayerPawnAthena* Pawn);
-
-    // Fault-guarded server-side ability activation (shared by weapon fire,
-    // sprint, ...). Returns false when the activation faulted.
-    static bool TryActivateAbilityHandle(UAbilitySystemComponent* ASC, FGameplayAbilitySpecHandle Handle);
 
     // ---- Cosmetics -------------------------------------------------------------------
     // Picks a random character skin from the cosmetics that exist in the
     // hosted build and applies it (hero + character parts). Falls back to
     // the default soldier when the build has no usable skins.
     static void ApplyRandomSkin(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn);
+
+    // Amortizes current-build skin discovery across server ticks. This never
+    // loads packages and never walks the complete UObject array in one frame.
+    static void TickCosmeticCache();
 
     // ---- Death --------------------------------------------------------------------
     // Kills a pawn through the native death pipeline (ForceKill) so kill

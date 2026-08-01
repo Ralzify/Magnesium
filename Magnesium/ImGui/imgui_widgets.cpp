@@ -3299,13 +3299,28 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
     bool temp_input_is_active = temp_input_allowed && TempInputIsActive(id);
     if (!temp_input_is_active)
     {
-        // Tabbing or CTRL+click on Slider turns it into an input box
+        // Tabbing, CTRL+left-click, or a single right-click on Slider turns it
+        // into an input box. Ordinary left-clicking retains normal dragging.
         const bool clicked = hovered && IsMouseClicked(0, ImGuiInputFlags_None, id);
-        const bool make_active = (clicked || g.NavActivateId == id);
+        const bool right_clicked = hovered && IsMouseClicked(1, ImGuiInputFlags_None, id);
+        const bool right_click_input =
+            right_clicked && temp_input_allowed &&
+            (flags & ImGuiSliderFlags_ClampOnInput);
+        const bool make_active =
+            (clicked || right_click_input || g.NavActivateId == id);
         if (make_active && clicked)
             SetKeyOwner(ImGuiKey_MouseLeft, id);
+        if (right_click_input)
+        {
+            SetKeyOwner(ImGuiKey_MouseRight, id);
+            // InputText normally activates from a left click or navigation.
+            // Route this right click through its navigation activation path so
+            // the editable box opens, focuses, and selects its value now.
+            g.NavActivateId = id;
+            g.NavActivateFlags = ImGuiActivateFlags_PreferInput;
+        }
         if (make_active && temp_input_allowed)
-            if ((clicked && g.IO.KeyCtrl) || (g.NavActivateId == id && (g.NavActivateFlags & ImGuiActivateFlags_PreferInput)))
+            if ((clicked && g.IO.KeyCtrl) || right_click_input || (g.NavActivateId == id && (g.NavActivateFlags & ImGuiActivateFlags_PreferInput)))
                 temp_input_is_active = true;
 
         // Store initial value (not used by main lib but available as a convenience but some mods e.g. to revert)

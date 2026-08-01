@@ -67,6 +67,12 @@ public:
     DEFINE_STRUCT_PROP(ActivationInfo, FGameplayAbilityActivationInfo);
     DEFINE_STRUCT_NEWOBJ_PROP(SourceObject, UObject);
     DEFINE_STRUCT_PROP(ActiveCount, uint8);
+    DEFINE_STRUCT_PROP(
+        ReplicatedInstances,
+        TArray<UFortGameplayAbility*>);
+    DEFINE_STRUCT_PROP(
+        NonReplicatedInstances,
+        TArray<UFortGameplayAbility*>);
     DEFINE_STRUCT_BITFIELD_PROP(InputPressed);
 };
 

@@ -6,6 +6,12 @@
 #include "LevelStreamingDynamic.h"
 
 class AFortAthenaMutator;
+class UFortItemDefinition;
+
+using FPickupLifecycleDelegate =
+    TMulticastInlineDelegate<void(UObject*, UFortItemDefinition*)>;
+using FMutatorGameplayEventDelegate =
+    TMulticastInlineDelegate<void(int32, int32, int32, int32)>;
 
 struct FGameMemberInfo : public FFastArraySerializerItem
 {
@@ -23,6 +29,27 @@ public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FGameMemberInfoArray);
 
     DEFINE_STRUCT_PROP(Members, TArray<FGameMemberInfo>);
+};
+
+struct FGameplayMutatorObjectData : public FFastArraySerializerItem
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FGameplayMutatorObjectData);
+
+    DEFINE_STRUCT_PROP(TheObject, UObject*);
+    DEFINE_STRUCT_PROP(ObjectId, int32);
+    DEFINE_STRUCT_PROP(ObjectValue1, int32);
+    DEFINE_STRUCT_PROP(ObjectValue2, int32);
+};
+
+struct FGameplayMutatorObjectDataArray : public FFastArraySerializer
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FGameplayMutatorObjectDataArray);
+
+    DEFINE_STRUCT_PROP(
+        ObjectDataList,
+        TArray<FGameplayMutatorObjectData>);
 };
 
 struct FAdditionalLevelStreamed
@@ -224,10 +251,20 @@ public:
     DEFINE_PROP(PlayersLeft, int32);
     DEFINE_PROP(WinningTeam, int32);
     DEFINE_PROP(WinningPlayerState, AFortPlayerStateAthena*);
+    DEFINE_PROP(SafeZonePhase, uint8);
     DEFINE_PROP(GamePhase, uint8);
     DEFINE_PROP(GamePhaseStep, uint8);
+    // Native Athena death handling consults this separately from the
+    // playlist's RespawnType. In 10.40, Getaway's mutator can leave the
+    // playlist configured for respawns while this switch is still false,
+    // preventing the client respawn handshake from starting.
+    DEFINE_PROP(bCheatRespawnEnabled, bool);
     DEFINE_PROP(Aircrafts, TArray<AFortAthenaAircraft*>);
     DEFINE_PROP(Aircraft, AFortAthenaAircraft*);
+    DEFINE_PROP(FlightPathMidLine, FAircraftFlightInfo);
+    DEFINE_PROP(
+        MutatorObjectDataArray,
+        FGameplayMutatorObjectDataArray);
     DEFINE_PROP(SafeZonesStartTime, float);
     DEFINE_PROP(AirCraftBehavior, uint8);
     DEFINE_PROP(CachedSafeZoneStartUp, uint8);
@@ -238,6 +275,9 @@ public:
     DEFINE_PROP(bPlaylistDataIsActivelyLoading, bool);
     DEFINE_PROP(GamePhaseStepTimeRemaining, float);
     DEFINE_PROP(GamePhaseStepChanged, TMulticastInlineDelegate<void(uint8)>);
+    DEFINE_PROP(OnPickupSpawnedAndReady, FPickupLifecycleDelegate);
+    DEFINE_PROP(OnPickupDestroy, FPickupLifecycleDelegate);
+    DEFINE_PROP(MutatorGameplayEvent, FMutatorGameplayEventDelegate);
     DEFINE_PROP(GameplayMutators, TArray<AFortAthenaMutator*>);
     DEFINE_PROP(VolumeManager, AFortVolumeManager*);
     DEFINE_PROP(CreativePortalManager, AFortCreativePortalManager*);

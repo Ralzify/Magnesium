@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 // ============================================================================
 // Magnesium PlayerAI - MagnesiumPlayerAISettings
 //
@@ -13,5 +14,5 @@
 
 struct MagnesiumPlayerAISettings
 {
-    static inline bool bEnableAIs = false;
+    static std::atomic_bool bEnableAIs;
 };

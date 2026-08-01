@@ -2,15 +2,20 @@
 #include "../Public/FortInventory.h"
 #include "../Public/FortPlayerPawnAthena.h"
 #include "../Public/FortPlayerControllerAthena.h"
+#include "../Public/FortGameStateAthena.h"
+#include "../Public/FortAthenaMutator.h"
 #include "../Public/FortKismetLibrary.h"
 #include "../../Erbium/Public/Configuration.h"
+#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/FortWeaponMods.h"
 #include <ShlObj.h>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 uint32_t OnItemInstanceAddedVft;
+uint64_t ApplyGadgetDataAddress;
 
 namespace
 {
@@ -38,9 +43,340 @@ namespace
 
     std::vector<FRegeneratingInventoryItem> RegeneratingInventoryItems;
     std::vector<FRechargingWeaponAmmo> RechargingWeaponAmmo;
+    std::unordered_map<
+        AFortPlayerControllerAthena*,
+        std::vector<FGuid>>
+        NativeDeathInventoryRetention;
+    std::unordered_map<
+        AFortPlayerControllerAthena*,
+        FGuid>
+        PendingCarmineFocus;
 
     constexpr size_t MaxTrackedRechargingWeapons = 128;
     constexpr double NativeRechargeGraceSeconds = 0.10;
+
+    bool IsExact1040CarmineGadget(
+        const UFortItemDefinition* Definition)
+    {
+        return VersionInfo.FortniteVersion == 10.40 &&
+            Definition &&
+            (Definition->Name.ToWString() ==
+                 L"AGID_CarminePack" ||
+             Definition->Name.ToWString() ==
+                 L"AGID_AshtonPack");
+    }
+
+    bool IsExact1040BaseAshtonGadget(
+        const UFortItemDefinition* Definition)
+    {
+        return VersionInfo.FortniteVersion == 10.40 &&
+            Definition &&
+            Definition->Name.ToWString() ==
+                L"AGID_AshtonPack";
+    }
+
+    bool IsExact1040AshtonMiloGadget(
+        const UFortItemDefinition* Definition)
+    {
+        return VersionInfo.FortniteVersion == 10.40 &&
+            Definition &&
+            Definition->Name.ToWString() ==
+                L"AGID_AshtonPack_Milo";
+    }
+
+    bool FocusOrQueueExact1040Carmine(
+        AFortPlayerControllerAthena* PlayerController,
+        const FGuid& ItemGuid)
+    {
+        if (!PlayerController)
+            return false;
+
+        if (!PlayerController->MyFortPawn)
+        {
+            PendingCarmineFocus[PlayerController] =
+                ItemGuid;
+            SDK::DbgLog(
+                "[Ashton1040] queued Carmine focus until "
+                "pawn possession controller=%p\n",
+                static_cast<void*>(PlayerController));
+            return true;
+        }
+
+        PlayerController->ServerExecuteInventoryItem(
+            ItemGuid);
+        PlayerController->ClientEquipItem(
+            ItemGuid, true);
+        return true;
+    }
+
+    UFortWeaponItemDefinition*
+        ResolveExact1040CarmineBacking()
+    {
+        if (VersionInfo.FortniteVersion != 10.40)
+            return nullptr;
+
+        auto CarmineGadget =
+            const_cast<UFortGadgetItemDefinition*>(
+                FindObject<UFortGadgetItemDefinition>(
+                    L"/Game/Athena/Items/Gameplay/BackPacks/"
+                    L"CarminePack/AGID_CarminePack."
+                    L"AGID_CarminePack"));
+        auto CarmineBacking =
+            const_cast<UFortWeaponItemDefinition*>(
+                FindObject<UFortWeaponItemDefinition>(
+                    L"/Game/Athena/Items/Gameplay/BackPacks/"
+                    L"CarminePack/D_CarminePack."
+                    L"D_CarminePack"));
+        if (!CarmineGadget ||
+            !CarmineBacking)
+            return nullptr;
+
+        CarmineGadget->AddToRoot();
+        CarmineBacking->AddToRoot();
+        return CarmineBacking;
+    }
+
+    const UFortItemDefinition*
+        ResolveExact1040AshtonGadgetAlias(
+            const UFortItemDefinition* Definition)
+    {
+        if (!IsExact1040BaseAshtonGadget(Definition))
+            return Definition;
+
+        auto CarmineGadget =
+            const_cast<UFortGadgetItemDefinition*>(
+                FindObject<UFortGadgetItemDefinition>(
+                    L"/Game/Athena/Items/Gameplay/BackPacks/"
+                    L"CarminePack/AGID_CarminePack."
+                    L"AGID_CarminePack"));
+        if (!CarmineGadget)
+            return Definition;
+
+        CarmineGadget->AddToRoot();
+        static bool bLoggedAlias = false;
+        if (!bLoggedAlias)
+        {
+            bLoggedAlias = true;
+            SDK::DbgLog(
+                "[Ashton1040] aliased incomplete "
+                "AGID_AshtonPack to authored AGID_CarminePack "
+                "before inventory replication\n");
+        }
+        return CarmineGadget;
+    }
+
+    void PreloadExact1040CarmineDependencies()
+    {
+        ResolveExact1040CarmineBacking();
+
+        auto CarmineAbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"CarminePack/AS_CarminePack.AS_CarminePack");
+        if (CarmineAbilitySet)
+        {
+            const_cast<UFortAbilitySet*>(CarmineAbilitySet)
+                ->AddToRoot();
+        }
+        auto AshtonAbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"Ashton/AS_AshtonPack.AS_AshtonPack");
+        if (AshtonAbilitySet)
+        {
+            const_cast<UFortAbilitySet*>(AshtonAbilitySet)
+                ->AddToRoot();
+        }
+
+        static constexpr const wchar_t* ClassPaths[] = {
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_CarminePack_PassiveSetup."
+                L"GA_CarminePack_PassiveSetup_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_CarminePack_DashOrSmash."
+                L"GA_CarminePack_DashOrSmash_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_CarminePack_Jump_NotMoving."
+                L"GA_CarminePack_Jump_NotMoving_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_CarminePack_Punch."
+                L"GA_CarminePack_Punch_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_CarminePack_LifeSteal."
+                L"GA_CarminePack_LifeSteal_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_AshtonPack_Carmine_GemPickup_Passive."
+                L"GA_AshtonPack_Carmine_GemPickup_Passive_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_AshtonPack_GemPickupFX."
+                L"GA_AshtonPack_GemPickupFX_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/DA_CarminePack."
+                L"DA_CarminePack_C",
+            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"Carmine/GCN_Carmine_Beam."
+                L"GCN_Carmine_Beam_C",
+            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"Carmine/GCL_Carmine_Beam_Loop."
+                L"GCL_Carmine_Beam_Loop_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Carmine_GC_Beam_Loop."
+                L"GE_Carmine_GC_Beam_Loop_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Carmine_Beam_Damage."
+                L"GE_Carmine_Beam_Damage_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Carmine_Beam_Damage_P."
+                L"GE_Carmine_Beam_Damage_P_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Ashton_Carmine_LockInPlace."
+                L"GE_Ashton_Carmine_LockInPlace_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Carmine_AbilityBlocker."
+                L"GE_Carmine_AbilityBlocker_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Carmine_DamageImmune."
+                L"GE_Carmine_DamageImmune_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Carmine_GC_Aura."
+                L"GE_Carmine_GC_Aura_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Carmine_GC_Skydive."
+                L"GE_Carmine_GC_Skydive_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Ashton_Carmine_GemPickUpAnim."
+                L"GE_Ashton_Carmine_GemPickUpAnim_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GE_Ashton_Carmine_FinalGemPickUpAnim."
+                L"GE_Ashton_Carmine_FinalGemPickUpAnim_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_AshtonPack_Carmine_StonePickUpAnim."
+                L"GA_AshtonPack_Carmine_StonePickUpAnim_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/GA_AshtonPack_Carmine_FinalGem."
+                L"GA_AshtonPack_Carmine_FinalGem_C",
+            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"Carmine/GCN_Carmine_Transform."
+                L"GCN_Carmine_Transform_C",
+            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"Carmine/GCL_Carmine_Skydive."
+                L"GCL_Carmine_Skydive_C",
+            L"/Game/Blueprints/Camera/Athena/"
+                L"Athena_PlayerCameraModeCarmineSpawn."
+                L"Athena_PlayerCameraModeCarmineSpawn_C",
+            L"/Game/Blueprints/Camera/Athena/"
+                L"Athena_PlayerCameraModeCarmine_Beam."
+                L"Athena_PlayerCameraModeCarmine_Beam_C",
+            L"/Game/Characters/Player/Male/Male_Avg_Base/"
+                L"Gauntlet_Player_AnimBlueprint."
+                L"Gauntlet_Player_AnimBlueprint_C"
+        };
+        for (const auto Path : ClassPaths)
+        {
+            auto Class = FindObject<UClass>(Path);
+            if (Class)
+                Class->AddToRoot();
+        }
+
+        static constexpr const wchar_t* VisualPaths[] = {
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/FX/P_Jim_LaserBlast."
+                L"P_Jim_LaserBlast",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/FX/P_Jim_LaserBlast_Muzzle."
+                L"P_Jim_LaserBlast_Muzzle",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/FX/P_Jim_LaserBlast_Dust."
+                L"P_Jim_LaserBlast_Dust",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/FX/P_Jim_LaserBlast_Impact."
+                L"P_Jim_LaserBlast_Impact",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"CarminePack/FX/P_Jim_LaserBlast_Impact_Player."
+                L"P_Jim_LaserBlast_Impact_Player",
+            L"/Game/Animation/Game/MainPlayer/Skydive/Freefall/"
+                L"Custom/Jim/Transitions/Spawn_Montage."
+                L"Spawn_Montage",
+            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"ExtraLarge/Jim/Jim_FistBeam_Montage."
+                L"Jim_FistBeam_Montage",
+            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"ExtraLarge/Jim/Jim_FistBeam_Outro_M."
+                L"Jim_FistBeam_Outro_M",
+            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"ExtraLarge/Jim/Jim_PowerUp_Montage."
+                L"Jim_PowerUp_Montage",
+            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"ExtraLarge/Jim/Jim_Victory_Montage."
+                L"Jim_Victory_Montage"
+        };
+        for (const auto Path : VisualPaths)
+        {
+            auto Asset = FindObject<UObject>(Path);
+            if (Asset)
+                const_cast<UObject*>(Asset)->AddToRoot();
+        }
+    }
+
+    void PreloadExact1040AshtonMiloDependencies()
+    {
+        auto AbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"Ashton/Milo/AS_AshtonPack_Milo."
+            L"AS_AshtonPack_Milo");
+        if (AbilitySet)
+        {
+            const_cast<UFortAbilitySet*>(AbilitySet)
+                ->AddToRoot();
+        }
+
+        auto BoostAbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"BoostJumpPack/AS_BoostJumpPack."
+            L"AS_BoostJumpPack");
+        if (BoostAbilitySet)
+        {
+            const_cast<UFortAbilitySet*>(BoostAbilitySet)
+                ->AddToRoot();
+        }
+
+        static constexpr const wchar_t* ClassPaths[] = {
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"Ashton/GA_AshtonPack_EMPTYABILITY."
+                L"GA_AshtonPack_EMPTYABILITY_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"Ashton/Milo/GA_AshtonPack_EquipWeapon_Milo."
+                L"GA_AshtonPack_EquipWeapon_Milo_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"Ashton/Milo/GA_AshtonPack_PassiveSetup_Milo."
+                L"GA_AshtonPack_PassiveSetup_Milo_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"Ashton/Milo/GA_AshtonPack_Milo_BlockAbilities."
+                L"GA_AshtonPack_Milo_BlockAbilities_C",
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"Ashton/Milo/GAT_AshtonPack_Milo_GemPickupHeal."
+                L"GAT_AshtonPack_Milo_GemPickupHeal_C",
+            L"/Game/Weapons/FORT_Rifles/Blueprints/Assault/"
+                L"B_Assault_AshtonPack_Milo."
+                L"B_Assault_AshtonPack_Milo_C",
+            L"/Game/Weapons/FORT_Rifles/Blueprints/"
+                L"B_Rifle_AshtonPack_Milo_Launcher."
+                L"B_Rifle_AshtonPack_Milo_Launcher_C",
+            L"/Game/Athena/Items/Weapons/Abilities/"
+                L"GA_Ranged_Ashton_Milo_Explosive_Athena."
+                L"GA_Ranged_Ashton_Milo_Explosive_Athena_C",
+            L"/Game/Abilities/Weapons/Ranged/"
+                L"GA_Ranged_GenericDamage."
+                L"GA_Ranged_GenericDamage_C",
+            L"/Game/Weapons/FORT_RocketLaunchers/Blueprints/"
+                L"B_Prj_AshtonPack_Milo_Launcher."
+                L"B_Prj_AshtonPack_Milo_Launcher_C"
+        };
+        for (const auto Path : ClassPaths)
+        {
+            auto Class = FindObject<UClass>(Path);
+            if (Class)
+                Class->AddToRoot();
+        }
+    }
 
     bool AreGuidsEqual(const FGuid& Left, const FGuid& Right)
     {
@@ -129,17 +465,16 @@ namespace
         return true;
     }
 
-    bool SyncEquippedNitroFistsAmmo(
+    AFortWeapon* ResolveEquippedWeaponForItem(
         AFortPlayerControllerAthena* Owner,
         UFortWeaponItemDefinition* WeaponDefinition,
-        const FGuid& ItemGuid,
-        int32 NewLoadedAmmo)
+        const FGuid& ItemGuid)
     {
         if (!Owner || !WeaponDefinition ||
             !Owner->HasMyFortPawn() || !Owner->MyFortPawn ||
             !Owner->MyFortPawn->HasCurrentWeapon())
         {
-            return false;
+            return nullptr;
         }
 
         auto WeaponActor = Owner->MyFortPawn->CurrentWeapon;
@@ -147,7 +482,7 @@ namespace
         if (!WeaponActor || !FortWeaponClass ||
             !WeaponActor->IsA(FortWeaponClass))
         {
-            return false;
+            return nullptr;
         }
 
         auto Weapon = static_cast<AFortWeapon*>(WeaponActor);
@@ -157,27 +492,56 @@ namespace
                 Weapon->WeaponData != WeaponDefinition) ||
             !Weapon->HasAmmoCount())
         {
-            return false;
+            return nullptr;
         }
+
+        return Weapon;
+    }
+
+    bool SyncWeaponAmmo(
+        AFortWeapon* Weapon,
+        int32 NewLoadedAmmo)
+    {
+        if (!Weapon || !Weapon->HasAmmoCount())
+            return false;
 
         const int32 OldAmmoCount = Weapon->AmmoCount;
-        if (OldAmmoCount == NewLoadedAmmo)
-            return true;
-
-        // The equipped actor owns the authoritative/live magazine used by
-        // Nitro abilities. Updating only FFortItemEntry explains why the
-        // restored charge became usable after re-equipping: equip copied
-        // the entry back into this field. Keep both representations in step
-        // and drive the normal rep-notify/delegate path for HUD listeners.
-        Weapon->AmmoCount = NewLoadedAmmo;
-        if (auto OnRepAmmoCount =
-            Weapon->GetFunction("OnRep_AmmoCount"))
+        if (OldAmmoCount != NewLoadedAmmo)
         {
-            Weapon->Call<void>(
-                OnRepAmmoCount, OldAmmoCount);
+            // The equipped actor owns the authoritative/live magazine.
+            // Keep it in step with the inventory representation and drive
+            // the normal local rep-notify path for server-side listeners.
+            Weapon->AmmoCount = NewLoadedAmmo;
+            if (auto OnRepAmmoCount =
+                Weapon->GetFunction("OnRep_AmmoCount"))
+            {
+                Weapon->Call<void>(
+                    OnRepAmmoCount, OldAmmoCount);
+            }
         }
+
+        // A locally predicted shot can lower the owning client's ammo while
+        // the server value remains unchanged under Infinite Ammo. Poll-model
+        // replication normally sees no delta in that case, and push-model
+        // builds require an explicit dirty mark. The item-change broadcast
+        // plus this mark sends the correction now instead of waiting for the
+        // weapon to be reconstructed on the next equip.
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            Weapon, L"AmmoCount");
         Weapon->ForceNetUpdate();
         return true;
+    }
+
+    bool SyncEquippedWeaponAmmo(
+        AFortPlayerControllerAthena* Owner,
+        UFortWeaponItemDefinition* WeaponDefinition,
+        const FGuid& ItemGuid,
+        int32 NewLoadedAmmo)
+    {
+        return SyncWeaponAmmo(
+            ResolveEquippedWeaponForItem(
+                Owner, WeaponDefinition, ItemGuid),
+            NewLoadedAmmo);
     }
 
     bool ResolveNitroFistsRechargeSettings(
@@ -482,13 +846,33 @@ bool UFortWorldItemDefinition::ServerExecute(UFortItem* Item, AFortPlayerControl
         this, Item, Instigator);
 }
 
-UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Count, int LoadedAmmo, int Level, bool ShowPickupNoti, bool updateInventory, int PhantomReserveAmmo, TArray<FFortItemEntryStateValue> StateValues, bool bNotifyItemInstanceAdded)
+UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Count, int LoadedAmmo, int Level, bool ShowPickupNoti, bool updateInventory, int PhantomReserveAmmo, TArray<FFortItemEntryStateValue> StateValues, bool bNotifyItemInstanceAdded, TArray<float> GenericAttributeValues, bool* OutForceFocusHandled, bool* OutGadgetInitializationDispatched)
 {
+    if (OutForceFocusHandled)
+        *OutForceFocusHandled = false;
+    if (OutGadgetInitializationDispatched)
+        *OutGadgetInitializationDispatched = false;
     if (!this || !Def || !Count)
         return nullptr;
 
+    // The cooked 10.40 Ashton gadget is a legacy partial definition: it has
+    // only the head part, the ordinary player AnimBP, an incomplete ability
+    // set and a missing D_AshtonPack package. The playlist-authored Carmine
+    // gadget is the complete Endgame Thanos carrier. Substitute before the
+    // definition ever reaches a replicated inventory entry so clients receive
+    // the full body, Gauntlet AnimBP, stone abilities and beam cue lifecycle.
+    Def = ResolveExact1040AshtonGadgetAlias(Def);
+
     auto PlayerController = Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
     auto Gadget = Def->Cast<UFortGadgetItemDefinition>();
+    const bool bCarmineGadget =
+        IsExact1040CarmineGadget(Def);
+    const bool bAshtonMiloGadget =
+        IsExact1040AshtonMiloGadget(Def);
+    if (bCarmineGadget)
+        PreloadExact1040CarmineDependencies();
+    if (bAshtonMiloGadget)
+        PreloadExact1040AshtonMiloDependencies();
 
     // Exclusive Chapter 1 gadgets expect the backpack to be emptied before
     // their native ServerExecute runs. The Infinity Gauntlet sets this flag.
@@ -546,8 +930,24 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
         auto NewData = FMemory::Malloc(FFortItemEntryStateValue::Size() * StateValues.Num());
         memcpy(NewData, StateValues.Data, FFortItemEntryStateValue::Size() * StateValues.Num());
         Item->ItemEntry.StateValues.NumElements = StateValues.Num();
-        Item->ItemEntry.StateValues.MaxElements = StateValues.Max();
+        Item->ItemEntry.StateValues.MaxElements = StateValues.Num();
         Item->ItemEntry.StateValues.Data = (FFortItemEntryStateValue*)NewData;
+    }
+    if (Item->ItemEntry.HasGenericAttributeValues() &&
+        GenericAttributeValues.Num() > 0)
+    {
+        auto NewData = FMemory::Malloc(
+            sizeof(float) * GenericAttributeValues.Num());
+        memcpy(
+            NewData,
+            GenericAttributeValues.Data,
+            sizeof(float) * GenericAttributeValues.Num());
+        Item->ItemEntry.GenericAttributeValues.NumElements =
+            GenericAttributeValues.Num();
+        Item->ItemEntry.GenericAttributeValues.MaxElements =
+            GenericAttributeValues.Num();
+        Item->ItemEntry.GenericAttributeValues.Data =
+            static_cast<float*>(NewData);
     }
 
     if (Item->ItemEntry.ItemGuid.A == 0 && Item->ItemEntry.ItemGuid.B == 0 && Item->ItemEntry.ItemGuid.C == 0 && Item->ItemEntry.ItemGuid.D == 0)
@@ -624,17 +1024,100 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
             *ReplicatedEntry, Item->ItemEntry);
     }
 
-    if (bNotifyItemInstanceAdded && OnItemInstanceAddedVft && Owner)
-        ((bool(*)(const UFortWorldItem*, const IInterface*)) Item->Vft[OnItemInstanceAddedVft])(Item, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()));
+    bool bCarmineInitialized = false;
+    if (bCarmineGadget)
+    {
+        // Install Carmine's server ability set immediately. The replicated
+        // item still follows the owning client's ordinary item-added path,
+        // where WaitAnimBPOverrideReady starts Spawn_Montage and the authored
+        // lift/skydive timers once the full Gauntlet AnimBP is actually ready.
+        bCarmineInitialized =
+            bNotifyItemInstanceAdded
+                ? InitializeGadgetItemWithFallback(
+                      Item, true)
+                : false;
+    }
+    bool bAshtonMiloInitialized = false;
+    if (bAshtonMiloGadget)
+    {
+        // The Chitauri backpack owns the three pieces of visible equipment.
+        // Prefer the validated gadget path after preloading its soft ability
+        // set, then fall through to the ordinary virtual notification if that
+        // private path is unavailable for the executable in use.
+        bAshtonMiloInitialized =
+            bNotifyItemInstanceAdded
+                ? InitializeGadgetItemWithFallback(
+                      Item, true)
+                : false;
+    }
+    bool bItemAddedFallbackDispatched = false;
+    bool bCarmineFallbackDispatched = false;
+    const IInterface* InventoryOwnerInterface =
+        Owner
+            ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::
+                      StaticClass())
+            : nullptr;
+    if ((!bCarmineGadget || !bCarmineInitialized) &&
+        (!bAshtonMiloGadget ||
+         !bAshtonMiloInitialized) &&
+        bNotifyItemInstanceAdded &&
+        OnItemInstanceAddedVft &&
+        OnItemInstanceAddedVft < 1024 &&
+        Item->Vft &&
+        Item->Vft[OnItemInstanceAddedVft] &&
+        InventoryOwnerInterface)
+    {
+        ((void(*)(const UFortWorldItem*, const IInterface*))
+            Item->Vft[OnItemInstanceAddedVft])(
+                Item, InventoryOwnerInterface);
+        bItemAddedFallbackDispatched = true;
+        bCarmineFallbackDispatched =
+            bCarmineGadget;
+    }
 
     // The S4 gauntlet is force-focused when collected. Route that focus through
     // ServerExecuteInventoryItem so the native gadget execution path above is
     // used instead of merely equipping its backing weapon definition.
-    if (VersionInfo.FortniteVersion >= 4.0 && VersionInfo.FortniteVersion <= 4.5 &&
-        PlayerController && Gadget && Def->HasbForceFocusWhenAdded() && Def->bForceFocusWhenAdded)
+    bool bCarmineFocusHandled = false;
+    if (bCarmineGadget &&
+        (bCarmineInitialized ||
+         bCarmineFallbackDispatched) &&
+        PlayerController &&
+        Def->HasbForceFocusWhenAdded() &&
+        Def->bForceFocusWhenAdded)
     {
-        PlayerController->ServerExecuteInventoryItem(Item->ItemEntry.ItemGuid);
-        PlayerController->ClientEquipItem(Item->ItemEntry.ItemGuid, true);
+        bCarmineFocusHandled =
+            IsExact1040BaseAshtonGadget(Def)
+                ? EnsureExact1040AshtonBackingAndFocus()
+                : FocusOrQueueExact1040Carmine(
+                      PlayerController,
+                      Item->ItemEntry.ItemGuid);
+    }
+    if (VersionInfo.FortniteVersion >= 4.0 &&
+        VersionInfo.FortniteVersion <= 4.5 &&
+        PlayerController && Gadget &&
+        Def->HasbForceFocusWhenAdded() &&
+        Def->bForceFocusWhenAdded)
+    {
+        PlayerController->ServerExecuteInventoryItem(
+            Item->ItemEntry.ItemGuid);
+        PlayerController->ClientEquipItem(
+            Item->ItemEntry.ItemGuid, true);
+    }
+    if (OutForceFocusHandled && bCarmineGadget)
+        *OutForceFocusHandled =
+            bCarmineFocusHandled;
+    if (OutGadgetInitializationDispatched)
+    {
+        *OutGadgetInitializationDispatched =
+            bCarmineGadget
+                ? bCarmineInitialized ||
+                      bItemAddedFallbackDispatched
+                : bAshtonMiloGadget
+                    ? bAshtonMiloInitialized ||
+                          bItemAddedFallbackDispatched
+                    : bItemAddedFallbackDispatched;
     }
 
     auto RechargingWeaponDefinition =
@@ -660,8 +1143,316 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
     return Item;
 }
 
-UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool ShowPickupNoti, bool updateInventory)
+bool AFortInventory::InitializeGadgetItem(
+    UFortWorldItem* Item,
+    bool updateInventory)
 {
+    if (!this || !Item || !Item->ItemEntry.ItemDefinition)
+        return false;
+
+    auto Gadget =
+        Item->ItemEntry.ItemDefinition
+            ->Cast<UFortGadgetItemDefinition>();
+    const IInterface* InventoryOwnerInterface =
+        Owner
+            ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::StaticClass())
+            : nullptr;
+    if (!Gadget || !InventoryOwnerInterface)
+        return false;
+
+    const bool bCarmineGadget =
+        IsExact1040CarmineGadget(Gadget);
+    const bool bAshtonMiloGadget =
+        IsExact1040AshtonMiloGadget(Gadget);
+    if (bCarmineGadget)
+        PreloadExact1040CarmineDependencies();
+    if (bAshtonMiloGadget)
+        PreloadExact1040AshtonMiloDependencies();
+
+    // ApplyGadgetData uses Get() on these authored soft references. The
+    // stripped 10.40 server never queues their normal preload, leaving both
+    // the ability-set handle and the tracked attribute set uninitialized.
+    // Resolve them once on the game thread before invoking the native path.
+    const UFortAbilitySet* LoadedAbilitySet = nullptr;
+    if (Gadget->HasAbilitySet())
+        LoadedAbilitySet = Gadget->AbilitySet.Get();
+
+    const bool bBigTeamGlider =
+        VersionInfo.FortniteVersion == 10.40 &&
+        Gadget->Name.ToWString() ==
+            L"Athena_Glider_Item_BigTeamMode";
+    if (!LoadedAbilitySet && bBigTeamGlider)
+    {
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"GliderItem/AS_Athena_Glider_Item."
+            L"AS_Athena_Glider_Item");
+    }
+    if (!LoadedAbilitySet &&
+        IsExact1040BaseAshtonGadget(Gadget))
+    {
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"Ashton/AS_AshtonPack.AS_AshtonPack");
+    }
+    if (!LoadedAbilitySet &&
+        bCarmineGadget &&
+        !IsExact1040BaseAshtonGadget(Gadget))
+    {
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"CarminePack/AS_CarminePack.AS_CarminePack");
+    }
+    if (!LoadedAbilitySet && bAshtonMiloGadget)
+    {
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(
+            L"/Game/Athena/Items/Gameplay/BackPacks/"
+            L"Ashton/Milo/AS_AshtonPack_Milo."
+            L"AS_AshtonPack_Milo");
+    }
+    if (LoadedAbilitySet)
+        LoadedAbilitySet->AddToRoot();
+
+    UClass* LoadedAttributeSet =
+        Gadget->HasAttributeSet()
+            ? Gadget->AttributeSet.Get()
+            : nullptr;
+    UClass* LoadedGameplayAbility =
+        Gadget->HasGameplayAbility()
+            ? Gadget->GameplayAbility.Get()
+            : nullptr;
+    auto LoadedWeaponDefinition =
+        Gadget->GetWeaponItemDefinition();
+
+    bool bApplied = false;
+    if (ApplyGadgetDataAddress)
+    {
+        bApplied =
+            ((bool (*)(
+                UFortGadgetItemDefinition*,
+                const IInterface*,
+                UFortItem*,
+                uint8_t))ApplyGadgetDataAddress)(
+                    Gadget,
+                    InventoryOwnerInterface,
+                    reinterpret_cast<UFortItem*>(Item),
+                    1);
+    }
+
+    if (updateInventory && bApplied)
+        Update(&Item->ItemEntry);
+
+    SDK::DbgLog(
+        "[Gadget] native initialization definition=%s item=%p "
+        "abilitySet=%p attributeSet=%p gameplayAbility=%p "
+        "weapon=%p applied=%d\n",
+        Gadget->Name.ToString().c_str(),
+        static_cast<void*>(Item),
+        static_cast<const void*>(LoadedAbilitySet),
+        static_cast<void*>(LoadedAttributeSet),
+        static_cast<void*>(LoadedGameplayAbility),
+        static_cast<void*>(LoadedWeaponDefinition),
+        bApplied ? 1 : 0);
+    return bApplied;
+}
+
+bool AFortInventory::InitializeGadgetItemWithFallback(
+    UFortWorldItem* Item,
+    bool updateInventory)
+{
+    if (!this || !Item ||
+        !Item->ItemEntry.ItemDefinition ||
+        !Item->ItemEntry.ItemDefinition
+             ->Cast<UFortGadgetItemDefinition>())
+    {
+        return false;
+    }
+
+    const bool bForceStockMiloNotification =
+        IsExact1040AshtonMiloGadget(
+            Item->ItemEntry.ItemDefinition);
+    const bool bForceStockNotification =
+        bForceStockMiloNotification;
+
+    // Milo's cooked passive creates its rifle, launcher and jetpack from its
+    // server item-added event, so it needs that stock notification. Carmine
+    // instead uses ApplyGadgetData here for immediate server abilities; its
+    // replicated owning-client item-added event independently owns the
+    // AnimBP-ready transformation.
+    if (!bForceStockNotification &&
+        InitializeGadgetItem(Item, updateInventory))
+        return true;
+
+    const IInterface* InventoryOwnerInterface =
+        Owner
+            ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::StaticClass())
+            : nullptr;
+    if (!InventoryOwnerInterface ||
+        !OnItemInstanceAddedVft ||
+        OnItemInstanceAddedVft >= 1024 ||
+        !Item->Vft ||
+        !Item->Vft[OnItemInstanceAddedVft])
+    {
+        return false;
+    }
+
+    ((void(*)(const UFortWorldItem*, const IInterface*))
+        Item->Vft[OnItemInstanceAddedVft])(
+            Item, InventoryOwnerInterface);
+    SDK::DbgLog(
+        "[Gadget] dispatched item-added %s "
+        "definition=%s item=%p\n",
+        bForceStockNotification
+            ? "forced-stock path"
+            : "fallback",
+        Item->ItemEntry.ItemDefinition->Name
+            .ToString().c_str(),
+        static_cast<void*>(Item));
+    return true;
+}
+
+bool AFortInventory::
+    EnsureExact1040AshtonBackingAndFocus(
+        FGuid* OutBackingGuid)
+{
+    if (OutBackingGuid)
+        *OutBackingGuid = {};
+    auto PlayerController =
+        Owner
+            ? Owner->Cast<
+                  AFortPlayerControllerAthena>()
+            : nullptr;
+    auto BackingDefinition =
+        ResolveExact1040CarmineBacking();
+    if (!PlayerController ||
+        !BackingDefinition)
+    {
+        return false;
+    }
+
+    auto Existing =
+        Inventory.ReplicatedEntries.Search(
+            [&](FFortItemEntry& Entry)
+            {
+                return Entry.ItemDefinition ==
+                    BackingDefinition;
+            },
+            FFortItemEntry::Size());
+    FGuid BackingGuid{};
+    if (Existing)
+    {
+        BackingGuid = Existing->ItemGuid;
+    }
+    else
+    {
+        auto BackingItem = GiveItem(
+            BackingDefinition,
+            1,
+            0,
+            0,
+            false,
+            true,
+            0,
+            {},
+            true);
+        if (!BackingItem)
+            return false;
+        BackingGuid =
+            BackingItem->ItemEntry.ItemGuid;
+        SDK::DbgLog(
+            "[Ashton1040] granted explicit "
+            "D_CarminePack backing for authored gauntlet "
+            "controller=%p\n",
+            static_cast<void*>(PlayerController));
+    }
+
+    if (OutBackingGuid)
+        *OutBackingGuid = BackingGuid;
+    return FocusOrQueueExact1040Carmine(
+        PlayerController, BackingGuid);
+}
+
+int32 AFortInventory::GiveItemToSingleStack(
+    const UFortItemDefinition* Definition,
+    int32 Count,
+    bool ShowPickupNoti)
+{
+    if (!this || !Definition || Count <= 0)
+        return 0;
+
+    int32 MaxStackSize = Definition->GetMaxStackSize();
+    if (MaxStackSize <= 0)
+    {
+        // Resource definitions expose a finite cap on supported builds. If a
+        // fork omits that reflection, still merge safely instead of reverting
+        // to GiveItem's one-new-GUID-per-grant behavior.
+        MaxStackSize = (std::numeric_limits<int32>::max)();
+    }
+
+    auto ExistingEntry = Inventory.ReplicatedEntries.Search(
+        [&](FFortItemEntry& Entry)
+        {
+            return Entry.ItemDefinition == Definition;
+        },
+        FFortItemEntry::Size());
+
+    if (!ExistingEntry)
+    {
+        const int32 GrantedCount =
+            (std::min)(Count, MaxStackSize);
+        return GiveItem(
+            Definition,
+            GrantedCount,
+            0,
+            0,
+            ShowPickupNoti)
+            ? GrantedCount
+            : 0;
+    }
+
+    const int32 ExistingCount =
+        (std::max)(ExistingEntry->Count, 0);
+    if (ExistingCount >= MaxStackSize)
+        return 0;
+
+    const int64 DesiredCount =
+        static_cast<int64>(ExistingCount) +
+        static_cast<int64>(Count);
+    int32 NewCount = static_cast<int32>(
+        (std::min)(
+            DesiredCount,
+            static_cast<int64>(MaxStackSize)));
+    const int32 GrantedCount = NewCount - ExistingCount;
+    if (GrantedCount <= 0)
+        return 0;
+
+    FGuid ExistingGuid = ExistingEntry->ItemGuid;
+    ExistingEntry->Count = NewCount;
+
+    auto ExistingItem = Inventory.ItemInstances.Search(
+        [&](UFortWorldItem* Item)
+        {
+            return Item &&
+                AreGuidsEqual(
+                    Item->ItemEntry.ItemGuid,
+                    ExistingGuid);
+        });
+    if (ExistingItem && *ExistingItem)
+    {
+        (*ExistingItem)->ItemEntry.Count = NewCount;
+        (*ExistingItem)->ItemEntry.bIsDirty = true;
+    }
+
+    UpdateEntry(*ExistingEntry);
+    return GrantedCount;
+}
+
+UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool ShowPickupNoti, bool updateInventory, bool* OutForceFocusHandled)
+{
+    if (OutForceFocusHandled)
+        *OutForceFocusHandled = false;
     if (Count == -1)
         Count = entry.Count;
 
@@ -682,9 +1473,15 @@ UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool 
                 : 0,
             entry.HasStateValues()
                 ? entry.StateValues
-                : TArray<FFortItemEntryStateValue>{});
+                : TArray<FFortItemEntryStateValue>{},
+            true,
+            entry.HasGenericAttributeValues()
+                ? entry.GenericAttributeValues
+                : TArray<float>{},
+            OutForceFocusHandled);
     }
 
+    bool bDefinitionFocusHandled = false;
     auto Item = GiveItem(
         entry.ItemDefinition,
         Count,
@@ -696,7 +1493,11 @@ UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool 
         entry.HasStateValues()
             ? entry.StateValues
             : TArray<FFortItemEntryStateValue>{},
-        false);
+        false,
+        entry.HasGenericAttributeValues()
+            ? entry.GenericAttributeValues
+            : TArray<float>{},
+        &bDefinitionFocusHandled);
     if (!Item)
         return nullptr;
 
@@ -738,10 +1539,98 @@ UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool 
     // Pickup/custom entries must expose their source attachment set before
     // inventory listeners initialize the item's abilities and equipped state.
     // The definition overload deliberately deferred this one notification.
-    if (OnItemInstanceAddedVft && Owner)
-        ((bool(*)(const UFortWorldItem*, const IInterface*)) Item->Vft[OnItemInstanceAddedVft])(Item, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()));
+    const IInterface* InventoryOwnerInterface =
+        Owner
+            ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::
+                      StaticClass())
+            : nullptr;
+    if (OnItemInstanceAddedVft &&
+        OnItemInstanceAddedVft < 1024 &&
+        Item->Vft &&
+        Item->Vft[OnItemInstanceAddedVft] &&
+        InventoryOwnerInterface &&
+        !bDefinitionFocusHandled)
+    {
+        ((void(*)(const UFortWorldItem*, const IInterface*))
+            Item->Vft[OnItemInstanceAddedVft])(
+                Item, InventoryOwnerInterface);
+        if (IsExact1040CarmineGadget(
+                Item->ItemEntry.ItemDefinition))
+        {
+            auto PlayerController =
+                Owner->Cast<
+                    AFortPlayerControllerAthena>();
+            auto Definition =
+                Item->ItemEntry.ItemDefinition;
+            if (PlayerController &&
+                Definition
+                    ->HasbForceFocusWhenAdded() &&
+                Definition
+                    ->bForceFocusWhenAdded)
+            {
+                bDefinitionFocusHandled =
+                    IsExact1040BaseAshtonGadget(
+                        Definition)
+                        ? EnsureExact1040AshtonBackingAndFocus()
+                        : FocusOrQueueExact1040Carmine(
+                              PlayerController,
+                              Item->ItemEntry.ItemGuid);
+            }
+        }
+    }
+    if (OutForceFocusHandled)
+        *OutForceFocusHandled =
+            bDefinitionFocusHandled;
 
     return Item;
+}
+
+void AFortInventory::HandlePendingCarmineFocus(
+    AFortPlayerControllerAthena* PlayerController)
+{
+    auto Pending =
+        PendingCarmineFocus.find(PlayerController);
+    if (Pending == PendingCarmineFocus.end() ||
+        !PlayerController ||
+        !PlayerController->MyFortPawn ||
+        !PlayerController->WorldInventory)
+    {
+        return;
+    }
+
+    const FGuid ItemGuid = Pending->second;
+    auto Entry =
+        PlayerController->WorldInventory
+            ->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(
+                        Candidate.ItemGuid,
+                        ItemGuid);
+                },
+                FFortItemEntry::Size());
+    PendingCarmineFocus.erase(Pending);
+    const bool bValidPendingDefinition =
+        Entry &&
+        (IsExact1040CarmineGadget(
+             Entry->ItemDefinition) ||
+         (Entry->ItemDefinition &&
+          Entry->ItemDefinition->Name.ToWString() ==
+              L"D_CarminePack"));
+    if (!bValidPendingDefinition)
+    {
+        return;
+    }
+
+    PlayerController->ServerExecuteInventoryItem(
+        ItemGuid);
+    PlayerController->ClientEquipItem(
+        ItemGuid, true);
+    SDK::DbgLog(
+        "[Ashton1040] completed queued Carmine focus "
+        "controller=%p\n",
+        static_cast<void*>(PlayerController));
 }
 
 void AFortInventory::SetRequiresUpdate()
@@ -920,6 +1809,19 @@ void AFortInventory::RemoveWeaponAbilities(AActor* Weapon__Uncasted)
 
 void AFortInventory::Remove(FGuid Guid)
 {
+    auto PendingOwner =
+        Owner
+            ? Owner->Cast<
+                  AFortPlayerControllerAthena>()
+            : nullptr;
+    auto Pending =
+        PendingCarmineFocus.find(PendingOwner);
+    if (Pending != PendingCarmineFocus.end() &&
+        AreGuidsEqual(Pending->second, Guid))
+    {
+        PendingCarmineFocus.erase(Pending);
+    }
+
     auto ItemEntryIdx = Inventory.ReplicatedEntries.SearchIndex([&](FFortItemEntry& entry)
         { return entry.ItemGuid == Guid; }, FFortItemEntry::Size());
     if (ItemEntryIdx == -1)
@@ -1079,6 +1981,21 @@ int32 AFortInventory::RemoveItem(
     return RemovedCount;
 }
 
+bool AFortInventory::ShouldBypassItemConsumption(
+    AFortPlayerControllerAthena* PlayerController,
+    int32 Count,
+    bool bForceRemoval)
+{
+    if (!PlayerController || Count <= 0 || bForceRemoval)
+        return false;
+
+    return
+        FConfiguration::bInfiniteAmmo.load(
+            std::memory_order_acquire) ||
+        (PlayerController->HasbInfiniteAmmo() &&
+            PlayerController->bInfiniteAmmo);
+}
+
 FFortRangedWeaponStats* AFortInventory::GetStats(const UFortWeaponItemDefinition* Def)
 {
     if (!Def || !Def->WeaponStatHandle.DataTable)
@@ -1212,6 +2129,35 @@ AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entr
         NewPickup->bTossedFromContainer = SpawnSource == EFortPickupSpawnSource::GetChest() || SpawnSource == EFortPickupSpawnSource::GetAmmoBox();
     if (NewPickup->bTossedFromContainer)
         NewPickup->OnRep_TossedFromContainer();
+
+    if (!SetPickupItems && OverrideClass)
+    {
+        const UClass* GameModePickupClass =
+            FindClass("FortGameModePickup");
+        const UObject* PickupDefault =
+            OverrideClass->GetDefaultObj();
+        if (GameModePickupClass &&
+            PickupDefault &&
+            PickupDefault->IsA(GameModePickupClass))
+        {
+            UWorld* World = UWorld::GetWorld();
+            auto GameState =
+                World && World->GameState
+                    ? World->GameState
+                          ->Cast<AFortGameStateAthena>()
+                    : nullptr;
+            if (GameState &&
+                GameState
+                    ->HasOnPickupSpawnedAndReady())
+            {
+                GameState->OnPickupSpawnedAndReady
+                    .Process(
+                        NewPickup,
+                        const_cast<UFortItemDefinition*>(
+                            Entry.ItemDefinition));
+            }
+        }
+    }
 
     return NewPickup;
 }
@@ -1478,7 +2424,7 @@ void AFortInventory::TickRegeneratingItems()
             if (State.LastObservedLoadedAmmo !=
                 State.MaxLoadedAmmo)
             {
-                SyncEquippedNitroFistsAmmo(
+                SyncEquippedWeaponAmmo(
                     Owner,
                     WeaponDefinition,
                     State.ItemGuid,
@@ -1497,7 +2443,7 @@ void AFortInventory::TickRegeneratingItems()
         if (CurrentLoadedAmmo >
             State.LastObservedLoadedAmmo)
         {
-            SyncEquippedNitroFistsAmmo(
+            SyncEquippedWeaponAmmo(
                 Owner,
                 WeaponDefinition,
                 State.ItemGuid,
@@ -1584,7 +2530,7 @@ void AFortInventory::TickRegeneratingItems()
         Inventory->UpdateEntry(*ReplicatedEntry);
         BroadcastWorldItemAmmoChanged(WorldItem);
         const bool bEquippedWeaponSynced =
-            SyncEquippedNitroFistsAmmo(
+            SyncEquippedWeaponAmmo(
                 Owner,
                 WeaponDefinition,
                 State.ItemGuid,
@@ -1597,6 +2543,25 @@ void AFortInventory::TickRegeneratingItems()
             MaximumLoadedAmmo,
             bEquippedWeaponSynced ? 1 : 0);
     }
+}
+
+void AFortInventory::BeginNativeDeathInventoryRetention(
+    AFortPlayerControllerAthena* PlayerController,
+    const std::vector<FGuid>& ItemGuids)
+{
+    if (!PlayerController || ItemGuids.empty())
+        return;
+
+    NativeDeathInventoryRetention[PlayerController] =
+        ItemGuids;
+}
+
+void AFortInventory::EndNativeDeathInventoryRetention(
+    AFortPlayerControllerAthena* PlayerController)
+{
+    if (PlayerController)
+        NativeDeathInventoryRetention.erase(
+            PlayerController);
 }
 
 
@@ -1701,9 +2666,6 @@ bool RemoveInventoryItemInternal(
     bool bForceRemoveFromQuickBars,
     bool bForceRemoval)
 {
-    if (FConfiguration::bInfiniteAmmo)
-        return true;
-
     if (!Interface)
     {
         return CallRemoveInventoryItemOriginal(
@@ -1758,9 +2720,27 @@ bool RemoveInventoryItemInternal(
             bForceRemoval);
     }
 
-    if (PlayerController->HasbInfiniteAmmo() &&
-        PlayerController->bInfiniteAmmo)
-        return true;
+    if (auto Retention =
+            NativeDeathInventoryRetention.find(
+                PlayerController);
+        Retention !=
+            NativeDeathInventoryRetention.end())
+    {
+        const bool bRetainItem =
+            std::any_of(
+                Retention->second.begin(),
+                Retention->second.end(),
+                [&](const FGuid& RetainedGuid)
+                {
+                    return
+                        RetainedGuid.A == ItemGuid.A &&
+                        RetainedGuid.B == ItemGuid.B &&
+                        RetainedGuid.C == ItemGuid.C &&
+                        RetainedGuid.D == ItemGuid.D;
+                });
+        if (bRetainItem)
+            return true;
+    }
 
     auto WorldInventory = PlayerController->WorldInventory;
     if (!WorldInventory ||
@@ -1789,7 +2769,28 @@ bool RemoveInventoryItemInternal(
                 return Entry.ItemGuid == ItemGuid;
             },
             FFortItemEntry::Size());
-    if (!ItemInstance || !*ItemInstance || !ItemEntry)
+    if (!ItemEntry)
+    {
+        return CallRemoveInventoryItemOriginal(
+            Interface,
+            ItemGuid,
+            Count,
+            bForceRemoveFromQuickBars,
+            bForceRemoval);
+    }
+
+    // Item instances are not materialized consistently for every inventory
+    // stack on every supported build. A valid replicated row is sufficient
+    // to identify and suppress ordinary consumption. The quickbar flag is
+    // commonly set when the final trap or throwable is used, so only the
+    // distinct force-removal flag may override Infinite Ammo here.
+    if (AFortInventory::ShouldBypassItemConsumption(
+            PlayerController, Count, bForceRemoval))
+    {
+        return true;
+    }
+
+    if (!ItemInstance || !*ItemInstance)
     {
         return CallRemoveInventoryItemOriginal(
             Interface,
@@ -1808,6 +2809,7 @@ bool RemoveInventoryItemInternal(
         ItemDefinition
             ? ItemDefinition->Cast<UFortAmmoItemDefinition>()
             : nullptr;
+
     const float ItemLevel =
         Item->ItemEntry.Level > 0
             ? static_cast<float>(Item->ItemEntry.Level)
@@ -2053,6 +3055,14 @@ void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
     if (!Item)
         return;
 
+    // The item instance is the first durable copy of the magazine. Update it
+    // even when a legacy build cannot resolve the owning controller or its
+    // replicated row yet; otherwise a later equip can resurrect stale ammo.
+    const int32 PreviousItemLoadedAmmo =
+        Item->ItemEntry.LoadedAmmo;
+    Item->ItemEntry.LoadedAmmo = LoadedAmmo;
+    Item->ItemEntry.bIsDirty = true;
+
     auto PlayerController = (AFortPlayerControllerAthena*)Item->GetOwningController();
     if (!PlayerController || !PlayerController->WorldInventory)
         return;
@@ -2063,23 +3073,30 @@ void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
     if (!repEnt)
         return;
 
-    const int32 PreviousLoadedAmmo = repEnt->LoadedAmmo;
-    repEnt->LoadedAmmo = LoadedAmmo;
-    Item->ItemEntry.LoadedAmmo = LoadedAmmo;
-    PlayerController->WorldInventory->UpdateEntry(*repEnt);
-    Item->ItemEntry.bIsDirty = true;
-
+    const int32 PreviousLoadedAmmo =
+        repEnt == &Item->ItemEntry
+            ? PreviousItemLoadedAmmo
+            : repEnt->LoadedAmmo;
     auto WeaponDefinition =
         Item->ItemEntry.ItemDefinition
             ? Item->ItemEntry.ItemDefinition->Cast<
                 UFortWeaponItemDefinition>()
             : nullptr;
+
+    // Persist the magazine value reported by the native weapon path.
+    // Re-equipping hydrates AFortWeapon::AmmoCount from this item entry, so
+    // retaining the previous/full value here makes every weapon swap look
+    // like a free reload. Infinite Ammo is enforced against reserve-ammo and
+    // consumable-stack removal instead: magazines behave normally and can be
+    // reloaded forever without traps, throwables, or reserve ammo decreasing.
+    repEnt->LoadedAmmo = LoadedAmmo;
+    PlayerController->WorldInventory->UpdateEntry(*repEnt);
+    BroadcastWorldItemAmmoChanged(Item);
+
     if (IsNitroFistsDefinition(WeaponDefinition))
     {
-        // The original native setter broadcasts this signal. The custom
-        // inventory setter must preserve it so FN30's
-        // FortControllerComponent_RechargeWeapons sees charge use.
-        BroadcastWorldItemAmmoChanged(Item);
+        // The common item-change broadcast above preserves the signal used
+        // by FN30's FortControllerComponent_RechargeWeapons.
         ObserveRechargingWeaponAmmo(
             PlayerController,
             WeaponDefinition,
@@ -2092,14 +3109,47 @@ void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
 
 void SetPhantomReserveAmmo(UFortWorldItem* Item, unsigned int PhantomReserveAmmo)
 {
+    if (!Item)
+        return;
+
     auto PlayerController = (AFortPlayerControllerAthena*)Item->GetOwningController();
-    //PlayerController->WorldInventory->UpdateEntry(Item->ItemEntry);
+    if (!PlayerController || !PlayerController->WorldInventory)
+        return;
+
     auto repEnt = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& item)
         { return item.ItemGuid == Item->ItemEntry.ItemGuid; }, FFortItemEntry::Size());
+    if (!repEnt)
+        return;
 
-    repEnt->PhantomReserveAmmo = PhantomReserveAmmo;
-    Item->ItemEntry.PhantomReserveAmmo = PhantomReserveAmmo;
+    const int32 PreviousPhantomReserveAmmo =
+        repEnt->PhantomReserveAmmo;
+    auto WeaponDefinition =
+        Item->ItemEntry.ItemDefinition
+            ? Item->ItemEntry.ItemDefinition->Cast<
+                UFortWeaponItemDefinition>()
+            : nullptr;
+    const bool bPreservePhantomReserve =
+        AFortInventory::ShouldBypassItemConsumption(
+            PlayerController, 1, false) &&
+        ResolveEquippedWeaponForItem(
+            PlayerController,
+            WeaponDefinition,
+            Item->ItemEntry.ItemGuid) &&
+        PreviousPhantomReserveAmmo > 0 &&
+        PhantomReserveAmmo <=
+            static_cast<unsigned int>(
+                (std::numeric_limits<int32>::max)()) &&
+        static_cast<int32>(PhantomReserveAmmo) <
+            PreviousPhantomReserveAmmo;
+    int32 AppliedPhantomReserveAmmo =
+        bPreservePhantomReserve
+            ? PreviousPhantomReserveAmmo
+            : static_cast<int32>(PhantomReserveAmmo);
 
+    repEnt->PhantomReserveAmmo =
+        AppliedPhantomReserveAmmo;
+    Item->ItemEntry.PhantomReserveAmmo =
+        AppliedPhantomReserveAmmo;
     PlayerController->WorldInventory->UpdateEntry(*repEnt);
     Item->ItemEntry.bIsDirty = true;
 }
@@ -2122,6 +3172,160 @@ void SpawnPickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Ret)
     *Ret = AFortInventory::SpawnPickup(Position, ItemDefinition, NumberToSpawn, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetSupplyDrop());
 }
 
+void SpawnGameModePickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Ret)
+{
+    UFortWorldItemDefinition* ItemDefinition = nullptr;
+    TSubclassOf<AFortPickupAthena> PickupClass{};
+    int32 NumberToSpawn = 0;
+    AFortPlayerPawnAthena* TriggeringPawn = nullptr;
+    FVector Position{};
+    FVector Direction{};
+    Stack.StepCompiledIn(&ItemDefinition);
+    Stack.StepCompiledIn(&PickupClass);
+    Stack.StepCompiledIn(&NumberToSpawn);
+    Stack.StepCompiledIn(&TriggeringPawn);
+    Stack.StepCompiledIn(&Position);
+    Stack.StepCompiledIn(&Direction);
+    Stack.IncrementCode();
+
+    *Ret = nullptr;
+    if (!ItemDefinition || NumberToSpawn <= 0)
+        return;
+
+    const UClass* GameModePickupClass =
+        FindClass("FortGameModePickup");
+    const UClass* OverrideClass = PickupClass.Get();
+    if (!OverrideClass)
+        OverrideClass = GameModePickupClass;
+    const UObject* PickupDefault =
+        OverrideClass ? OverrideClass->GetDefaultObj() : nullptr;
+    if (!GameModePickupClass ||
+        !PickupDefault ||
+        !PickupDefault->IsA(GameModePickupClass))
+    {
+        SDK::DbgLog(
+            "[SupplyDrop] rejected invalid game-mode pickup class=%p item=%p\n",
+            (void*)OverrideClass,
+            (void*)ItemDefinition);
+        return;
+    }
+
+    const bool bCurrentAshtonStone =
+        FFortAthenaNativeLTMCompatibility::
+            IsCurrentAshtonStone(
+                TriggeringPawn, ItemDefinition);
+    if (bCurrentAshtonStone)
+    {
+        if (FFortAthenaNativeLTMCompatibility::
+                IsAshtonStoneCaptured(
+                    ItemDefinition))
+        {
+            SDK::DbgLog(
+                "[Ashton1040] suppressed deferred pickup "
+                "spawn for captured stone item=%s\n",
+                ItemDefinition->Name.ToString().c_str());
+            return;
+        }
+
+        // The rock carrier can disappear before its already-queued SpawnLoot
+        // callback runs. In that gap the compatibility watchdog may restore
+        // the missing gem; reuse it here instead of materializing a second
+        // copy of the same stone. Scan the common game-mode base so a
+        // color-specific subclass and the compatibility base are both seen.
+        UWorld* World = UWorld::GetWorld();
+        auto ExistingActors =
+            World
+                ? UGameplayStatics::GetAllActorsOfClass(
+                      World, GameModePickupClass)
+                : TArray<AActor*>{};
+        if (ExistingActors.Num() >= 0 &&
+            ExistingActors.Num() <= 256 &&
+            ExistingActors.Max() >=
+                ExistingActors.Num() &&
+            ExistingActors.Max() <= 512)
+        {
+            for (auto Actor : ExistingActors)
+            {
+                auto ExistingPickup =
+                    Actor &&
+                            Actor->IsA(
+                                GameModePickupClass)
+                        ? Actor->Cast<
+                              AFortPickupAthena>()
+                        : nullptr;
+                if (!ExistingPickup ||
+                    !ExistingPickup->HasAuthority() ||
+                    (ExistingPickup
+                         ->HasbActorIsBeingDestroyed() &&
+                     ExistingPickup
+                         ->bActorIsBeingDestroyed) ||
+                    (ExistingPickup->HasbPickedUp() &&
+                     ExistingPickup->bPickedUp) ||
+                    ExistingPickup
+                            ->PrimaryPickupItemEntry
+                            .ItemDefinition !=
+                        ItemDefinition)
+                {
+                    continue;
+                }
+
+                ExistingPickup->SetLifeSpan(0.0f);
+                ExistingPickup->ForceNetUpdate();
+                *Ret = ExistingPickup;
+                SDK::DbgLog(
+                    "[Ashton1040] reused existing stone "
+                    "pickup for deferred carrier callback "
+                    "item=%s pickup=%p class=%s\n",
+                    ItemDefinition->Name
+                        .ToString().c_str(),
+                    static_cast<void*>(
+                        ExistingPickup),
+                    ExistingPickup->Class->Name
+                        .ToString().c_str());
+                break;
+            }
+        }
+        ExistingActors.Free();
+        if (*Ret)
+            return;
+    }
+
+    // 10.40's Ashton rock supply drops use this native UFunction instead of
+    // SpawnPickup so the six stone definitions retain their authored custom
+    // pickup classes. The stripped server has no usable body for it; spawning
+    // the generic pickup here would also bypass Ashton's lifecycle delegates.
+    *Ret = AFortInventory::SpawnPickup(
+        Position,
+        ItemDefinition,
+        NumberToSpawn,
+        -1,
+        EFortPickupSourceTypeFlag::GetOther(),
+        EFortPickupSpawnSource::GetSupplyDrop(),
+        TriggeringPawn,
+        true,
+        false,
+        OverrideClass);
+
+    if (*Ret)
+    {
+        // FortGameModePickup objectives are persistent world objectives. The
+        // generic TossPickup path can inherit a finite pickup lifespan, which
+        // made every uncollected Infinity Stone expire and caused the Ashton
+        // watchdog to spawn it again. A zero lifespan clears that timer.
+        (*Ret)->SetLifeSpan(0.0f);
+        (*Ret)->ForceNetUpdate();
+    }
+
+    SDK::DbgLog(
+        "[SupplyDrop] game-mode pickup item=%p class=%p result=%p direction=(%.1f,%.1f,%.1f)\n",
+        (void*)ItemDefinition,
+        (void*)OverrideClass,
+        (void*)*Ret,
+        Direction.X,
+        Direction.Y,
+        Direction.Z);
+}
+
 void RemoveInventoryStateValue()
 {
     printf("Sup\n");
@@ -2136,9 +3340,11 @@ void AFortInventory::PostLoadHook()
 {
     SDK::DbgLog("  [FI] 0 pre-FindSetPickupItems\n");
     SetPickupItems = FindSetPickupItems();
-    SDK::DbgLog("  [FI] 0a pre-FindOnItemInstanceAddedVft\n");
+    SDK::DbgLog("  [FI] 0a pre-FindApplyGadgetData\n");
+    ApplyGadgetDataAddress = FindApplyGadgetData();
+    SDK::DbgLog("  [FI] 0b pre-FindOnItemInstanceAddedVft\n");
     OnItemInstanceAddedVft = FindOnItemInstanceAddedVft();
-    SDK::DbgLog("  [FI] 0b pre-FindClearAbility\n");
+    SDK::DbgLog("  [FI] 0c pre-FindClearAbility\n");
     ClearAbility_ = FindClearAbility();
     SDK::DbgLog("  [FI] 1 finds done\n");
 
@@ -2269,6 +3475,21 @@ void AFortInventory::PostLoadHook()
 
     SDK::DbgLog("  [FI] 3 SetOwningInventory block done\n");
     if (auto sd = DefaultObjImpl("FortAthenaSupplyDrop"))
-        Utils::ExecHook(sd->GetFunction("SpawnPickup"), SpawnPickup_);
+    {
+        if (auto SpawnPickupFunction =
+                sd->GetFunction("SpawnPickup"))
+        {
+            Utils::ExecHook(
+                SpawnPickupFunction,
+                SpawnPickup_);
+        }
+        if (auto SpawnGameModePickupFunction =
+                sd->GetFunction("SpawnGameModePickup"))
+        {
+            Utils::ExecHook(
+                SpawnGameModePickupFunction,
+                SpawnGameModePickup_);
+        }
+    }
     SDK::DbgLog("  [FI] 4 PostLoadHook complete\n");
 }

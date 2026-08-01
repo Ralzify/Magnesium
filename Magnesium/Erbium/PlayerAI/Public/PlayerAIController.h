@@ -41,8 +41,9 @@ public:
     bool bSprintAbilityActivated = false;
     bool bNativeFiring = false;      // real trigger held (any backend)
     bool bGroundAheadValid = true;   // last ground sample found walkable terrain
-    FVector MoveProbeLoc{};          // input-movement probe (simulated backend)
-    float MoveProbeTime = 0.f;
+    FVector LastIssuedMoveTarget{};  // last destination sent to native path following
+    bool bHasIssuedMoveTarget = false;
+    float NextMoveDecisionTime = 0.f; // behavior-goal stability / hysteresis
     float FireTapEndTime = 0.f;      // trigger tap release time (simulated fire)
     int ProbeAmmoAtTap = -1;         // loaded ammo at trigger pull (real-fire probe)
     float JumpStopTime = 0.f;        // when to release a held native jump
@@ -59,15 +60,33 @@ public:
     // ---- Transport / landing ----
     FVector LandingTarget{};
     bool bHasLandingTarget = false;
+    bool bLandingTargetGroundValidated = false;
+    int GroundedLandingSamples = 0;
     bool bEnteredTransport = false;
     bool bVirtualTransport = false;  // native aircraft unavailable -> simulated seat
     bool bThankedDriver = false;
     bool bJumpedFromTransport = false;
     bool bAirPawnSeen = false;       // an airborne pawn existed after the jump
+    bool bTransportSetupPending = false;
+    bool bForceTransportJump = false;
+    bool bManualAirMovement = false;
+    AFortPlayerPawnAthena* ManualAirMovementPawn = nullptr;
+    bool bManualAirMovementComponentDisabled = false;
+    bool bAirStallSampleValid = false;
+    float MissingAirPawnSince = 0.f;
+    float TransportSetupReadyTime = 0.f;
     float TransportPhaseStartTime = 0.f;
+    float TransportUnlockedAtTime = 0.f;
+    float EarliestJumpTime = 0.f;
     float ForcedJumpTime = 0.f;
     float ThankDriverTime = 0.f;
     float JumpedAtTime = 0.f;
+    FVector LastAirStallLocation{};
+    float NextAirStallCheckTime = 0.f;
+    float LastManualAirMoveTime = 0.f;
+    float NextManualAirMoveTime = 0.f;
+    float NextPawnRecoveryTime = 0.f;
+    int PawnRecoveryAttempts = 0;
 
     // ---- Looting ----
     ABuildingContainer* LootContainerTarget = nullptr;
@@ -98,13 +117,34 @@ public:
     float OutsideZoneSince = 0.f;
     float LastObservedHealth = 0.f;
     float LastStormDamageTime = 0.f;
+    float PendingStormFallbackDamage = 0.f;
     bool bStormFallbackActive = false;
 
     // ---- Death / elimination credit data ----
     AFortPlayerControllerAthena* LastDamagerPC = nullptr; // last player/AI that damaged us (via simulated combat)
     float LastDamageTime = 0.f;
     float DBNOSince = 0.f;
+    // Snapshot of the pawn that produced the terminal death report. Native
+    // respawn code can replace Controller->Pawn before the next server tick;
+    // retaining this identity lets teardown remove both the dead pawn and any
+    // unauthorized replacement without dereferencing either after destruction.
+    AFortPlayerPawnAthena* EliminatedPawn = nullptr;
+    // Native player bots are not AFortPlayerControllerAthena instances, so the
+    // player death/restart hooks cannot protect their pawn lifecycle. Keep a
+    // serial-aware expected identity plus a raw address marker used only for
+    // comparison/logging. One bounded pre-jump aircraft handoff may replace
+    // it; after that, any new pawn is an unauthorized native respawn and makes
+    // the entity terminal.
+    TWeakObjectPtr<AFortPlayerPawnAthena> ExpectedNativePawn;
+    AFortPlayerPawnAthena* ExpectedNativePawnIdentity = nullptr;
+    float NativePawnHandoffMissingSince = -1.f;
+    int NativePawnGeneration = 0;
+    bool bNativePawnIdentityEstablished = false;
+    bool bNativeAircraftHandoffConsumed = false;
+    bool bNativePawnIdentityLocked = false;
     bool bDeathHandled = false;
+    bool bTransitionDamageProtectionApplied = false;
+    AFortPlayerPawnAthena* DamageProtectedPawn = nullptr;
 
     // ---- Debug / stability ----
     float SpawnedAtTime = 0.f;
@@ -118,7 +158,10 @@ public:
     bool IsAlive() const;
     EPlayerAIState GetState() const { return StateMachine.GetState(); }
     void SetState(EPlayerAIState NewState, const char* Reason);
+    void SetTransitionDamageProtection(bool bProtect);
 
 private:
+    bool ValidateNativePawnIdentity(
+        float Now, FPlayerAIWorldSnapshot& World);
     void Think(float Now, FPlayerAIWorldSnapshot& World);
 };

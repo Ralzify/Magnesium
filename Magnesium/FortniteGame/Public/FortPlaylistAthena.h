@@ -85,6 +85,7 @@ public:
     DEFINE_PROP(GameplayTagContainer, FGameplayTagContainer);
     DEFINE_PROP(bSkipWarmup, bool);
     DEFINE_PROP(bSkipAircraft, bool);
+    DEFINE_PROP(bUseDefaultSupplyDrops, bool);
     DEFINE_PROP(bForceRespawnLocationInsideOfVolume, bool);
     DEFINE_PROP(bIsLargeTeamGame, bool);
     DEFINE_PROP(ModifierList, TArray<TSoftObjectPtr<UFortGameplayModifierItemDefinition>>);

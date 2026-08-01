@@ -40,7 +40,10 @@ public:
 	static inline bool bPausedZone = false;
 	static inline bool bStartAircraft = false;
 	static bool IsSafeZonePaused();
+	static bool GetSafeZonePausedSnapshot();
+	static void RequestSafeZonePaused(bool bPaused);
 	static void SetSafeZonePaused(bool bPaused);
+	static void TickSafeZonePause();
 
 	DEFINE_PROP(WarmupCountdownStartTime, float);
 	DEFINE_PROP(WarmupCountdownEndTime, float);
@@ -58,6 +61,7 @@ public:
 	DEFINE_PROP(StormCampingInitialDelayTime, FScalableFloat);
 	DEFINE_PROP(bSafeZoneActive, bool);
 	DEFINE_PROP(bSafeZonePaused, bool);
+	DEFINE_PROP(SupplyDropSpawnDataList, FSupplyDropSpawnDataArrayHeader);
 
 	DEFINE_FUNC(OnRep_GamePhase, void);
 	DEFINE_FUNC(HandleGamePhaseStepChanged, void);

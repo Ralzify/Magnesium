@@ -15,6 +15,7 @@
 #include "../Public/PlayerAIFaultGuard.h"
 #include "../Public/AIDebugLogger.h"
 #include "../Public/VersionFeatureAdapter.h"
+#include "../Public/ReplicationBehavior.h"
 #include "../../../FortniteGame/Public/FortKismetLibrary.h"
 #include "../../../FortniteGame/Public/FortWeaponMods.h"
 #include "../../../Engine/Public/AbilitySystemComponent.h"
@@ -23,27 +24,141 @@
 // PlayerAIEntity::GetPawn (declared in PlayerAIEntity.h)
 // ============================================================================
 
+static bool PlayerAIIsLiveObject(const UObject* Object)
+{
+    if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
+        return false;
+
+    const int32 ObjectIndex = Object->Index;
+
+    if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
+        return false;
+
+    auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+    const int32 InvalidObjectFlags =
+        Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+
+    return Item && Item->GetObject() == Object &&
+        !(Item->GetFlags() & InvalidObjectFlags) &&
+        Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
+}
+
+static bool PlayerAIIsLiveActor(const AActor* Actor)
+{
+    if (!PlayerAIIsLiveObject(Actor))
+        return false;
+
+    return !Actor->HasbActorIsBeingDestroyed() ||
+        !Actor->bActorIsBeingDestroyed;
+}
+
+static bool PlayerAIIsLiveActorOfClass(
+    const AActor* Actor, const UClass* ExpectedClass)
+{
+    return ExpectedClass && PlayerAIIsLiveActor(Actor) &&
+        Actor->IsA(ExpectedClass);
+}
+
+bool PlayerAIEntity::HasLiveController() const
+{
+    const AActor* Controller = bNativeBacked
+        ? NativeController : (const AActor*)PC;
+    const UClass* ControllerClass = bNativeBacked
+        ? AFortAthenaAIBotController::StaticClass()
+        : AFortPlayerControllerAthena::StaticClass();
+
+    return PlayerAIIsLiveActorOfClass(Controller, ControllerClass);
+}
+
+bool PlayerAIEntity::HasLivePlayerState() const
+{
+    return PlayerAIIsLiveActorOfClass(
+        PlayerState, AFortPlayerStateAthena::StaticClass());
+}
+
+bool PlayerAIEntity::IsValid() const
+{
+    return HasLiveController() && HasLivePlayerState();
+}
+
+bool PlayerAIEntity::IsLivePawn(
+    const AFortPlayerPawnAthena* Pawn)
+{
+    return PlayerAIIsLiveActorOfClass(
+        Pawn, AFortPlayerPawnAthena::StaticClass());
+}
+
 AFortPlayerPawnAthena* PlayerAIEntity::GetPawn() const
 {
+    const UClass* PawnClass =
+        AFortPlayerPawnAthena::StaticClass();
+
     if (bNativeBacked)
     {
         auto Bot = (AFortAthenaAIBotController*)NativeController;
 
-        if (!Bot)
-            return nullptr;
+        if (HasLiveController())
+        {
+            auto Pawn = Bot->Pawn;
 
-        return Bot->Pawn;
+            if (PlayerAIIsLiveActorOfClass(Pawn, PawnClass))
+                return Pawn;
+        }
+
+        return PlayerAIIsLiveActorOfClass(
+            NativePawn, PawnClass) ? NativePawn : nullptr;
     }
 
-    if (!PC)
+    if (!HasLiveController())
         return nullptr;
 
-    auto Pawn = PC->MyFortPawn;
+    // Pawn is the possession authority. MyFortPawn can retain the address of
+    // a destroyed warmup pawn after aircraft transitions on several builds.
+    auto Pawn = PC->Pawn;
 
-    if (!Pawn)
-        Pawn = PC->Pawn;
+    if (!PlayerAIIsLiveActorOfClass(Pawn, PawnClass))
+        Pawn = PC->MyFortPawn;
 
-    return Pawn;
+    return PlayerAIIsLiveActorOfClass(
+        Pawn, PawnClass) ? (AFortPlayerPawnAthena*)Pawn : nullptr;
+}
+
+AFortPlayerPawnAthena* PlayerAIEntity::GetNativeControllerPawn() const
+{
+    if (!bNativeBacked || !HasLiveController())
+        return nullptr;
+
+    auto Bot = (AFortAthenaAIBotController*)NativeController;
+    auto Pawn = Bot->Pawn;
+
+    return PlayerAIIsLiveActorOfClass(
+        Pawn, AFortPlayerPawnAthena::StaticClass())
+        ? Pawn : nullptr;
+}
+
+AFortInventory* PlayerAIEntity::GetInventory() const
+{
+    if (!HasLiveController())
+        return nullptr;
+
+    AFortInventory* Inventory = nullptr;
+
+    if (bNativeBacked)
+    {
+        auto Bot =
+            (AFortAthenaAIBotController*)NativeController;
+
+        if (Bot->HasInventory())
+            Inventory = Bot->Inventory;
+    }
+    else
+    {
+        Inventory = PC->WorldInventory;
+    }
+
+    return PlayerAIIsLiveActorOfClass(
+        Inventory, AFortInventory::StaticClass())
+        ? Inventory : nullptr;
 }
 
 // ============================================================================
@@ -58,22 +173,17 @@ static const UClass* GPhoebePawnClass = nullptr;
 static const UClass* GMutatorClass = nullptr;
 static int GDetectAttempts = 0;
 static float GNextDetectTime = 0.f;
+static int GConsecutiveNullSpawns = 0;
 
-static const UClass* PlayerAIFindClassObject(const char* ShortName)
+// Resident-only class lookup. Native Phoebe support is optional, so its
+// detection must never force package loading from TickFlush.
+// (Kept free of unwindable C++ objects for SEH.)
+static const UClass* PlayerAITryFindLoadedClass(
+    const wchar_t* Path, bool* bOutFaulted)
 {
-    auto Object = TUObjectArray::FindFirstObject(ShortName);
+    if (!Offsets::StaticFindObject)
+        return nullptr;
 
-    if (Object && Object->IsA<UClass>())
-        return (const UClass*)Object;
-
-    return nullptr;
-}
-
-// Fault-isolated asset class loading: loading a nonexistent path can fault
-// on some builds, and a fault during detection must NEVER take the whole
-// PlayerAI system down. (Kept free of unwindable C++ objects for SEH.)
-static const UClass* PlayerAITryLoadClass(const wchar_t* Path, bool* bOutFaulted)
-{
     GPlayerAIGuardedNativeCallDepth++;
 
     const UClass* Result = nullptr;
@@ -81,7 +191,8 @@ static const UClass* PlayerAITryLoadClass(const wchar_t* Path, bool* bOutFaulted
 
     __try
     {
-        Result = FindObject<UClass>(Path);
+        Result = (const UClass*)SDK::StaticFindObject(
+            Path, UClass::StaticClass());
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -96,9 +207,9 @@ static const UClass* PlayerAITryLoadClass(const wchar_t* Path, bool* bOutFaulted
     return Result;
 }
 
-// Detection must FORCE-LOAD the Phoebe blueprints: they are lazy loaded and
-// are usually not in memory until something references them, so a memory
-// scan alone always misses them on a fresh server.
+// Detection uses only classes already present in the hosted build's active
+// object set. If Phoebe is not resident, the universal simulated backend is
+// safer than synchronously loading its package from the server tick.
 static void PlayerAIDetectNativeStack()
 {
     if (GNativeAvailable != -1)
@@ -121,37 +232,36 @@ static void PlayerAIDetectNativeStack()
     GNextDetectTime = Now + 2.f;
     GDetectAttempts++;
 
-    auto BotControllerClass = FindClass("FortAthenaAIBotController");
+    // Native classes are process-resident. Cache both success and failure so
+    // four availability probes do not repeat full reflected-object scans.
+    static auto BotControllerClass =
+        FindClass("FortAthenaAIBotController");
+    static auto NativeMutatorClass =
+        FindClass("FortAthenaMutator_Bots");
     bool bLoadFaulted = false;
 
     if (!GPhoebePawnClass)
-        GPhoebePawnClass = PlayerAITryLoadClass(L"/Game/Athena/AI/Phoebe/BP_PlayerPawn_Athena_Phoebe.BP_PlayerPawn_Athena_Phoebe_C", &bLoadFaulted);
-
-    if (!GPhoebePawnClass && !bLoadFaulted)
-        GPhoebePawnClass = PlayerAIFindClassObject("BP_PlayerPawn_Athena_Phoebe_C");
+        GPhoebePawnClass = PlayerAITryFindLoadedClass(L"/Game/Athena/AI/Phoebe/BP_PlayerPawn_Athena_Phoebe.BP_PlayerPawn_Athena_Phoebe_C", &bLoadFaulted);
 
     if (!GMutatorClass && !bLoadFaulted)
-        GMutatorClass = PlayerAITryLoadClass(L"/Game/Athena/AI/Phoebe/BP_Phoebe_Mutator.BP_Phoebe_Mutator_C", &bLoadFaulted);
+        GMutatorClass = PlayerAITryFindLoadedClass(L"/Game/Athena/AI/Phoebe/BP_Phoebe_Mutator.BP_Phoebe_Mutator_C", &bLoadFaulted);
 
     if (!GMutatorClass)
-        GMutatorClass = PlayerAIFindClassObject("BP_Phoebe_Mutator_C");
-
-    if (!GMutatorClass)
-        GMutatorClass = FindClass("FortAthenaMutator_Bots");
+        GMutatorClass = NativeMutatorClass;
 
     if (bLoadFaulted)
     {
         // Loading faulted on this build: settle immediately, never retry.
         GNativeAvailable = 0;
         AIDebugLogger::MissingFeature("NativeBotAssetLoading",
-            "asset loading faulted - PlayerAI uses the simulated backend");
+            "resident asset lookup faulted - PlayerAI uses the simulated backend");
         return;
     }
 
     if (BotControllerClass && GPhoebePawnClass && GMutatorClass)
     {
         GNativeAvailable = 1;
-        AIDebugLogger::Log("NativeBackend", "native player-bot stack loaded - PlayerAI uses engine bots (navmesh pathing, real weapons)");
+        AIDebugLogger::Log("NativeBackend", "resident native player-bot stack found - PlayerAI uses engine bots (navmesh pathing, real weapons)");
         return;
     }
 
@@ -172,9 +282,22 @@ bool NativePlayerAIBackend::IsAvailable()
 
 void NativePlayerAIBackend::Reset()
 {
+    // This actor is created by this backend, so tear it down before dropping
+    // the pointer. Same-world match recycling would otherwise accumulate bot
+    // mutators, while a destroyed actor could later be mistaken for a valid
+    // initialized backend.
+    if (PlayerAIIsLiveActor(GBotMutator))
+        GBotMutator->K2_DestroyActor();
+
+    GNativeAvailable = -1;
     GBotMutator = nullptr;
     bNavMeshRequested = false;
     bNavMeshReady = false;
+    GPhoebePawnClass = nullptr;
+    GMutatorClass = nullptr;
+    GDetectAttempts = 0;
+    GNextDetectTime = 0.f;
+    GConsecutiveNullSpawns = 0;
 }
 
 bool NativePlayerAIBackend::IsNavMeshReady()
@@ -186,13 +309,14 @@ bool NativePlayerAIBackend::IsNavMeshReady()
 // Navmesh bootstrap
 // ============================================================================
 
-// The game ships /Game/Maps/NavMeshBounds: a stub level holding a unit-sized
-// NavMeshBoundsVolume for dedicated servers to scale over the map so the
-// navmesh generates at runtime. Without nav bounds no tiles are ever built
-// and every pathfinding request fails.
+// Use nav data the hosted build already initialized. Streaming a bounds level,
+// scaling it over the whole island, and synchronously notifying navigation
+// launched a full dynamic rebuild from TickFlush; on several builds that
+// starved the game thread indefinitely. MoveTo has a direct-input fallback
+// whenever the existing path follower cannot find a route.
 static void PlayerAIEnsureNavMesh()
 {
-    if (bNavMeshReady)
+    if (bNavMeshRequested)
         return;
 
     auto World = UWorld::GetWorld();
@@ -200,80 +324,9 @@ static void PlayerAIEnsureNavMesh()
     if (!World || !World->HasNavigationSystem() || !World->NavigationSystem)
         return;
 
+    bNavMeshRequested = true;
+
     auto NavSystem = World->NavigationSystem;
-
-    if (!bNavMeshRequested)
-    {
-        bNavMeshRequested = true;
-
-        auto Statics = UGameplayStatics::GetDefaultObj();
-        auto LoadFn = Statics ? Statics->GetFunction("LoadStreamLevel") : nullptr;
-
-        if (!LoadFn)
-        {
-            AIDebugLogger::MissingFeature("LoadStreamLevel", "navmesh bounds level cannot be streamed - direct-input movement only");
-            return;
-        }
-
-        // Build the parameter block by property name so this survives layout
-        // changes between versions.
-        auto Params = LoadFn->GetParamsNamed();
-        std::vector<uint8_t> Buffer((size_t)(Params.Size > 0 ? Params.Size : 0x100), 0);
-
-        for (auto& Param : Params.NameOffsetMap)
-        {
-            if (Param.Name == "WorldContextObject")
-                *(UWorld**)(Buffer.data() + Param.Offset) = World;
-            else if (Param.Name == "LevelName")
-                *(FName*)(Buffer.data() + Param.Offset) = FName(L"/Game/Maps/NavMeshBounds");
-            else if (Param.Name == "bMakeVisibleAfterLoad")
-                *(bool*)(Buffer.data() + Param.Offset) = true;
-            else if (Param.Name == "bShouldBlockOnLoad")
-                *(bool*)(Buffer.data() + Param.Offset) = false;
-            else if (Param.Name == "LatentInfo")
-            {
-                // FLatentActionInfo: Linkage(int32), UUID(int32),
-                // ExecutionFunction(FName), CallbackTarget(UObject*).
-                auto Latent = Buffer.data() + Param.Offset;
-                *(int32*)(Latent + 0) = 0;
-                *(int32*)(Latent + 4) = 134005; // arbitrary unique UUID
-                *(FName*)(Latent + 8) = FName();
-                *(UObject**)(Latent + 16) = World;
-            }
-        }
-
-        Statics->ProcessEvent(LoadFn, Buffer.data());
-        AIDebugLogger::Log("NativeBackend", "streaming the NavMeshBounds level for runtime navmesh generation");
-        return; // volume appears on a later tick
-    }
-
-    // Wait for the volume to stream in, then stretch it over the island.
-    static auto VolumeClass = FindClass("NavMeshBoundsVolume");
-
-    if (!VolumeClass)
-    {
-        AIDebugLogger::MissingFeature("NavMeshBoundsVolume", "no navmesh bounds class - direct-input movement only");
-        bNavMeshReady = true; // stop retrying
-        return;
-    }
-
-    TArray<AActor*> Volumes;
-    Utils::GetAll(VolumeClass, Volumes);
-
-    if (Volumes.Num() == 0)
-    {
-        Volumes.Free();
-        return; // still streaming - retry next tick
-    }
-
-    auto Volume = Volumes[0];
-    Volumes.Free();
-
-    // Cover the whole island.
-    Volume->K2_SetActorLocation(FVector(0.f, 0.f, 12000.f), false, nullptr, true);
-    Volume->SetActorScale3D(FVector(300000.f, 300000.f, 40000.f));
-
-    // Force dynamic runtime generation on the nav data.
     static auto MainNavDataOffset = NavSystem->GetOffset("MainNavData");
 
     if (MainNavDataOffset != -1)
@@ -282,20 +335,17 @@ static void PlayerAIEnsureNavMesh()
 
         if (NavData)
         {
-            static auto RuntimeGenerationOffset = NavData->GetOffset("RuntimeGeneration");
-
-            if (RuntimeGenerationOffset != -1)
-                GetFromOffset<uint8>(NavData, RuntimeGenerationOffset) = 2; // ERuntimeGenerationType::Dynamic
+            bNavMeshReady = true;
+            AIDebugLogger::Log(
+                "NativeBackend",
+                "using the hosted build's existing navigation data");
+            return;
         }
     }
 
-    auto UpdateFn = NavSystem->GetFunction("OnNavigationBoundsUpdated");
-
-    if (UpdateFn)
-        NavSystem->Call<void>(UpdateFn, Volume);
-
-    AIDebugLogger::Log("NativeBackend", "navmesh bounds placed over the island - runtime generation started");
-    bNavMeshReady = true;
+    AIDebugLogger::MissingFeature(
+        "ExistingNavDataForPlayerAI",
+        "no ready nav data - native bots use bounded direct-input movement");
 }
 
 // ============================================================================
@@ -309,8 +359,11 @@ void NativePlayerAIBackend::EnsureInitialized()
 
     PlayerAIEnsureNavMesh();
 
-    if (GBotMutator)
+    if (PlayerAIIsLiveActorOfClass(
+            GBotMutator, GMutatorClass))
         return;
+
+    GBotMutator = nullptr;
 
     auto GameMode = VersionFeatureAdapter::GetGameMode();
     auto GameState = VersionFeatureAdapter::GetGameState();
@@ -362,8 +415,13 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
 
     EnsureInitialized();
 
-    if (!GBotMutator || !GPhoebePawnClass)
+    if (!PlayerAIIsLiveActorOfClass(
+            GBotMutator, GMutatorClass) ||
+        !GPhoebePawnClass)
+    {
+        GBotMutator = nullptr;
         return Entity;
+    }
 
     auto SpawnBotFn = GBotMutator->GetFunction("SpawnBot");
 
@@ -393,13 +451,11 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
     // Consecutive dead spawns disable the backend for the session so the
     // simulated tier takes over (a null-returning SpawnBot otherwise
     // retries forever and the lobby never fills - seen on 17.30).
-    static int ConsecutiveNullSpawns = 0;
-
     if (!Pawn)
     {
         AIDebugLogger::Error("NativeBackend", "native bot spawn returned null");
 
-        if (++ConsecutiveNullSpawns >= 3)
+        if (++GConsecutiveNullSpawns >= 3)
         {
             GNativeAvailable = 0;
             AIDebugLogger::MissingFeature("NativeBotSpawn",
@@ -416,7 +472,7 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
         AIDebugLogger::Error("NativeBackend", "native bot spawned without a controller");
         Pawn->K2_DestroyActor();
 
-        if (++ConsecutiveNullSpawns >= 3)
+        if (++GConsecutiveNullSpawns >= 3)
         {
             GNativeAvailable = 0;
             AIDebugLogger::MissingFeature("NativeBotSpawn",
@@ -433,7 +489,7 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
         AIDebugLogger::Error("NativeBackend", "native bot spawned without a player state");
         Pawn->K2_DestroyActor();
 
-        if (++ConsecutiveNullSpawns >= 3)
+        if (++GConsecutiveNullSpawns >= 3)
         {
             GNativeAvailable = 0;
             AIDebugLogger::MissingFeature("NativeBotSpawn",
@@ -443,7 +499,7 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
         return Entity;
     }
 
-    ConsecutiveNullSpawns = 0;
+    GConsecutiveNullSpawns = 0;
 
     // Inventory (native bots use the controller's own inventory).
     if (!Bot->HasInventory() || !Bot->Inventory)
@@ -463,7 +519,12 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
     // Pickaxe.
     if (Bot->HasInventory() && Bot->Inventory)
     {
-        static auto DefaultPickaxe = FindObject<UFortItemDefinition>(L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01");
+        static auto DefaultPickaxe =
+            Offsets::StaticFindObject
+            ? (const UFortItemDefinition*)SDK::StaticFindObject(
+                L"/Game/Athena/Items/Weapons/WID_Harvest_Pickaxe_Athena_C_T01.WID_Harvest_Pickaxe_Athena_C_T01",
+                UFortItemDefinition::StaticClass())
+            : nullptr;
 
         if (DefaultPickaxe)
         {
@@ -575,7 +636,14 @@ PlayerAIEntity NativePlayerAIBackend::SpawnNativeEntity(const FTransform& SpawnA
 
 AFortAthenaAIBotController* NativePlayerAIBackend::GetBotController(PlayerAIController& AI)
 {
-    return AI.Entity.bNativeBacked ? (AFortAthenaAIBotController*)AI.Entity.NativeController : nullptr;
+    if (!AI.Entity.bNativeBacked ||
+        !AI.Entity.HasLiveController())
+    {
+        return nullptr;
+    }
+
+    return (AFortAthenaAIBotController*)
+        AI.Entity.NativeController;
 }
 
 static uint8 PlayerAIMoveStatusMoving()
@@ -601,38 +669,18 @@ void NativePlayerAIBackend::Sprint(PlayerAIController& AI)
     if (!Pawn)
         return;
 
-    // One-time sprint ability activation (same path real clients use), then
-    // keep the replicated movement style at Sprinting.
-    if (!AI.bSprintAbilityActivated)
-    {
-        AI.bSprintAbilityActivated = true;
-
-        auto PlayerState = AI.Entity.PlayerState;
-        auto SprintClass = FindClass("FortGameplayAbility_Sprint");
-
-        if (SprintClass && PlayerState && PlayerState->HasAbilitySystemComponent() && PlayerState->AbilitySystemComponent)
-        {
-            auto ASC = PlayerState->AbilitySystemComponent;
-            auto& Items = ASC->ActivatableAbilities.Items;
-
-            for (int i = 0; i < Items.Num(); i++)
-            {
-                auto Spec = (FGameplayAbilitySpec*)((PBYTE)Items.GetData() + (i * FGameplayAbilitySpec::Size()));
-
-                if (!Spec || !Spec->Ability || !Spec->Ability->IsA(SprintClass))
-                    continue;
-
-                VersionFeatureAdapter::TryActivateAbilityHandle(ASC, Spec->Handle);
-                break;
-            }
-        }
-    }
+    // Do not activate sprint through InternalServerTryActivateAbility. Raw
+    // ability activation on server-owned, connectionless players can re-enter
+    // the native activation path until the game thread exhausts its stack.
+    // Movement remains engine-owned; the replicated style supplies the sprint
+    // presentation without that unsafe call.
+    AI.bSprintAbilityActivated = true;
 
     if (Pawn->HasCurrentMovementStyle())
     {
-        static int SprintingValue = -1;
+        static int SprintingValue = -2;
 
-        if (SprintingValue == -1)
+        if (SprintingValue == -2)
         {
             auto Enum = FindEnum("EFortMovementStyle");
             SprintingValue = Enum ? (int)Enum->GetValue("Sprinting") : -1;
@@ -661,18 +709,30 @@ void NativePlayerAIBackend::MoveTo(PlayerAIController& AI, const FVector& Dest, 
     if (Dist <= AcceptRadius)
         return;
 
-    const bool bGoalChanged = !AI.bHasMoveTarget || (Dest - AI.MoveTarget).Magnitude() > 500.0;
+    const bool bGoalChanged =
+        !AI.bHasIssuedMoveTarget ||
+        (Dest - AI.LastIssuedMoveTarget).Magnitude() >
+            500.0;
 
     AI.MoveTarget = FVector(Dest);
     AI.bHasMoveTarget = true;
 
-    bool bFollowing = Bot->GetMoveStatus() == PlayerAIMoveStatusMoving();
+    bool bFollowing = bNavMeshReady &&
+        Bot->GetMoveStatus() ==
+            PlayerAIMoveStatusMoving();
 
     // Only (re)issue when the goal moved or the follower went idle -
     // restarting an in-flight move stutters the pawn.
-    if (bGoalChanged || (!bFollowing && Now - AI.LastRepathTime >= 0.75f))
+    const bool bCanIssuePath =
+        !AI.bHasIssuedMoveTarget ||
+        Now - AI.LastRepathTime >= 0.50f;
+
+    if (bNavMeshReady && bCanIssuePath &&
+        (bGoalChanged || !bFollowing))
     {
         AI.LastRepathTime = Now;
+        AI.LastIssuedMoveTarget = FVector(Dest);
+        AI.bHasIssuedMoveTarget = true;
 
         // Goal projection first, raw second - some goals sit slightly off
         // the navmesh (chests on props, zone points over water).
@@ -707,6 +767,9 @@ void NativePlayerAIBackend::StopMove(PlayerAIController& AI)
 
     if (Bot)
         Bot->StopMovement();
+
+    AI.bHasIssuedMoveTarget = false;
+    AI.LastRepathTime = 0.f;
 }
 
 void NativePlayerAIBackend::SetFocalPoint(PlayerAIController& AI, const FVector& Point)
@@ -755,13 +818,17 @@ void NativePlayerAIBackend::Jump(PlayerAIController& AI)
         Pawn->Jump();
 }
 
-void NativePlayerAIBackend::SkydiveFrom(PlayerAIController& AI, const FVector& Location)
+bool NativePlayerAIBackend::SkydiveFrom(PlayerAIController& AI, const FVector& Location)
 {
     auto Pawn = AI.GetPawn();
 
     if (!Pawn)
-        return;
+        return false;
 
     Pawn->K2_TeleportTo(FVector(Location), FRotator{}, false, true);
-    Pawn->BeginSkydiving(true);
+    ReplicationBehavior::PushTeleportUpdate(Pawn);
+
+    AI.SetTransitionDamageProtection(true);
+
+    return VersionFeatureAdapter::TryBeginSkydiving(Pawn);
 }

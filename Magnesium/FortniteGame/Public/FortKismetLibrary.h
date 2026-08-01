@@ -37,6 +37,27 @@ public:
 	DEFINE_STATIC_FUNC(CloseActor, void);
 	//DEFINE_STATIC_FUNC(K2_GetResourceItemDefinition, UFortItemDefinition*);
 
+	// The legacy FortTimeOfDayManager and the newer DaySequence actor expose
+	// different playback controls. These helpers resolve the active manager
+	// for the current world and keep both generations on one call path.
+	static UObject* GetTimeOfDayControllerCompat(
+		UObject* WorldContextObject);
+	static bool GetTimeOfDayCompat(
+		UObject* WorldContextObject,
+		float& OutTimeOfDay);
+	static bool GetTimeOfDaySpeedCompat(
+		UObject* WorldContextObject,
+		float& OutTimeOfDaySpeed);
+	static bool SetTimeOfDayCompat(
+		UObject* WorldContextObject,
+		float TimeOfDay);
+	static bool SetTimeOfDaySpeedCompat(
+		UObject* WorldContextObject,
+		float TimeOfDaySpeed);
+	static bool SetResolvedTimeOfDaySpeedCompat(
+		UObject* Controller,
+		float TimeOfDaySpeed);
+
 	static const UFortItemDefinition* K2_GetResourceItemDefinition(EFortResourceType Type)
 	{
 		// exec func doesnt exist on rlly old builds

@@ -3841,7 +3841,7 @@ namespace
                 SDK::DbgLog(
                     "  [ProjectileDamage] phase-state source=unavailable status=%d late-game=%d in-aircraft=%d allowed=0\n",
                     static_cast<int32>(GUI::gsStatus),
-                    FConfiguration::bLateGame,
+                    FConfiguration::bLateGame.load(),
                     ShooterInAircraft);
             }
             return false;
@@ -3868,7 +3868,7 @@ namespace
                 static_cast<uint32>(LegacyPhase),
                 static_cast<uint32>(LegacyStep),
                 static_cast<int32>(GUI::gsStatus),
-                FConfiguration::bLateGame,
+                FConfiguration::bLateGame.load(),
                 ShooterInAircraft,
                 Allowed);
         }

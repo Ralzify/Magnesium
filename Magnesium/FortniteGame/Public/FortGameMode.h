@@ -17,6 +17,19 @@ enum class EEvaluateCurveTableResult : uint8
 
 class UNetDriver;
 
+// Supply-drop runtime element layouts and ownership change between releases,
+// but their reflected arrays retain Unreal's 0x10 script-array header.
+struct FSupplyDropSpawnDataArrayHeader
+{
+    void* Data = nullptr;
+    int32 NumElements = 0;
+    int32 MaxElements = 0;
+};
+
+static_assert(
+    sizeof(FSupplyDropSpawnDataArrayHeader) == 0x10,
+    "Supply-drop array header must match Unreal's TArray header");
+
 class AFortGameMode : public AActor
 {
 public:
@@ -69,6 +82,7 @@ public:
     DEFINE_PROP(ServerBotManager, UObject*);
     DEFINE_PROP(SpawningPolicyManager, AFortAthenaSpawningPolicyManager*);
     DEFINE_PROP(OnPlaylistLootTablesAppliedDelegate, TMulticastInlineDelegate<void()>);
+    DEFINE_PROP(SupplyDropSpawnDataList, FSupplyDropSpawnDataArrayHeader);
 
     DEFINE_FUNC(SpawnDefaultPawnAtTransform, AFortPlayerPawnAthena*);
     DEFINE_FUNC(RestartPlayer, void);
@@ -91,6 +105,8 @@ public:
     static int GetLateSafeZoneIndex();
     static void TickLateGameSafeZonePhaseFallback(UNetDriver* Driver);
     static void TickPendingVehicleSpawns();
+    static void TickSupplyDropSuppression(bool bForceDiscovery = false);
+    static void TickGameplayConfigurationPolicy(float DeltaSeconds);
     
     InitHooks;
     InitPostLoadHooks;

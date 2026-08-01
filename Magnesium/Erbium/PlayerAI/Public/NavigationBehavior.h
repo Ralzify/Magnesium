@@ -34,7 +34,7 @@ public:
     static void TryJump(PlayerAIController& AI, float Now);
 
     // Steering while skydiving/gliding toward the landing target.
-    static void StepAirMovement(PlayerAIController& AI, float DeltaSeconds);
+    static void StepAirMovement(PlayerAIController& AI, float Now, float DeltaSeconds);
 
     // Swept-walking backend: gravity for idle pawns so nobody hovers after
     // placements, landings or teleports.

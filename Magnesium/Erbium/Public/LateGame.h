@@ -22,7 +22,8 @@ enum class EAmmoType : uint8
 
 static inline bool IsOneShot()
 {
-	return GUI::SelectedPlaylist == static_cast<int>(Playlist::OneShotSolos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::OneShotDuos) || GUI::SelectedPlaylist == static_cast<int>(Playlist::OneShotSquads);
+	const int Selected = GUI::GetSelectedPlaylist();
+	return Selected == static_cast<int>(Playlist::OneShotSolos) || Selected == static_cast<int>(Playlist::OneShotDuos) || Selected == static_cast<int>(Playlist::OneShotSquads);
 }
 
 class LateGame

@@ -383,6 +383,9 @@ public:
     DEFINE_PROP(LastSpectatorSyncLocation, FVector);
     DEFINE_PROP(LastSpectatorSyncRotation, FRotator);
     DEFINE_PROP(PlayerState, AFortPlayerStateAthena*);
+    // Native elimination credit candidate retained by FortPlayerController.
+    // Reflected on the tested 10.40, 15.30, and 32.11 layouts.
+    DEFINE_PROP(LastDamager, AActor*);
     DEFINE_PROP(MyFortPawn, AFortPlayerPawnAthena*);
     DEFINE_PROP(Pawn, AFortPlayerPawnAthena*);
 
@@ -482,6 +485,9 @@ public:
     DEFINE_FUNC(ServerAttemptInteract, void);
     DEFINE_FUNC(ServerExecuteInventoryItem, void);
     DEFINE_FUNC(ClientEquipItem, void);
+    DEFINE_FUNC(RemoveItemFromQuickBars, void);
+    DEFINE_FUNC(AddItemToQuickBars, void);
+    DEFINE_FUNC(ClientForceUpdateQuickbar, void);
     DEFINE_FUNC(OnRep_PlayerState, void);
     DEFINE_FUNC(OnRep_Pawn, void);
     DEFINE_FUNC(ServerChangeName, void);
@@ -517,6 +523,15 @@ public:
     DEFINE_FUNC(ServerModifyStat, void);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
+    // Removes spawn-island loot while retaining the harvesting/building tools
+    // that are intentionally non-droppable. Safe to call at several aircraft
+    // lifecycle checkpoints; later calls become no-ops.
+    static void BeginAircraftInventoryCleanupForMatch(
+        UObject* MatchToken);
+    static int32 ClearDroppableInventoryForAircraft(
+        AFortPlayerControllerAthena* PlayerController,
+        const char* Source,
+        bool bRequireAircraftPassenger = false);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);
     DefHookOg(void, ServerAttemptAircraftJump_, UObject*, FFrame&);
     static void ServerExecuteInventoryItem_(UObject*, FFrame&);
@@ -525,6 +540,7 @@ public:
     static void ServerBeginEditingBuildingActor(UObject*, FFrame&);
     static void ServerEditBuildingActor(UObject*, FFrame&);
     static void ServerEndEditingBuildingActor(UObject*, FFrame&);
+    static void TickEditingToolStateRepair(UNetDriver* Driver);
     static void ServerRepairBuildingActor(UObject*, FFrame&);
     static void ServerAttemptInventoryDrop(UObject*, FFrame&);
     static void ServerPlayEmoteItem_(UObject*, FFrame&);
@@ -535,11 +551,14 @@ public:
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
     static void TickNukeRockets(float DeltaSeconds);
+    // Runs on the server/game thread and keeps an explicitly selected
+    // respawn policy authoritative after playlist/mutator initialization.
+    static void ApplyConfiguredRespawnPolicy();
     static void TickPendingVictoryCrownNotifications();
     DefHookOg(void, ClientOnPawnDied, AFortPlayerControllerAthena*, FFortPlayerDeathReport&);
     DefUHookOg(ServerAttemptInteract_);
     void InternalPickup(FFortItemEntry*);
-    static void ServerDropAllItems(UObject*, FFrame&);
+    DefUHookOg(ServerDropAllItems);
     static void SpawnToyInstance(UObject*, FFrame&, AActor**);
     DefHookOg(void, EnterAircraft, UObject*, AActor*);
     static void ServerTeleportToPlaygroundLobbyIsland(UObject*, FFrame&);

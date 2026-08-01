@@ -30,13 +30,20 @@ public:
     // unavailable). Returns the new pawn or nullptr.
     static AFortPlayerPawnAthena* SpawnPawnAt(PlayerAIController& AI, const FVector& Location, bool bGround);
 
+    // Keeps a transition pawn safely airborne when this build cannot resolve
+    // a grounded landing spot. The pawn stays damage-protected and descends
+    // under native physics instead of being teleported to an assumed Z.
+    static AFortPlayerPawnAthena* SpawnAirborneForLanding(PlayerAIController& AI, const FVector& Desired);
+
     // Post-aircraft-jump setup: wires the fresh RestartPlayer pawn like a
     // PlayerAI pawn, moves it to the aircraft and starts the native
-    // skydive. Returns true when the pawn is skydiving; false when it was
-    // placed at the landing target directly (no skydive support).
+    // skydive. Returns true while the pawn remains on an airborne landing
+    // path. Ground resolution is deliberately deferred to staggered landing
+    // ticks so an aircraft exit cannot issue thousands of traces at once.
     static bool FinishAircraftJumpPawn(PlayerAIController& AI);
 
     // Fully removes a PlayerAI entity from the match (pre-match room making
-    // or shutdown). Updates alive counts safely.
-    static void DespawnEntity(PlayerAIController& AI, const char* Reason);
+    // or shutdown). Batch callers can publish the alive count once after all
+    // entities are gone.
+    static void DespawnEntity(PlayerAIController& AI, const char* Reason, bool bSyncPlayersLeft = true);
 };

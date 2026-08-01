@@ -21,6 +21,106 @@
 #include "../Public/VictoryConditionBehavior.h"
 #include "../Public/MagnesiumPlayerAISpawner.h"
 
+namespace
+{
+    // Shared spawn recovery is intentionally tiny. A broken pawn path on an
+    // unsupported build must not let a filled lobby call RestartPlayer in one
+    // TickFlush.
+    constexpr int PlayerAIPawnRecoveryBudgetPerTick = 2;
+    constexpr int PlayerAIMaxPawnRecoveryAttempts = 6;
+    int PlayerAIPawnRecoveryBudgetRemaining = 0;
+    constexpr int PlayerAITransportJumpBudgetPerTick = 2;
+    int PlayerAITransportJumpBudgetRemaining = 0;
+
+    bool PlayerAITryConsumePawnRecoveryBudget()
+    {
+        if (PlayerAIPawnRecoveryBudgetRemaining <= 0)
+            return false;
+
+        PlayerAIPawnRecoveryBudgetRemaining--;
+        return true;
+    }
+
+    // Loot discovery walks only this many global object slots per server
+    // tick. Results remain staged until a complete pass, so behavior code
+    // always observes one coherent cache.
+    constexpr int PlayerAILootDiscoveryBudgetPerTick = 512;
+    UWorld* PlayerAILootScanWorld = nullptr;
+    int PlayerAILootScanCursor = 0;
+    int PlayerAILootScanLimit = 0;
+    bool bPlayerAILootScanActive = false;
+    std::vector<ABuildingContainer*> PlayerAIPendingContainers;
+    std::vector<AFortPickupAthena*> PlayerAIPendingPickups;
+
+    bool PlayerAIIsLiveObject(const UObject* Object)
+    {
+        if (!Object ||
+            !SDK::MemReadable(Object, sizeof(UObject)))
+        {
+            return false;
+        }
+
+        const int32 ObjectIndex = Object->Index;
+        const int32 ObjectCount = TUObjectArray::Num();
+
+        if (ObjectIndex < 0 || ObjectIndex >= ObjectCount)
+            return false;
+
+        auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+        const int32 InvalidObjectFlags =
+            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+
+        return Item &&
+            Item->GetObject() == Object &&
+            !(Item->GetFlags() & InvalidObjectFlags) &&
+            Object->Class &&
+            SDK::MemReadable(Object->Class, sizeof(UClass));
+    }
+
+    bool PlayerAIObjectBelongsToWorld(
+        const UObject* Object,
+        const UWorld* ExpectedWorld)
+    {
+        if (!ExpectedWorld)
+            return false;
+
+        // Actors are outered to their ULevel, whose outer chain reaches the
+        // owning UWorld on every supported UE4 layout. Bound the walk and
+        // validate every hop so stale cache entries are never dereferenced.
+        const UObject* Current = Object;
+
+        for (int Depth = 0; Depth < 8 && Current; Depth++)
+        {
+            if (Current == ExpectedWorld)
+                return true;
+
+            if (!PlayerAIIsLiveObject(Current))
+                return false;
+
+            Current = Current->Outer;
+        }
+
+        return false;
+    }
+
+    void PlayerAIResetLootDiscovery(bool bClearPublished)
+    {
+        PlayerAILootScanWorld = nullptr;
+        PlayerAILootScanCursor = 0;
+        PlayerAILootScanLimit = 0;
+        bPlayerAILootScanActive = false;
+        PlayerAIPendingContainers.clear();
+        PlayerAIPendingPickups.clear();
+
+        if (bClearPublished)
+        {
+            PlayerAIManager::GetWorld().Containers.clear();
+            PlayerAIManager::GetWorld().Pickups.clear();
+            PlayerAIManager::GetWorld().LastLootScanTime = -1000.f;
+        }
+    }
+}
+
 // ============================================================================
 // PlayerAIController
 // ============================================================================
@@ -41,6 +141,56 @@ bool PlayerAIController::IsAlive() const
 void PlayerAIController::SetState(EPlayerAIState NewState, const char* Reason)
 {
     StateMachine.Transition(NewState, VersionFeatureAdapter::GetTimeSeconds(), Entity.DisplayName.c_str(), Reason);
+}
+
+void PlayerAIController::SetTransitionDamageProtection(bool bProtect)
+{
+    auto Pawn = GetPawn();
+
+    // Never restore a flag on an old/destroyed pawn, and never claim
+    // ownership of invulnerability that another gameplay system applied.
+    if (DamageProtectedPawn != Pawn)
+    {
+        DamageProtectedPawn = nullptr;
+        bTransitionDamageProtectionApplied = false;
+    }
+
+    if (!Pawn || !Pawn->HasbCanBeDamaged())
+        return;
+
+    if (bProtect)
+    {
+        if (bTransitionDamageProtectionApplied &&
+            DamageProtectedPawn == Pawn)
+        {
+            // Possession/skydive setup can restore this flag after we first
+            // acquired it. Reassert protection every transition tick while
+            // retaining the same ownership rules for the eventual restore.
+            if (Pawn->bCanBeDamaged)
+                Pawn->bCanBeDamaged = false;
+
+            return;
+        }
+
+        if (Pawn->bCanBeDamaged)
+        {
+            Pawn->bCanBeDamaged = false;
+            DamageProtectedPawn = Pawn;
+            bTransitionDamageProtectionApplied = true;
+        }
+
+        return;
+    }
+
+    if (bTransitionDamageProtectionApplied &&
+        DamageProtectedPawn == Pawn &&
+        !Pawn->bCanBeDamaged)
+    {
+        Pawn->bCanBeDamaged = true;
+    }
+
+    DamageProtectedPawn = nullptr;
+    bTransitionDamageProtectionApplied = false;
 }
 
 static bool PlayerAIIsGroundState(EPlayerAIState State)
@@ -67,6 +217,224 @@ static bool PlayerAIIsGroundState(EPlayerAIState State)
     }
 }
 
+static bool PlayerAIIsNativeAircraftHandoffWindow(
+    const PlayerAIController& AI,
+    const FPlayerAIWorldSnapshot& World)
+{
+    if (AI.bNativePawnIdentityLocked ||
+        AI.bNativeAircraftHandoffConsumed ||
+        AI.bJumpedFromTransport ||
+        AI.NativePawnGeneration != 1)
+    {
+        return false;
+    }
+
+    if (World.Phase != EPlayerAIMatchPhase::Transport &&
+        World.Phase != EPlayerAIMatchPhase::InProgress)
+    {
+        return false;
+    }
+
+    switch (AI.GetState())
+    {
+    case EPlayerAIState::PreMatchIdle:
+    case EPlayerAIState::PreMatchWalking:
+    case EPlayerAIState::PreMatchEmoting:
+        // Validation runs before phase-transition setup in Update. Permit the
+        // same single handoff while that setup is newly pending, including
+        // playlists which skip the explicit Transport phase.
+        return AI.bTransportSetupPending ||
+            AI.ObservedPhase != World.Phase;
+    case EPlayerAIState::WaitingForTransport:
+    case EPlayerAIState::InTransport:
+    case EPlayerAIState::ChoosingLandingSpot:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static constexpr float PlayerAINativePawnHandoffGraceSeconds = 2.f;
+
+static void PlayerAINormalizeTerminalPawnDamage(
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (!PlayerAIEntity::IsLivePawn(Pawn) ||
+        !Pawn->HasbCanBeDamaged() ||
+        Pawn->bCanBeDamaged)
+    {
+        return;
+    }
+
+    // Teardown should follow immediately. Restoring damage first ensures a
+    // replacement cannot remain as an invulnerable world actor if an engine
+    // destroy request is deferred by one frame.
+    Pawn->bCanBeDamaged = true;
+    Pawn->ForceNetUpdate();
+}
+
+bool PlayerAIController::ValidateNativePawnIdentity(
+    float Now, FPlayerAIWorldSnapshot& World)
+{
+    if (!Entity.bNativeBacked)
+        return true;
+
+    auto CurrentPawn = Entity.GetNativeControllerPawn();
+    auto ExpectedPawn = ExpectedNativePawn.Get();
+    const bool bExpectedIdentityLive =
+        ExpectedPawn &&
+        ExpectedPawn == ExpectedNativePawnIdentity &&
+        PlayerAIEntity::IsLivePawn(ExpectedPawn);
+
+    auto MakeTerminal =
+        [&](const char* Reason)
+        {
+            const auto PreviousState = GetState();
+
+            // Pass only a serial-validated expected actor to teardown. The raw
+            // address remains an identity marker, but must not be dereferenced
+            // after its UObject slot has been recycled. DespawnEntity also
+            // samples the controller's current pawn, so a live original and an
+            // unsolicited replacement are both removed.
+            EliminatedPawn = bExpectedIdentityLive
+                ? ExpectedPawn : CurrentPawn;
+            SetTransitionDamageProtection(false);
+            PlayerAINormalizeTerminalPawnDamage(ExpectedPawn);
+            if (CurrentPawn != ExpectedPawn)
+                PlayerAINormalizeTerminalPawnDamage(CurrentPawn);
+            bDeathHandled = true;
+            SetState(EPlayerAIState::Dead, Reason);
+            AIDebugLogger::Error(
+                "Lifecycle",
+                "%s terminal native pawn lifecycle expected=%p current=%p generation=%d phase=%d state=%s reason=%s",
+                Entity.DisplayName.c_str(),
+                (void*)ExpectedNativePawnIdentity,
+                (void*)CurrentPawn,
+                NativePawnGeneration,
+                (int)World.Phase,
+                PlayerAIStateToString(PreviousState),
+                Reason);
+            EliminationBehavior::OnEliminated(*this, Now);
+            return false;
+        };
+
+    if (!bNativePawnIdentityEstablished)
+    {
+        // SpawnNativeEntity normally supplies the pawn synchronously. Retain a
+        // very small initial-assignment grace for builds which publish the
+        // controller's Pawn property on the following server tick.
+        const bool bInitialAssignmentWindow =
+            NativePawnGeneration == 0 &&
+            Now >= SpawnedAtTime &&
+            Now - SpawnedAtTime <= 2.f &&
+            World.Phase <= EPlayerAIMatchPhase::PreMatch;
+        if (!CurrentPawn)
+        {
+            if (bInitialAssignmentWindow)
+                return true;
+
+            return MakeTerminal("native pawn was never assigned");
+        }
+
+        if (!bInitialAssignmentWindow)
+            return MakeTerminal("late native pawn assignment rejected");
+
+        if (bExpectedIdentityLive && CurrentPawn != ExpectedPawn)
+        {
+            return MakeTerminal(
+                "conflicting initial native pawn assignment");
+        }
+
+        ExpectedNativePawn =
+            TWeakObjectPtr<AFortPlayerPawnAthena>(CurrentPawn);
+        ExpectedNativePawnIdentity = CurrentPawn;
+        Entity.NativePawn = CurrentPawn;
+        NativePawnGeneration = 1;
+        bNativePawnIdentityEstablished = true;
+        NativePawnHandoffMissingSince = -1.f;
+        return true;
+    }
+
+    // Observe the expected actor directly, even if the native controller has
+    // already detached from or replaced it. This closes the one-tick window in
+    // which native respawn could otherwise hide a terminal health transition.
+    if (bExpectedIdentityLive &&
+        World.Phase == EPlayerAIMatchPhase::InProgress)
+    {
+        const float Health = ExpectedPawn->GetHealth();
+        if (std::isfinite(Health) && Health <= 0.f &&
+            !ExpectedPawn->IsDBNO())
+        {
+            return MakeTerminal("native pawn reached terminal health");
+        }
+    }
+
+    const bool bExpectedPawnMatches =
+        CurrentPawn &&
+        CurrentPawn == ExpectedPawn &&
+        CurrentPawn == ExpectedNativePawnIdentity;
+    if (bExpectedPawnMatches)
+    {
+        NativePawnHandoffMissingSince = -1.f;
+
+        if (bJumpedFromTransport ||
+            (World.Phase == EPlayerAIMatchPhase::InProgress &&
+             PlayerAIIsGroundState(GetState())))
+        {
+            bNativePawnIdentityLocked = true;
+        }
+
+        return true;
+    }
+
+    if (!CurrentPawn)
+    {
+        // A brief pre-jump detach is the only supported pawnless handoff. Once
+        // the bot jumped (or reached normal play), a missing expected pawn is
+        // terminal rather than a reason to let native respawn code recover it.
+        if (PlayerAIIsNativeAircraftHandoffWindow(*this, World))
+        {
+            if (NativePawnHandoffMissingSince < 0.f ||
+                Now < NativePawnHandoffMissingSince)
+            {
+                NativePawnHandoffMissingSince = Now;
+            }
+
+            if (Now - NativePawnHandoffMissingSince <=
+                PlayerAINativePawnHandoffGraceSeconds)
+                return true;
+        }
+    }
+    else if (!bExpectedIdentityLive &&
+        (NativePawnHandoffMissingSince < 0.f ||
+         Now < NativePawnHandoffMissingSince ||
+         Now - NativePawnHandoffMissingSince <=
+             PlayerAINativePawnHandoffGraceSeconds) &&
+        PlayerAIIsNativeAircraftHandoffWindow(*this, World))
+    {
+        // Some builds replace the parked warmup pawn before the virtual
+        // passenger jumps. Adopt exactly one such pre-jump handoff, and never
+        // when the old pawn is still live (which would be a duplicate).
+        ExpectedNativePawn =
+            TWeakObjectPtr<AFortPlayerPawnAthena>(CurrentPawn);
+        ExpectedNativePawnIdentity = CurrentPawn;
+        Entity.NativePawn = CurrentPawn;
+        NativePawnGeneration++;
+        bNativeAircraftHandoffConsumed = true;
+        NativePawnHandoffMissingSince = -1.f;
+        AIDebugLogger::Log(
+            "Lifecycle",
+            "%s accepted one native aircraft pawn handoff (generation %d)",
+            Entity.DisplayName.c_str(), NativePawnGeneration);
+        return true;
+    }
+
+    return MakeTerminal(
+        CurrentPawn
+            ? "unauthorized native pawn replacement"
+            : "native pawn disappeared");
+}
+
 static bool PlayerAIIsMovingState(EPlayerAIState State)
 {
     switch (State)
@@ -90,18 +458,139 @@ void PlayerAIController::Update(float Now, float DeltaSeconds, FPlayerAIWorldSna
     if (!Entity.IsValid())
         return;
 
-    const auto State = GetState();
+    if (GetState() == EPlayerAIState::Dead ||
+        GetState() == EPlayerAIState::MatchEnded)
+        return;
 
-    if (State == EPlayerAIState::Dead || State == EPlayerAIState::MatchEnded)
+    if (!ValidateNativePawnIdentity(Now, World))
         return;
 
     // Match end freezes everyone.
     if (World.Phase == EPlayerAIMatchPhase::Ended)
     {
         NavigationBehavior::ClearMoveTarget(*this);
+        SetTransitionDamageProtection(false);
         SetState(EPlayerAIState::MatchEnded, "match ended");
         return;
     }
+
+    // Observe phase changes immediately, but spread transport setup over a
+    // short window. Running landing selection/reflection for a full lobby in
+    // one TickFlush caused a visible server freeze at bus start.
+    if (World.Phase != ObservedPhase)
+    {
+        if (World.Phase == EPlayerAIMatchPhase::Transport &&
+            !bJumpedFromTransport)
+        {
+            bTransportSetupPending = true;
+        }
+        else if (World.Phase == EPlayerAIMatchPhase::InProgress &&
+            !bJumpedFromTransport &&
+            (GetState() == EPlayerAIState::PreMatchIdle ||
+             GetState() == EPlayerAIState::PreMatchWalking ||
+             GetState() == EPlayerAIState::PreMatchEmoting ||
+             GetState() == EPlayerAIState::WaitingForTransport))
+        {
+            // The transport phase was skipped on this playlist/version.
+            bTransportSetupPending = true;
+        }
+
+        if (bTransportSetupPending)
+        {
+            const int Slot =
+                AIIndex > 0 ? (AIIndex - 1) % 100 : 0;
+            TransportSetupReadyTime =
+                Now + Slot * 0.005f;
+        }
+
+        if (World.Phase == EPlayerAIMatchPhase::InProgress &&
+            !bTransportSetupPending &&
+            !bJumpedFromTransport &&
+            (GetState() == EPlayerAIState::InTransport ||
+             GetState() == EPlayerAIState::ChoosingLandingSpot ||
+             GetState() == EPlayerAIState::WaitingForTransport))
+        {
+            ForcedJumpTime = Now;
+            EarliestJumpTime = Now;
+        }
+
+        ObservedPhase = World.Phase;
+    }
+
+    if (bTransportSetupPending)
+    {
+        if (bJumpedFromTransport)
+        {
+            bTransportSetupPending = false;
+        }
+        else if (Now >= TransportSetupReadyTime)
+        {
+            TransportBehavior::OnTransportPhaseStarted(
+                *this, Now, World);
+            bTransportSetupPending = false;
+
+            if (World.Phase ==
+                EPlayerAIMatchPhase::InProgress)
+            {
+                ForcedJumpTime = Now;
+                EarliestJumpTime = Now;
+            }
+        }
+    }
+
+    auto ActivePawn = GetPawn();
+
+    if (ActivePawn)
+    {
+        NextPawnRecoveryTime = 0.f;
+        PawnRecoveryAttempts = 0;
+    }
+
+    // A simulated pawn can be removed by map warmup teardown on unusual
+    // playlists. Recover it only while still in warmup. During Transport a
+    // pawnless controller is a valid virtual passenger: spawning it here
+    // bypasses the locked-bus gate and used to create two airborne pawns per
+    // frame until a full lobby stalled the game thread.
+    if (!ActivePawn && !Entity.bNativeBacked &&
+        World.Phase < EPlayerAIMatchPhase::Transport)
+    {
+        if (!PlayerAIManager::TryBeginPawnRecovery(
+                *this, Now))
+            return;
+
+        FVector Recovery = bHasLandingTarget
+            ? LandingTarget
+            : HomeLocation;
+
+        ActivePawn =
+            MagnesiumPlayerAISpawner::SpawnPawnAt(
+                *this, Recovery, true);
+
+        if (!ActivePawn)
+        {
+            PlayerAIManager::FinishPawnRecovery(
+                *this, false);
+            return;
+        }
+
+        PlayerAIManager::FinishPawnRecovery(
+            *this, true);
+    }
+
+    const auto State = GetState();
+    const bool bTransitionProtected =
+        World.Phase <= EPlayerAIMatchPhase::PreMatch ||
+        State == EPlayerAIState::WaitingForTransport ||
+        State == EPlayerAIState::InTransport ||
+        State == EPlayerAIState::ChoosingLandingSpot ||
+        State == EPlayerAIState::JumpingFromTransport ||
+        State == EPlayerAIState::Gliding ||
+        State == EPlayerAIState::Landing;
+
+    // Pregame island damage and fall damage vary wildly by version. Keep the
+    // pawn protected only while the match transition owns its position; the
+    // first grounded combat/loot state restores normal damage immediately.
+    SetTransitionDamageProtection(bTransitionProtected);
 
     // ---- Per tick (cheap) work ----
     if (PlayerAIIsGroundState(State))
@@ -131,7 +620,9 @@ void PlayerAIController::Update(float Now, float DeltaSeconds, FPlayerAIWorldSna
         break;
 
     case EPlayerAIState::Gliding:
-        NavigationBehavior::StepAirMovement(*this, DeltaSeconds);
+    case EPlayerAIState::Landing:
+        NavigationBehavior::StepAirMovement(
+            *this, Now, DeltaSeconds);
         break;
 
     default:
@@ -159,13 +650,52 @@ void PlayerAIController::Update(float Now, float DeltaSeconds, FPlayerAIWorldSna
             if (RescueLoc.Z < -7000.0)
             {
                 FVector Anchor = bHasLandingTarget ? LandingTarget : HomeLocation;
-                Anchor.Z = Anchor.Z + 300.0;
+                const bool bGroundedRescue =
+                    MagnesiumPlayerAISpawner::SpawnPawnAt(
+                        *this, Anchor, true) != nullptr;
+                bool bAirborneRescue = false;
 
-                RescuePawn->K2_TeleportTo(Anchor, RescuePawn->K2_GetActorRotation(), false, true);
+                if (!bGroundedRescue)
+                {
+                    RescuePawn =
+                        MagnesiumPlayerAISpawner::SpawnAirborneForLanding(
+                            *this, Anchor);
+                    bAirborneRescue = RescuePawn != nullptr;
+
+                    if (bAirborneRescue)
+                    {
+                        SetState(
+                            EPlayerAIState::Landing,
+                            "below-world rescue awaiting ground");
+                    }
+                }
+
                 NavigationBehavior::ClearMoveTarget(*this);
                 PosVertVel = 0.f;
                 bPosGrounded = false; // swept gravity re-verifies footing
-                AIDebugLogger::Log("Navigation", "%s rescued from below the world", Entity.DisplayName.c_str());
+
+                if (bGroundedRescue || bAirborneRescue)
+                {
+                    AIDebugLogger::Log(
+                        "Navigation",
+                        "%s rescued from below the world (%s)",
+                        Entity.DisplayName.c_str(),
+                        bGroundedRescue ? "grounded" : "airborne");
+                }
+
+                if (!bGroundedRescue)
+                {
+                    SetTransitionDamageProtection(true);
+
+                    if (!bAirborneRescue)
+                    {
+                        SetState(
+                            EPlayerAIState::Landing,
+                            "below-world rescue pending");
+                    }
+
+                    return;
+                }
             }
         }
     }
@@ -182,36 +712,6 @@ void PlayerAIController::Update(float Now, float DeltaSeconds, FPlayerAIWorldSna
 
 void PlayerAIController::Think(float Now, FPlayerAIWorldSnapshot& World)
 {
-    // Phase transitions observed per AI (safe with late thinkers).
-    if (World.Phase != ObservedPhase)
-    {
-        if (World.Phase == EPlayerAIMatchPhase::Transport && !bJumpedFromTransport)
-        {
-            TransportBehavior::OnTransportPhaseStarted(*this, Now, World);
-        }
-        else if (World.Phase == EPlayerAIMatchPhase::InProgress && !bJumpedFromTransport &&
-                 (GetState() == EPlayerAIState::PreMatchIdle || GetState() == EPlayerAIState::PreMatchWalking ||
-                  GetState() == EPlayerAIState::PreMatchEmoting || GetState() == EPlayerAIState::WaitingForTransport))
-        {
-            // The transport phase was skipped on this playlist/version
-            // (e.g. lategame instant drop): run the transport flow now, it
-            // handles missing aircraft with the landing fallback.
-            TransportBehavior::OnTransportPhaseStarted(*this, Now, World);
-        }
-
-        // The drop window closed while this AI was still "aboard" (parked):
-        // jump IMMEDIATELY. The spawn island gets torn down when the
-        // aircraft finishes - anyone still parked there dies.
-        if (World.Phase == EPlayerAIMatchPhase::InProgress && !bJumpedFromTransport &&
-            (GetState() == EPlayerAIState::InTransport || GetState() == EPlayerAIState::ChoosingLandingSpot ||
-             GetState() == EPlayerAIState::WaitingForTransport))
-        {
-            ForcedJumpTime = Now;
-        }
-
-        ObservedPhase = World.Phase;
-    }
-
     const auto State = GetState();
 
     switch (State)
@@ -320,6 +820,10 @@ void PlayerAIController::Think(float Now, FPlayerAIWorldSnapshot& World)
 // PlayerAIManager
 // ============================================================================
 
+static float PlayerAINextPlayersLeftRepairTime = 0.f;
+static int PlayerAILastRosterCount = -1;
+static int PlayerAIStablePlayersLeftMismatchTicks = 0;
+
 void PlayerAIManager::Initialize()
 {
     if (bInitialized)
@@ -331,6 +835,10 @@ void PlayerAIManager::Initialize()
     AINameGenerator::Reset();
     VersionFeatureAdapter::ResetCaches();
     LandingBehavior::Reset();
+    PlayerAINextPlayersLeftRepairTime = 0.f;
+    PlayerAILastRosterCount = -1;
+    PlayerAIStablePlayersLeftMismatchTicks = 0;
+    PlayerAIResetLootDiscovery(true);
 
     AIDebugLogger::Log("Manager", "PlayerAI system initialized (max player count: %d)", VersionFeatureAdapter::GetMaxPlayerCount());
 }
@@ -362,47 +870,127 @@ void PlayerAIManager::RefreshWorldSnapshot(float Now)
     World.Phase = VersionFeatureAdapter::GetMatchPhase();
     World.bHasSafeZone = VersionFeatureAdapter::TryGetSafeZone(World.SafeZoneCenter, World.SafeZoneRadius);
 
-    if (Now - World.LastLootScanTime >= PlayerAIConfig::WorldSnapshotInterval)
+    auto CurrentWorld = UWorld::GetWorld();
+
+    // With no managed AI there is no consumer for loot data. Abandon any
+    // partial pass instead of spending server ticks scanning an empty lobby.
+    if (Controllers.empty())
     {
+        if (bPlayerAILootScanActive ||
+            !World.Containers.empty() ||
+            !World.Pickups.empty())
+        {
+            PlayerAIResetLootDiscovery(true);
+        }
+
+        return;
+    }
+
+    if (PlayerAILootScanWorld != CurrentWorld)
+    {
+        PlayerAIResetLootDiscovery(true);
+        PlayerAILootScanWorld = CurrentWorld;
+    }
+
+    if (!CurrentWorld)
+        return;
+
+    if (!bPlayerAILootScanActive)
+    {
+        if (Now - World.LastLootScanTime <
+            PlayerAIConfig::WorldSnapshotInterval)
+        {
+            return;
+        }
+
+        PlayerAILootScanCursor = 0;
+        PlayerAILootScanLimit = TUObjectArray::Num();
+        PlayerAIPendingContainers.clear();
+        PlayerAIPendingPickups.clear();
+        bPlayerAILootScanActive =
+            PlayerAILootScanLimit > 0;
+
+        if (!bPlayerAILootScanActive)
+        {
+            World.LastLootScanTime = Now;
+            return;
+        }
+    }
+
+    const UClass* ContainerClass =
+        ABuildingContainer::StaticClass();
+    const UClass* PickupClass =
+        AFortPickupAthena::StaticClass();
+
+    if (!ContainerClass && !PickupClass)
+    {
+        bPlayerAILootScanActive = false;
         World.LastLootScanTime = Now;
+        return;
+    }
 
-        World.Containers.clear();
-        World.Pickups.clear();
+    const int CurrentObjectCount = TUObjectArray::Num();
+    const int End = (std::min)(
+        PlayerAILootScanCursor +
+            PlayerAILootDiscoveryBudgetPerTick,
+        PlayerAILootScanLimit);
 
-        // Generic loot sources: anything derived from BuildingContainer
-        // (chests, ammo boxes, supply containers, version equivalents) and
-        // world pickups (floor loot, dropped items).
-        TArray<ABuildingContainer*> Containers;
-        Utils::GetAll<ABuildingContainer>(Containers);
+    for (int ObjectIndex = PlayerAILootScanCursor;
+         ObjectIndex < End &&
+         ObjectIndex < CurrentObjectCount;
+         ObjectIndex++)
+    {
+        auto Object =
+            TUObjectArray::GetObjectByIndex(ObjectIndex);
 
-        for (auto& Container : Containers)
+        if (!PlayerAIIsLiveObject(Object) ||
+            Object->IsDefaultObject())
         {
-            if (!Container)
-                continue;
-
-            if (Container->HasbAlreadySearched() && Container->bAlreadySearched)
-                continue;
-
-            World.Containers.push_back(Container);
+            continue;
         }
 
-        Containers.Free();
+        const bool bIsPickup =
+            PickupClass &&
+            Object->IsA(PickupClass);
+        const bool bIsContainer =
+            !bIsPickup &&
+            ContainerClass &&
+            Object->IsA(ContainerClass);
 
-        TArray<AFortPickupAthena*> Pickups;
-        Utils::GetAll<AFortPickupAthena>(Pickups);
-
-        for (auto& Pickup : Pickups)
+        if ((!bIsPickup && !bIsContainer) ||
+            !PlayerAIObjectBelongsToWorld(
+                Object, CurrentWorld))
         {
-            if (!Pickup)
-                continue;
-
-            if (Pickup->HasbPickedUp() && Pickup->bPickedUp)
-                continue;
-
-            World.Pickups.push_back(Pickup);
+            continue;
         }
 
-        Pickups.Free();
+        if (bIsPickup)
+        {
+            PlayerAIPendingPickups.push_back(
+                (AFortPickupAthena*)Object);
+        }
+        else
+        {
+            PlayerAIPendingContainers.push_back(
+                (ABuildingContainer*)Object);
+        }
+    }
+
+    PlayerAILootScanCursor = End;
+
+    if (PlayerAILootScanCursor >=
+        PlayerAILootScanLimit)
+    {
+        World.Containers.swap(
+            PlayerAIPendingContainers);
+        World.Pickups.swap(
+            PlayerAIPendingPickups);
+        PlayerAIPendingContainers.clear();
+        PlayerAIPendingPickups.clear();
+        PlayerAILootScanCursor = 0;
+        PlayerAILootScanLimit = 0;
+        bPlayerAILootScanActive = false;
+        World.LastLootScanTime = Now;
     }
 }
 
@@ -429,20 +1017,147 @@ static bool PlayerAITryUpdate(PlayerAIController* Controller, float Now, float D
     return bOk;
 }
 
+bool PlayerAIManager::TryBeginPawnRecovery(
+    PlayerAIController& AI,
+    float Now)
+{
+    if (AI.PawnRecoveryAttempts >=
+        PlayerAIMaxPawnRecoveryAttempts)
+    {
+        // Non-destructive quarantine: keep the controller/player-state alive
+        // for native possession to recover, but never issue another spawn
+        // during this missing-pawn episode.
+        AI.NextPawnRecoveryTime = FLT_MAX;
+        return false;
+    }
+
+    if (AI.NextPawnRecoveryTime <= 0.f)
+    {
+        const int Slot =
+            AI.AIIndex > 0
+            ? (AI.AIIndex - 1) % 100
+            : 0;
+        AI.NextPawnRecoveryTime =
+            Now + Slot * 0.005f;
+        return false;
+    }
+
+    if (Now < AI.NextPawnRecoveryTime ||
+        !PlayerAITryConsumePawnRecoveryBudget())
+    {
+        return false;
+    }
+
+    AI.PawnRecoveryAttempts++;
+    const int BackoffShift =
+        (std::min)(
+            AI.PawnRecoveryAttempts - 1, 5);
+    const float RetryDelay =
+        (std::min)(
+            1.f * (float)(1 << BackoffShift),
+            30.f);
+    AI.NextPawnRecoveryTime = Now + RetryDelay;
+    return true;
+}
+
+void PlayerAIManager::FinishPawnRecovery(
+    PlayerAIController& AI,
+    bool bSucceeded)
+{
+    if (bSucceeded)
+    {
+        AI.NextPawnRecoveryTime = 0.f;
+        AI.PawnRecoveryAttempts = 0;
+        return;
+    }
+
+    if (AI.PawnRecoveryAttempts <
+        PlayerAIMaxPawnRecoveryAttempts)
+    {
+        return;
+    }
+
+    AI.NextPawnRecoveryTime = FLT_MAX;
+    AIDebugLogger::Error(
+        "Spawner",
+        "%s pawn recovery failed %d times - spawn recovery quarantined",
+        AI.Entity.DisplayName.c_str(),
+        AI.PawnRecoveryAttempts);
+}
+
+bool PlayerAIManager::TryBeginTransportJump()
+{
+    if (PlayerAITransportJumpBudgetRemaining <= 0)
+        return false;
+
+    PlayerAITransportJumpBudgetRemaining--;
+    return true;
+}
+
 void PlayerAIManager::UpdateAll(float Now, float DeltaSeconds)
 {
     if (!bInitialized)
         return;
 
+    if (Controllers.empty())
+    {
+        if (PlayerAILootScanWorld ||
+            bPlayerAILootScanActive ||
+            !World.Containers.empty() ||
+            !World.Pickups.empty())
+        {
+            PlayerAIResetLootDiscovery(true);
+        }
+
+        return;
+    }
+
+    PlayerAIPawnRecoveryBudgetRemaining =
+        PlayerAIPawnRecoveryBudgetPerTick;
+    PlayerAITransportJumpBudgetRemaining =
+        PlayerAITransportJumpBudgetPerTick;
     RefreshWorldSnapshot(Now);
 
-    for (auto& Controller : Controllers)
+    std::vector<int> CleanupIndices;
+
+    for (int ControllerIndex = 0;
+         ControllerIndex < (int)Controllers.size();
+         ControllerIndex++)
     {
+        auto& Controller = Controllers[ControllerIndex];
+
         if (!Controller)
             continue;
 
-        if (PlayerAITryUpdate(Controller.get(), Now, DeltaSeconds, World))
+        // Death is terminal for PlayerAI even when the current playlist has
+        // player respawns enabled. The native death callback can replace the
+        // pawn before this tick; DespawnEntity deliberately tears down both
+        // that replacement and the remembered eliminated pawn.
+        if (Controller->bDeathHandled ||
+            Controller->GetState() == EPlayerAIState::Dead)
+        {
+            CleanupIndices.push_back(ControllerIndex);
             continue;
+        }
+
+        if (!Controller->Entity.IsValid())
+        {
+            AIDebugLogger::Error(
+                "Manager",
+                "AIPlayer '%s' lost its engine entity - removing stale roster entry",
+                Controller->Entity.DisplayName.c_str());
+            CleanupIndices.push_back(ControllerIndex);
+            continue;
+        }
+
+        if (PlayerAITryUpdate(Controller.get(), Now, DeltaSeconds, World))
+        {
+            // Only consecutive faults quarantine an AI. Three unrelated
+            // guarded feature misses over a whole match must not strand a
+            // live roster entry.
+            Controller->FaultCount = 0;
+            continue;
+        }
 
         Controller->FaultCount++;
         AIDebugLogger::Error("Manager", "AIPlayer '%s' update faulted (%d/3) - contained",
@@ -450,13 +1165,74 @@ void PlayerAIManager::UpdateAll(float Now, float DeltaSeconds)
 
         if (Controller->FaultCount >= 3)
         {
-            // Quarantine: stop driving this AI. Its pawn stays a normal,
-            // damageable player pawn, so the match still resolves natively.
+            // Remove a repeatedly faulting entity completely. Leaving a
+            // frozen controller in AlivePlayers/AliveBots creates an
+            // unkillable roster ghost and prevents the match from ending.
+            Controller->SetTransitionDamageProtection(false);
             Controller->bDeathHandled = true;
             Controller->SetState(EPlayerAIState::MatchEnded, "quarantined after repeated faults");
             AIDebugLogger::Error("Manager", "AIPlayer '%s' quarantined to protect the gameserver",
                 Controller->Entity.DisplayName.c_str());
+            CleanupIndices.push_back(ControllerIndex);
         }
+    }
+
+    for (int CleanupIndex = (int)CleanupIndices.size() - 1;
+         CleanupIndex >= 0; CleanupIndex--)
+    {
+        const int ControllerIndex = CleanupIndices[CleanupIndex];
+        auto& Controller = Controllers[ControllerIndex];
+
+        if (Controller)
+        {
+            Controller->SetTransitionDamageProtection(false);
+            MagnesiumPlayerAISpawner::DespawnEntity(
+                *Controller,
+                "invalid or quarantined PlayerAI",
+                false);
+        }
+
+        Controllers.erase(Controllers.begin() + ControllerIndex);
+    }
+
+    if (!CleanupIndices.empty())
+        VersionFeatureAdapter::SyncPlayersLeft(true);
+
+    // Repair native death/spawn ordering without fighting a one-frame engine
+    // transition. Once the unique AlivePlayers + AliveBots roster disagrees
+    // for two consecutive samples, publish it and explicitly dirty the
+    // push-model PlayersLeft property used by modern minimap HUDs.
+    if (Now >= PlayerAINextPlayersLeftRepairTime)
+    {
+        PlayerAINextPlayersLeftRepairTime = Now + 0.5f;
+        VersionFeatureAdapter::
+            RetryPendingPlayersLeftReplication();
+
+        const int RosterCount =
+            VersionFeatureAdapter::CountAliveParticipants();
+        const int ReplicatedCount =
+            World.GameState ? World.GameState->PlayersLeft : RosterCount;
+
+        if (World.GameState && ReplicatedCount != RosterCount)
+        {
+            if (RosterCount == PlayerAILastRosterCount)
+                PlayerAIStablePlayersLeftMismatchTicks++;
+            else
+                PlayerAIStablePlayersLeftMismatchTicks = 1;
+
+            if (PlayerAIStablePlayersLeftMismatchTicks >= 2)
+            {
+                VersionFeatureAdapter::ReplicatePlayersLeft(
+                    World.GameState, RosterCount, true);
+                PlayerAIStablePlayersLeftMismatchTicks = 0;
+            }
+        }
+        else
+        {
+            PlayerAIStablePlayersLeftMismatchTicks = 0;
+        }
+
+        PlayerAILastRosterCount = RosterCount;
     }
 
     // Periodic alive count debug line.
@@ -474,6 +1250,40 @@ PlayerAIController* PlayerAIManager::RegisterEntity(const PlayerAIEntity& Entity
     auto Controller = std::make_unique<PlayerAIController>();
 
     Controller->Entity = Entity;
+    if (Controller->Entity.bNativeBacked)
+    {
+        auto ControllerNativePawn =
+            Controller->Entity.GetNativeControllerPawn();
+        auto InitialNativePawn = ControllerNativePawn;
+        if (!InitialNativePawn &&
+            PlayerAIEntity::IsLivePawn(
+                Controller->Entity.NativePawn))
+        {
+            InitialNativePawn =
+                Controller->Entity.NativePawn;
+        }
+
+        if (InitialNativePawn)
+        {
+            Controller->ExpectedNativePawn =
+                TWeakObjectPtr<AFortPlayerPawnAthena>(
+                    InitialNativePawn);
+            Controller->ExpectedNativePawnIdentity =
+                InitialNativePawn;
+            Controller->Entity.NativePawn =
+                InitialNativePawn;
+
+            // A returned spawn pawn is useful for bounded teardown, but only
+            // the controller's possession property establishes generation 1.
+            // Some builds publish that property on the next server tick.
+            if (ControllerNativePawn)
+            {
+                Controller->NativePawnGeneration = 1;
+                Controller->bNativePawnIdentityEstablished =
+                    true;
+            }
+        }
+    }
     Controller->AIIndex = NextAIIndex++;
     Controller->Skill = AISkillProfile::GetSettings(AISkillProfile::PickRandomProfile());
     Controller->SpawnedAtTime = VersionFeatureAdapter::GetTimeSeconds();
@@ -487,6 +1297,7 @@ PlayerAIController* PlayerAIManager::RegisterEntity(const PlayerAIEntity& Entity
     }
 
     Controller->SetState(EPlayerAIState::PreMatchIdle, "spawned");
+    Controller->SetTransitionDamageProtection(true);
     Controller->PreMatchActionEndTime = Controller->SpawnedAtTime + PlayerAIRandRange(0.5f, 3.f);
 
     auto Raw = Controller.get();
@@ -525,13 +1336,20 @@ bool PlayerAIManager::RemoveOnePreMatch()
 
 void PlayerAIManager::RemoveAll(const char* Reason)
 {
+    const bool bRemovedAny = !Controllers.empty();
+
     for (auto& Controller : Controllers)
     {
         if (Controller)
-            MagnesiumPlayerAISpawner::DespawnEntity(*Controller, Reason);
+            MagnesiumPlayerAISpawner::DespawnEntity(
+                *Controller, Reason, false);
     }
 
     Controllers.clear();
+
+    if (bRemovedAny)
+        VersionFeatureAdapter::SyncPlayersLeft(true);
+
     AINameGenerator::Reset();
     LandingBehavior::Reset();
     EliminatedCount = 0;
@@ -563,6 +1381,29 @@ bool PlayerAIManager::IsPlayerAI(AFortPlayerControllerAthena* PC)
     return FindByController(PC) != nullptr;
 }
 
+bool PlayerAIManager::HandleControllerDeath(
+    AFortPlayerControllerAthena* PC,
+    AFortPlayerPawnAthena* EliminatedPawn)
+{
+    auto AI = FindByController(PC);
+
+    if (!AI)
+        return false;
+
+    if (EliminatedPawn)
+        AI->EliminatedPawn = EliminatedPawn;
+
+    if (AI->bDeathHandled)
+        return true;
+
+    AI->SetTransitionDamageProtection(false);
+    AI->bDeathHandled = true;
+    AI->SetState(EPlayerAIState::Dead, "native pawn death");
+    EliminationBehavior::OnEliminated(
+        *AI, VersionFeatureAdapter::GetTimeSeconds());
+    return true;
+}
+
 PlayerAIController* PlayerAIManager::FindByController(AFortPlayerControllerAthena* PC)
 {
     if (!PC)
@@ -580,4 +1421,20 @@ PlayerAIController* PlayerAIManager::FindByController(AFortPlayerControllerAthen
     }
 
     return nullptr;
+}
+
+bool PlayerAIManager::IsLiveWorldActor(
+    const AActor* Actor,
+    const UClass* ExpectedClass)
+{
+    auto CurrentWorld = UWorld::GetWorld();
+
+    // Membership was verified when the staged cache was built. At use time
+    // only reject a world swap and validate the object-array slot/flags; do
+    // not repeat an outer-chain walk for every loot candidate of every AI.
+    return CurrentWorld &&
+        PlayerAILootScanWorld == CurrentWorld &&
+        ExpectedClass &&
+        PlayerAIIsLiveObject(Actor) &&
+        Actor->IsA(ExpectedClass);
 }

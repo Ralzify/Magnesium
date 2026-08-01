@@ -8,6 +8,8 @@
 #include "BuildingContainer.h"
 #include "FortPlaylistAthena.h"
 
+class AFortPlayerControllerAthena;
+
 struct FGuid
 {
     int32 A;
@@ -204,6 +206,7 @@ public:
     DEFINE_STRUCT_PROP(ParentInventory, TWeakObjectPtr<class AFortInventory>);
     DEFINE_STRUCT_PROP(Level, int32);
     DEFINE_STRUCT_PROP(StateValues, TArray<FFortItemEntryStateValue>);
+    DEFINE_STRUCT_PROP(GenericAttributeValues, TArray<float>);
     DEFINE_STRUCT_PROP(bIsReplicatedCopy, bool);
     DEFINE_STRUCT_PROP(bIsDirty, bool);
     DEFINE_STRUCT_PROP(WeaponModSlots, TArray<void*>);
@@ -415,6 +418,31 @@ class UFortGadgetItemDefinition : public UFortWorldItemDefinition
 public:
     UCLASS_COMMON_MEMBERS(UFortGadgetItemDefinition);
 
+    DEFINE_PROP(AbilitySet, TSoftObjectPtr<UFortAbilitySet>);
+    DEFINE_PROP(AttributeSet, TSoftClassPtr<UClass>);
+    DEFINE_PROP(GameplayAbility, TSoftClassPtr<UClass>);
+    static inline int32
+        WeaponItemDefinitionSoftPtr__Offset = -2;
+    TSoftObjectPtr<UFortWeaponItemDefinition>*
+        GetWeaponItemDefinitionSoftPtr() const
+    {
+        if (WeaponItemDefinitionSoftPtr__Offset == -2)
+        {
+            WeaponItemDefinitionSoftPtr__Offset =
+                GetOffset(
+                    "WeaponItemDefinition",
+                    GUESS_PROP_FLAGS(
+                        TSoftObjectPtr<
+                            UFortWeaponItemDefinition>));
+        }
+        return WeaponItemDefinitionSoftPtr__Offset != -1
+            ? &GetFromOffset<
+                  TSoftObjectPtr<
+                      UFortWeaponItemDefinition>>(
+                  this,
+                  WeaponItemDefinitionSoftPtr__Offset)
+            : nullptr;
+    }
     DEFINE_PROP(bValidForLastEquipped, bool);
     DEFINE_BITFIELD_PROP(bDropAllOnEquip);
 
@@ -524,11 +552,20 @@ public:
 
     DEFINE_FUNC(HandleInventoryLocalUpdate, void);
 
-    UFortWorldItem* GiveItem(const UFortItemDefinition*, int = 1, int = 0, int = 0, bool = true, bool = true, int = 0, TArray<FFortItemEntryStateValue> = {}, bool = true);
-    UFortWorldItem* GiveItem(FFortItemEntry&, int = -1, bool = true, bool = true);
+    UFortWorldItem* GiveItem(const UFortItemDefinition*, int = 1, int = 0, int = 0, bool = true, bool = true, int = 0, TArray<FFortItemEntryStateValue> = {}, bool = true, TArray<float> = {}, bool* = nullptr, bool* = nullptr);
+    UFortWorldItem* GiveItem(FFortItemEntry&, int = -1, bool = true, bool = true, bool* = nullptr);
+    bool InitializeGadgetItem(UFortWorldItem*, bool = true);
+    bool InitializeGadgetItemWithFallback(UFortWorldItem*, bool = true);
+    bool EnsureExact1040AshtonBackingAndFocus(
+        FGuid* OutBackingGuid = nullptr);
+    int32 GiveItemToSingleStack(const UFortItemDefinition*, int32, bool = false);
     void Update(FFortItemEntry*);
     void Remove(FGuid);
     int32 RemoveItem(FGuid, int32, bool = false);
+    static bool ShouldBypassItemConsumption(
+        AFortPlayerControllerAthena*,
+        int32,
+        bool);
     static AFortPickupAthena* SpawnPickup(FVector, FFortItemEntry&, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, int = -1, bool = true, bool = true, bool = true, const UClass* = nullptr, FVector = FVector());
     static AFortPickupAthena* SpawnPickup(FVector, const UFortItemDefinition*, int, int, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, bool = true, bool = true, const UClass* = nullptr);
     static AFortPickupAthena* SpawnPickup(ABuildingContainer*, FFortItemEntry&, AFortPlayerPawnAthena* = nullptr, int = -1);
@@ -537,6 +574,15 @@ public:
     static FFortRangedWeaponStats* CloneStats(const UFortWeaponItemDefinition* Def);
     static bool IsPrimaryQuickbar(const UFortItemDefinition*);
     static void TickRegeneratingItems();
+    // Scoped around native pawn-death processing so Keep Inventory can retain
+    // ordinary rows without weakening forced/admin removals at any other time.
+    static void BeginNativeDeathInventoryRetention(
+        AFortPlayerControllerAthena*,
+        const std::vector<FGuid>&);
+    static void EndNativeDeathInventoryRetention(
+        AFortPlayerControllerAthena*);
+    static void HandlePendingCarmineFocus(
+        AFortPlayerControllerAthena*);
     void UpdateEntry(FFortItemEntry&);
     void SetRequiresUpdate();
     static void RemoveWeaponAbilities(AActor*);

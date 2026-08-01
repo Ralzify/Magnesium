@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "../Public/FortLootPackage.h"
 #include "../Public/BuildingContainer.h"
+#include "../Public/FortAthenaMutator.h"
 #include "../Public/FortGameMode.h"
 #include "../../Erbium/Public/Configuration.h"
 
@@ -423,6 +424,20 @@ void UFortLootPackage::ChooseLootForContainer(TArray<FFortItemEntry*>& LootDrops
 
 bool UFortLootPackage::SpawnLootHook(ABuildingContainer* Container)
 {
+	if (!Container)
+		return false;
+
+	if (FFortAthenaNativeLTMCompatibility::
+		ShouldSuppressArsenalWorldLoot())
+	{
+		if (!Container->bAlreadySearched)
+		{
+			Container->bAlreadySearched = true;
+			Container->OnRep_bAlreadySearched();
+		}
+		return true;
+	}
+
 	if (Container->bAlreadySearched)
 		return false;
 
@@ -866,13 +881,51 @@ static void InstallHopRockConsumeHook()
 		(void*)ApplyEffectFunction->ExecFunction);
 }
 
+static void DestroyLoadedArsenalChests()
+{
+	static UWorld* SuppressedWorld = nullptr;
+	UWorld* World = UWorld::GetWorld();
+	if (!World || SuppressedWorld == World)
+		return;
+
+	auto ChestClass = FindObject<UClass>(
+		L"/Game/Building/ActorBlueprints/Containers/"
+		L"Tiered_Chest_6_Parent.Tiered_Chest_6_Parent_C");
+	if (!ChestClass)
+		return;
+
+	TArray<ABuildingContainer*> Chests;
+	Utils::GetAll<ABuildingContainer>(ChestClass, Chests);
+	for (auto Chest : Chests)
+	{
+		if (Chest)
+			Chest->K2_DestroyActor();
+	}
+	Chests.Free();
+	SuppressedWorld = World;
+}
+
 void UFortLootPackage::SpawnFloorLootForContainer(const UClass* ContainerType)
 {
 	TArray<ABuildingContainer*> Containers;
 	Utils::GetAll<ABuildingContainer>(ContainerType, Containers);
+	const bool bSuppressArsenalWorldLoot =
+		FFortAthenaNativeLTMCompatibility::
+			ShouldSuppressArsenalWorldLoot();
+	if (bSuppressArsenalWorldLoot)
+		DestroyLoadedArsenalChests();
 
 	for (auto& BuildingContainer : Containers)
 	{
+		if (!BuildingContainer)
+			continue;
+
+		if (bSuppressArsenalWorldLoot)
+		{
+			BuildingContainer->K2_DestroyActor();
+			continue;
+		}
+
 		if (VersionInfo.FortniteVersion >= 11.00)
 		{
 			BuildingContainer->K2_DestroyActor();

@@ -74,8 +74,9 @@ public:
     static void Jump(PlayerAIController& AI);
     static void Sprint(PlayerAIController& AI);
 
-    // Teleport + native skydive (bus drop / fallback placements).
-    static void SkydiveFrom(PlayerAIController& AI, const FVector& Location);
+    // Teleport + guarded native skydive (bus drop / fallback placements).
+    // Returns false when this build did not actually enter skydiving.
+    static bool SkydiveFrom(PlayerAIController& AI, const FVector& Location);
 
     static AFortAthenaAIBotController* GetBotController(PlayerAIController& AI);
 

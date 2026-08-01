@@ -2,6 +2,8 @@
 #include "../../pch.h"
 #include "GameplayTagContainer.h"
 
+class AFortPlayerControllerAthena;
+
 enum class ETryExitVehicleBehavior : uint8
 {
     DoNotForce = 0,
@@ -98,6 +100,9 @@ public:
     FGameplayTagContainer SourceTags;
 };
 
+class UNetDriver;
+class AController;
+
 class AFortPlayerPawnAthena : public AActor
 {
 public:
@@ -135,6 +140,10 @@ public:
     DEFINE_PROP(bShouldDropItemsOnDeath, bool);
     DEFINE_PROP(MoveSoundStimulusBroadcastInterval, uint16_t);
     DEFINE_PROP(Damagers, TArray<FDamagerInfo>);
+    // Native damage timestamp inherited from FortPawn. The health-state
+    // watchdog uses it to distinguish a lethal hit from scripted zero-health
+    // possession/form transitions.
+    DEFINE_PROP(LastDamagedTime, float);
     DEFINE_PROP(LastReplicatedEmoteExecuted, UObject*);
     DEFINE_PROP(Mesh, UActorComponent*);
     DEFINE_BITFIELD_PROP(bIsDBNO);
@@ -217,6 +226,25 @@ public:
 
     void SetHealth(float NewValue) const
     {
+        // Clamp custom direct writers only while our explicit "god min"
+        // policy is active. Some modern attribute layouts default Minimum to
+        // 1 even while their native clamp-state bookkeeping is disabled.
+        auto Set = HasHealthSet() ? HealthSet : nullptr;
+        if (HasMinimumHealthGodMode(this) &&
+            Set && Set->HasHealth() &&
+            FFortGameplayAttributeData::StaticStruct() &&
+            FFortGameplayAttributeData::HasMinimum())
+        {
+            const float Minimum = Set->Health.Minimum;
+            if (FPlatformMath::IsFinite(NewValue) &&
+                FPlatformMath::IsFinite(Minimum) &&
+                Minimum > 0.f &&
+                NewValue < Minimum)
+            {
+                NewValue = Minimum;
+            }
+        }
+
         static auto Fn = GetFunction("SetHealth");
 
         if (Fn)
@@ -224,8 +252,6 @@ public:
             Call<void>(Fn, NewValue);
             return;
         }
-
-        auto Set = HealthSet;
 
         if (!Set || !Set->HasHealth())
         {
@@ -386,7 +412,7 @@ public:
         if (Fn)
             return Call<float>(Fn);
 
-        auto Set = HealthSet;
+        auto Set = HasHealthSet() ? HealthSet : nullptr;
         return (Set && Set->HasHealth()) ? Set->Health.CurrentValue : 0.f;
     }
 
@@ -397,7 +423,7 @@ public:
         if (Fn)
             return Call<float>(Fn);
 
-        auto Set = HealthSet;
+        auto Set = HasHealthSet() ? HealthSet : nullptr;
         return (Set && Set->HasMaxHealth()) ? Set->MaxHealth.CurrentValue : 0.f;
     }
 
@@ -408,7 +434,7 @@ public:
         if (Fn)
             return Call<float>(Fn);
 
-        auto Set = HealthSet;
+        auto Set = HasHealthSet() ? HealthSet : nullptr;
         return (Set && Set->HasCurrentShield()) ? Set->CurrentShield.CurrentValue : 0.f;
     }
 
@@ -419,7 +445,7 @@ public:
         if (Fn)
             return Call<float>(Fn);
 
-        auto Set = HealthSet;
+        auto Set = HasHealthSet() ? HealthSet : nullptr;
         return (Set && Set->HasShield()) ? Set->Shield.CurrentValue : 0.f;
     }
     DEFINE_FUNC(EquipWeaponDefinition, AActor*);
@@ -453,6 +479,13 @@ public:
     DEFINE_FUNC(ServerInterrogateDBNOPlayer, void);
     DEFINE_FUNC(GetVehicleActor, AActor*);
 
+    // Performs the native same-pawn DBNO transition. Reviving is deliberately
+    // separate from the death/respawn pipeline: starting a respawn here leaves
+    // the revived pawn behind and creates a duplicate at the configured spawn.
+    static bool ReviveFromDBNOCompat(
+        AFortPlayerPawnAthena* Pawn,
+        AController* EventInstigator);
+
     DefUHookOg(ServerHandlePickup_);
     DefUHookOg(ServerHandlePickupInfo);
     DefHookOg(bool, FinishedTargetSpline, void*);
@@ -463,11 +496,28 @@ public:
     DefUHookOg(Athena_MedConsumable_Triggered);
     DefUHookOgRet(AActor*, ServerOnExitVehicle_);
     DefUHookOg(EmoteStopped_);
-    static void ServerHandlePickupWithRequestedSwap(UObject*, FFrame&);
+    DefUHookOg(ServerHandlePickupWithRequestedSwap);
     DefHookOg(void, EndSkydiving, AFortPlayerPawnAthena*);
     DefUHookOg(ServerReviveFromDBNO_);
     DefUHookOg(ServerThrowCarriedPlayer_);
     DefUHookOg(ServerInterrogateDBNOPlayer_);
+
+    // Repairs native damage outcomes that leave a possessed pawn with an
+    // invalid shield or at zero health without entering DBNO/death.
+    static void TickHealthStateRepair(UNetDriver* Driver);
+
+    // "god min" remains controller-scoped so it survives pawn replacement.
+    // The active pawn still receives a real Health.Minimum of 1, allowing
+    // shields and health to take damage normally without entering death.
+    static bool SetMinimumHealthGodMode(
+        AFortPlayerControllerAthena* Controller,
+        bool bEnabled);
+    static bool HasMinimumHealthGodMode(
+        const AFortPlayerControllerAthena* Controller);
+    static bool HasMinimumHealthGodMode(
+        const AFortPlayerPawnAthena* Pawn);
+    static bool HasFullHealthGodMode(
+        const AFortPlayerPawnAthena* Pawn);
 
     InitPostLoadHooks;
 };

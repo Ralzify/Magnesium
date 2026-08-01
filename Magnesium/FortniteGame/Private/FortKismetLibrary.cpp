@@ -3,6 +3,8 @@
 #include "../Public/FortInventory.h"
 #include "../Public/FortLootPackage.h"
 #include "../Public/FortPlayerControllerAthena.h"
+#include "../Public/FortAthenaMutator.h"
+#include <cmath>
 #include <limits>
 #include <vector>
 
@@ -14,6 +16,985 @@ bool bHasPickupInstigatorHandle2 = false;
 bool bHasSourceType = false;
 bool bHasSource = false;
 bool bHasOptionalOwnerPC = false;
+
+namespace
+{
+	struct FTimeOfDayControllerResolverState
+	{
+		TWeakObjectPtr<UWorld> World;
+		TWeakObjectPtr<UObject> DaySequenceActor;
+		TWeakObjectPtr<UClass> DaySequenceActorClass;
+		ULONGLONG NextActorScanTimeMs = 0;
+		bool bDaySequenceActorClassLookupAttempted = false;
+		bool bLoggedGameStateManager = false;
+		bool bLoggedDirectActorFallback = false;
+		bool bLoggedKismetManagerFallback = false;
+	};
+
+	FTimeOfDayControllerResolverState
+		GTimeOfDayControllerResolverState{};
+
+	void ResetTimeOfDayResolverStateForWorld(
+		UWorld* World)
+	{
+		auto& State =
+			GTimeOfDayControllerResolverState;
+		if (State.World.Get() == World)
+			return;
+
+		State = {};
+		if (World)
+		{
+			State.World =
+				TWeakObjectPtr<UWorld>(World);
+		}
+	}
+
+	bool IsLiveTimeOfDayObject(const UObject* Object)
+	{
+		if (!Object ||
+			!SDK::MemReadable(Object, sizeof(UObject)))
+		{
+			return false;
+		}
+
+		const int32 ObjectIndex = Object->Index;
+		if (ObjectIndex < 0 ||
+			ObjectIndex >= TUObjectArray::Num())
+		{
+			return false;
+		}
+
+		auto Item = TUObjectArray::GetItemByIndex(
+			ObjectIndex);
+		const int32 InvalidObjectFlags =
+			Offsets::bEncryptedObjects
+				? 0x10200000
+				: 0x20;
+		return Item &&
+			Item->GetObject() == Object &&
+			!(Item->GetFlags() & InvalidObjectFlags) &&
+			Object->Class &&
+			SDK::MemReadable(
+				Object->Class, sizeof(UClass));
+	}
+
+	bool IsTimeOfDayObjectOwnedByWorld(
+		const UObject* Object,
+		const UWorld* World)
+	{
+		if (!Object || !World)
+			return false;
+
+		auto Outer = Object;
+		for (int32 Depth = 0;
+			Outer && Depth < 32;
+			++Depth)
+		{
+			if (Outer == World)
+				return true;
+			Outer = Outer->Outer;
+		}
+		return false;
+	}
+
+	UObject* ResolveTimeOfDayManagerFromGameState(
+		UWorld* World)
+	{
+		if (!World ||
+			!IsLiveTimeOfDayObject(World->GameState))
+		{
+			return nullptr;
+		}
+
+		auto GameState = World->GameState;
+		auto GetManager =
+			GameState->GetFunction(
+				"GetTimeOfDayManager");
+		if (GetManager)
+		{
+			// Legacy builds return a raw AFortTimeOfDayManager pointer, while
+			// newer builds may return a TScriptInterface (UObject first,
+			// resolved interface pointer second). A zeroed two-pointer buffer
+			// safely covers both reflected layouts.
+			struct
+			{
+				UObject* ObjectPointer = nullptr;
+				void* InterfacePointer = nullptr;
+			} Params;
+			GameState->ProcessEvent(GetManager, &Params);
+
+			// This getter belongs to the current GameState, so its interface
+			// result is already scoped to this world. Modern implementations
+			// may be subsystem-owned and therefore have no Outer chain back to
+			// UWorld; rejecting those is what hid the Chapter 4+ manager.
+			if (IsLiveTimeOfDayObject(
+					Params.ObjectPointer))
+			{
+				auto& State =
+					GTimeOfDayControllerResolverState;
+				if (!State.bLoggedGameStateManager)
+				{
+					SDK::DbgLog(
+						"[TimeOfDay] resolved "
+						"GameState manager %s (%s) "
+						"on %.2f\n",
+						Params.ObjectPointer->Name
+							.ToString().c_str(),
+						Params.ObjectPointer->Class->Name
+							.ToString().c_str(),
+						VersionInfo.FortniteVersion);
+					State.bLoggedGameStateManager = true;
+				}
+				return Params.ObjectPointer;
+			}
+		}
+
+		// Some intermediate builds expose the replicated interface property
+		// but omit the Blueprint getter.
+		const char* PropertyNames[] = {
+			"FortTimeOfDayManager",
+			"TimeOfDayManager"
+		};
+		for (const char* PropertyName : PropertyNames)
+		{
+			const int32 Offset =
+				static_cast<int32>(
+					GameState->GetOffset(PropertyName));
+			if (Offset < 0 ||
+				!SDK::MemReadable(
+					reinterpret_cast<const uint8*>(
+						GameState) + Offset,
+					sizeof(UObject*)))
+			{
+				continue;
+			}
+
+			auto Manager = GetFromOffset<UObject*>(
+				GameState, Offset);
+			if (IsLiveTimeOfDayObject(Manager))
+			{
+				auto& State =
+					GTimeOfDayControllerResolverState;
+				if (!State.bLoggedGameStateManager)
+				{
+					SDK::DbgLog(
+						"[TimeOfDay] resolved "
+						"GameState.%s manager %s "
+						"(%s) on %.2f\n",
+						PropertyName,
+						Manager->Name.ToString().c_str(),
+						Manager->Class->Name
+							.ToString().c_str(),
+						VersionInfo.FortniteVersion);
+					State.bLoggedGameStateManager = true;
+				}
+				return Manager;
+			}
+		}
+
+		return nullptr;
+	}
+
+	bool IsCompatibleTimeOfDayManagerGetter(
+		UFunction* Getter)
+	{
+		if (!Getter)
+			return false;
+
+		const auto ReflectedParams =
+			Getter->GetParamsNamed();
+		bool bHasWorldContext = false;
+		bool bHasInterfaceReturn = false;
+		for (const auto& Parameter :
+			ReflectedParams.NameOffsetMap)
+		{
+			if (Parameter.Name ==
+				"WorldContextObject")
+			{
+				if (Parameter.Offset != 0)
+					return false;
+				bHasWorldContext = true;
+			}
+			else if (Parameter.Name ==
+				"ReturnValue")
+			{
+				// The return is a 16-byte TScriptInterface beginning after
+				// the 8-byte context pointer.
+				if (Parameter.Offset !=
+					sizeof(UObject*))
+				{
+					return false;
+				}
+				bHasInterfaceReturn = true;
+			}
+			else
+			{
+				// Reflected function parameter enumerations contain only
+				// parameters here. Reject an unexpected ABI instead of
+				// dispatching into a fixed-size buffer.
+				return false;
+			}
+		}
+		return bHasWorldContext &&
+			bHasInterfaceReturn;
+	}
+
+	UObject* ResolveTimeOfDayManagerFromKismet(
+		UWorld* World)
+	{
+		if (!World)
+			return nullptr;
+
+		auto Library =
+			UFortKismetLibrary::GetDefaultObj();
+		if (!Library)
+			return nullptr;
+
+		const char* GetterNames[] = {
+			// Epic's own modern SetTimeOfDay path resolves the contextual
+			// manager first. The global manager may exist but control a
+			// different streamed context.
+			"GetContextualTimeOfDayManager",
+			"GetGlobalTimeOfDayManager"
+		};
+		for (const char* GetterName : GetterNames)
+		{
+			auto Getter =
+				Library->GetFunction(GetterName);
+			if (!IsCompatibleTimeOfDayManagerGetter(
+					Getter))
+				continue;
+
+			// Both modern Kismet getters use an 8-byte world context followed
+			// by a 16-byte TScriptInterface return value.
+			struct
+			{
+				UObject* WorldContextObject = nullptr;
+				UObject* ObjectPointer = nullptr;
+				void* InterfacePointer = nullptr;
+			} Params;
+			Params.WorldContextObject = World;
+			Library->ProcessEvent(Getter, &Params);
+			if (!IsLiveTimeOfDayObject(
+					Params.ObjectPointer))
+			{
+				continue;
+			}
+
+			auto& State =
+				GTimeOfDayControllerResolverState;
+			if (!State.bLoggedKismetManagerFallback)
+			{
+				SDK::DbgLog(
+					"[TimeOfDay] resolved %s manager %s "
+					"on %.2f\n",
+					GetterName,
+					Params.ObjectPointer->Name
+						.ToString().c_str(),
+					VersionInfo.FortniteVersion);
+				State.bLoggedKismetManagerFallback = true;
+			}
+			return Params.ObjectPointer;
+		}
+		return nullptr;
+	}
+
+	UObject* ResolveDaySequenceFallback(UWorld* World)
+	{
+		// Battle Royale moved to DaySequence in Chapter 4. Older builds do
+		// not load this module, so avoid repeatedly scanning their GObjects.
+		if (!World ||
+			VersionInfo.FortniteVersion < 23.00)
+		{
+			return nullptr;
+		}
+
+		ResetTimeOfDayResolverStateForWorld(World);
+		auto& State =
+			GTimeOfDayControllerResolverState;
+
+		auto IsUsableDaySequenceActor =
+			[&](UObject* Actor)
+			{
+				if (!IsLiveTimeOfDayObject(Actor) ||
+					Actor->IsDefaultObject() ||
+					!IsTimeOfDayObjectOwnedByWorld(
+						Actor, World) ||
+					!Actor->GetFunction("SetTimeOfDay") ||
+					!Actor->GetFunction("GetTimeOfDay") ||
+					!Actor->GetFunction("Pause") ||
+					!Actor->GetFunction("Play"))
+				{
+					return false;
+				}
+
+				return true;
+			};
+
+		auto CachedActor =
+			State.DaySequenceActor.Get();
+		if (IsUsableDaySequenceActor(CachedActor))
+			return CachedActor;
+		State.DaySequenceActor = {};
+
+		const ULONGLONG CurrentTimeMs =
+			GetTickCount64();
+		if (CurrentTimeMs < State.NextActorScanTimeMs)
+			return nullptr;
+		State.NextActorScanTimeMs =
+			CurrentTimeMs + 1000ULL;
+
+		auto DaySequenceActorClass =
+			State.DaySequenceActorClass.Get();
+		if (!State.bDaySequenceActorClassLookupAttempted)
+		{
+			State.bDaySequenceActorClassLookupAttempted =
+				true;
+			DaySequenceActorClass =
+				const_cast<UClass*>(
+					FindClass("DaySequenceActor"));
+			if (DaySequenceActorClass)
+			{
+				State.DaySequenceActorClass =
+					TWeakObjectPtr<UClass>(
+						DaySequenceActorClass);
+			}
+		}
+
+		// A few shipping builds can expose the active DaySequence actor before
+		// either Fortnite manager getter is ready. Keep a bounded direct scan
+		// only as the final fallback.
+		for (int32 Index = 0;
+			Index < TUObjectArray::Num();
+			++Index)
+		{
+			auto Item =
+				TUObjectArray::GetItemByIndex(Index);
+			auto Actor =
+				Item
+					? const_cast<UObject*>(
+						Item->GetObject())
+					: nullptr;
+			if (!IsUsableDaySequenceActor(Actor))
+				continue;
+			if (DaySequenceActorClass &&
+				!Actor->IsA(DaySequenceActorClass))
+			{
+				continue;
+			}
+
+			State.DaySequenceActor =
+				TWeakObjectPtr<UObject>(Actor);
+			if (!State.bLoggedDirectActorFallback)
+			{
+				SDK::DbgLog(
+					"[TimeOfDay] resolved direct "
+					"DaySequence actor %s on %.2f\n",
+					Actor->Name.ToString().c_str(),
+					VersionInfo.FortniteVersion);
+				State.bLoggedDirectActorFallback = true;
+			}
+			return Actor;
+		}
+		return nullptr;
+	}
+
+	float NormalizeTimeOfDayHours(float TimeOfDay)
+	{
+		if (!std::isfinite(TimeOfDay))
+			return 0.f;
+
+		TimeOfDay = std::fmod(TimeOfDay, 24.f);
+		if (TimeOfDay < 0.f)
+			TimeOfDay += 24.f;
+		return TimeOfDay;
+	}
+
+	bool InvokeSingleFloatSetter(
+		UObject* Target,
+		UFunction* Function,
+		float Value)
+	{
+		if (!IsLiveTimeOfDayObject(Target) ||
+			!Function)
+		{
+			return false;
+		}
+
+		// SetTimeOfDay/SetTimeOfDaySpeed take one float on both the legacy
+		// numeric aliases and DaySequence. Validate that exact schema before
+		// dispatching: legacy AFortTimeOfDayManager also has a misleadingly
+		// named SetTimeOfDay(FString), which must never receive raw float
+		// bytes. Honor the bool result exposed by modern interfaces because a
+		// streamed manager can legitimately reject an early seek.
+		alignas(16) uint8 Params[0x40]{};
+		const auto ReflectedParams =
+			Function->GetParamsNamed();
+		constexpr uint64 CPF_Parm =
+			0x0000000000000080ULL;
+		constexpr uint64 CPF_OutParm =
+			0x0000000000000100ULL;
+		constexpr uint64 CPF_ReturnParm =
+			0x0000000000000400ULL;
+		const bool bReliablePropertyMetadata =
+			VersionInfo.FortniteVersion < 32.00;
+		uint32 ValueOffset = 0;
+		int32 ReturnValueOffset = -1;
+		int32 ValueParameterCount = 0;
+		for (const auto& Parameter :
+			ReflectedParams.NameOffsetMap)
+		{
+			const bool bReturnParameter =
+				Parameter.Name == "ReturnValue" ||
+				(bReliablePropertyMetadata &&
+					(Parameter.PropertyFlags &
+						CPF_ReturnParm));
+			if (bReturnParameter)
+			{
+				if (Parameter.Offset <
+						sizeof(Params) &&
+					(!bReliablePropertyMetadata ||
+						Parameter.ElementSize ==
+							sizeof(bool)))
+				{
+					ReturnValueOffset =
+						static_cast<int32>(
+							Parameter.Offset);
+				}
+				else
+				{
+					return false;
+				}
+			}
+			else
+			{
+				if (bReliablePropertyMetadata)
+				{
+					if (!(Parameter.PropertyFlags &
+							CPF_Parm))
+					{
+						continue;
+					}
+					if ((Parameter.PropertyFlags &
+							(CPF_OutParm |
+								CPF_ReturnParm)) ||
+						Parameter.ElementSize !=
+							sizeof(float))
+					{
+						return false;
+					}
+				}
+				if (Parameter.Offset + sizeof(float) >
+						sizeof(Params) ||
+					++ValueParameterCount != 1)
+				{
+					return false;
+				}
+				ValueOffset = Parameter.Offset;
+			}
+		}
+		if (ValueParameterCount != 1)
+			return false;
+
+		memcpy(
+			Params + ValueOffset,
+			&Value,
+			sizeof(Value));
+		Target->ProcessEvent(Function, Params);
+		return ReturnValueOffset < 0 ||
+			Params[ReturnValueOffset] != 0;
+	}
+
+	bool InvokeSingleFloatGetter(
+		UObject* Target,
+		UFunction* Function,
+		float& OutValue)
+	{
+		if (!IsLiveTimeOfDayObject(Target) ||
+			!Function)
+		{
+			return false;
+		}
+
+		struct
+		{
+			float ReturnValue = 0.f;
+		} Params;
+		Target->ProcessEvent(Function, &Params);
+		if (!std::isfinite(Params.ReturnValue))
+			return false;
+
+		OutValue = Params.ReturnValue;
+		return true;
+	}
+
+	bool InvokeBoolGetter(
+		UObject* Target,
+		UFunction* Function,
+		bool& OutValue)
+	{
+		if (!IsLiveTimeOfDayObject(Target) ||
+			!Function)
+		{
+			return false;
+		}
+
+		struct
+		{
+			uint8 ReturnValue = 0;
+			uint8 Padding[7]{};
+		} Params;
+		Target->ProcessEvent(Function, &Params);
+		OutValue = Params.ReturnValue != 0;
+		return true;
+	}
+
+	bool InvokeWorldFloatSetter(
+		const UFortKismetLibrary* Library,
+		UFunction* Function,
+		UObject* WorldContextObject,
+		float Value)
+	{
+		if (!Library || !Function ||
+			!WorldContextObject)
+		{
+			return false;
+		}
+
+		struct
+		{
+			UObject* WorldContextObject = nullptr;
+			float Value = 0.f;
+			uint8 Padding[4]{};
+		} Params;
+		Params.WorldContextObject =
+			WorldContextObject;
+		Params.Value = Value;
+		Library->ProcessEvent(Function, &Params);
+		return true;
+	}
+
+	bool InvokeWorldFloatGetter(
+		const UFortKismetLibrary* Library,
+		UFunction* Function,
+		UObject* WorldContextObject,
+		float& OutValue)
+	{
+		if (!Library || !Function ||
+			!WorldContextObject)
+		{
+			return false;
+		}
+
+		struct
+		{
+			UObject* WorldContextObject = nullptr;
+			float ReturnValue = 0.f;
+			uint8 Padding[4]{};
+		} Params;
+		Params.WorldContextObject =
+			WorldContextObject;
+		Library->ProcessEvent(Function, &Params);
+		if (!std::isfinite(Params.ReturnValue))
+			return false;
+
+		OutValue = Params.ReturnValue;
+		return true;
+	}
+
+	bool IsDaySequenceController(UObject* Controller)
+	{
+		return IsLiveTimeOfDayObject(Controller) &&
+			Controller->GetFunction("Pause") &&
+			Controller->GetFunction("Play");
+	}
+
+	void EnsureDaySequenceReplication(
+		UObject* Controller)
+	{
+		if (!IsDaySequenceController(Controller))
+			return;
+
+		if (auto SetReplicatePlayback =
+			Controller->GetFunction(
+				"SetReplicatePlayback"))
+		{
+			struct
+			{
+				uint8 bReplicatePlayback = 1;
+				uint8 Padding[7]{};
+			} Params;
+			Controller->ProcessEvent(
+				SetReplicatePlayback, &Params);
+		}
+	}
+
+	void ForceDaySequenceReplication(
+		UObject* Controller)
+	{
+		auto Actor = Controller
+			? Controller->Cast<AActor>()
+			: nullptr;
+		if (Actor)
+			Actor->ForceNetUpdate();
+	}
+}
+
+UObject* UFortKismetLibrary::
+	GetTimeOfDayControllerCompat(
+		UObject* WorldContextObject)
+{
+	auto World =
+		reinterpret_cast<UWorld*>(
+			WorldContextObject);
+	if (!IsLiveTimeOfDayObject(World))
+		return nullptr;
+	ResetTimeOfDayResolverStateForWorld(World);
+
+	if (auto Manager =
+		ResolveTimeOfDayManagerFromGameState(World))
+	{
+		return Manager;
+	}
+
+	if (auto Manager =
+		ResolveTimeOfDayManagerFromKismet(World))
+	{
+		return Manager;
+	}
+
+	return ResolveDaySequenceFallback(World);
+}
+
+bool UFortKismetLibrary::GetTimeOfDayCompat(
+	UObject* WorldContextObject,
+	float& OutTimeOfDay)
+{
+	auto Controller =
+		GetTimeOfDayControllerCompat(
+			WorldContextObject);
+	if (Controller)
+	{
+		if (InvokeSingleFloatGetter(
+				Controller,
+				Controller->GetFunction(
+					"GetTimeOfDay"),
+				OutTimeOfDay))
+		{
+			OutTimeOfDay =
+				NormalizeTimeOfDayHours(
+					OutTimeOfDay);
+			return true;
+		}
+	}
+
+	auto World =
+		reinterpret_cast<UWorld*>(
+			WorldContextObject);
+	auto DaySequenceActor =
+		ResolveDaySequenceFallback(World);
+	if (DaySequenceActor != Controller &&
+		InvokeSingleFloatGetter(
+			DaySequenceActor,
+			DaySequenceActor
+				? DaySequenceActor->GetFunction(
+					"GetTimeOfDay")
+				: nullptr,
+			OutTimeOfDay))
+	{
+		OutTimeOfDay =
+			NormalizeTimeOfDayHours(
+				OutTimeOfDay);
+		return true;
+	}
+
+	auto Library = GetDefaultObj();
+	if (!Library ||
+		!InvokeWorldFloatGetter(
+			Library,
+			Library->GetFunction("GetTimeOfDay"),
+			WorldContextObject,
+			OutTimeOfDay))
+	{
+		return false;
+	}
+
+	OutTimeOfDay =
+		NormalizeTimeOfDayHours(OutTimeOfDay);
+	return true;
+}
+
+bool UFortKismetLibrary::GetTimeOfDaySpeedCompat(
+	UObject* WorldContextObject,
+	float& OutTimeOfDaySpeed)
+{
+	auto Controller =
+		GetTimeOfDayControllerCompat(
+			WorldContextObject);
+	if (Controller)
+	{
+		if (IsDaySequenceController(Controller))
+		{
+			bool bPaused = false;
+			if (InvokeBoolGetter(
+					Controller,
+					Controller->GetFunction(
+						"IsPaused"),
+					bPaused))
+			{
+				if (!bPaused)
+				{
+					bool bPlaying = true;
+					if (InvokeBoolGetter(
+							Controller,
+							Controller->GetFunction(
+								"IsPlaying"),
+							bPlaying) &&
+						!bPlaying)
+					{
+						bPaused = true;
+					}
+				}
+				OutTimeOfDaySpeed =
+					bPaused ? 0.f : 1.f;
+				return true;
+			}
+		}
+
+		if (InvokeSingleFloatGetter(
+				Controller,
+				Controller->GetFunction(
+					"GetTimeOfDaySpeed"),
+				OutTimeOfDaySpeed))
+		{
+			return true;
+		}
+	}
+
+	auto World =
+		reinterpret_cast<UWorld*>(
+			WorldContextObject);
+	auto DaySequenceActor =
+		ResolveDaySequenceFallback(World);
+	if (DaySequenceActor != Controller &&
+		IsDaySequenceController(DaySequenceActor))
+	{
+		bool bPaused = false;
+		if (InvokeBoolGetter(
+				DaySequenceActor,
+				DaySequenceActor->GetFunction(
+					"IsPaused"),
+				bPaused))
+		{
+			OutTimeOfDaySpeed =
+				bPaused ? 0.f : 1.f;
+			return true;
+		}
+	}
+
+	auto Library = GetDefaultObj();
+	return Library &&
+		InvokeWorldFloatGetter(
+			Library,
+			Library->GetFunction(
+				"GetTimeOfDaySpeed"),
+			WorldContextObject,
+			OutTimeOfDaySpeed);
+}
+
+bool UFortKismetLibrary::SetTimeOfDayCompat(
+	UObject* WorldContextObject,
+	float TimeOfDay)
+{
+	const float NormalizedTime =
+		NormalizeTimeOfDayHours(TimeOfDay);
+	auto TryApplyTime =
+		[&](UObject* Controller)
+		{
+			if (!Controller)
+				return false;
+
+			const bool bDaySequence =
+				IsDaySequenceController(Controller);
+			if (bDaySequence)
+			{
+				EnsureDaySequenceReplication(
+					Controller);
+			}
+
+			// The manager interface already used the plain float setter in
+			// 22.40. Probe it on every version: schema validation safely
+			// rejects the legacy FString overload before ProcessEvent.
+			const char* SetterNames[] = {
+				"SetTimeOfDay",
+				"SetTimeOfDayFloat",
+				"SetTimeOfDayInHours"
+			};
+			for (const char* SetterName : SetterNames)
+			{
+				if (SetterName &&
+					InvokeSingleFloatSetter(
+						Controller,
+						Controller->GetFunction(
+							SetterName),
+						NormalizedTime))
+				{
+					if (bDaySequence)
+					ForceDaySequenceReplication(
+						Controller);
+					return true;
+				}
+			}
+			return false;
+		};
+
+	auto Controller =
+		GetTimeOfDayControllerCompat(
+			WorldContextObject);
+	if (TryApplyTime(Controller))
+		return true;
+
+	auto World =
+		reinterpret_cast<UWorld*>(
+			WorldContextObject);
+	auto DaySequenceActor =
+		ResolveDaySequenceFallback(World);
+	if (DaySequenceActor != Controller &&
+		TryApplyTime(DaySequenceActor))
+	{
+		return true;
+	}
+
+	auto Library = GetDefaultObj();
+	if (!Library ||
+		!InvokeWorldFloatSetter(
+			Library,
+			Library->GetFunction("SetTimeOfDay"),
+			WorldContextObject,
+			NormalizedTime))
+	{
+		return false;
+	}
+
+	// The modern static Kismet setter is void and reports success even if it
+	// found no contextual manager. Require readback on those builds so the
+	// live policy keeps retrying instead of accepting a silent no-op.
+	if (VersionInfo.FortniteVersion >= 22.40)
+	{
+		float ObservedTime = 0.f;
+		if (!GetTimeOfDayCompat(
+				WorldContextObject,
+				ObservedTime))
+		{
+			return false;
+		}
+		const float Difference =
+			std::fabs(ObservedTime - NormalizedTime);
+		return (std::min)(
+				Difference,
+				24.f - Difference) <= 0.05f;
+	}
+	return true;
+}
+
+bool UFortKismetLibrary::
+	SetResolvedTimeOfDaySpeedCompat(
+	UObject* Controller,
+	float TimeOfDaySpeed)
+{
+	if (!IsLiveTimeOfDayObject(Controller))
+		return false;
+
+	if (IsDaySequenceController(Controller))
+	{
+		EnsureDaySequenceReplication(
+			Controller);
+		auto PlaybackFunction =
+			Controller->GetFunction(
+				std::fabs(TimeOfDaySpeed) <=
+						std::numeric_limits<float>::
+							epsilon()
+					? "Pause"
+					: "Play");
+		if (!PlaybackFunction)
+			return false;
+
+		Controller->ProcessEvent(
+			PlaybackFunction, nullptr);
+		ForceDaySequenceReplication(
+			Controller);
+		return true;
+	}
+
+	const char* SpeedSetterNames[] = {
+		"SetTimeOfDaySpeed",
+		"SetTimeOfDaySpeedFloat"
+	};
+	for (const char* SetterName :
+		SpeedSetterNames)
+	{
+		if (InvokeSingleFloatSetter(
+				Controller,
+				Controller->GetFunction(
+					SetterName),
+				TimeOfDaySpeed))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool UFortKismetLibrary::SetTimeOfDaySpeedCompat(
+	UObject* WorldContextObject,
+	float TimeOfDaySpeed)
+{
+	auto Controller =
+		GetTimeOfDayControllerCompat(
+			WorldContextObject);
+	if (SetResolvedTimeOfDaySpeedCompat(
+			Controller, TimeOfDaySpeed))
+	{
+		return true;
+	}
+
+	auto World =
+		reinterpret_cast<UWorld*>(
+			WorldContextObject);
+	auto DaySequenceActor =
+		ResolveDaySequenceFallback(World);
+	if (DaySequenceActor != Controller &&
+		SetResolvedTimeOfDaySpeedCompat(
+			DaySequenceActor,
+			TimeOfDaySpeed))
+	{
+		return true;
+	}
+
+	auto Library = GetDefaultObj();
+	if (!Library ||
+		!InvokeWorldFloatSetter(
+			Library,
+			Library->GetFunction(
+				"SetTimeOfDaySpeed"),
+			WorldContextObject,
+			TimeOfDaySpeed))
+	{
+		return false;
+	}
+	if (VersionInfo.FortniteVersion >= 22.40)
+	{
+		float ObservedSpeed = 0.f;
+		return GetTimeOfDaySpeedCompat(
+				WorldContextObject,
+				ObservedSpeed) &&
+			std::fabs(
+				ObservedSpeed -
+				TimeOfDaySpeed) <= 0.01f;
+	}
+	return true;
+}
 
 void UFortKismetLibrary::K2_SpawnPickupInWorld(UObject* Object, FFrame& Stack, AFortPickupAthena** Ret)
 {
@@ -54,6 +1035,20 @@ void UFortKismetLibrary::K2_SpawnPickupInWorld(UObject* Object, FFrame& Stack, A
 	if (bHasbPickupOnlyRelevantToOwner)
 		Stack.StepCompiledIn(&bPickupOnlyRelevantToOwner);
 	Stack.IncrementCode();
+
+	if (FFortAthenaNativeLTMCompatibility::
+			ShouldSuppressAshtonLeaderWorldPickup(
+				ItemDefinition))
+	{
+		*Ret = nullptr;
+		SDK::DbgLog(
+			"[Ashton1040] suppressed leader world pickup "
+			"definition=%s\n",
+			ItemDefinition
+				? ItemDefinition->Name.ToString().c_str()
+				: "null");
+		return;
+	}
 
 	*Ret = AFortInventory::SpawnPickup(Position, ItemDefinition, NumberToSpawn, -1, SourceType, Source, OptionalOwnerPC ? OptionalOwnerPC->MyFortPawn : nullptr, bToss, bRandomRotation);
 }
@@ -97,6 +1092,18 @@ void UFortKismetLibrary::GiveItemToInventoryOwner(UObject* Object, FFrame& Stack
 	auto PlayerController = InventoryOwner.ObjectPointer->Cast<AFortPlayerControllerAthena>();
 	if (!PlayerController || !PlayerController->WorldInventory)
 		return;
+	if (FFortAthenaNativeLTMCompatibility::
+			ShouldRejectAshtonLeaderGrant(
+				PlayerController,
+				ItemDefinition))
+	{
+		SDK::DbgLog(
+			"[Ashton1040] rejected non-stone leader transfer "
+			"controller=%p definition=%s\n",
+			(void*)PlayerController,
+			ItemDefinition->Name.ToString().c_str());
+		return;
+	}
 
 	auto ItemEntry = AFortInventory::MakeItemEntry(ItemDefinition, NumberToGive, ItemLevel);
 	if (!ItemEntry)
@@ -180,6 +1187,17 @@ namespace
 			return 0;
 		}
 
+		if (AFortInventory::ShouldBypassItemConsumption(
+				PlayerController,
+				AmountToRemove,
+				bForceRemoval))
+		{
+			return min(
+				GetItemQuantityOnPlayer(
+					PlayerController, ItemDefinition),
+				AmountToRemove);
+		}
+
 		// Variant GUID and force-removal were added to some later signatures.
 		// Lower builds do not expose variants, and the inventory layout has no
 		// safe cross-version variant accessor. Consume both reflected params
@@ -241,7 +1259,24 @@ namespace
 			return 0;
 		}
 
-		(void)bForceRemoval;
+		if (AFortInventory::ShouldBypassItemConsumption(
+				PlayerController,
+				AmountToRemove,
+				bForceRemoval))
+		{
+			auto ItemEntry =
+				PlayerController->WorldInventory
+					->Inventory.ReplicatedEntries.Search(
+						[&](FFortItemEntry& Entry)
+						{
+							return Entry.ItemGuid == ItemGuid;
+						},
+						FFortItemEntry::Size());
+			return ItemEntry
+				? min(max(ItemEntry->Count, 0), AmountToRemove)
+				: 0;
+		}
+
 		return PlayerController->WorldInventory->RemoveItem(
 			ItemGuid,
 			AmountToRemove < 0 ? -1 : AmountToRemove);

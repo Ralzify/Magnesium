@@ -280,6 +280,138 @@ static UFortDecoItemDefinition* ResolvePlacedDecoDefinition(AFortDecoTool* Tool,
 	return static_cast<UFortDecoItemDefinition*>(Selected);
 }
 
+struct FLegacyTrapStackSnapshot
+{
+	FGuid ItemGuid{};
+	int32 Count = 0;
+};
+
+static bool AreItemGuidsEqual(
+	const FGuid& Left,
+	const FGuid& Right)
+{
+	return Left.A == Right.A &&
+		Left.B == Right.B &&
+		Left.C == Right.C &&
+		Left.D == Right.D;
+}
+
+static UFortWorldItem* FindInventoryItemInstance(
+	AFortInventory* Inventory,
+	const FGuid& ItemGuid)
+{
+	if (!Inventory)
+		return nullptr;
+
+	auto Item = Inventory->Inventory.ItemInstances.Search(
+		[&](UFortWorldItem* Candidate)
+		{
+			return Candidate &&
+				AreItemGuidsEqual(
+					Candidate->ItemEntry.ItemGuid,
+					ItemGuid);
+		});
+	return Item ? *Item : nullptr;
+}
+
+static std::vector<FLegacyTrapStackSnapshot>
+	ProtectLegacyTrapStacks(
+		AFortDecoTool* Tool,
+		AFortPlayerControllerAthena* PlayerController,
+		uint8 AttachmentType)
+{
+	std::vector<FLegacyTrapStackSnapshot> Snapshots;
+	if (!Tool || !PlayerController ||
+		!PlayerController->WorldInventory ||
+		!AFortInventory::ShouldBypassItemConsumption(
+			PlayerController, 1, false))
+	{
+		return Snapshots;
+	}
+
+	auto Inventory = PlayerController->WorldInventory;
+	const auto ToolDefinition =
+		reinterpret_cast<const UFortItemDefinition*>(
+			Tool->ItemDefinition);
+	const auto PlacedDefinition =
+		ResolvePlacedDecoDefinition(Tool, AttachmentType);
+	auto& Entries = Inventory->Inventory.ReplicatedEntries;
+	Snapshots.reserve(Entries.Num());
+
+	for (int32 Index = 0; Index < Entries.Num(); Index++)
+	{
+		auto& Entry =
+			Entries.Get(Index, FFortItemEntry::Size());
+		if (Entry.Count <= 0 ||
+			(Entry.ItemDefinition != ToolDefinition &&
+				Entry.ItemDefinition != PlacedDefinition))
+		{
+			continue;
+		}
+
+		Snapshots.push_back(
+			{ Entry.ItemGuid, Entry.Count });
+
+		// Native legacy placement removes the inventory row when its last
+		// trap is used. Keep the same GUID alive until placement returns so
+		// the original numeric stack can be restored without re-granting it.
+		if (Entry.Count == 1)
+		{
+			Entry.Count = 2;
+			if (auto Item =
+				FindInventoryItemInstance(
+					Inventory, Entry.ItemGuid))
+			{
+				Item->ItemEntry.Count = 2;
+				Item->ItemEntry.bIsDirty = true;
+			}
+			Inventory->UpdateEntry(Entry);
+		}
+	}
+
+	return Snapshots;
+}
+
+static void RestoreLegacyTrapStacks(
+	AFortInventory* Inventory,
+	const std::vector<FLegacyTrapStackSnapshot>& Snapshots)
+{
+	if (!Inventory)
+		return;
+
+	for (const auto& Snapshot : Snapshots)
+	{
+		auto Entry =
+			Inventory->Inventory.ReplicatedEntries.Search(
+				[&](FFortItemEntry& Candidate)
+				{
+					return AreItemGuidsEqual(
+						Candidate.ItemGuid,
+						Snapshot.ItemGuid);
+				},
+				FFortItemEntry::Size());
+		if (!Entry)
+			continue;
+
+		bool bChanged = Entry->Count != Snapshot.Count;
+		int32 RestoredCount = Snapshot.Count;
+		Entry->Count = RestoredCount;
+		if (auto Item =
+			FindInventoryItemInstance(
+				Inventory, Snapshot.ItemGuid))
+		{
+			if (Item->ItemEntry.Count != Snapshot.Count)
+			{
+				Item->ItemEntry.Count = RestoredCount;
+				Item->ItemEntry.bIsDirty = true;
+				bChanged = true;
+			}
+		}
+		if (bChanged)
+			Inventory->UpdateEntry(*Entry);
+	}
+}
+
 ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVector& SavedLocation, const FRotator& SavedRotation,
 	ABuildingSMActor* AttachedActor, uint8 AttachmentType, AFortPlayerControllerAthena* PlayerController, const wchar_t* ItemDefinitionPath)
 {
@@ -333,9 +465,28 @@ ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVec
 		{
 			// The original legacy placement event verifies inventory and consumes one
 			// trap. Supply that transient placement item so restore follows the same path.
-			PlayerController->WorldInventory->GiveItem((UFortItemDefinition*)SavedItemObject, 1);
+			const bool bInfiniteConsumption =
+				AFortInventory::ShouldBypassItemConsumption(
+					PlayerController, 1, false);
+			auto PlacementItem =
+				PlayerController->WorldInventory->GiveItem(
+					(UFortItemDefinition*)SavedItemObject, 1);
+			FGuid PlacementItemGuid{};
+			const bool bHasPlacementItem =
+				PlacementItem != nullptr;
+			if (bHasPlacementItem)
+				PlacementItemGuid =
+					PlacementItem->ItemEntry.ItemGuid;
 			const int PreviousCount = GetAttachedBuildingActorCount(AttachedActor);
 			Tool->ServerSpawnDeco(Location, Rotation, AttachedActor, AttachmentType);
+			if (bInfiniteConsumption && bHasPlacementItem)
+			{
+				// This grant exists only to authorize save restoration. Infinite
+				// consumption deliberately keeps ordinary player stacks, so
+				// explicitly remove this administrative temporary afterward.
+				PlayerController->WorldInventory->Remove(
+					PlacementItemGuid);
+			}
 			if (AttachedActor->HasAttachedBuildingActors() && AttachedActor->AttachedBuildingActors.Num() > PreviousCount)
 				Trap = AttachedActor->AttachedBuildingActors.Get(PreviousCount);
 		}
@@ -467,7 +618,15 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 	if (VersionInfo.FortniteVersion < 18)
 	{
 		auto PreviousAttachedActorCount = GetAttachedBuildingActorCount(AttachedActor);
+		auto ProtectedStacks =
+			ProtectLegacyTrapStacks(
+				DecoTool,
+				PlayerController,
+				InBuildingAttachmentType);
 		callOG(DecoTool, Stack.GetCurrentNativeFunction(), ServerSpawnDeco, Location, Rotation, AttachedActor, InBuildingAttachmentType);
+		RestoreLegacyTrapStacks(
+			PlayerController->WorldInventory,
+			ProtectedStacks);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount,
 			ResolvePlacedDecoDefinition(DecoTool, InBuildingAttachmentType));
 	}
@@ -568,7 +727,15 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 	if (VersionInfo.FortniteVersion < 18)
 	{
 		auto PreviousAttachedActorCount = GetAttachedBuildingActorCount(AttachedActor);
+		auto ProtectedStacks =
+			ProtectLegacyTrapStacks(
+				DecoTool,
+				PlayerController,
+				InBuildingAttachmentType);
 		ServerSpawnDeco_ImplementationOG(Context, Stack);
+		RestoreLegacyTrapStacks(
+			PlayerController->WorldInventory,
+			ProtectedStacks);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount,
 			ResolvePlacedDecoDefinition(DecoTool, InBuildingAttachmentType));
 	}
