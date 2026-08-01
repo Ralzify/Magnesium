@@ -47,6 +47,7 @@
 static const UClass* GetRemoteControlledPawnClass();
 static bool IsNativeVehiclePossessionPawn(AActor* Actor);
 static bool IsUsableDeathObject(const UObject* Object);
+static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory);
 static bool IsManagedNonRespawningBot(
 	AFortPlayerControllerAthena* PlayerController);
 static bool IsTerminalManagedBot(
@@ -205,11 +206,11 @@ static bool VehicleLoadoutContainsGuid(
 		});
 }
 
-static bool VehicleInventoryContainsGuid(
+static FFortItemEntry* FindVehicleInventoryEntry(
 	AFortInventory* Inventory, const FGuid& Guid)
 {
 	if (!Inventory)
-		return false;
+		return nullptr;
 
 	for (int32 Index = 0;
 		Index < Inventory->Inventory.ReplicatedEntries.Num(); ++Index)
@@ -217,10 +218,16 @@ static bool VehicleInventoryContainsGuid(
 		auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(
 			Index, FFortItemEntry::Size());
 		if (VehicleLoadoutGuidsEqual(Entry.ItemGuid, Guid))
-			return true;
+			return &Entry;
 	}
 
-	return false;
+	return nullptr;
+}
+
+static bool VehicleInventoryContainsGuid(
+	AFortInventory* Inventory, const FGuid& Guid)
+{
+	return FindVehicleInventoryEntry(Inventory, Guid) != nullptr;
 }
 
 static std::vector<FGuid> SnapshotVehicleInventoryGuids(
@@ -315,24 +322,51 @@ static void RemoveTrackedVehicleItems(
 	State.TemporaryItemGuids.clear();
 }
 
+// Puts an inventory entry back in the pawn's hands for real. The two RPCs alone
+// move the quickbar selection and tell the client what to show, but neither
+// replaces the weapon actor the server pawn is holding - so on their own they
+// leave a player whose UI says "pickaxe" still carrying a mounted vehicle gun.
+// EquipWeaponDefinition is the part that actually swaps the actor.
+static bool EquipInventoryEntryOnPawn(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* RiderPawn,
+	FFortItemEntry* Entry)
+{
+	if (!PlayerController || !Entry || !Entry->ItemDefinition)
+		return false;
+
+	PlayerController->ServerExecuteInventoryItem(Entry->ItemGuid);
+
+	if (RiderPawn)
+	{
+		RiderPawn->EquipWeaponDefinition(
+			Entry->ItemDefinition,
+			Entry->ItemGuid,
+			Entry->HasTrackerGuid() ? Entry->TrackerGuid : FGuid(),
+			false);
+	}
+
+	PlayerController->ClientEquipItem(Entry->ItemGuid, true);
+	return true;
+}
+
 static bool EquipTrackedVehicleOriginalItem(
 	AFortPlayerControllerAthena* PlayerController,
 	const FTrackedVehicleLoadout& State)
 {
-	if (!State.bHasOriginalEquippedItem ||
-		!PlayerController || !PlayerController->WorldInventory ||
-		!VehicleInventoryContainsGuid(
-			PlayerController->WorldInventory,
-			State.OriginalEquippedItem))
-	{
+	if (!State.bHasOriginalEquippedItem || !PlayerController)
 		return false;
-	}
 
-	PlayerController->ServerExecuteInventoryItem(
+	auto Entry = FindVehicleInventoryEntry(
+		PlayerController->WorldInventory,
 		State.OriginalEquippedItem);
-	PlayerController->ClientEquipItem(
-		State.OriginalEquippedItem, true);
-	return true;
+	if (!Entry)
+		return false;
+
+	return EquipInventoryEntryOnPawn(
+		PlayerController,
+		ResolveVehicleRiderPawn(PlayerController),
+		Entry);
 }
 
 void AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(
@@ -378,6 +412,181 @@ void AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(
 		(unsigned)State.OriginalEquippedItem.B,
 		(unsigned)State.OriginalEquippedItem.C,
 		(unsigned)State.OriginalEquippedItem.D);
+}
+
+// The loadout bookkeeping only knows about vehicle entries this code observed, and
+// what it does on exit is remove inventory entries - it never takes the weapon out
+// of the pawn's hands. Both of those can leave the same visible state: a player
+// standing on the ground still holding the vehicle's gun, with a quickbar that
+// says otherwise and no way to select out of it, because every slot resolves to an
+// entry that is not the actor being held.
+//
+// So this is checked on the pawn instead of on the bookkeeping, and the test is
+// the one the player can see: is a weapon being held that this player cannot
+// possibly be holding - because their inventory has no entry for it, or because it
+// is a vehicle weapon and they are not in a vehicle.
+static bool IsStrandedVehicleWeapon(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* RiderPawn,
+	AFortWeapon* Weapon,
+	bool& bOutOwnsEntry)
+{
+	bOutOwnsEntry = false;
+
+	if (!PlayerController || !RiderPawn || !Weapon)
+		return false;
+
+	// Still riding something. A seat weapon is exactly what should be held here.
+	if (ResolveVehicleForPawn(RiderPawn) ||
+		(AActor*)PlayerController->Pawn != (AActor*)RiderPawn)
+	{
+		return false;
+	}
+
+	bOutOwnsEntry = VehicleInventoryContainsGuid(
+		PlayerController->WorldInventory, Weapon->ItemEntryGuid);
+
+	// No entry behind the actor: unusable regardless of what it is, and nothing
+	// the player selects will replace it.
+	if (!bOutOwnsEntry)
+		return true;
+
+	// The entry survived, so the exit cleanup never ran. A vehicle-weapon class
+	// held on foot is still wrong, and the entry has to go with it. Absent on
+	// builds that predate the class, where the test above is the only one needed.
+	static const UClass* VehicleWeaponClass = nullptr;
+	static bool bResolvedVehicleWeaponClass = false;
+	if (!bResolvedVehicleWeaponClass)
+	{
+		bResolvedVehicleWeaponClass = true;
+		VehicleWeaponClass = FindClass("FortWeaponRangedForVehicle");
+	}
+
+	return VehicleWeaponClass && Weapon->IsA(VehicleWeaponClass);
+}
+
+static void RepairStrandedVehicleWeapon(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* RiderPawn)
+{
+	if (!PlayerController || !PlayerController->WorldInventory ||
+		!RiderPawn || !RiderPawn->HasCurrentWeapon() ||
+		!IsUsableDeathObject(RiderPawn->CurrentWeapon))
+	{
+		return;
+	}
+
+	auto Weapon = RiderPawn->CurrentWeapon->Cast<AFortWeapon>();
+	bool bOwnsEntry = false;
+	if (!IsStrandedVehicleWeapon(
+		PlayerController, RiderPawn, Weapon, bOwnsEntry))
+	{
+		return;
+	}
+
+	if (bOwnsEntry)
+		PlayerController->WorldInventory->Remove(Weapon->ItemEntryGuid);
+
+	// The pickaxe is the one item every player is guaranteed to still have, and
+	// it is what the quickbar falls back to anyway. Anything at all beats leaving
+	// the pawn holding the vehicle's weapon.
+	auto Entry = FindHarvestingToolEntry(PlayerController->WorldInventory);
+	if (!Entry &&
+		PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num() > 0)
+	{
+		Entry = &PlayerController->WorldInventory->Inventory
+			.ReplicatedEntries.Get(0, FFortItemEntry::Size());
+	}
+
+	if (!EquipInventoryEntryOnPawn(PlayerController, RiderPawn, Entry))
+		return;
+
+	SDK::DbgLog(
+		"[Vehicles] unequipped stranded vehicle weapon controller=%p "
+		"pawn=%p owned-entry=%d\n",
+		(void*)PlayerController, (void*)RiderPawn, (int)bOwnsEntry);
+}
+
+// A deferred restore gets no second chance of its own. RestoreVehicleLoadoutAfterExit
+// only ever runs off an exit RPC, so any exit that still shows the rider seated at
+// that exact instant loses the cleanup entirely and strands the temporary vehicle
+// weapon in the player's hands - equipped, and with no vehicle left to use it on.
+// A cannon does precisely that: the launch clears the seat after the exit has
+// already been handled.
+//
+// So the rule is enforced as an invariant rather than as an event. A rider that is
+// no longer in the vehicle its loadout was captured for gets the cleanup it missed,
+// on the next tick, whichever way it left.
+void AFortPlayerControllerAthena::TickVehicleLoadoutReconcile()
+{
+	auto World = UWorld::GetWorld();
+	if (!World)
+		return;
+
+	// Pass one: give back the loadout for any tracked ride that has ended.
+	// Only controllers whose entry this code actually recorded are considered.
+	// Without a known vehicle there is nothing to test occupancy against, and
+	// guessing "not in one" would strip the weapon from a live rider.
+	// Snapshotted because the restore erases from both maps.
+	if (!GTrackedVehicleLoadouts.empty() &&
+		!GVehiclePossessionVehicle.empty())
+	{
+		std::vector<AFortPlayerControllerAthena*> Candidates;
+		Candidates.reserve(GVehiclePossessionVehicle.size());
+
+		for (const auto& Entry : GVehiclePossessionVehicle)
+		{
+			if (GTrackedVehicleLoadouts.count(Entry.first) != 0)
+				Candidates.push_back(Entry.first);
+		}
+
+		for (auto* PlayerController : Candidates)
+		{
+			// Asked here as well as inside the restore so an ordinary seated
+			// rider costs one occupancy test per tick and logs nothing.
+			if (!IsUsableDeathObject(PlayerController) ||
+				IsControllerStillUsingTrackedVehicle(PlayerController))
+			{
+				continue;
+			}
+
+			SDK::DbgLog(
+				"[Vehicles] reconciling stranded vehicle loadout "
+				"controller=%p\n",
+				(void*)PlayerController);
+			RestoreVehicleLoadoutAfterExit(PlayerController);
+		}
+	}
+
+	// Pass two: the part the player can see. This deliberately does not consult
+	// the bookkeeping, because the whole failure mode is a ride the bookkeeping
+	// missed or a restore that freed the inventory entry without freeing the
+	// pawn's hands. AlivePlayers is the authoritative match list, and the check
+	// is a couple of pointer tests for anyone holding an ordinary weapon.
+	if (!IsUsableDeathObject(World->AuthorityGameMode) ||
+		!World->AuthorityGameMode->IsA(AFortGameMode::StaticClass()))
+	{
+		return;
+	}
+
+	auto GameMode = static_cast<AFortGameMode*>(World->AuthorityGameMode);
+	if (!GameMode->HasAlivePlayers())
+		return;
+
+	for (auto PlayerActor : GameMode->AlivePlayers)
+	{
+		if (!IsUsableDeathObject(PlayerActor) ||
+			!PlayerActor->IsA(AFortPlayerControllerAthena::StaticClass()))
+		{
+			continue;
+		}
+
+		auto PlayerController =
+			static_cast<AFortPlayerControllerAthena*>(PlayerActor);
+		RepairStrandedVehicleWeapon(
+			PlayerController,
+			ResolveVehicleRiderPawn(PlayerController));
+	}
 }
 
 static bool IsRemoteControlledPawn(AActor* Actor)
@@ -20188,7 +20397,18 @@ static bool ConfigureVehicleSeatWeapon(
 	// MountedWeaponInfoRepped stores a real interface pointer on FN30. Validate
 	// it before granting anything so a non-vehicle actor can never leave an
 	// unusable temporary weapon in the player's inventory.
+	//
+	// A build can also predate the whole structure. Seat weapons themselves are
+	// older than it is, so treating its absence as a failure refused to grant
+	// them at all on those builds - the reason vehicle weapons appeared to only
+	// start working around FN9. There is simply nothing to publish there, so the
+	// grant/equip below runs and the publication at the end is skipped. Probed
+	// rather than version-gated because that is the fact that actually matters.
 	const IInterface* VehicleInterface = nullptr;
+	const bool bPublishMountedInfo =
+		FMountedWeaponInfoRepped::HasHostVehicleCached() ||
+		FMountedWeaponInfoRepped::HasHostVehicleCachedActor();
+
 	if (FMountedWeaponInfoRepped::HasHostVehicleCached())
 	{
 		auto VehicleInterfaceClass =
@@ -20200,10 +20420,6 @@ static bool ConfigureVehicleSeatWeapon(
 			VehicleInterfaceClass);
 		if (!VehicleInterface)
 			return false;
-	}
-	else if (!FMountedWeaponInfoRepped::HasHostVehicleCachedActor())
-	{
-		return false;
 	}
 
 	auto Tracked = GTrackedVehicleLoadouts.find(PlayerController);
@@ -20313,15 +20529,21 @@ static bool ConfigureVehicleSeatWeapon(
 	}
 	// MountedWeaponInfoRepped belongs to FortWeaponRangedForVehicle, not
 	// AFortWeapon. Its generated accessor caches one reflected offset globally;
-	// never let a normal/dual ranged weapon seed or reuse that subclass offset.
+	// never let a normal/dual ranged weapon seed or reuse that subclass offset,
+	// which is why every touch of it below stays behind this class test.
 	static const UClass* VehicleWeaponClass = nullptr;
 	if (!VehicleWeaponClass)
 		VehicleWeaponClass =
 			FindClass("FortWeaponRangedForVehicle");
-	if (!MountedWeapon ||
-		!VehicleWeaponClass ||
-		!MountedWeapon->IsA(VehicleWeaponClass) ||
-		!MountedWeapon->HasMountedWeaponInfoRepped())
+	if (!MountedWeapon)
+		return false;
+
+	// The weapon is equipped and usable at this point. Only the replicated host
+	// cache is still outstanding, and a build without it has nothing to fill in.
+	if (bPublishMountedInfo &&
+		(!VehicleWeaponClass ||
+			!MountedWeapon->IsA(VehicleWeaponClass) ||
+			!MountedWeapon->HasMountedWeaponInfoRepped()))
 	{
 		return false;
 	}
@@ -20336,21 +20558,24 @@ static bool ConfigureVehicleSeatWeapon(
 	// Preserve the camera/aim cache populated by the final native transition.
 	// Clearing the full structure detaches a mounted projectile ray from its
 	// passenger camera and leaves only the host fields valid.
-	FMountedWeaponInfoRepped MountedInfo =
-		MountedWeapon->MountedWeaponInfoRepped;
-	if (FMountedWeaponInfoRepped::HasHostVehicleCached())
+	if (bPublishMountedInfo)
 	{
-		MountedInfo.HostVehicleCached.ObjectPointer = Vehicle;
-		MountedInfo.HostVehicleCached.InterfacePointer =
-			VehicleInterface;
+		FMountedWeaponInfoRepped MountedInfo =
+			MountedWeapon->MountedWeaponInfoRepped;
+		if (FMountedWeaponInfoRepped::HasHostVehicleCached())
+		{
+			MountedInfo.HostVehicleCached.ObjectPointer = Vehicle;
+			MountedInfo.HostVehicleCached.InterfacePointer =
+				VehicleInterface;
+		}
+		else
+		{
+			MountedInfo.HostVehicleCachedActor = Vehicle;
+		}
+		MountedInfo.HostVehicleSeatIndexCached = SeatIndex;
+		MountedWeapon->MountedWeaponInfoRepped = MountedInfo;
+		MountedWeapon->OnRep_MountedWeaponInfoRepped();
 	}
-	else
-	{
-		MountedInfo.HostVehicleCachedActor = Vehicle;
-	}
-	MountedInfo.HostVehicleSeatIndexCached = SeatIndex;
-	MountedWeapon->MountedWeaponInfoRepped = MountedInfo;
-	MountedWeapon->OnRep_MountedWeaponInfoRepped();
 
 	// The enhanced-input F toggle passes this transient value to SeatIsTurret.
 	// Publish it only after the native equip path has settled, on the exact

@@ -1507,6 +1507,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -1633,6 +1634,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -1796,6 +1798,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);

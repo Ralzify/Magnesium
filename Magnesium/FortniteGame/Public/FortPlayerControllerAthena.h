@@ -548,6 +548,9 @@ public:
     static void ServerClientIsReadyToRespawn(UObject*, FFrame&);
     static void FinalizeRespawnAfterLanding(AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
     static void RestoreVehicleLoadoutAfterExit(AFortPlayerControllerAthena*);
+    // Catches the exits the RPC above cannot see, so a temporary vehicle weapon
+    // never outlives the ride. Call once per server tick.
+    static void TickVehicleLoadoutReconcile();
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
     static void TickNukeRockets(float DeltaSeconds);

@@ -296,6 +296,11 @@ public:
     }
 };
 
+// The weapon the cannon operator holds, not the cannon. It owns
+// ServerFireActorInCannon, so that RPC's Context is a weapon actor and the
+// cannon it belongs to has to be resolved through the pawn holding it - see
+// FortPhysicsPawn.cpp. Declared on AActor rather than AFortWeapon only because
+// FortWeapon.h includes this header, and nothing here needs the weapon fields.
 class AFortWeaponRangedMountedCannon : public AActor
 {
 public:
