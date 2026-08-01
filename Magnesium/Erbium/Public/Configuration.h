@@ -85,6 +85,25 @@ struct FConfiguration
     static inline std::atomic_bool bSiphon{ false };
     static inline std::atomic_int SiphonAnimType{ 0 };
     static inline std::atomic_int SiphonAmount{ 50 };
+    // Vehicle -> player knockback. Fortnite launches a pawn the vehicle drives
+    // into, scaled by how fast the vehicle is going. Magnesium teleports
+    // vehicles from the driver's ServerMove instead of simulating them, so the
+    // native contact that triggers that launch never happens server side -
+    // FortVehicleBump reproduces it from the replicated linear velocity.
+    static inline std::atomic_bool bVehicleBumpLaunch{ true };
+    // Below this the vehicle just nudges past you, as in the retail game.
+    static inline std::atomic<float> VehicleBumpMinSpeedKmh{ 20.f };
+    // Compensates for how much of the launch survives the trip to the client.
+    // The launch velocity itself is computed from the game's own tuning, but a
+    // server-side LaunchCharacter reaches the client as a position correction
+    // rather than a real impulse, and most of the arc is lost on the way. 5.0 is
+    // what measured closest to retail distances in game; it is not a taste knob,
+    // which is why there is no slider for it.
+    static inline std::atomic<float> VehicleBumpForceMultiplier{ 5.f };
+    // Run-over damage, scaled by impact speed. Only ever applied when the
+    // vehicle has no driver or its driver is on another team - shoving your own
+    // squadmate is free.
+    static inline std::atomic_bool bVehicleBumpDamage{ true };
 
     static inline std::atomic_bool bEnableTrickshotTab{ false };
     static inline std::atomic_bool bUseWinLines{ true };

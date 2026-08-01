@@ -9502,6 +9502,26 @@ void GUI::Init()
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
 
             AtomicCheckbox(
+                "Vehicle Bump Launch",
+                FConfiguration::bVehicleBumpLaunch);
+
+            if (FConfiguration::bVehicleBumpLaunch)
+            {
+                ImGui::Indent(12.f);
+
+                AtomicLabeledSliderFloat(
+                    "Bump Minimum Speed",
+                    "##vehicle-bump-min-speed",
+                    FConfiguration::VehicleBumpMinSpeedKmh,
+                    0.0f, 120.0f, "%.0f km/h", Width);
+                AtomicCheckbox(
+                    "Bump Damage",
+                    FConfiguration::bVehicleBumpDamage);
+
+                ImGui::Unindent(12.f);
+            }
+
+            AtomicCheckbox(
                 "Auto Pause TODM",
                 FConfiguration::bAutoPauseTODM);
 

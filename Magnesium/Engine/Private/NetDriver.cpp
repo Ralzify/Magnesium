@@ -1505,6 +1505,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
+		FortVehicleBump::Tick();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
@@ -1628,6 +1629,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
+		FortVehicleBump::Tick();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
@@ -1788,6 +1790,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
+		FortVehicleBump::Tick();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
