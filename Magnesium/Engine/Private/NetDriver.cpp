@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "../Public/NetDriver.h"
 #include "../../Erbium/Public/AutoHosting.h"
+#include "../../Erbium/Public/Calendar.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/Finders.h"
 #include "../../Erbium/Public/GUI.h"
@@ -1506,6 +1507,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
@@ -1630,6 +1632,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
@@ -1791,6 +1794,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);

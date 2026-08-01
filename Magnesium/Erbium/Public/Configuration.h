@@ -12,6 +12,12 @@ struct FConfiguration
 
     static inline std::atomic_bool bSnowMap{ false };
 
+    // Calendar tab. The snow value is version shaped - a position along the
+    // season's snow curve on 7.x/11.x/15.10, a progression phase index on
+    // 19.01/28.01 - so Calendar::GetSnowVersionModel owns its range.
+    static inline std::atomic_bool bSnowOnMatchStart{ false };
+    static inline std::atomic<float> SnowValue{ 0.f };
+
     static inline std::atomic_bool bReadyToStart{ false };
     static inline std::atomic<float> MaxTickRate{ 30.f };
     static inline std::atomic_int Port{ 7777 };
