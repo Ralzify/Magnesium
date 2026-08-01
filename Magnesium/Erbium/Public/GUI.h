@@ -81,7 +81,10 @@ enum class Playlist : int
     BountyDuo,
     BountySquads,
     AvengersEndgame,
-    DiscoDomination
+    DiscoDomination,
+    ScoreRoyaleSolo,
+    ScoreRoyaleDuos,
+    ScoreRoyaleSquads
 };
 
 enum class Plot : int

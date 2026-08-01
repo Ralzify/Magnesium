@@ -125,6 +125,7 @@ class UFortWorldItemDefinition : public UFortItemDefinition
 public:
     UCLASS_COMMON_MEMBERS(UFortWorldItemDefinition);
 
+    DEFINE_BITFIELD_PROP(bForceStayInOverflow);
     DEFINE_FUNC(GetAmmoWorldItemDefinition_BP, UFortWorldItemDefinition*);
 
     bool ServerExecute(UFortItem* Item, AFortPlayerControllerAthena* Instigator) const;
@@ -419,6 +420,7 @@ public:
     UCLASS_COMMON_MEMBERS(UFortGadgetItemDefinition);
 
     DEFINE_PROP(AbilitySet, TSoftObjectPtr<UFortAbilitySet>);
+    DEFINE_PROP(CharacterParts, TArray<UObject*>);
     DEFINE_PROP(AttributeSet, TSoftClassPtr<UClass>);
     DEFINE_PROP(GameplayAbility, TSoftClassPtr<UClass>);
     static inline int32
@@ -566,6 +568,16 @@ public:
         AFortPlayerControllerAthena*,
         int32,
         bool);
+    static void TrackGhostModeActivation(
+        AFortPlayerControllerAthena*,
+        const UFortItemDefinition*,
+        const FGuid&);
+    static void NotifyGhostModeExitAbilityActivated(
+        UAbilitySystemComponent*,
+        const UFortGameplayAbility*);
+    static void NotifyGhostModeHarvestingToolRequested(
+        AFortPlayerControllerAthena*,
+        const UFortItemDefinition*);
     static AFortPickupAthena* SpawnPickup(FVector, FFortItemEntry&, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, int = -1, bool = true, bool = true, bool = true, const UClass* = nullptr, FVector = FVector());
     static AFortPickupAthena* SpawnPickup(FVector, const UFortItemDefinition*, int, int, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, bool = true, bool = true, const UClass* = nullptr);
     static AFortPickupAthena* SpawnPickup(ABuildingContainer*, FFortItemEntry&, AFortPlayerPawnAthena* = nullptr, int = -1);

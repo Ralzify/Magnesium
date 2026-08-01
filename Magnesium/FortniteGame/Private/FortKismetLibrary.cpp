@@ -6,7 +6,11 @@
 #include "../Public/FortAthenaMutator.h"
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 #include <vector>
+
+extern void CaptureGhostModeCharacterPartsBeforeGrant(
+	AFortPlayerControllerAthena* PlayerController);
 
 bool bHasbPickupOnlyRelevantToOwner = false;
 bool bHasbToss = false;
@@ -1059,8 +1063,1262 @@ bool bHasItemLevel = false;
 bool bHasPickupInstigatorHandle = false;
 bool bHasbUseItemPickupAnalyticEvent = false;
 bool bHasWeaponAmmoOverride = false;
-void UFortKismetLibrary::GiveItemToInventoryOwner(UObject* Object, FFrame& Stack)
+
+namespace
 {
+	constexpr uint64 CPF_Parm = 0x0000000000000080;
+	constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+	constexpr size_t MaxGhostFunctionBytes = 0x8000;
+	constexpr size_t MaxGhostCallGraphFunctions = 64;
+
+	enum class EGhostGiveItemAbi
+	{
+		None,
+		Legacy,
+		WithVariantGuid
+	};
+
+	struct FGhostBranch
+	{
+		uintptr_t Address = 0;
+		uintptr_t Target = 0;
+		uintptr_t OwnerStart = 0;
+		uintptr_t OwnerEnd = 0;
+		uint8 Length = 0;
+		uint8 DisplacementOffset = 0;
+	};
+
+	EGhostGiveItemAbi GGhostGiveItemAbi =
+		EGhostGiveItemAbi::None;
+	bool GGiveItemToInventoryOwnerReturnsItem = false;
+	bool GGhostGiveItemCallsitePatched = false;
+	std::unordered_set<AFortPlayerControllerAthena*>
+		GGhostCleanupInProgress;
+
+	bool IsGhostModeCompatibilityBuild()
+	{
+		return VersionInfo.FortniteVersion >= 5.30 &&
+			VersionInfo.FortniteVersion <= 8.00;
+	}
+
+	bool GetMainImageRange(
+		uintptr_t& OutStart,
+		uintptr_t& OutEnd)
+	{
+		OutStart = 0;
+		OutEnd = 0;
+		if (!ImageBase ||
+			!SDK::MemReadable(
+				reinterpret_cast<void*>(ImageBase),
+				sizeof(IMAGE_DOS_HEADER)))
+		{
+			return false;
+		}
+
+		auto Dos = reinterpret_cast<IMAGE_DOS_HEADER*>(ImageBase);
+		if (Dos->e_magic != IMAGE_DOS_SIGNATURE ||
+			Dos->e_lfanew <= 0 ||
+			Dos->e_lfanew > 0x1000)
+		{
+			return false;
+		}
+
+		auto NtAddress =
+			ImageBase + static_cast<uintptr_t>(Dos->e_lfanew);
+		if (!SDK::MemReadable(
+				reinterpret_cast<void*>(NtAddress),
+				sizeof(IMAGE_NT_HEADERS64)))
+		{
+			return false;
+		}
+
+		auto Nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(NtAddress);
+		if (Nt->Signature != IMAGE_NT_SIGNATURE ||
+			Nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+			Nt->OptionalHeader.SizeOfImage == 0)
+		{
+			return false;
+		}
+
+		OutStart = ImageBase;
+		OutEnd =
+			ImageBase + Nt->OptionalHeader.SizeOfImage;
+		return OutEnd > OutStart;
+	}
+
+	bool IsExecutableImageRange(
+		uintptr_t Address,
+		size_t Size)
+	{
+		uintptr_t ImageStart = 0;
+		uintptr_t ImageEnd = 0;
+		if (!GetMainImageRange(ImageStart, ImageEnd) ||
+			Address < ImageStart || Address >= ImageEnd ||
+			Size > ImageEnd - Address ||
+			!SDK::MemReadable(
+				reinterpret_cast<void*>(Address), Size))
+		{
+			return false;
+		}
+
+		MEMORY_BASIC_INFORMATION MemoryInfo{};
+		if (!VirtualQuery(
+				reinterpret_cast<void*>(Address),
+				&MemoryInfo,
+				sizeof(MemoryInfo)) ||
+			MemoryInfo.State != MEM_COMMIT ||
+			(MemoryInfo.Protect & PAGE_GUARD))
+		{
+			return false;
+		}
+
+		const DWORD Protection =
+			MemoryInfo.Protect & 0xFF;
+		return Protection == PAGE_EXECUTE ||
+			Protection == PAGE_EXECUTE_READ ||
+			Protection == PAGE_EXECUTE_READWRITE ||
+			Protection == PAGE_EXECUTE_WRITECOPY;
+	}
+
+	bool ResolveFunctionRange(
+		uintptr_t Address,
+		uintptr_t& OutStart,
+		uintptr_t& OutEnd)
+	{
+		OutStart = 0;
+		OutEnd = 0;
+		if (!IsExecutableImageRange(Address, 1))
+			return false;
+
+		DWORD64 FunctionImageBase = 0;
+		auto RuntimeFunction = RtlLookupFunctionEntry(
+			static_cast<DWORD64>(Address),
+			&FunctionImageBase,
+			nullptr);
+		if (RuntimeFunction && FunctionImageBase)
+		{
+			const uintptr_t Start =
+				static_cast<uintptr_t>(FunctionImageBase) +
+				RuntimeFunction->BeginAddress;
+			const uintptr_t End =
+				static_cast<uintptr_t>(FunctionImageBase) +
+				RuntimeFunction->EndAddress;
+			if (End > Start &&
+				End - Start <= MaxGhostFunctionBytes &&
+				Address >= Start && Address < End &&
+				IsExecutableImageRange(
+					Start, static_cast<size_t>(End - Start)))
+			{
+				OutStart = Start;
+				OutEnd = End;
+				return true;
+			}
+			return false;
+		}
+
+		// Small generated exec/tail thunks can be leaf functions and therefore
+		// have no unwind entry. Bound those to their first return or padding byte;
+		// never let this fallback become an open-ended image scan.
+		for (uintptr_t Cursor = Address;
+			Cursor < Address + 0x100;
+			++Cursor)
+		{
+			if (!IsExecutableImageRange(Cursor, 1))
+				return false;
+			const uint8 Byte =
+				*reinterpret_cast<const uint8*>(Cursor);
+			if (Byte == 0xC3 || Byte == 0xC2 || Byte == 0xCC)
+			{
+				OutStart = Address;
+				OutEnd = Cursor + 1;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool DecodeGhostBranch(
+		uintptr_t Address,
+		uintptr_t FunctionEnd,
+		FGhostBranch& OutBranch)
+	{
+		OutBranch = {};
+		if (Address >= FunctionEnd ||
+			!IsExecutableImageRange(Address, 1))
+		{
+			return false;
+		}
+
+		const auto Bytes =
+			reinterpret_cast<const uint8*>(Address);
+		uint8 Length = 0;
+		uint8 DisplacementOffset = 0;
+		if (Bytes[0] == 0xE8 || Bytes[0] == 0xE9)
+		{
+			Length = 5;
+			DisplacementOffset = 1;
+		}
+		else if (Address + 2 <= FunctionEnd &&
+			Bytes[0] == 0x0F &&
+			(Bytes[1] & 0xF0) == 0x80)
+		{
+			Length = 6;
+			DisplacementOffset = 2;
+		}
+		else
+		{
+			return false;
+		}
+
+		if (Address + Length > FunctionEnd ||
+			!IsExecutableImageRange(Address, Length))
+		{
+			return false;
+		}
+
+		const int32 Relative =
+			*reinterpret_cast<const int32*>(
+				Address + DisplacementOffset);
+		const uintptr_t Target =
+			static_cast<uintptr_t>(
+				static_cast<int64>(Address + Length) +
+				static_cast<int64>(Relative));
+		if (!IsExecutableImageRange(Target, 1))
+			return false;
+
+		OutBranch.Address = Address;
+		OutBranch.Target = Target;
+		OutBranch.Length = Length;
+		OutBranch.DisplacementOffset =
+			DisplacementOffset;
+		return true;
+	}
+
+	bool IsTrivialNullReturnStub(uintptr_t Address)
+	{
+		uintptr_t StubStart = 0;
+		uintptr_t StubEnd = 0;
+		if (!ResolveFunctionRange(
+				Address, StubStart, StubEnd) ||
+			StubStart != Address || StubEnd <= StubStart ||
+			StubEnd - StubStart > 8 ||
+			!IsExecutableImageRange(Address, 1))
+			return false;
+		const auto Bytes =
+			reinterpret_cast<const uint8*>(Address);
+
+		if (Bytes[0] == 0xC3)
+		{
+			return true;
+		}
+		if (Bytes[0] == 0xC2)
+			return IsExecutableImageRange(Address, 3);
+		if (!IsExecutableImageRange(Address, 3))
+			return false;
+		if ((Bytes[0] == 0x33 || Bytes[0] == 0x31) &&
+			Bytes[1] == 0xC0 &&
+			(Bytes[2] == 0xC3 || Bytes[2] == 0xC2))
+		{
+			return Bytes[2] == 0xC3 ||
+				IsExecutableImageRange(Address, 5);
+		}
+		if (!IsExecutableImageRange(Address, 4))
+			return false;
+		return Bytes[0] == 0x48 &&
+			(Bytes[1] == 0x33 || Bytes[1] == 0x31) &&
+			Bytes[2] == 0xC0 &&
+			(Bytes[3] == 0xC3 ||
+			 (Bytes[3] == 0xC2 &&
+			  IsExecutableImageRange(Address, 6)));
+	}
+
+	void CollectGhostStubBranches(
+		uintptr_t Function,
+		int Depth,
+		std::unordered_set<uintptr_t>& VisitedFunctions,
+		std::vector<FGhostBranch>& OutBranches)
+	{
+		if (!Function || Depth < 0 ||
+			VisitedFunctions.size() >=
+				MaxGhostCallGraphFunctions)
+		{
+			return;
+		}
+
+		uintptr_t FunctionStart = 0;
+		uintptr_t FunctionEnd = 0;
+		if (!ResolveFunctionRange(
+				Function, FunctionStart, FunctionEnd) ||
+			!VisitedFunctions.insert(FunctionStart).second)
+		{
+			return;
+		}
+
+		std::vector<uintptr_t> ChildFunctions;
+		for (uintptr_t Cursor = FunctionStart;
+			Cursor < FunctionEnd;
+			++Cursor)
+		{
+			FGhostBranch Branch{};
+			if (!DecodeGhostBranch(
+					Cursor, FunctionEnd, Branch))
+			{
+				continue;
+			}
+
+			if (IsTrivialNullReturnStub(Branch.Target))
+			{
+				Branch.OwnerStart = FunctionStart;
+				Branch.OwnerEnd = FunctionEnd;
+				const bool bAlreadyCollected =
+					std::any_of(
+						OutBranches.begin(),
+						OutBranches.end(),
+						[&](const FGhostBranch& Existing)
+						{
+							return Existing.Address ==
+								Branch.Address;
+						});
+				if (!bAlreadyCollected)
+					OutBranches.push_back(Branch);
+				continue;
+			}
+
+			// Recurse only through direct calls/tail jumps. Conditional branches
+			// stay within the current function unless their target is the stripped
+			// helper itself, which was handled above.
+			const uint8 Opcode =
+				*reinterpret_cast<const uint8*>(Cursor);
+			if (Depth > 0 &&
+				(Opcode == 0xE8 || Opcode == 0xE9))
+			{
+				ChildFunctions.push_back(Branch.Target);
+			}
+		}
+
+		for (const uintptr_t Child : ChildFunctions)
+		{
+			CollectGhostStubBranches(
+				Child,
+				Depth - 1,
+				VisitedFunctions,
+				OutBranches);
+		}
+	}
+
+	bool ResolveGhostStartImplementation(
+		UFunction* StartGhostMode,
+		uintptr_t& OutImplementation)
+	{
+		OutImplementation = 0;
+		if (!StartGhostMode || !StartGhostMode->ExecFunction)
+			return false;
+
+		const uintptr_t Thunk =
+			reinterpret_cast<uintptr_t>(
+				StartGhostMode->ExecFunction);
+		uintptr_t ThunkStart = 0;
+		uintptr_t ThunkEnd = 0;
+		if (!ResolveFunctionRange(
+				Thunk, ThunkStart, ThunkEnd))
+		{
+			return false;
+		}
+
+		// A native UFunction stores its generated exec thunk. The reflected
+		// implementation is the thunk's final direct call/tail-jump target, after
+		// parameter unmarshalling. Anchor there before looking for a stripped
+		// helper so unrelated null-return branches in the thunk cannot qualify.
+		FGhostBranch FinalHandoff{};
+		for (uintptr_t Cursor = ThunkStart;
+			Cursor < ThunkEnd;
+			++Cursor)
+		{
+			FGhostBranch Branch{};
+			if (!DecodeGhostBranch(
+					Cursor, ThunkEnd, Branch))
+			{
+				continue;
+			}
+
+			const uint8 Opcode =
+				*reinterpret_cast<const uint8*>(Cursor);
+			if ((Opcode != 0xE8 && Opcode != 0xE9) ||
+				(Branch.Target >= ThunkStart &&
+				 Branch.Target < ThunkEnd) ||
+				IsTrivialNullReturnStub(Branch.Target))
+			{
+				continue;
+			}
+
+			uintptr_t TargetStart = 0;
+			uintptr_t TargetEnd = 0;
+			if (!ResolveFunctionRange(
+					Branch.Target,
+					TargetStart,
+					TargetEnd) ||
+				TargetStart != Branch.Target)
+			{
+				continue;
+			}
+			FinalHandoff = Branch;
+		}
+
+		// Generated exec thunks hand off at their tail. Reject a coincidental
+		// earlier call instead of widening the search when that invariant is not
+		// present on a build.
+		if (!FinalHandoff.Address ||
+			ThunkEnd - FinalHandoff.Address > 0x80)
+		{
+			return false;
+		}
+
+		OutImplementation = FinalHandoff.Target;
+		return true;
+	}
+
+	void* AllocateGhostRelayNear(uintptr_t BranchAddress)
+	{
+		SYSTEM_INFO SystemInfo{};
+		GetSystemInfo(&SystemInfo);
+		const uintptr_t Granularity =
+			SystemInfo.dwAllocationGranularity
+				? SystemInfo.dwAllocationGranularity
+				: 0x10000;
+		const uintptr_t Base =
+			BranchAddress & ~(Granularity - 1);
+		const uintptr_t Minimum =
+			reinterpret_cast<uintptr_t>(
+				SystemInfo.lpMinimumApplicationAddress);
+		const uintptr_t Maximum =
+			reinterpret_cast<uintptr_t>(
+				SystemInfo.lpMaximumApplicationAddress);
+		constexpr uintptr_t RelativeReach =
+			0x7FFF0000ull;
+
+		for (uintptr_t Distance = Granularity;
+			Distance <= RelativeReach;
+			Distance += Granularity)
+		{
+			const uintptr_t Candidates[] = {
+				Base >= Distance ? Base - Distance : 0,
+				Base <= Maximum - Distance
+					? Base + Distance
+					: 0
+			};
+			for (const uintptr_t Candidate : Candidates)
+			{
+				if (!Candidate || Candidate < Minimum ||
+					Candidate > Maximum - 0x20)
+				{
+					continue;
+				}
+				const int64 Relative =
+					static_cast<int64>(Candidate) -
+					static_cast<int64>(BranchAddress + 6);
+				if (Relative <
+						(std::numeric_limits<int32>::min)() ||
+					Relative >
+						(std::numeric_limits<int32>::max)())
+				{
+					continue;
+				}
+
+				if (void* Relay = VirtualAlloc(
+						reinterpret_cast<void*>(Candidate),
+						0x20,
+						MEM_COMMIT | MEM_RESERVE,
+						PAGE_EXECUTE_READWRITE))
+				{
+					return Relay;
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	bool PatchGhostBranch(
+		const FGhostBranch& Branch,
+		void* Detour)
+	{
+		FGhostBranch Current{};
+		uintptr_t FunctionStart = 0;
+		uintptr_t FunctionEnd = 0;
+		if (!Branch.Address || !Detour ||
+			!ResolveFunctionRange(
+				Branch.Address,
+				FunctionStart,
+				FunctionEnd) ||
+			!DecodeGhostBranch(
+				Branch.Address,
+				FunctionEnd,
+				Current) ||
+			Current.Target != Branch.Target ||
+			Current.Length != Branch.Length ||
+			Current.DisplacementOffset !=
+				Branch.DisplacementOffset ||
+			Branch.Address < Branch.OwnerStart ||
+			Branch.Address >= Branch.OwnerEnd ||
+			FunctionStart != Branch.OwnerStart ||
+			FunctionEnd != Branch.OwnerEnd ||
+			!IsTrivialNullReturnStub(Current.Target))
+		{
+			return false;
+		}
+
+		void* Relay =
+			AllocateGhostRelayNear(Branch.Address);
+		if (!Relay)
+			return false;
+
+		uint8 RelayCode[14] = {
+			0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00
+		};
+		memcpy(
+			RelayCode + 6,
+			&Detour,
+			sizeof(Detour));
+		memcpy(Relay, RelayCode, sizeof(RelayCode));
+		FlushInstructionCache(
+			GetCurrentProcess(), Relay, sizeof(RelayCode));
+
+		const int64 Relative64 =
+			static_cast<int64>(
+				reinterpret_cast<uintptr_t>(Relay)) -
+			static_cast<int64>(
+				Branch.Address + Branch.Length);
+		if (Relative64 <
+				(std::numeric_limits<int32>::min)() ||
+			Relative64 >
+				(std::numeric_limits<int32>::max)())
+		{
+			VirtualFree(Relay, 0, MEM_RELEASE);
+			return false;
+		}
+		const int32 Relative =
+			static_cast<int32>(Relative64);
+		void* DisplacementAddress =
+			reinterpret_cast<void*>(
+				Branch.Address +
+				Branch.DisplacementOffset);
+		DWORD OriginalProtection = 0;
+		if (!VirtualProtect(
+				DisplacementAddress,
+				sizeof(Relative),
+				PAGE_EXECUTE_READWRITE,
+				&OriginalProtection))
+		{
+			VirtualFree(Relay, 0, MEM_RELEASE);
+			return false;
+		}
+		memcpy(
+			DisplacementAddress,
+			&Relative,
+			sizeof(Relative));
+		FlushInstructionCache(
+			GetCurrentProcess(),
+			DisplacementAddress,
+			sizeof(Relative));
+		DWORD IgnoredProtection = 0;
+		VirtualProtect(
+			DisplacementAddress,
+			sizeof(Relative),
+			OriginalProtection,
+			&IgnoredProtection);
+		return true;
+	}
+
+	bool ValidateGhostModeReflection(
+		const AFortPlayerControllerAthena* ControllerDefault,
+		UFunction* StartGhostMode)
+	{
+		if (!ControllerDefault || !StartGhostMode ||
+			!StartGhostMode->ExecFunction ||
+			!IsExecutableImageRange(
+				reinterpret_cast<uintptr_t>(
+					StartGhostMode->ExecFunction),
+				1))
+		{
+			return false;
+		}
+
+		const auto StartParams =
+			StartGhostMode->GetParamsNamed();
+		int InputCount = 0;
+		bool bHasGhostDefinition = false;
+		for (const auto& Parameter :
+			StartParams.NameOffsetMap)
+		{
+			if (!(Parameter.PropertyFlags & CPF_Parm) ||
+				(Parameter.PropertyFlags & CPF_ReturnParm))
+			{
+				continue;
+			}
+			++InputCount;
+			if (Parameter.Name ==
+					"ItemProvidingGhostMode" &&
+				Parameter.ElementSize ==
+					sizeof(UFortWorldItemDefinition*))
+			{
+				bHasGhostDefinition = true;
+			}
+		}
+		if (InputCount != 1 || !bHasGhostDefinition)
+			return false;
+
+		auto GhostModeData = FindObject<UStruct>(
+			L"/Script/FortniteGame.GhostModeRepData");
+		if (!GhostModeData ||
+			GhostModeData->GetPropertiesSize() < 0x18 ||
+			GhostModeData->GetPropertiesSize() > 0x40)
+		{
+			return false;
+		}
+		const auto InGhostMode =
+			GhostModeData->GetProperty("bInGhostMode");
+		const auto GhostModeItemDef =
+			GhostModeData->GetProperty("GhostModeItemDef");
+		const auto PreviousFocusedSlot =
+			GhostModeData->GetProperty("PreviousFocusedSlot");
+		const auto TimeExitedGhostMode =
+			GhostModeData->GetProperty("TimeExitedGhostMode");
+		const auto ControllerGhostModeData =
+			ControllerDefault->GetProperty("GhostModeRepData");
+		if (!InGhostMode || !GhostModeItemDef ||
+			!PreviousFocusedSlot || !TimeExitedGhostMode ||
+			!ControllerGhostModeData)
+		{
+			return false;
+		}
+
+		const uint32 ControllerDataSize =
+			GetFromOffset<uint32>(
+				ControllerGhostModeData,
+				Offsets::ElementSize);
+		const uint32 ControllerDataOffset =
+			SDK::DecryptPropOffset(GetFromOffset<uint32>(
+				ControllerGhostModeData,
+				Offsets::Offset_Internal));
+		const int32 ControllerPropertiesSize =
+			ControllerDefault->Class->GetPropertiesSize();
+		if (ControllerPropertiesSize <= 0)
+			return false;
+		const uint32 ControllerPropertiesSizeUnsigned =
+			static_cast<uint32>(ControllerPropertiesSize);
+		return ControllerDataSize ==
+				static_cast<uint32>(
+					GhostModeData->GetPropertiesSize()) &&
+			ControllerDataOffset <
+				ControllerPropertiesSizeUnsigned &&
+			ControllerDataSize <=
+				ControllerPropertiesSizeUnsigned -
+				ControllerDataOffset;
+	}
+
+	EGhostGiveItemAbi ResolveGhostGiveItemAbi(
+		UFunction* GiveItemFunction)
+	{
+		GGiveItemToInventoryOwnerReturnsItem = false;
+		if (!GiveItemFunction)
+			return EGhostGiveItemAbi::None;
+
+		const auto Parameters =
+			GiveItemFunction->GetParamsNamed();
+		const UFunction::ParamNamed* InventoryOwner = nullptr;
+		const UFunction::ParamNamed* ItemDefinition = nullptr;
+		const UFunction::ParamNamed* ItemVariantGuid = nullptr;
+		const UFunction::ParamNamed* NumberToGive = nullptr;
+		const UFunction::ParamNamed* NotifyPlayer = nullptr;
+		const UFunction::ParamNamed* ReturnValue = nullptr;
+		bool bUnknownInput = false;
+
+		for (const auto& Parameter :
+			Parameters.NameOffsetMap)
+		{
+			if (Parameter.PropertyFlags & CPF_ReturnParm)
+			{
+				if (Parameter.Name == "ReturnValue" &&
+					Parameter.ElementSize ==
+						sizeof(UFortWorldItem*))
+				{
+					ReturnValue = &Parameter;
+				}
+				else
+				{
+					return EGhostGiveItemAbi::None;
+				}
+				continue;
+			}
+			if (!(Parameter.PropertyFlags & CPF_Parm))
+				continue;
+
+			if (Parameter.Name == "InventoryOwner")
+				InventoryOwner = &Parameter;
+			else if (Parameter.Name == "ItemDefinition")
+				ItemDefinition = &Parameter;
+			else if (Parameter.Name == "ItemVariantGuid")
+				ItemVariantGuid = &Parameter;
+			else if (Parameter.Name == "NumberToGive")
+				NumberToGive = &Parameter;
+			else if (Parameter.Name == "bNotifyPlayer")
+				NotifyPlayer = &Parameter;
+			else if (Parameter.Name != "ItemLevel" &&
+				Parameter.Name != "PickupInstigatorHandle" &&
+				Parameter.Name != "bUseItemPickupAnalyticEvent" &&
+				Parameter.Name != "WeaponAmmoOverride")
+			{
+				bUnknownInput = true;
+			}
+		}
+
+		if (bUnknownInput || !InventoryOwner ||
+			!ItemDefinition || !NumberToGive ||
+			!NotifyPlayer ||
+			InventoryOwner->ElementSize !=
+				sizeof(TScriptInterface<
+					IFortInventoryOwnerInterface>) ||
+			ItemDefinition->ElementSize !=
+				sizeof(UFortWorldItemDefinition*) ||
+			NumberToGive->ElementSize != sizeof(int32) ||
+			NotifyPlayer->ElementSize != sizeof(bool) ||
+			!(InventoryOwner->Offset < ItemDefinition->Offset) ||
+			!(ItemDefinition->Offset < NumberToGive->Offset) ||
+			!(NumberToGive->Offset < NotifyPlayer->Offset))
+		{
+			return EGhostGiveItemAbi::None;
+		}
+
+		// GiveItemToInventoryOwner is reflected as void in 6.21 even though the
+		// native helper used by StartGhostMode has the same x64 argument layout
+		// and may return the granted item in RAX.  A return value is therefore
+		// optional for ABI selection; the caller simply ignores it on void builds.
+		GGiveItemToInventoryOwnerReturnsItem = ReturnValue != nullptr;
+		if (!ItemVariantGuid)
+			return EGhostGiveItemAbi::Legacy;
+
+		if (ItemVariantGuid->ElementSize != sizeof(FGuid) ||
+			!(ItemDefinition->Offset < ItemVariantGuid->Offset) ||
+			!(ItemVariantGuid->Offset < NumberToGive->Offset))
+		{
+			GGiveItemToInventoryOwnerReturnsItem = false;
+			return EGhostGiveItemAbi::None;
+		}
+		return EGhostGiveItemAbi::WithVariantGuid;
+	}
+
+	UFortWorldItem* FindGhostModeItemInstance(
+		AFortInventory* Inventory,
+		const UFortItemDefinition* Definition)
+	{
+		if (!Inventory || !Definition)
+			return nullptr;
+		auto Item = Inventory->Inventory.ItemInstances.Search(
+			[&](UFortWorldItem* Candidate)
+			{
+				return Candidate &&
+					Candidate->ItemEntry.ItemDefinition ==
+						Definition;
+			});
+		return Item ? *Item : nullptr;
+	}
+
+	UFortWorldItem* GiveGhostModeItem(
+		TScriptInterface<IFortInventoryOwnerInterface>*
+			InventoryOwner,
+		UFortWorldItemDefinition* ItemDefinition,
+		int32 NumberToGive)
+	{
+		if (!InventoryOwner ||
+			!SDK::MemReadable(
+				InventoryOwner,
+				sizeof(*InventoryOwner)) ||
+			!UFortKismetLibrary::
+				IsGhostModeItemDefinition(ItemDefinition))
+		{
+			return nullptr;
+		}
+
+		auto OwnerObject = const_cast<UObject*>(
+			InventoryOwner->ObjectPointer);
+		if (!OwnerObject ||
+			!SDK::MemReadable(
+				OwnerObject, sizeof(UObject)) ||
+			!OwnerObject->Class ||
+			!SDK::MemReadable(
+				OwnerObject->Class, sizeof(UClass)))
+		{
+			return nullptr;
+		}
+
+		auto PlayerController =
+			OwnerObject->Cast<AFortPlayerControllerAthena>();
+		if (!PlayerController ||
+			!PlayerController->WorldInventory ||
+			NumberToGive != 1)
+		{
+			return nullptr;
+		}
+
+		CaptureGhostModeCharacterPartsBeforeGrant(
+			PlayerController);
+
+		auto Item = FindGhostModeItemInstance(
+			PlayerController->WorldInventory,
+			ItemDefinition);
+		const bool bAlreadyHadBackingItem = Item != nullptr;
+		if (!Item)
+		{
+			Item = PlayerController->WorldInventory->GiveItem(
+				ItemDefinition,
+				max(NumberToGive, 1),
+				0,
+				0,
+				false);
+		}
+		if (!Item)
+			return nullptr;
+		if (bAlreadyHadBackingItem)
+		{
+			// StartGhostMode can reach the stripped server-assets grant branch
+			// twice during one transition on 6.21. The first call already created,
+			// focused, and executed this exact backing gadget. Executing it again
+			// starts a second movement-cancellable action and can strand the ghost
+			// visual after the item is removed.
+			SDK::DbgLog(
+				"[GhostMode] coalesced duplicate backing-item grant "
+				"controller=%p item=%p definition=%s\n",
+				static_cast<void*>(PlayerController),
+				static_cast<void*>(Item),
+				ItemDefinition->Name.ToString().c_str());
+			return Item;
+		}
+
+		PlayerController->ClientEquipItem(
+			Item->ItemEntry.ItemGuid, true);
+		PlayerController->ServerExecuteInventoryItem(
+			Item->ItemEntry.ItemGuid);
+		AFortInventory::TrackGhostModeActivation(
+			PlayerController,
+			ItemDefinition,
+			Item->ItemEntry.ItemGuid);
+		SDK::DbgLog(
+			"[GhostMode] granted and focused backing item "
+			"controller=%p item=%p definition=%s count=%d\n",
+			static_cast<void*>(PlayerController),
+			static_cast<void*>(Item),
+			ItemDefinition->Name.ToString().c_str(),
+			max(NumberToGive, 1));
+		return Item;
+	}
+
+	UFortWorldItem* GiveGhostModeItemLegacy(
+		TScriptInterface<IFortInventoryOwnerInterface>*
+			InventoryOwner,
+		UFortWorldItemDefinition* ItemDefinition,
+		int32 NumberToGive)
+	{
+		return GiveGhostModeItem(
+			InventoryOwner,
+			ItemDefinition,
+			NumberToGive);
+	}
+
+	UFortWorldItem* GiveGhostModeItemWithVariant(
+		TScriptInterface<IFortInventoryOwnerInterface>*
+			InventoryOwner,
+		UFortWorldItemDefinition* ItemDefinition,
+		const FGuid* ItemVariantGuid,
+		int32 NumberToGive)
+	{
+		(void)ItemVariantGuid;
+		return GiveGhostModeItem(
+			InventoryOwner,
+			ItemDefinition,
+			NumberToGive);
+	}
+
+	bool InstallGhostModeGiveItemPatch(
+		UFunction* GiveItemFunction)
+	{
+		if (!IsGhostModeCompatibilityBuild())
+			return false;
+
+		auto ControllerDefault =
+			AFortPlayerControllerAthena::GetDefaultObj();
+		auto StartGhostMode =
+			ControllerDefault
+				? ControllerDefault->GetFunction(
+					"StartGhostMode")
+				: nullptr;
+		if (!ValidateGhostModeReflection(
+				ControllerDefault, StartGhostMode))
+		{
+			SDK::DbgLog(
+				"[GhostMode] native grant patch unavailable: "
+				"reflection contract mismatch (FN %.2f)\n",
+				VersionInfo.FortniteVersion);
+			return false;
+		}
+
+		GGhostGiveItemAbi =
+			ResolveGhostGiveItemAbi(GiveItemFunction);
+		void* Detour = nullptr;
+		if (GGhostGiveItemAbi ==
+				EGhostGiveItemAbi::Legacy)
+		{
+			Detour = reinterpret_cast<void*>(
+				&GiveGhostModeItemLegacy);
+		}
+		else if (GGhostGiveItemAbi ==
+				 EGhostGiveItemAbi::WithVariantGuid)
+		{
+			Detour = reinterpret_cast<void*>(
+				&GiveGhostModeItemWithVariant);
+		}
+		else
+		{
+			SDK::DbgLog(
+				"[GhostMode] native grant patch unavailable: "
+				"GiveItemToInventoryOwner ABI mismatch "
+				"(FN %.2f)\n",
+				VersionInfo.FortniteVersion);
+			return false;
+		}
+
+		std::unordered_set<uintptr_t> VisitedFunctions;
+		std::vector<FGhostBranch> Candidates;
+		uintptr_t StartGhostModeImplementation = 0;
+		if (!ResolveGhostStartImplementation(
+				StartGhostMode,
+				StartGhostModeImplementation))
+		{
+			SDK::DbgLog(
+				"[GhostMode] native grant patch unavailable: "
+				"could not anchor StartGhostMode implementation "
+				"(FN %.2f)\n",
+				VersionInfo.FortniteVersion);
+			return false;
+		}
+		CollectGhostStubBranches(
+			StartGhostModeImplementation,
+			2,
+			VisitedFunctions,
+			Candidates);
+		if (Candidates.size() != 1)
+		{
+			SDK::DbgLog(
+				"[GhostMode] native grant patch unavailable: "
+				"expected one stripped branch, found %zu "
+				"(FN %.2f)\n",
+				Candidates.size(),
+				VersionInfo.FortniteVersion);
+			return false;
+		}
+
+		const bool bPatched =
+			PatchGhostBranch(Candidates[0], Detour);
+		SDK::DbgLog(
+			"[GhostMode] native grant patch %s "
+			"abi=%s callsite=0x%llX stub=0x%llX "
+			"impl=0x%llX (FN %.2f)\n",
+			bPatched ? "installed" : "failed",
+			GGhostGiveItemAbi ==
+					EGhostGiveItemAbi::WithVariantGuid
+				? "variant-guid"
+				: "legacy",
+			static_cast<unsigned long long>(
+				Candidates[0].Address - ImageBase),
+			static_cast<unsigned long long>(
+				Candidates[0].Target - ImageBase),
+			static_cast<unsigned long long>(
+				StartGhostModeImplementation - ImageBase),
+			VersionInfo.FortniteVersion);
+		return bPatched;
+	}
+
+	bool HasExactNoInputBoolReturn(UFunction* Function)
+	{
+		if (!Function)
+			return false;
+		int InputCount = 0;
+		int BoolReturnCount = 0;
+		for (const auto& Parameter :
+			Function->GetParamsNamed().NameOffsetMap)
+		{
+			if (!(Parameter.PropertyFlags & CPF_Parm))
+				continue;
+			if (Parameter.PropertyFlags & CPF_ReturnParm)
+			{
+				if (Parameter.ElementSize == sizeof(bool))
+					++BoolReturnCount;
+			}
+			else
+			{
+				++InputCount;
+			}
+		}
+		return InputCount == 0 && BoolReturnCount == 1;
+	}
+
+	bool HasNoReflectedParameters(UFunction* Function)
+	{
+		if (!Function)
+			return false;
+		for (const auto& Parameter :
+			Function->GetParamsNamed().NameOffsetMap)
+		{
+			if (Parameter.PropertyFlags & CPF_Parm)
+				return false;
+		}
+		return true;
+	}
+
+	bool HasExactGhostDefinitionParameter(UFunction* Function)
+	{
+		if (!Function)
+			return false;
+		int InputCount = 0;
+		bool bValidDefinition = false;
+		for (const auto& Parameter :
+			Function->GetParamsNamed().NameOffsetMap)
+		{
+			if (!(Parameter.PropertyFlags & CPF_Parm) ||
+				(Parameter.PropertyFlags & CPF_ReturnParm))
+			{
+				continue;
+			}
+			++InputCount;
+			bValidDefinition =
+				Parameter.Name == "GhostModeItemDef" &&
+				Parameter.ElementSize ==
+					sizeof(UFortWorldItemDefinition*);
+		}
+		return InputCount == 1 && bValidDefinition;
+	}
+
+	bool ClearLegacyGhostModePlayerState(
+		AFortPlayerControllerAthena* PlayerController)
+	{
+		if (!IsGhostModeCompatibilityBuild() ||
+			!PlayerController || !PlayerController->PlayerState)
+		{
+			return false;
+		}
+
+		auto PlayerState = PlayerController->PlayerState
+			->Cast<AFortPlayerStateAthena>();
+		if (!PlayerState || !PlayerState->HasbInGhostMode() ||
+			!PlayerState->bInGhostMode)
+		{
+			return false;
+		}
+
+		PlayerState->bInGhostMode = false;
+		auto OnRepInGhostMode = PlayerState->GetFunction(
+			"OnRep_InGhostMode");
+		if (HasNoReflectedParameters(OnRepInGhostMode))
+			PlayerState->Call<void>(OnRepInGhostMode);
+		PlayerState->ForceNetUpdate();
+		SDK::DbgLog(
+			"[GhostMode] cleared legacy player-state flag "
+			"controller=%p playerState=%p\n",
+			static_cast<void*>(PlayerController),
+			static_cast<void*>(PlayerState));
+		return true;
+	}
+}
+
+bool UFortKismetLibrary::IsGhostModeItemDefinition(
+	const UFortItemDefinition* ItemDefinition)
+{
+	if (!IsGhostModeCompatibilityBuild() ||
+		!ItemDefinition ||
+		ItemDefinition->Name.ToWString() !=
+			L"AGID_SpookyMist" ||
+		!ItemDefinition->Cast<UFortGadgetItemDefinition>())
+	{
+		return false;
+	}
+
+	const bool bForceFocused =
+		ItemDefinition->HasbForceFocusWhenAdded() &&
+		ItemDefinition->bForceFocusWhenAdded;
+	const auto WorldDefinition =
+		ItemDefinition->Cast<UFortWorldItemDefinition>();
+	const bool bStayInOverflow =
+		WorldDefinition &&
+		WorldDefinition->HasbForceStayInOverflow() &&
+		WorldDefinition->bForceStayInOverflow;
+	const bool bForceIntoOverflow =
+		ItemDefinition->HasbForceIntoOverflow() &&
+		ItemDefinition->bForceIntoOverflow;
+	return bForceFocused || bStayInOverflow ||
+		bForceIntoOverflow;
+}
+
+void UFortKismetLibrary::NotifyGhostModeItemRemoved(
+	AFortPlayerControllerAthena* PlayerController,
+	const UFortItemDefinition* ItemDefinition)
+{
+	if (!PlayerController ||
+		!IsGhostModeItemDefinition(ItemDefinition) ||
+		GGhostCleanupInProgress.contains(PlayerController))
+	{
+		return;
+	}
+
+	auto CheckRemoved = PlayerController->GetFunction(
+		"CheckGhostModeItemRemoved");
+	if (HasExactGhostDefinitionParameter(CheckRemoved))
+	{
+		auto WorldDefinition =
+			const_cast<UFortWorldItemDefinition*>(
+				ItemDefinition->Cast<
+					UFortWorldItemDefinition>());
+		PlayerController->Call<void>(
+			CheckRemoved, WorldDefinition);
+		SDK::DbgLog(
+			"[GhostMode] notified native removal controller=%p "
+			"definition=%s\n",
+			static_cast<void*>(PlayerController),
+			ItemDefinition->Name.ToString().c_str());
+	}
+
+	// CheckGhostModeItemRemoved is only a conditional bridge into
+	// EndGhostMode.  On 6.21 its native inventory lookup can observe the
+	// already-removed backing row and return without completing the controller
+	// transition.  Restoring character parts while GhostModeRepData still says
+	// that the player is a ghost is ineffective: the owning client keeps the
+	// ghost visualization authoritative and immediately wins over the part
+	// update.  Verify the postcondition and use the public terminal transition
+	// as the narrow fallback.  This runs only after AGID_SpookyMist's terminal
+	// stack has been removed, so its authored low gravity remains active for the
+	// complete Ghost Mode lifetime.
+	bool bForcedEnd = false;
+	auto IsInGhostMode = PlayerController->GetFunction(
+		"IsInGhostMode");
+	if (HasExactNoInputBoolReturn(IsInGhostMode) &&
+		PlayerController->Call<bool>(IsInGhostMode))
+	{
+		auto EndGhostMode = PlayerController->GetFunction(
+			"EndGhostMode");
+		if (HasNoReflectedParameters(EndGhostMode))
+		{
+			PlayerController->Call<void>(EndGhostMode);
+			bForcedEnd = true;
+		}
+	}
+
+	// Some early Athena builds replicate a second ghost flag on PlayerState.
+	// The controller's native exit does not always clear it on a custom server,
+	// leaving the owning client rendered as the ghost after the gadget is gone.
+	ClearLegacyGhostModePlayerState(PlayerController);
+	PlayerController->ForceNetUpdate();
+	if (bForcedEnd)
+	{
+		SDK::DbgLog(
+			"[GhostMode] completed terminal controller transition "
+			"after backing-item removal controller=%p\n",
+			static_cast<void*>(PlayerController));
+	}
+}
+
+bool UFortKismetLibrary::CleanupGhostMode(
+	AFortPlayerControllerAthena* PlayerController,
+	bool bRemoveBackingItem)
+{
+	if (!IsGhostModeCompatibilityBuild() ||
+		!PlayerController ||
+		!GGhostCleanupInProgress.insert(
+			PlayerController).second)
+	{
+		return false;
+	}
+
+	bool bChanged = false;
+	bool bEndedGhostModeNatively = false;
+	auto IsInGhostMode = PlayerController->GetFunction(
+		"IsInGhostMode");
+	const bool bWasInGhostMode =
+		HasExactNoInputBoolReturn(IsInGhostMode) &&
+		PlayerController->Call<bool>(IsInGhostMode);
+	if (bWasInGhostMode)
+	{
+		auto EndGhostMode = PlayerController->GetFunction(
+			"EndGhostMode");
+		if (HasNoReflectedParameters(EndGhostMode))
+		{
+			PlayerController->Call<void>(EndGhostMode);
+			bChanged = true;
+			bEndedGhostModeNatively = true;
+		}
+	}
+
+	std::vector<FGuid> GhostItemGuids;
+	std::vector<const UFortItemDefinition*>
+		GhostItemDefinitions;
+	if (bRemoveBackingItem &&
+		PlayerController->WorldInventory)
+	{
+		auto& Entries = PlayerController->WorldInventory
+			->Inventory.ReplicatedEntries;
+		GhostItemGuids.reserve(Entries.Num());
+		GhostItemDefinitions.reserve(Entries.Num());
+		for (int32 Index = 0; Index < Entries.Num(); ++Index)
+		{
+			auto& Entry = Entries.Get(
+				Index, FFortItemEntry::Size());
+			if (IsGhostModeItemDefinition(
+					Entry.ItemDefinition))
+			{
+				GhostItemGuids.push_back(Entry.ItemGuid);
+				GhostItemDefinitions.push_back(
+					Entry.ItemDefinition);
+			}
+		}
+
+		for (const auto& Guid : GhostItemGuids)
+		{
+			PlayerController->WorldInventory->Remove(Guid);
+			bChanged = true;
+		}
+	}
+
+	GGhostCleanupInProgress.erase(PlayerController);
+	// EndGhostMode and CheckGhostModeItemRemoved are two entry points into the
+	// same terminal transition. Use the removal callback only as the fallback;
+	// issuing both can replay the legacy exit state and strand its cosmetics.
+	if (!bEndedGhostModeNatively)
+	{
+		for (const auto Definition : GhostItemDefinitions)
+		{
+			NotifyGhostModeItemRemoved(
+				PlayerController, Definition);
+		}
+	}
+	ClearLegacyGhostModePlayerState(PlayerController);
+
+	if (bChanged)
+	{
+		SDK::DbgLog(
+			"[GhostMode] cleanup controller=%p active=%d "
+			"removed=%zu\n",
+			static_cast<void*>(PlayerController),
+			bWasInGhostMode ? 1 : 0,
+			GhostItemGuids.size());
+	}
+	return bChanged;
+}
+
+void UFortKismetLibrary::GiveItemToInventoryOwner(
+	UObject* Object,
+	FFrame& Stack,
+	UFortWorldItem** Ret)
+{
+	if (Ret)
+		*Ret = nullptr;
 	TScriptInterface<class IFortInventoryOwnerInterface> InventoryOwner;
 	UFortItemDefinition* ItemDefinition;
 	FGuid ItemVariantGuid;
@@ -1102,6 +2360,17 @@ void UFortKismetLibrary::GiveItemToInventoryOwner(UObject* Object, FFrame& Stack
 			"controller=%p definition=%s\n",
 			(void*)PlayerController,
 			ItemDefinition->Name.ToString().c_str());
+		return;
+	}
+
+	if (IsGhostModeItemDefinition(ItemDefinition))
+	{
+		auto GhostItem = GiveGhostModeItem(
+			&InventoryOwner,
+			ItemDefinition->Cast<UFortWorldItemDefinition>(),
+			NumberToGive);
+		if (Ret && GGiveItemToInventoryOwnerReturnsItem)
+			*Ret = GhostItem;
 		return;
 	}
 
@@ -1187,7 +2456,9 @@ namespace
 			return 0;
 		}
 
-		if (AFortInventory::ShouldBypassItemConsumption(
+		if (!UFortKismetLibrary::IsGhostModeItemDefinition(
+				ItemDefinition) &&
+			AFortInventory::ShouldBypassItemConsumption(
 				PlayerController,
 				AmountToRemove,
 				bForceRemoval))
@@ -1259,19 +2530,23 @@ namespace
 			return 0;
 		}
 
-		if (AFortInventory::ShouldBypassItemConsumption(
+		auto ItemEntry =
+			PlayerController->WorldInventory
+				->Inventory.ReplicatedEntries.Search(
+					[&](FFortItemEntry& Entry)
+					{
+						return Entry.ItemGuid == ItemGuid;
+					},
+					FFortItemEntry::Size());
+
+		if ((!ItemEntry ||
+			 !UFortKismetLibrary::IsGhostModeItemDefinition(
+				 ItemEntry->ItemDefinition)) &&
+			AFortInventory::ShouldBypassItemConsumption(
 				PlayerController,
 				AmountToRemove,
 				bForceRemoval))
 		{
-			auto ItemEntry =
-				PlayerController->WorldInventory
-					->Inventory.ReplicatedEntries.Search(
-						[&](FFortItemEntry& Entry)
-						{
-							return Entry.ItemGuid == ItemGuid;
-						},
-						FFortItemEntry::Size());
 			return ItemEntry
 				? min(max(ItemEntry->Count, 0), AmountToRemove)
 				: 0;
@@ -1620,6 +2895,12 @@ void UFortKismetLibrary::PostLoadHook()
 			else if (Param.Name == "WeaponAmmoOverride")
 				bHasWeaponAmmoOverride = true;
 		}
+	if (!GGhostGiveItemCallsitePatched)
+	{
+		GGhostGiveItemCallsitePatched =
+			InstallGhostModeGiveItemPatch(
+				GiveItemToInventoryOwnerFn);
+	}
 	Utils::ExecHook(GiveItemToInventoryOwnerFn, GiveItemToInventoryOwner);
 
 	K2GetItemQuantityOnPlayerFn =

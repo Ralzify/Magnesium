@@ -17,6 +17,29 @@ enum class EEvaluateCurveTableResult : uint8
 
 class UNetDriver;
 
+class UFortSpawnActorInfo : public UObject
+{
+public:
+    UCLASS_COMMON_MEMBERS(UFortSpawnActorInfo);
+
+    DEFINE_PROP(SpawnActorID, FName);
+    DEFINE_PROP(SpawnActorClass, TSubclassOf<AActor>);
+    DEFINE_PROP(SpawnTiming, uint8);
+    DEFINE_PROP(SafeZoneIndex, FScalableFloat);
+    DEFINE_PROP(SpawnAtSafeZoneIndex, FScalableFloat);
+};
+
+struct FFortSpawnActorData
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FFortSpawnActorData);
+
+    DEFINE_STRUCT_PROP(SpawnActorInfo, UFortSpawnActorInfo*);
+    DEFINE_STRUCT_PROP(NumSpawnsRemaining, int32);
+    DEFINE_STRUCT_PROP(TimeUntilNextSpawn, float);
+    DEFINE_STRUCT_PROP(SpawnedFortSpawnActors, TArray<AActor*>);
+};
+
 // Supply-drop runtime element layouts and ownership change between releases,
 // but their reflected arrays retain Unreal's 0x10 script-array header.
 struct FSupplyDropSpawnDataArrayHeader
@@ -116,4 +139,6 @@ class AFortGameModeAthena : public AFortGameMode
 {
 public:
     UCLASS_COMMON_MEMBERS(AFortGameModeAthena);
+
+    DEFINE_PROP(SpawnActorDataList, TArray<FFortSpawnActorData>);
 };

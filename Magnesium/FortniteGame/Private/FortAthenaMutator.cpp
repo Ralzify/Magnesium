@@ -13,16 +13,21 @@
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
+#include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace
 {
     constexpr double HeistMinimumVersion = 5.40;
     constexpr double HeistEndVersionExclusive = 6.00;
     constexpr double ExitCraftDiscoveryInterval = 0.20;
+    constexpr double OriginalFoodFightMinimumVersion = 6.30;
+    constexpr double OriginalFoodFightMaximumVersion = 8.00;
     constexpr double NativeLTMVersion = 10.40;
     constexpr double NativeLTMVersionTolerance = 0.001;
     constexpr double NativeLTMInitializationGraceSeconds = 3.0;
@@ -276,6 +281,11 @@ namespace
         bool bLoggedWaitingForLava = false;
         bool bLoggedWaitingForStructuralGrid = false;
         bool bLoggedHudUnavailable = false;
+        bool bOriginalTeamStatesInitialized = false;
+        bool bOriginalObjectivePairCommitted = false;
+        bool bLoggedOriginalRequirementsUnavailable = false;
+        bool bLoggedOriginalFlightPathUnavailable = false;
+        bool bLoggedOriginalSafeZoneUnavailable = false;
     };
 
     struct FAshtonMiloHealthReconcileState
@@ -517,6 +527,9 @@ namespace
         const UObject* Passive);
 
     void RefreshDeepFriedArenaBindings();
+    AAthenaBarrierObjective* ResolveBarrierObjectiveActor(
+        AAthenaBarrierFlag* Flag,
+        bool bAllowOriginal = true);
     void EnsureDeepFriedArena(
         UWorld* World,
         AFortGameStateAthena* GameState,
@@ -524,6 +537,9 @@ namespace
         const TScriptInterface<IInterface>& SafeZoneInterface);
     void TickDeepFriedArena(
         AFortGameStateAthena* GameState);
+    void TickOriginalFoodFightArena(
+        AFortGameStateAthena* GameState,
+        int32 ObservedPhaseStep = -1);
     void TickArsenalCompatibility(
         AFortGameStateAthena* GameState,
         double Now);
@@ -633,6 +649,61 @@ namespace
             static_cast<size_t>(Num) * ElementSize);
     }
 
+    bool IsExecutableCodeAddress(const void* Address)
+    {
+        if (!Address)
+            return false;
+
+        MEMORY_BASIC_INFORMATION Information{};
+        if (VirtualQuery(
+                Address,
+                &Information,
+                sizeof(Information)) != sizeof(Information) ||
+            Information.State != MEM_COMMIT ||
+            (Information.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+        {
+            return false;
+        }
+
+        const DWORD Protection = Information.Protect & 0xFF;
+        return Protection == PAGE_EXECUTE ||
+            Protection == PAGE_EXECUTE_READ ||
+            Protection == PAGE_EXECUTE_READWRITE ||
+            Protection == PAGE_EXECUTE_WRITECOPY;
+    }
+
+    bool TryReadExecutableVTableEntry(
+        const UObject* Object,
+        uint32 Index,
+        void*& OutAddress)
+    {
+        OutAddress = nullptr;
+        if (!Object ||
+            !SDK::MemReadable(Object, sizeof(UObject)) ||
+            !Object->Vft || Index >= 0x1000)
+        {
+            return false;
+        }
+
+        const uintptr_t VTableAddress =
+            reinterpret_cast<uintptr_t>(Object->Vft);
+        const size_t SlotOffset =
+            static_cast<size_t>(Index) * sizeof(void*);
+        if (VTableAddress >
+            (std::numeric_limits<uintptr_t>::max)() - SlotOffset)
+        {
+            return false;
+        }
+
+        const uintptr_t SlotAddress = VTableAddress + SlotOffset;
+        const void* Slot = reinterpret_cast<const void*>(SlotAddress);
+        if (!SDK::MemReadable(Slot, sizeof(void*)))
+            return false;
+
+        memcpy(&OutAddress, Slot, sizeof(OutAddress));
+        return IsExecutableCodeAddress(OutAddress);
+    }
+
     bool IsLiveObject(const UObject* Object)
     {
         if (!Object ||
@@ -722,6 +793,58 @@ namespace
             std::wcscmp(
                 Descriptor->ObjectName,
                 L"Playlist_Barrier_16_B_Lava") == 0;
+    }
+
+    bool IsOriginalFoodFightDescriptor(
+        const FNativeLTMPlaylistDescriptor* Descriptor)
+    {
+        return IsNativeFoodFightDescriptor(Descriptor) &&
+            !IsNativeDeepFriedDescriptor(Descriptor) &&
+            std::wcscmp(
+                Descriptor->ObjectName,
+                L"Playlist_Barrier") == 0;
+    }
+
+    const UFortPlaylistAthena* ResolveOriginalFoodFightPlaylist(
+        AFortGameStateAthena* GameState)
+    {
+        if (!IsLiveObject(GameState) ||
+            !FFortAthenaNativeLTMCompatibility::
+                IsOriginalFoodFightSupportedBuild())
+        {
+            return nullptr;
+        }
+
+        auto IsOriginal =
+            [](const UFortPlaylistAthena* Playlist)
+            {
+                return IsOriginalFoodFightDescriptor(
+                    FindExactNativeLTMDescriptor(Playlist));
+            };
+
+        if (GameState->HasCurrentPlaylistInfo())
+        {
+            if (FPlaylistPropertyArray::HasOverridePlaylist() &&
+                IsOriginal(
+                    GameState->CurrentPlaylistInfo
+                        .OverridePlaylist))
+            {
+                return GameState->CurrentPlaylistInfo
+                    .OverridePlaylist;
+            }
+            if (FPlaylistPropertyArray::HasBasePlaylist() &&
+                IsOriginal(
+                    GameState->CurrentPlaylistInfo.BasePlaylist))
+            {
+                return GameState->CurrentPlaylistInfo.BasePlaylist;
+            }
+        }
+        if (GameState->HasCurrentPlaylistData() &&
+            IsOriginal(GameState->CurrentPlaylistData))
+        {
+            return GameState->CurrentPlaylistData;
+        }
+        return nullptr;
     }
 
     bool IsNativeWaxDescriptor(
@@ -1806,7 +1929,9 @@ namespace
             return Address;
         bInitialized = true;
 
-        if (!FFortAthenaHeistCompatibility::IsSupportedBuild())
+        if (!FFortAthenaHeistCompatibility::IsSupportedBuild() &&
+            !FFortAthenaScoreRoyaleCompatibility::
+                IsSupportedBuild())
             return 0;
 
         auto StringRef = Memcury::Scanner::FindStringRef(
@@ -1837,7 +1962,8 @@ namespace
         }
 
         SDK::DbgLog(
-            "[Heist] native LoadCurrentPlaylistData resolver=%p\n",
+            "[PlaylistData] native LoadCurrentPlaylistData "
+            "resolver=%p\n",
             reinterpret_cast<void*>(Address));
         return Address;
     }
@@ -1863,7 +1989,7 @@ namespace
             Address = Candidate;
 
         SDK::DbgLog(
-            "[Heist] native InitializePlaylistDataPreDataLoad "
+            "[PlaylistData] native InitializePlaylistDataPreDataLoad "
             "resolver=%p\n",
             reinterpret_cast<void*>(Address));
         return Address;
@@ -12094,6 +12220,25 @@ bool FFortAthenaNativeLTMCompatibility::IsSupportedBuild()
         NativeLTMVersionTolerance;
 }
 
+bool FFortAthenaNativeLTMCompatibility::
+    IsOriginalFoodFightSupportedBuild()
+{
+    const double Version = VersionInfo.FortniteVersion;
+    return Version + NativeLTMVersionTolerance >=
+            OriginalFoodFightMinimumVersion &&
+        Version <= OriginalFoodFightMaximumVersion +
+            NativeLTMVersionTolerance;
+}
+
+bool FFortAthenaNativeLTMCompatibility::
+    IsOriginalFoodFightPlaylist(
+        const UFortPlaylistAthena* Playlist)
+{
+    return IsOriginalFoodFightSupportedBuild() &&
+        IsOriginalFoodFightDescriptor(
+            FindExactNativeLTMDescriptor(Playlist));
+}
+
 bool FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(
     const UFortPlaylistAthena* Playlist)
 {
@@ -12447,7 +12592,10 @@ void FFortAthenaNativeLTMCompatibility::Tick(
     float DeltaSeconds)
 {
     (void)DeltaSeconds;
-    if (!IsSupportedBuild() || !Driver)
+    const bool bOriginalFoodFightBuild =
+        IsOriginalFoodFightSupportedBuild();
+    if ((!IsSupportedBuild() && !bOriginalFoodFightBuild) ||
+        !Driver)
         return;
 
     UWorld* World = UWorld::GetWorld();
@@ -12461,6 +12609,12 @@ void FFortAthenaNativeLTMCompatibility::Tick(
         World->GameState->Cast<AFortGameStateAthena>();
     if (!GameState)
         return;
+
+    if (bOriginalFoodFightBuild)
+    {
+        TickOriginalFoodFightArena(GameState);
+        return;
+    }
 
     const UFortPlaylistAthena* Playlist = nullptr;
     const FNativeLTMPlaylistDescriptor* Descriptor = nullptr;
@@ -13416,6 +13570,94 @@ namespace
             std::fabs(Value.Z) < 1000000.0;
     }
 
+    bool IsUsableOriginalStaticGroundResult(
+        const FVector& RequestedLocation,
+        const FVector& GroundLocation)
+    {
+        if (!IsFiniteArenaVector(RequestedLocation) ||
+            !IsFiniteArenaVector(GroundLocation))
+        {
+            return false;
+        }
+
+        // UObject::Call returns a zero-initialized FVector when reflection
+        // invocation cannot produce a return value. A vertical ground trace
+        // must also preserve X/Y, so reject both that silent fallback and a
+        // result that does not match FindStaticGroundLocationAt's contract.
+        const double MagnitudeSquared =
+            GroundLocation.X * GroundLocation.X +
+            GroundLocation.Y * GroundLocation.Y +
+            GroundLocation.Z * GroundLocation.Z;
+        const double DeltaX =
+            GroundLocation.X - RequestedLocation.X;
+        const double DeltaY =
+            GroundLocation.Y - RequestedLocation.Y;
+        return MagnitudeSquared > 1.0 &&
+            DeltaX * DeltaX + DeltaY * DeltaY <= 16.0;
+    }
+
+    UFunction* ResolveOriginalStaticGroundFunction(
+        const UFortKismetLibrary* Library)
+    {
+        UFunction* Function = Library
+            ? Library->GetFunction("FindStaticGroundLocationAt")
+            : nullptr;
+        if (!IsLiveObject(Function))
+            return nullptr;
+
+        const auto Parameters = Function->GetParamsNamed();
+        if (Parameters.Size == 0 || Parameters.Size > 0x100 ||
+            Parameters.NameOffsetMap.size() != 6)
+        {
+            return nullptr;
+        }
+
+        constexpr uint64 CPF_Parm = 0x0000000000000080;
+        constexpr uint64 CPF_OutParm = 0x0000000000000100;
+        constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+        const char* ExpectedNames[] = {
+            "World",
+            "InLocation",
+            "IgnoreActor",
+            "TraceStartZ",
+            "TraceEndZ",
+            "ReturnValue"
+        };
+        const uint32 ExpectedSizes[] = {
+            static_cast<uint32>(sizeof(UWorld*)),
+            static_cast<uint32>(FVector::Size()),
+            static_cast<uint32>(sizeof(AActor*)),
+            static_cast<uint32>(sizeof(float)),
+            static_cast<uint32>(sizeof(float)),
+            static_cast<uint32>(FVector::Size())
+        };
+
+        for (size_t Index = 0;
+             Index < Parameters.NameOffsetMap.size();
+             ++Index)
+        {
+            const auto& Parameter =
+                Parameters.NameOffsetMap[Index];
+            const bool bReturn = Index == 5;
+            if (Parameter.Name != ExpectedNames[Index] ||
+                !(Parameter.PropertyFlags & CPF_Parm) ||
+                (!bReturn &&
+                 (Parameter.PropertyFlags &
+                     (CPF_OutParm | CPF_ReturnParm))) ||
+                (bReturn &&
+                 !(Parameter.PropertyFlags & CPF_ReturnParm)) ||
+                Parameter.ElementSize != ExpectedSizes[Index] ||
+                Parameter.Offset > Parameters.Size ||
+                ExpectedSizes[Index] >
+                    Parameters.Size - Parameter.Offset)
+            {
+                return nullptr;
+            }
+        }
+
+        return Function;
+    }
+
     bool IsUsableArenaCenter(const FVector& Value)
     {
         return IsFiniteArenaVector(Value) &&
@@ -14290,6 +14532,114 @@ namespace
         return Placement;
     }
 
+    AAthenaBarrierObjective* ResolveBarrierObjectiveActor(
+        AAthenaBarrierFlag* Flag,
+        bool bAllowOriginal)
+    {
+        if (!IsLiveObject(Flag))
+            return nullptr;
+
+        const UClass* ChildActorComponentClass =
+            FindClass("ChildActorComponent");
+        const UClass* ObjectiveClass =
+            AAthenaBarrierObjective::StaticClass();
+        if (!FFortAthenaNativeLTMCompatibility::
+                IsOriginalFoodFightSupportedBuild())
+        {
+            // Preserve the exact-10.40 reflected implementation. The early
+            // vtable replacement intentionally skips this call because its
+            // stripped native body is the behavior being repaired.
+            auto ReflectedObjective = Flag->GetObjectiveActor();
+            if (IsLiveObject(ReflectedObjective) &&
+                (!IsLiveObject(ObjectiveClass) ||
+                 ReflectedObjective->IsA(ObjectiveClass)))
+            {
+                return ReflectedObjective;
+            }
+        }
+        auto ResolveComponent =
+            [Flag, ObjectiveClass](const UObject* Candidate)
+            -> AAthenaBarrierObjective*
+            {
+                if (!IsLiveObject(Candidate) ||
+                    !IsLiveObject(ObjectiveClass))
+                {
+                    return nullptr;
+                }
+
+                auto Component = static_cast<UActorComponent*>(
+                    const_cast<UObject*>(Candidate));
+                if (Component->GetOwner() != Flag)
+                    return nullptr;
+
+                const uint32 ChildActorOffset =
+                    Component->GetOffset("ChildActor");
+                if (ChildActorOffset ==
+                        static_cast<uint32>(-1) ||
+                    ChildActorOffset > 0x1000)
+                {
+                    return nullptr;
+                }
+
+                auto ChildActor = GetFromOffset<AActor*>(
+                    Component, ChildActorOffset);
+                return IsLiveObject(ChildActor) &&
+                        ChildActor->IsA(ObjectiveClass)
+                    ? static_cast<AAthenaBarrierObjective*>(
+                          ChildActor)
+                    : nullptr;
+            };
+
+        if (IsLiveObject(ChildActorComponentClass))
+        {
+            if (auto FirstComponent =
+                    Flag->GetComponentByClass(
+                        ChildActorComponentClass))
+            {
+                if (auto Objective =
+                        ResolveComponent(FirstComponent))
+                {
+                    return Objective;
+                }
+            }
+
+            // The mascot prefab can contain more than one child-actor
+            // component. GetComponentByClass returns only the first, so scan
+            // the live component objects for the one owned by this flag.
+            for (int32 ObjectIndex = 0;
+                 ObjectIndex < TUObjectArray::Num();
+                 ++ObjectIndex)
+            {
+                auto Candidate =
+                    TUObjectArray::GetObjectByIndex(ObjectIndex);
+                if (!IsLiveObject(Candidate) ||
+                    !Candidate->IsA(ChildActorComponentClass))
+                {
+                    continue;
+                }
+                if (auto Objective =
+                        ResolveComponent(Candidate))
+                {
+                    return Objective;
+                }
+            }
+        }
+
+        if (bAllowOriginal &&
+            AAthenaBarrierFlag::GetObjectiveActorOG)
+        {
+            auto Objective =
+                AAthenaBarrierFlag::GetObjectiveActorOG(Flag);
+            if (IsLiveObject(Objective) &&
+                (!IsLiveObject(ObjectiveClass) ||
+                 Objective->IsA(ObjectiveClass)))
+            {
+                return Objective;
+            }
+        }
+        return nullptr;
+    }
+
     void SetDeepFriedActorTeam(
         AAthenaBarrierFlag* Flag,
         AAthenaBarrierObjective* Objective,
@@ -14880,6 +15230,11 @@ namespace
                 ? World->GameState
                       ->Cast<AFortGameStateAthena>()
                 : nullptr;
+        bool bOriginalFoodFight =
+            FFortAthenaNativeLTMCompatibility::
+                IsOriginalFoodFightSupportedBuild() &&
+            IsOriginalFoodFightDescriptor(
+                GNativeLTMCompatibilityState.Descriptor);
         if (IsLiveObject(Arena.Wall) &&
             Arena.Wall->HasBarrierState())
         {
@@ -14978,7 +15333,7 @@ namespace
                 !IsLiveObject(Arena.Objectives[TeamIndex]))
             {
                 Arena.Objectives[TeamIndex] =
-                    Flag->GetObjectiveActor();
+                    ResolveBarrierObjectiveActor(Flag);
             }
         }
         if (!Arena.bBindingsComplete &&
@@ -15055,7 +15410,8 @@ namespace
                 Objective->ObjectiveDamageState =
                     static_cast<uint8>(
                         DeepFriedObjectiveDamageStateMax);
-                Objective->bAllowDamage = false;
+                Objective->bAllowDamage =
+                    bOriginalFoodFight;
                 Arena.LastObjectiveHealth[TeamIndex] =
                     ReadDeepFriedObjectiveHealth(
                         Objective);
@@ -15108,10 +15464,14 @@ namespace
             if (!IsLiveObject(Objective))
                 continue;
 
+            bool bShouldAllowDamage =
+                bOriginalFoodFight || bWallDown;
             if (Objective->HasbAllowDamage() &&
-                Objective->bAllowDamage != bWallDown)
+                Objective->bAllowDamage !=
+                    bShouldAllowDamage)
             {
-                Objective->bAllowDamage = bWallDown;
+                Objective->bAllowDamage =
+                    bShouldAllowDamage;
                 Objective->ForceNetUpdate();
             }
 
@@ -15675,6 +16035,654 @@ namespace
         if (IsLiveObject(Arena.Wall))
             Arena.Wall->ForceNetUpdate();
         Barrier->ForceNetUpdate();
+    }
+
+    bool InitializeOriginalFoodFightTeamStates(
+        AFortAthenaMutator_Barrier* Barrier,
+        const UFortPlaylistAthena* Playlist)
+    {
+        if (!IsLiveObject(Barrier) || !IsLiveObject(Playlist) ||
+            !FBarrierTeamState::StaticStruct() ||
+            !Barrier->HasTeam_0_State() ||
+            !Barrier->HasTeam_1_State() ||
+            !FBarrierTeamState::HasTeamNum() ||
+            !FBarrierTeamState::HasFoodTeam() ||
+            !FBarrierTeamState::HasObjectiveFlag() ||
+            !FBarrierTeamState::HasObjectiveObject() ||
+            !FBarrierTeamState::HasbRespawnEnabled())
+        {
+            return false;
+        }
+
+        const uint32 FirstTeamOffset =
+            Playlist->GetOffset("DefaultFirstTeam");
+        if (FirstTeamOffset == static_cast<uint32>(-1) ||
+            FirstTeamOffset > 0x1000)
+        {
+            return false;
+        }
+
+        uint8 FirstTeam =
+            GetFromOffset<uint8>(Playlist, FirstTeamOffset);
+        // The original Athena Barrier HUD and objective records are authored
+        // for the two large-team indices 3 and 4. Refuse an unexpected
+        // playlist layout instead of publishing mismatched team state.
+        if (FirstTeam != DeepFriedBurgerTeam)
+            return false;
+
+        auto& Arena = GDeepFriedArenaState;
+        auto& Burger = Barrier->Team_0_State;
+        auto& Tomato = Barrier->Team_1_State;
+        Burger.TeamNum = FirstTeam;
+        Burger.FoodTeam = 0;
+        Burger.ObjectiveFlag = Arena.Flags[0];
+        Burger.ObjectiveObject = Arena.Objectives[0];
+        Burger.bRespawnEnabled =
+            IsLiveObject(Arena.Objectives[0]);
+
+        Tomato.TeamNum = static_cast<uint8>(FirstTeam + 1);
+        Tomato.FoodTeam = 1;
+        Tomato.ObjectiveFlag = Arena.Flags[1];
+        Tomato.ObjectiveObject = Arena.Objectives[1];
+        Tomato.bRespawnEnabled =
+            IsLiveObject(Arena.Objectives[1]);
+        Barrier->ForceNetUpdate();
+        Arena.bOriginalTeamStatesInitialized = true;
+        return true;
+    }
+
+    bool ResolveOriginalFoodFightFlightLine(
+        AFortGameStateAthena* GameState,
+        FVector& OutStart,
+        FVector& OutEnd,
+        float& OutYaw)
+    {
+        if (!IsLiveObject(GameState) ||
+            !GameState->HasFlightPathMidLine() ||
+            !FAircraftFlightInfo::StaticStruct() ||
+            !FAircraftFlightInfo::HasFlightStartLocation() ||
+            !FAircraftFlightInfo::HasFlightStartRotation() ||
+            !FAircraftFlightInfo::HasFlightSpeed() ||
+            !FAircraftFlightInfo::HasTimeTillFlightEnd())
+        {
+            return false;
+        }
+
+        const auto& Flight = GameState->FlightPathMidLine;
+        const FVector Start = Flight.FlightStartLocation;
+        const float Yaw =
+            static_cast<float>(Flight.FlightStartRotation.Yaw);
+        const float Speed = Flight.FlightSpeed;
+        const float Time = Flight.TimeTillFlightEnd;
+        if (!IsFiniteArenaVector(Start) ||
+            !std::isfinite(Yaw) || !std::isfinite(Speed) ||
+            !std::isfinite(Time) || Speed <= 0.0f ||
+            Time <= 0.0f)
+        {
+            return false;
+        }
+
+        const double Radians =
+            static_cast<double>(Yaw) *
+            3.14159265358979323846 / 180.0;
+        const FVector Direction(
+            std::cos(Radians), std::sin(Radians), 0.0);
+        const FVector End =
+            Start + Direction *
+                (static_cast<double>(Speed) *
+                 static_cast<double>(Time));
+        if (!IsFiniteArenaVector(End))
+            return false;
+
+        OutStart = FVector(Start.X, Start.Y, 0.0f);
+        OutEnd = FVector(End.X, End.Y, 0.0f);
+        OutYaw = Yaw;
+        return (OutEnd - OutStart).SizeSquared() > 1.0;
+    }
+
+    bool EnsureOriginalFoodFightWall(
+        UWorld* World,
+        AFortGameStateAthena* GameState,
+        AFortAthenaMutator_Barrier* Barrier)
+    {
+        auto& Arena = GDeepFriedArenaState;
+        if (!World || !IsLiveObject(GameState) ||
+            !IsLiveObject(Barrier))
+        {
+            return false;
+        }
+        if (Barrier->HasBigBaseWall() &&
+            IsLiveObject(Barrier->BigBaseWall))
+        {
+            Arena.Wall = Barrier->BigBaseWall;
+            return true;
+        }
+        if (IsLiveObject(Arena.Wall))
+            return true;
+
+        FVector WallStart;
+        FVector WallEnd;
+        float WallYaw = 0.0f;
+        if (!ResolveOriginalFoodFightFlightLine(
+                GameState, WallStart, WallEnd, WallYaw))
+        {
+            if (!Arena.bLoggedOriginalFlightPathUnavailable)
+            {
+                Arena.bLoggedOriginalFlightPathUnavailable = true;
+                SDK::DbgLog(
+                    "[FoodFightOriginal] waiting for the authored "
+                    "FlightPathMidLine before warmup wall creation\n");
+            }
+            return false;
+        }
+        Arena.bLoggedOriginalFlightPathUnavailable = false;
+
+        if (!Barrier->HasBigBaseWallClass())
+            return false;
+        const UClass* WallClass = Barrier->BigBaseWallClass.Get();
+        if (!IsLiveObject(WallClass))
+            return false;
+
+        FVector WallLocation = (WallStart + WallEnd) * 0.5;
+        const auto Library = UFortKismetLibrary::GetDefaultObj();
+        UFunction* FindStaticGround =
+            ResolveOriginalStaticGroundFunction(Library);
+        if (!Library || !FindStaticGround)
+            return false;
+        const AActor* IgnoreActor = nullptr;
+        const FVector Ground = Library->Call<FVector>(
+            FindStaticGround,
+            World,
+            WallLocation,
+            IgnoreActor,
+            -9800.0f,
+            20000.0f);
+        if (!IsUsableOriginalStaticGroundResult(
+                WallLocation, Ground))
+            return false;
+        WallLocation.Z = Ground.Z;
+
+        auto DeferredWall =
+            World->SpawnActorUnfinished<AAthenaBigBaseWall>(
+                WallClass,
+                WallLocation,
+                FRotator(0.0f, WallYaw, 0.0f),
+                Barrier);
+        if (!IsLiveObject(DeferredWall))
+            return false;
+        auto FinishedWall =
+            World->FinishSpawnActor<AAthenaBigBaseWall>(
+                DeferredWall,
+                WallLocation,
+                FRotator(0.0f, WallYaw, 0.0f));
+        Arena.Wall = IsLiveObject(FinishedWall)
+            ? FinishedWall
+            : (IsLiveObject(DeferredWall)
+                ? DeferredWall
+                : nullptr);
+        if (!IsLiveObject(Arena.Wall))
+            return false;
+
+        Barrier->BigBaseWall = Arena.Wall;
+        Barrier->ForceNetUpdate();
+        Arena.Wall->ForceNetUpdate();
+        Arena.LastWallLocation = WallLocation;
+        Arena.LastWallYaw = WallYaw;
+        Arena.bHasWallTransform = true;
+        SDK::DbgLog(
+            "[FoodFightOriginal] spawned divider during warmup "
+            "wall=%p center=(%.1f,%.1f,%.1f) yaw=%.1f\n",
+            static_cast<void*>(Arena.Wall),
+            static_cast<float>(WallLocation.X),
+            static_cast<float>(WallLocation.Y),
+            static_cast<float>(WallLocation.Z),
+            WallYaw);
+        return true;
+    }
+
+    bool ResolveOriginalFoodFightSafeZoneCenter(
+        UWorld* World,
+        FVector& OutCenter)
+    {
+        const auto Library = UFortKismetLibrary::GetDefaultObj();
+        UFunction* GetSafeZoneLocation = Library
+            ? Library->GetFunction("GetSafeZoneLocation")
+            : nullptr;
+        if (Library && GetSafeZoneLocation)
+        {
+            FVector Center;
+            Library->Call<void>(
+                GetSafeZoneLocation,
+                World,
+                3,
+                &Center);
+            if (IsUsableArenaCenter(Center))
+            {
+                OutCenter = Center;
+                return true;
+            }
+        }
+
+        // This is the reflected data source used by the same native helper.
+        // Keep the original phase-three selection and do not substitute an
+        // arbitrary map center when the authored entry is unavailable.
+        return TryReadGameModeSafeZoneCenter(
+            World, 3, OutCenter);
+    }
+
+    void ConfigureOriginalFoodFightObjective(
+        AFortAthenaMutator_Barrier* Barrier,
+        int32 TeamIndex,
+        float FacingYaw)
+    {
+        if (!IsLiveObject(Barrier) || TeamIndex < 0 ||
+            TeamIndex >= 2)
+        {
+            return;
+        }
+        auto& Arena = GDeepFriedArenaState;
+        auto Flag = Arena.Flags[TeamIndex];
+        if (!IsLiveObject(Flag))
+            return;
+
+        auto Objective = Arena.Objectives[TeamIndex];
+        if (!IsLiveObject(Objective))
+        {
+            Objective = ResolveBarrierObjectiveActor(Flag);
+            Arena.Objectives[TeamIndex] = Objective;
+        }
+
+        const uint8 Team = static_cast<uint8>(
+            TeamIndex == 0
+                ? DeepFriedBurgerTeam
+                : DeepFriedTomatoTeam);
+        if (Flag->HasFoodTeam())
+            Flag->FoodTeam = static_cast<uint8>(TeamIndex);
+        if (Flag->HasCurrentState())
+            Flag->CurrentState = 0;
+        SetDeepFriedActorTeam(Flag, Objective, Team);
+        Flag->OnRep_FoodTeam();
+        Flag->OnRep_CurrentState();
+        Flag->ForceNetUpdate();
+
+        if (!IsLiveObject(Objective))
+            return;
+        if (Objective->HasFoodTeam())
+            Objective->FoodTeam =
+                static_cast<uint8>(TeamIndex);
+        if (Objective->HasHeadRotationYaw())
+            Objective->HeadRotationYaw = FacingYaw;
+        if (Objective->HasbAllowDamage())
+            Objective->bAllowDamage = true;
+        Objective->OnRep_FoodTeam();
+        Objective->OnRep_HeadRotationYaw();
+        Objective->ForceNetUpdate();
+
+        auto& TeamState = TeamIndex == 0
+            ? Barrier->Team_0_State
+            : Barrier->Team_1_State;
+        TeamState.ObjectiveFlag = Flag;
+        TeamState.ObjectiveObject = Objective;
+        TeamState.bRespawnEnabled = true;
+        Barrier->ForceNetUpdate();
+    }
+
+    void EnsureOriginalFoodFightObjectives(
+        UWorld* World,
+        AFortGameStateAthena* GameState,
+        AFortAthenaMutator_Barrier* Barrier)
+    {
+        auto& Arena = GDeepFriedArenaState;
+        if (!World || !IsLiveObject(GameState) ||
+            !IsLiveObject(Barrier) || !IsLiveObject(Arena.Wall) ||
+            !Barrier->HasObjectiveFlag() ||
+            !Barrier->HasObjectiveDistanceFromWall() ||
+            !Barrier->HasObjectiveZOffset())
+        {
+            return;
+        }
+
+        const UClass* FlagClass = Barrier->ObjectiveFlag.Get();
+        const auto FlagDefault = IsLiveObject(FlagClass)
+            ? static_cast<const AAthenaBarrierFlag*>(
+                  FlagClass->GetDefaultObj())
+            : nullptr;
+        if (!IsLiveObject(FlagClass) ||
+            !AAthenaBarrierFlag::StaticClass() ||
+            !AAthenaBarrierObjective::StaticClass() ||
+            !IsLiveObject(
+                const_cast<AAthenaBarrierFlag*>(FlagDefault)) ||
+            !FlagDefault->HasFoodTeam() ||
+            !FlagDefault->HasCurrentState())
+        {
+            return;
+        }
+
+        if (Arena.bBindingsComplete ||
+            Arena.bObjectiveDestroyed[0] ||
+            Arena.bObjectiveDestroyed[1])
+        {
+            Arena.bOriginalObjectivePairCommitted = true;
+        }
+        if (Arena.bOriginalObjectivePairCommitted)
+        {
+            // Once the authored pair exists, actor loss is gameplay state,
+            // not a request to spawn another mascot. Only retry binding a
+            // still-live flag's child while initial registration is pending.
+            if (!Arena.bBindingsComplete)
+            {
+                for (int32 TeamIndex = 0;
+                     TeamIndex < 2;
+                     ++TeamIndex)
+                {
+                    if (!IsLiveObject(Arena.Flags[TeamIndex]))
+                        continue;
+                    const float FacingYaw = static_cast<float>(
+                        Arena.Flags[TeamIndex]
+                            ->K2_GetActorRotation().Yaw);
+                    ConfigureOriginalFoodFightObjective(
+                        Barrier, TeamIndex, FacingYaw);
+                }
+            }
+            return;
+        }
+
+        FVector Center;
+        if (!ResolveOriginalFoodFightSafeZoneCenter(
+                World, Center))
+        {
+            if (!Arena.bLoggedOriginalSafeZoneUnavailable)
+            {
+                Arena.bLoggedOriginalSafeZoneUnavailable = true;
+                SDK::DbgLog(
+                    "[FoodFightOriginal] waiting for the authored "
+                    "phase-three safe-zone location before spawning "
+                    "objectives\n");
+            }
+            return;
+        }
+        Arena.bLoggedOriginalSafeZoneUnavailable = false;
+
+        const float Distance =
+            Barrier->ObjectiveDistanceFromWall.Evaluate();
+        const float ZOffset =
+            Barrier->ObjectiveZOffset.Evaluate();
+        if (!std::isfinite(Distance) || Distance <= 0.0f ||
+            !std::isfinite(ZOffset))
+        {
+            return;
+        }
+
+        const FVector Right = Arena.Wall->GetActorRightVector();
+        if (!IsFiniteArenaVector(Right) ||
+            Right.SizeSquared() <= 0.01)
+        {
+            return;
+        }
+        FVector Locations[2] = {
+            Center + Right * Distance,
+            Center - Right * Distance
+        };
+        const auto Library = UFortKismetLibrary::GetDefaultObj();
+        UFunction* FindStaticGround =
+            ResolveOriginalStaticGroundFunction(Library);
+        if (!Library || !FindStaticGround)
+            return;
+        const AActor* IgnoreActor = nullptr;
+        for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+        {
+            FVector Ground = Library->Call<FVector>(
+                FindStaticGround,
+                World,
+                Locations[TeamIndex],
+                IgnoreActor,
+                20000.0f,
+                -9800.0f);
+            if (!IsUsableOriginalStaticGroundResult(
+                    Locations[TeamIndex], Ground))
+                return;
+            Locations[TeamIndex] = Ground;
+            Locations[TeamIndex].Z += ZOffset * 512.0f;
+        }
+
+        const FVector Direction01 =
+            Locations[1] - Locations[0];
+        const FVector Direction10 =
+            Locations[0] - Locations[1];
+        const float Yaws[2] = {
+            static_cast<float>(
+                std::atan2(Direction01.Y, Direction01.X) *
+                180.0 / 3.14159265358979323846),
+            static_cast<float>(
+                std::atan2(Direction10.Y, Direction10.X) *
+                180.0 / 3.14159265358979323846)
+        };
+
+        AAthenaBarrierFlag* SpawnedThisPass[2]{};
+        for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+        {
+            if (!IsLiveObject(Arena.Flags[TeamIndex]))
+            {
+                // The original prefab remains world-aligned; only its mascot
+                // head receives Yaws[TeamIndex] during configuration below.
+                SpawnedThisPass[TeamIndex] = SpawnDeepFriedFlag(
+                    World,
+                    Barrier,
+                    FlagClass,
+                    Locations[TeamIndex],
+                    0.0f,
+                    static_cast<uint8>(TeamIndex));
+                Arena.Flags[TeamIndex] =
+                    SpawnedThisPass[TeamIndex];
+            }
+        }
+
+        if (!IsLiveObject(Arena.Flags[0]) ||
+            !IsLiveObject(Arena.Flags[1]))
+        {
+            // Keep an all-new pair transactional. A failed second spawn must
+            // not leave a lone compatibility flag that the next retry can
+            // accidentally duplicate. An already-authored/native survivor is
+            // retained and adopted while only the missing side is retried.
+            const bool bHadAuthoredSurvivor =
+                (!SpawnedThisPass[0] &&
+                 IsLiveObject(Arena.Flags[0])) ||
+                (!SpawnedThisPass[1] &&
+                 IsLiveObject(Arena.Flags[1]));
+            if (!bHadAuthoredSurvivor)
+            {
+                for (int32 TeamIndex = 0;
+                     TeamIndex < 2;
+                     ++TeamIndex)
+                {
+                    if (IsLiveObject(
+                            SpawnedThisPass[TeamIndex]))
+                    {
+                        SpawnedThisPass[TeamIndex]
+                            ->K2_DestroyActor();
+                    }
+                    if (Arena.Flags[TeamIndex] ==
+                        SpawnedThisPass[TeamIndex])
+                    {
+                        Arena.Flags[TeamIndex] = nullptr;
+                    }
+                }
+            }
+            return;
+        }
+
+        Arena.bOriginalObjectivePairCommitted = true;
+        for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+        {
+            ConfigureOriginalFoodFightObjective(
+                Barrier, TeamIndex, Yaws[TeamIndex]);
+        }
+    }
+
+    AFortAthenaMutator_Barrier* ResolveOriginalFoodFightMutator(
+        AFortGameStateAthena* GameState)
+    {
+        const UClass* BarrierClass =
+            AFortAthenaMutator_Barrier::StaticClass();
+        if (!IsLiveObject(GameState) ||
+            !IsLiveObject(BarrierClass))
+        {
+            return nullptr;
+        }
+
+        if (GameState->HasGameplayMutators())
+        {
+            auto& Mutators = GameState->GameplayMutators;
+            if (IsSaneArray(Mutators.Num(), Mutators.Max(), 128) &&
+                IsReadableArrayStorage(
+                    Mutators.Data,
+                    Mutators.Num(),
+                    sizeof(AFortGameplayMutator*)))
+            {
+                for (auto Candidate : Mutators)
+                {
+                    if (IsLiveObject(Candidate) &&
+                        Candidate->IsA(BarrierClass))
+                    {
+                        return static_cast<
+                            AFortAthenaMutator_Barrier*>(Candidate);
+                    }
+                }
+            }
+        }
+
+        auto Candidate = FindWorldMutator(
+            const_cast<UClass*>(BarrierClass));
+        return IsLiveObject(Candidate) &&
+                Candidate->IsA(BarrierClass)
+            ? static_cast<AFortAthenaMutator_Barrier*>(Candidate)
+            : nullptr;
+    }
+
+    void TickOriginalFoodFightArena(
+        AFortGameStateAthena* GameState,
+        int32 ObservedPhaseStep)
+    {
+        UWorld* World = UWorld::GetWorld();
+        const UFortPlaylistAthena* Playlist =
+            ResolveOriginalFoodFightPlaylist(GameState);
+        if (!World || !IsLiveObject(GameState) || !Playlist)
+        {
+            if (World &&
+                GNativeLTMCompatibilityState.World == World &&
+                IsOriginalFoodFightDescriptor(
+                    GNativeLTMCompatibilityState.Descriptor))
+            {
+                ResetNativeLTMCompatibilityState(World);
+            }
+            return;
+        }
+
+        const auto Descriptor =
+            FindExactNativeLTMDescriptor(Playlist);
+        if (!IsOriginalFoodFightDescriptor(Descriptor))
+            return;
+        if (GNativeLTMCompatibilityState.World != World ||
+            GNativeLTMCompatibilityState.Playlist != Playlist)
+        {
+            ResetNativeLTMCompatibilityState(
+                World, Playlist, Descriptor);
+            SDK::DbgLog(
+                "[FoodFightOriginal] selected canonical FN %.2f "
+                "Playlist_Barrier\n",
+                VersionInfo.FortniteVersion);
+        }
+
+        auto& Arena = GDeepFriedArenaState;
+        auto Barrier = ResolveOriginalFoodFightMutator(GameState);
+        if (!IsLiveObject(Barrier))
+        {
+            if (!Arena.bLoggedWaitingForBarrier)
+            {
+                Arena.bLoggedWaitingForBarrier = true;
+                SDK::DbgLog(
+                    "[FoodFightOriginal] waiting for the authored "
+                    "Barrier mutator; compatibility will not create "
+                    "an unconfigured replacement\n");
+            }
+            return;
+        }
+        Arena.bLoggedWaitingForBarrier = false;
+        if (Arena.Barrier != Barrier)
+        {
+            Arena = {};
+            Arena.World = World;
+            Arena.Barrier = Barrier;
+        }
+
+        // Adopt any objects the native Blueprint managed to create before
+        // repairing the stripped callbacks. This keeps the compatibility path
+        // idempotent and prevents a second objective pair at BusLocked.
+        if (FBarrierTeamState::StaticStruct() &&
+            FBarrierTeamState::HasObjectiveFlag() &&
+            FBarrierTeamState::HasObjectiveObject())
+        {
+            if (Barrier->HasTeam_0_State())
+            {
+                if (IsLiveObject(
+                        Barrier->Team_0_State.ObjectiveFlag))
+                {
+                    Arena.Flags[0] =
+                        Barrier->Team_0_State.ObjectiveFlag;
+                }
+                if (IsLiveObject(
+                        Barrier->Team_0_State.ObjectiveObject))
+                {
+                    Arena.Objectives[0] =
+                        Barrier->Team_0_State.ObjectiveObject;
+                }
+            }
+            if (Barrier->HasTeam_1_State())
+            {
+                if (IsLiveObject(
+                        Barrier->Team_1_State.ObjectiveFlag))
+                {
+                    Arena.Flags[1] =
+                        Barrier->Team_1_State.ObjectiveFlag;
+                }
+                if (IsLiveObject(
+                        Barrier->Team_1_State.ObjectiveObject))
+                {
+                    Arena.Objectives[1] =
+                        Barrier->Team_1_State.ObjectiveObject;
+                }
+            }
+        }
+
+        if (!Arena.bOriginalTeamStatesInitialized &&
+            !InitializeOriginalFoodFightTeamStates(
+                Barrier, Playlist))
+        {
+            if (!Arena.bLoggedOriginalRequirementsUnavailable)
+            {
+                Arena.bLoggedOriginalRequirementsUnavailable = true;
+                SDK::DbgLog(
+                    "[FoodFightOriginal] required Barrier team-state "
+                    "reflection is unavailable; failing closed\n");
+            }
+            return;
+        }
+        Arena.bLoggedOriginalRequirementsUnavailable = false;
+
+        EnsureOriginalFoodFightWall(
+            World, GameState, Barrier);
+
+        int32 PhaseStep = ObservedPhaseStep;
+        if (PhaseStep < 0 && GameState->HasGamePhaseStep())
+            PhaseStep = GameState->GamePhaseStep;
+        if (PhaseStep >= static_cast<int32>(
+                EAthenaGamePhaseStep::BusLocked))
+        {
+            EnsureOriginalFoodFightObjectives(
+                World, GameState, Barrier);
+        }
+
+        RefreshDeepFriedArenaBindings();
     }
 
     void TickDeepFriedArena(
@@ -18963,7 +19971,8 @@ bool FFortAthenaNativeLTMCompatibility::
 {
     UWorld* World = UWorld::GetWorld();
     auto& Arena = GDeepFriedArenaState;
-    if (!IsSupportedBuild() ||
+    if ((!IsSupportedBuild() &&
+         !IsOriginalFoodFightSupportedBuild()) ||
         !World ||
         GNativeLTMCompatibilityState.World != World ||
         !IsNativeFoodFightDescriptor(
@@ -20067,6 +21076,13 @@ void AFortAthenaMutator_Disco::OnGamePhaseStepChanged(
         OnGamePhaseStepChangedOG(Context, Stack);
 }
 
+AAthenaBarrierObjective*
+    AAthenaBarrierFlag::GetObjectiveActorHook(
+        AAthenaBarrierFlag* Flag)
+{
+    return ResolveBarrierObjectiveActor(Flag, true);
+}
+
 void AFortAthenaMutator_Barrier::OnGamePhaseStepChanged(
     UObject* Context,
     FFrame& Stack)
@@ -20076,6 +21092,49 @@ void AFortAthenaMutator_Barrier::OnGamePhaseStepChanged(
         if (OnGamePhaseStepChangedOG)
             OnGamePhaseStepChangedOG(Context, Stack);
     };
+
+    if (FFortAthenaNativeLTMCompatibility::
+            IsOriginalFoodFightSupportedBuild())
+    {
+        UWorld* World = UWorld::GetWorld();
+        auto GameState =
+            World && World->GameState
+                ? World->GameState->Cast<
+                      AFortGameStateAthena>()
+                : nullptr;
+        const UClass* BarrierClass = StaticClass();
+        if (!World || !GameState || !BarrierClass || !Context ||
+            !Context->IsA(BarrierClass) ||
+            !ResolveOriginalFoodFightPlaylist(GameState))
+        {
+            CallOriginal();
+            return;
+        }
+
+        // FN 6.30-8.00 passes only the byte-sized phase enum. Do not read it
+        // as 10.40's safe-zone interface; the two reflected ABIs are not
+        // interchangeable.
+        uint8 PhaseStep = static_cast<uint8>(
+            EAthenaGamePhaseStep::None);
+        FFrame Probe = Stack;
+        Probe.StepCompiledIn(&PhaseStep);
+        CallOriginal();
+        if (PhaseStep == static_cast<uint8>(
+                EAthenaGamePhaseStep::BusLocked))
+        {
+            TickOriginalFoodFightArena(
+                GameState, static_cast<int32>(PhaseStep));
+            SDK::DbgLog(
+                "[FoodFightOriginal] processed original BusLocked "
+                "phase callback context=%p flags=(%p,%p)\n",
+                Context,
+                static_cast<void*>(
+                    GDeepFriedArenaState.Flags[0]),
+                static_cast<void*>(
+                    GDeepFriedArenaState.Flags[1]));
+        }
+        return;
+    }
 
     if (!FFortAthenaNativeLTMCompatibility::IsSupportedBuild())
     {
@@ -21423,10 +22482,58 @@ void AFortAthenaMutator_Disco::PostLoadHook()
 
 void AFortAthenaMutator_Barrier::PostLoadHook()
 {
-    if (!FFortAthenaNativeLTMCompatibility::IsSupportedBuild() ||
+    const bool bOriginalFoodFight =
+        FFortAthenaNativeLTMCompatibility::
+            IsOriginalFoodFightSupportedBuild();
+    const bool bNative1040 =
+        FFortAthenaNativeLTMCompatibility::IsSupportedBuild();
+    if ((!bOriginalFoodFight && !bNative1040) ||
         !StaticClass())
     {
         return;
+    }
+
+    if (bOriginalFoodFight)
+    {
+        const UClass* FlagClass =
+            AAthenaBarrierFlag::StaticClass();
+        const auto FlagDefault = FlagClass
+            ? AAthenaBarrierFlag::GetDefaultObj()
+            : nullptr;
+        UFunction* GetObjectiveActor = FlagDefault
+            ? FlagDefault->GetFunction("GetObjectiveActor")
+            : nullptr;
+        const uint32 VTableIndex = GetObjectiveActor
+            ? GetObjectiveActor->GetVTableIndex()
+            : static_cast<uint32>(-1);
+        void* HookAddress = reinterpret_cast<void*>(
+            AAthenaBarrierFlag::GetObjectiveActorHook);
+        void* CurrentAddress = nullptr;
+        if (IsLiveObject(FlagDefault) &&
+            IsExecutableCodeAddress(HookAddress) &&
+            TryReadExecutableVTableEntry(
+                FlagDefault, VTableIndex, CurrentAddress))
+        {
+            if (CurrentAddress != HookAddress)
+            {
+                AAthenaBarrierFlag::GetObjectiveActorOG =
+                    reinterpret_cast<
+                        AAthenaBarrierObjective* (*)(
+                            AAthenaBarrierFlag*)>(
+                                CurrentAddress);
+                Utils::HookEvery<AAthenaBarrierFlag>(
+                    VTableIndex, HookAddress);
+                SDK::DbgLog(
+                    "[FoodFightOriginal] restored BarrierFlag "
+                    "GetObjectiveActor vtable dispatch\n");
+            }
+        }
+        else
+        {
+            SDK::DbgLog(
+                "[FoodFightOriginal] BarrierFlag objective resolver "
+                "was unavailable; objective setup will fail closed\n");
+        }
     }
 
     const auto DefaultObject = GetDefaultObj();
@@ -21443,13 +22550,21 @@ void AFortAthenaMutator_Barrier::PostLoadHook()
         return;
     }
 
-    Utils::ExecHook(
-        PhaseFunction,
-        OnGamePhaseStepChanged,
-        OnGamePhaseStepChangedOG);
+    void* HookAddress = reinterpret_cast<void*>(
+        OnGamePhaseStepChanged);
+    if (PhaseFunction->ExecFunction != HookAddress)
+    {
+        Utils::ExecHook(
+            PhaseFunction,
+            OnGamePhaseStepChanged,
+            OnGamePhaseStepChangedOG);
+    }
     SDK::DbgLog(
-        "[FoodFight] installed native Barrier BusLocked "
-        "bootstrap\n");
+        bOriginalFoodFight
+            ? "[FoodFightOriginal] installed original byte-ABI "
+              "Barrier BusLocked bootstrap\n"
+            : "[FoodFight] installed native Barrier BusLocked "
+              "bootstrap\n");
 }
 
 void AFortAthenaMutator_GiveItemsAtGamePhaseStep::PostLoadHook()
@@ -21495,4 +22610,1965 @@ void AFortAthenaMutator_GiveItemsAtGamePhase::PostLoadHook()
         PhaseFunction,
         OnGamePhaseChanged,
         OnGamePhaseChangedOG);
+}
+
+namespace
+{
+    constexpr double ScoreRoyaleMinimumVersion = 7.30;
+    constexpr double ScoreRoyaleEndVersionExclusive = 10.01;
+
+    struct FPendingScoreForageEvent
+    {
+        AFortPlayerControllerAthena* PlayerController = nullptr;
+        AActor* SourceActor = nullptr;
+        int32 ScoreBefore = 0;
+        int32 CounterBefore = 0;
+        double ReadyTime = 0.0;
+    };
+
+    struct FScoreRoyaleCompatibilityState
+    {
+        UWorld* World = nullptr;
+        AFortGameStateAthena* GameState = nullptr;
+        const UFortPlaylistAthena* Playlist = nullptr;
+        AFortAthenaMutator_Score* Mutator = nullptr;
+        double InitializedAt = 0.0;
+        double NextPreparationAttempt = 0.0;
+        bool bPlaylistIdRepublished = false;
+        bool bPlaylistLoadRequested = false;
+        bool bLoggedPlaylistLoadUnavailable = false;
+        bool bLoggedSpawnDataUnavailable = false;
+        bool bModifierRegistrationAttempted = false;
+        bool bManualMutatorSpawnAttempted = false;
+        bool bLoggedMissingMutator = false;
+        bool bMatchEnded = false;
+        std::unordered_map<
+            UFortSpawnActorInfo*,
+            std::unordered_set<int32>> DispatchedSpawnWaves;
+        std::unordered_set<uint64> CollectedScoreActors;
+        std::unordered_set<uint64> SearchedContainers;
+        std::unordered_set<uint64> ConsumedForagedActors;
+        std::unordered_map<
+            AFortPlayerStateAthena*,
+            std::array<int32, 12>> EventOccurrences;
+        std::vector<FPendingScoreForageEvent> PendingForageEvents;
+    };
+
+    FScoreRoyaleCompatibilityState GScoreRoyaleCompatibilityState;
+
+    uint64 GetScoreRoyaleObjectIdentity(const UObject* Object)
+    {
+        if (!IsLiveObject(Object))
+            return 0;
+
+        TWeakObjectPtr<UObject> WeakObject(
+            const_cast<UObject*>(Object));
+        if (WeakObject.Get() != Object ||
+            WeakObject.ObjectIndex < 0 ||
+            WeakObject.ObjectSerialNumber == 0)
+        {
+            return 0;
+        }
+
+        return
+            (static_cast<uint64>(
+                 static_cast<uint32>(WeakObject.ObjectIndex)) << 32) |
+            static_cast<uint32>(
+                WeakObject.ObjectSerialNumber);
+    }
+
+    bool IsScoreRoyaleSpawnInfo(UFortSpawnActorInfo* Info)
+    {
+        if (!IsLiveObject(Info) ||
+            !Info->HasSpawnActorID() ||
+            !Info->SpawnActorID.IsValid() ||
+            !Info->HasSpawnActorClass())
+        {
+            return false;
+        }
+
+        const UClass* SpawnClass = Info->SpawnActorClass.Get();
+        if (!IsLiveObject(SpawnClass))
+            return false;
+
+        const auto SpawnId = Info->SpawnActorID.ToWString();
+        const auto ClassName = SpawnClass->Name.ToWString();
+        struct FScoreSpawnIdentity
+        {
+            const wchar_t* Id;
+            const wchar_t* ClassName;
+        };
+        static constexpr FScoreSpawnIdentity Identities[] = {
+            {
+                L"ScoreActor_BronzeCoin",
+                L"BP_ScoreMode_Coin_Bronze_C"
+            },
+            {
+                L"ScoreActor_SilverCoin",
+                L"BP_ScoreMode_Coin_Silver_C"
+            },
+            {
+                L"ScoreActor_GoldCoin",
+                L"BP_ScoreMode_Coin_Gold_C"
+            }
+        };
+        for (const auto& Identity : Identities)
+        {
+            if (SpawnId == Identity.Id &&
+                ClassName == Identity.ClassName)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool HasHydratedScoreRoyaleSpawnData(
+        AFortGameModeAthena* GameMode)
+    {
+        if (!IsLiveObject(GameMode) ||
+            !GameMode->HasSpawnActorDataList())
+        {
+            return false;
+        }
+
+        const UStruct* EntryStruct =
+            FFortSpawnActorData::StaticStruct();
+        if (!EntryStruct ||
+            !FFortSpawnActorData::HasSpawnActorInfo())
+        {
+            return false;
+        }
+
+        const int32 EntrySize = EntryStruct->GetPropertiesSize();
+        auto& Entries = GameMode->SpawnActorDataList;
+        if (EntrySize <= 0 || EntrySize > 0x200 ||
+            !IsSaneArray(Entries.Num(), Entries.Max(), 256) ||
+            Entries.Num() <= 0 ||
+            !IsReadableArrayStorage(
+                Entries.Data, Entries.Num(), EntrySize))
+        {
+            return false;
+        }
+
+        for (int32 Index = 0; Index < Entries.Num(); ++Index)
+        {
+            auto& Entry = Entries.Get(Index, EntrySize);
+            if (IsScoreRoyaleSpawnInfo(Entry.SpawnActorInfo))
+                return true;
+        }
+        return false;
+    }
+
+    AFortGameModeAthena* ResolveScoreRoyaleGameMode()
+    {
+        UWorld* World = UWorld::GetWorld();
+        if (!World || !IsLiveObject(World->AuthorityGameMode))
+            return nullptr;
+
+        const UClass* AthenaClass =
+            AFortGameModeAthena::StaticClass();
+        return AthenaClass &&
+                World->AuthorityGameMode->IsA(AthenaClass)
+            ? static_cast<AFortGameModeAthena*>(
+                  World->AuthorityGameMode)
+            : nullptr;
+    }
+
+    bool RequestScoreRoyalePlaylistData(
+        AFortGameStateAthena* GameState)
+    {
+        auto& State = GScoreRoyaleCompatibilityState;
+        if (!IsLiveObject(GameState))
+            return false;
+
+        auto GameMode = ResolveScoreRoyaleGameMode();
+        const bool bHasLoadState =
+            GameState->HasbPlaylistDataIsLoaded() &&
+            GameState->HasbPlaylistDataIsActivelyLoading();
+
+        // CurrentPlaylistInfo publishes the playlist object, while the ID
+        // notification starts the playlist-owned async asset pipeline on the
+        // Score Royale builds. Publish it before accepting any load-state or
+        // spawn-list evidence: both fields can still describe the default BR
+        // playlist immediately after SetupPlaylist changes the selection.
+        if (!State.bPlaylistIdRepublished)
+        {
+            State.bPlaylistIdRepublished = true;
+
+            const bool bHasScoreSpawnData =
+                HasHydratedScoreRoyaleSpawnData(GameMode);
+            if (bHasLoadState &&
+                GameState->bPlaylistDataIsLoaded &&
+                !GameState->bPlaylistDataIsActivelyLoading &&
+                !bHasScoreSpawnData)
+            {
+                // Clear only a completed, demonstrably non-Score load. This
+                // lets OnRep/the loader hydrate the newly selected playlist
+                // instead of short-circuiting on stale default-BR state.
+                GameState->bPlaylistDataIsLoaded = false;
+            }
+
+            CallReflectedNoParams(
+                GameState, "OnRep_CurrentPlaylistId");
+            GameMode = ResolveScoreRoyaleGameMode();
+        }
+
+        if (HasHydratedScoreRoyaleSpawnData(GameMode))
+            return true;
+
+        if (bHasLoadState &&
+            (GameState->bPlaylistDataIsActivelyLoading ||
+             GameState->bPlaylistDataIsLoaded))
+        {
+            // OnRep accepted the current playlist and owns the outstanding
+            // load/publication. Wait for Score-specific spawn data instead of
+            // starting a second loader and duplicating actors.
+            State.bPlaylistLoadRequested = true;
+            return false;
+        }
+        if (State.bPlaylistLoadRequested)
+            return false;
+
+        UFunction* ReflectedInitialize =
+            GameState->GetFunction(
+                "InitializePlaylistDataPreDataLoad");
+        UFunction* ReflectedLoad =
+            GameState->GetFunction("LoadCurrentPlaylistData");
+        if (HasNoParameters(ReflectedLoad))
+        {
+            State.bPlaylistLoadRequested = true;
+            UWorld* MatchWorld = UWorld::GetWorld();
+            if (HasNoParameters(ReflectedInitialize))
+            {
+                GameState->Call<void>(ReflectedInitialize);
+                if (UWorld::GetWorld() != MatchWorld ||
+                    !IsLiveObject(GameState))
+                {
+                    return false;
+                }
+            }
+            GameState->Call<void>(ReflectedLoad);
+            SDK::DbgLog(
+                "[ScoreRoyale] requested reflected playlist-data "
+                "pipeline\n");
+            return HasHydratedScoreRoyaleSpawnData(
+                ResolveScoreRoyaleGameMode());
+        }
+
+        const uintptr_t NativeLoad =
+            FindNativeLoadCurrentPlaylistData();
+        if (!NativeLoad)
+        {
+            if (!State.bLoggedPlaylistLoadUnavailable)
+            {
+                State.bLoggedPlaylistLoadUnavailable = true;
+                SDK::DbgLog(
+                    "[ScoreRoyale] playlist-data pipeline "
+                    "unavailable (reflected init=%p load=%p, "
+                    "native load=%p); coin waves remain "
+                    "fail-closed\n",
+                    static_cast<void*>(ReflectedInitialize),
+                    static_cast<void*>(ReflectedLoad),
+                    reinterpret_cast<void*>(NativeLoad));
+            }
+            return false;
+        }
+
+        State.bPlaylistLoadRequested = true;
+        using PlaylistDataFunction =
+            void(*)(AFortGameStateAthena*);
+        UWorld* MatchWorld = UWorld::GetWorld();
+        if (HasNoParameters(ReflectedInitialize))
+        {
+            GameState->Call<void>(ReflectedInitialize);
+        }
+        // Core's compatible implementation intentionally leaves the pre-load
+        // initializer empty. Do not use the broad private initializer pattern
+        // on Score builds; the validated Load resolver is sufficient.
+        if (UWorld::GetWorld() != MatchWorld ||
+            !IsLiveObject(GameState))
+        {
+            return false;
+        }
+        reinterpret_cast<PlaylistDataFunction>(
+            NativeLoad)(GameState);
+        SDK::DbgLog(
+            "[ScoreRoyale] requested validated native "
+            "playlist-data pipeline\n");
+        return HasHydratedScoreRoyaleSpawnData(
+            ResolveScoreRoyaleGameMode());
+    }
+
+    uintptr_t FindNativeSpawnFortSpawnActors()
+    {
+        static bool bInitialized = false;
+        static uintptr_t Address = 0;
+        if (bInitialized)
+            return Address;
+        bInitialized = true;
+
+        if (!FFortAthenaScoreRoyaleCompatibility::
+                IsSupportedBuild())
+        {
+            return 0;
+        }
+
+        auto StringRef = Memcury::Scanner::FindStringRef(
+            L"AFortGameModeAthena::SpawnFortSpawnActors", false);
+        if (!StringRef.IsValid())
+        {
+            StringRef = Memcury::Scanner::FindStringRef(
+                L"%s: SafeZoneIndicator is invalid. Falling back "
+                L"to SafeZoneDef",
+                false);
+        }
+        if (StringRef.IsValid())
+        {
+            const uintptr_t ReferenceAddress = StringRef.Get();
+            const uintptr_t Candidate =
+                StringRef.FindFunctionBoundary(false).Get();
+            if (IsValidatedNativeFunction(Candidate) &&
+                Candidate <= ReferenceAddress &&
+                ReferenceAddress - Candidate <= 8192)
+            {
+                Address = Candidate;
+            }
+        }
+
+        SDK::DbgLog(
+            "[ScoreRoyale] native SpawnFortSpawnActors "
+            "resolver=%p\n",
+            reinterpret_cast<void*>(Address));
+        return Address;
+    }
+
+    bool TryEvaluateScoreRoyaleSpawnPhase(
+        FScalableFloat& Value,
+        float& OutPhase)
+    {
+        OutPhase = 0.0f;
+        if (!std::isfinite(Value.Value))
+            return false;
+
+        const UCurveTable* CurveTable = Value.Curve.CurveTable;
+        const UClass* CurveTableClass = UCurveTable::StaticClass();
+        if (CurveTable &&
+            (!Value.Curve.RowName.IsValid() ||
+             !IsLiveObject(
+                 const_cast<UCurveTable*>(CurveTable)) ||
+             !CurveTableClass ||
+             !CurveTable->IsA(CurveTableClass)))
+        {
+            return false;
+        }
+
+        OutPhase = Value.Evaluate(0.0f);
+        return std::isfinite(OutPhase) &&
+            OutPhase >= 0.0f && OutPhase <= 64.0f;
+    }
+
+    void DispatchScoreRoyaleSpawnWave(
+        AFortGameStateAthena* GameState)
+    {
+        auto& State = GScoreRoyaleCompatibilityState;
+        if (!IsLiveObject(GameState) ||
+            !GameState->HasGamePhaseStep() ||
+            GameState->GamePhaseStep != static_cast<uint8>(
+                EAthenaGamePhaseStep::StormHolding))
+        {
+            return;
+        }
+
+        auto GameMode = ResolveScoreRoyaleGameMode();
+        if (!HasHydratedScoreRoyaleSpawnData(GameMode))
+            return;
+
+        const uintptr_t SpawnAddress =
+            FindNativeSpawnFortSpawnActors();
+        if (!SpawnAddress)
+        {
+            if (!State.bLoggedSpawnDataUnavailable)
+            {
+                State.bLoggedSpawnDataUnavailable = true;
+                SDK::DbgLog(
+                    "[ScoreRoyale] validated spawn-actor pipeline "
+                    "unavailable; wave dispatch remains fail-closed\n");
+            }
+            return;
+        }
+
+        const UStruct* EntryStruct =
+            FFortSpawnActorData::StaticStruct();
+        const UClass* InfoClass = UFortSpawnActorInfo::StaticClass();
+        if (!EntryStruct || !InfoClass ||
+            !FFortSpawnActorData::HasSpawnActorInfo())
+        {
+            return;
+        }
+
+        const int32 EntrySize = EntryStruct->GetPropertiesSize();
+        auto& Entries = GameMode->SpawnActorDataList;
+        const int32 Phase = GameMode->HasSafeZonePhase()
+            ? GameMode->SafeZonePhase
+            : (GameState->HasSafeZonePhase()
+                   ? static_cast<int32>(GameState->SafeZonePhase)
+                   : -1);
+        if (Phase < 0 || Phase > 64 || EntrySize <= 0 ||
+            EntrySize > 0x200 ||
+            !IsSaneArray(Entries.Num(), Entries.Max(), 256) ||
+            !IsReadableArrayStorage(
+                Entries.Data, Entries.Num(), EntrySize))
+        {
+            return;
+        }
+
+        using SpawnFortSpawnActorsFunction =
+            void(*)(AFortGameModeAthena*, FFortSpawnActorData*);
+        const auto SpawnFortSpawnActors =
+            reinterpret_cast<SpawnFortSpawnActorsFunction>(
+                SpawnAddress);
+
+        int32 Dispatched = 0;
+        for (int32 Index = 0; Index < Entries.Num(); ++Index)
+        {
+            auto& Entry = Entries.Get(Index, EntrySize);
+            auto Info = Entry.SpawnActorInfo;
+            if (!IsLiveObject(Info) || !Info->IsA(InfoClass) ||
+                !IsScoreRoyaleSpawnInfo(Info) ||
+                !Info->HasSpawnTiming() ||
+                !Info->HasSafeZoneIndex() ||
+                Info->SpawnTiming != 1)
+            {
+                continue;
+            }
+
+            float RequiredPhase = 0.0f;
+            if (!TryEvaluateScoreRoyaleSpawnPhase(
+                    Info->SafeZoneIndex, RequiredPhase) ||
+                std::fabs(
+                    RequiredPhase - static_cast<float>(Phase)) >
+                    0.001f)
+            {
+                continue;
+            }
+
+            auto& DispatchedPhases =
+                State.DispatchedSpawnWaves[Info];
+            if (DispatchedPhases.find(Phase) !=
+                DispatchedPhases.end())
+            {
+                continue;
+            }
+
+            // If stock code already populated this runtime entry, adopt that
+            // dispatch instead of invoking the private function twice.
+            if (FFortSpawnActorData::HasSpawnedFortSpawnActors())
+            {
+                auto& Spawned = Entry.SpawnedFortSpawnActors;
+                if (IsSaneArray(
+                        Spawned.Num(), Spawned.Max(), 4096) &&
+                    Spawned.Num() > 0)
+                {
+                    DispatchedPhases.insert(Phase);
+                    continue;
+                }
+            }
+
+            // Mark before entering native code so a re-entrant NetDriver tick
+            // cannot launch the same authored wave again.
+            DispatchedPhases.insert(Phase);
+            SpawnFortSpawnActors(GameMode, &Entry);
+            ++Dispatched;
+        }
+
+        if (Dispatched > 0)
+        {
+            SDK::DbgLog(
+                "[ScoreRoyale] dispatched %d authored spawn "
+                "wave(s) for safe-zone phase %d\n",
+                Dispatched, Phase);
+        }
+    }
+
+    const UFortPlaylistAthena* FindExactScoreRoyalePlaylist(
+        const UFortPlaylistAthena* Playlist)
+    {
+        if (!IsLiveObject(Playlist))
+            return nullptr;
+
+        static constexpr const wchar_t* Paths[] = {
+            L"/Game/Athena/Playlists/Score/"
+                L"Playlist_Score_Solo.Playlist_Score_Solo",
+            L"/Game/Athena/Playlists/Score/"
+                L"Playlist_Score_Duos.Playlist_Score_Duos",
+            L"/Game/Athena/Playlists/Score/"
+                L"Playlist_Score_Squads.Playlist_Score_Squads"
+        };
+        for (const auto Path : Paths)
+        {
+            const auto Canonical =
+                FindObject<UFortPlaylistAthena>(Path);
+            if (Canonical == Playlist)
+                return Canonical;
+        }
+        return nullptr;
+    }
+
+    const UFortPlaylistAthena* ResolveCurrentScoreRoyalePlaylist(
+        AFortGameStateAthena* GameState)
+    {
+        if (!IsLiveObject(GameState))
+            return nullptr;
+
+        if (GameState->HasCurrentPlaylistInfo())
+        {
+            if (FPlaylistPropertyArray::HasOverridePlaylist())
+            {
+                if (const auto Playlist =
+                        FindExactScoreRoyalePlaylist(
+                            GameState->CurrentPlaylistInfo
+                                .OverridePlaylist))
+                {
+                    return Playlist;
+                }
+            }
+            if (FPlaylistPropertyArray::HasBasePlaylist())
+            {
+                if (const auto Playlist =
+                        FindExactScoreRoyalePlaylist(
+                            GameState->CurrentPlaylistInfo
+                                .BasePlaylist))
+                {
+                    return Playlist;
+                }
+            }
+        }
+        return GameState->HasCurrentPlaylistData()
+            ? FindExactScoreRoyalePlaylist(
+                  GameState->CurrentPlaylistData)
+            : nullptr;
+    }
+
+    AFortPlayerControllerAthena* ResolveScoreController(
+        AFortPlayerStateAthena* PlayerState)
+    {
+        if (!IsLiveObject(PlayerState) ||
+            !IsLiveObject(PlayerState->Owner))
+        {
+            return nullptr;
+        }
+        auto Controller =
+            PlayerState->Owner->Cast<AFortPlayerControllerAthena>();
+        return IsLiveObject(Controller) ? Controller : nullptr;
+    }
+
+    int32* ResolveScoreEventCounter(
+        AFortPlayerStateAthena* PlayerState,
+        EAthenaScoringEventCompat Event)
+    {
+        if (!IsLiveObject(PlayerState))
+            return nullptr;
+
+        switch (Event)
+        {
+        case EAthenaScoringEventCompat::ChestOpened:
+            return PlayerState->HasNumChestsOpened()
+                ? &PlayerState->NumChestsOpened : nullptr;
+        case EAthenaScoringEventCompat::AmmoCanOpened:
+            return PlayerState->HasNumAmmoCansOpened()
+                ? &PlayerState->NumAmmoCansOpened : nullptr;
+        case EAthenaScoringEventCompat::SupplyDropOpened:
+            return PlayerState->HasNumSupplyDropsOpened()
+                ? &PlayerState->NumSupplyDropsOpened : nullptr;
+        case EAthenaScoringEventCompat::SupplyLlamaOpened:
+            return PlayerState->HasNumLlamasOpened()
+                ? &PlayerState->NumLlamasOpened : nullptr;
+        case EAthenaScoringEventCompat::ForagedItemConsumed:
+            return PlayerState->HasNumForagedItemsConsumed()
+                ? &PlayerState->NumForagedItemsConsumed : nullptr;
+        case EAthenaScoringEventCompat::SurvivalInMinutes:
+            return PlayerState->HasNumMinutesAlive()
+                ? &PlayerState->NumMinutesAlive : nullptr;
+        case EAthenaScoringEventCompat::CollectedCoinBronze:
+            return PlayerState->HasNumBronzeCoinsCollected()
+                ? &PlayerState->NumBronzeCoinsCollected : nullptr;
+        case EAthenaScoringEventCompat::CollectedCoinSilver:
+            return PlayerState->HasNumSilverCoinsCollected()
+                ? &PlayerState->NumSilverCoinsCollected : nullptr;
+        case EAthenaScoringEventCompat::CollectedCoinGold:
+            return PlayerState->HasNumGoldCoinsCollected()
+                ? &PlayerState->NumGoldCoinsCollected : nullptr;
+        default:
+            return nullptr;
+        }
+    }
+
+    const wchar_t* GetScoreEventTag(
+        EAthenaScoringEventCompat Event)
+    {
+        switch (Event)
+        {
+        case EAthenaScoringEventCompat::ChestOpened:
+            return L"Building.Type.Container.TreasureChest";
+        case EAthenaScoringEventCompat::AmmoCanOpened:
+            return L"Building.Type.Container.Ammobox";
+        case EAthenaScoringEventCompat::SupplyDropOpened:
+            return L"Building.Type.Container.SupplyDrop";
+        case EAthenaScoringEventCompat::SupplyLlamaOpened:
+            return L"Building.Type.Container.SupplyLlama";
+        case EAthenaScoringEventCompat::ForagedItemConsumed:
+            return L"ForagedItem";
+        case EAthenaScoringEventCompat::CollectedCoinBronze:
+            return L"Gameplay.ScoreActor.Coin.Bronze";
+        case EAthenaScoringEventCompat::CollectedCoinSilver:
+            return L"Gameplay.ScoreActor.Coin.Silver";
+        case EAthenaScoringEventCompat::CollectedCoinGold:
+            return L"Gameplay.ScoreActor.Coin.Gold";
+        default:
+            return nullptr;
+        }
+    }
+
+    bool HasExactScoreTag(
+        const FGameplayTagContainer& Tags,
+        const wchar_t* Expected)
+    {
+        if (!Expected)
+            return false;
+
+        auto HasInArray =
+            [&](const TArray<FGameplayTag>& Values)
+            {
+                if (!IsSaneArray(
+                        Values.Num(), Values.Max(), 128) ||
+                    !IsReadableArrayStorage(
+                        Values.Data,
+                        Values.Num(),
+                        FGameplayTag::Size()))
+                {
+                    return false;
+                }
+                for (int32 Index = 0;
+                     Index < Values.Num(); ++Index)
+                {
+                    const auto& Tag = Values.Get(
+                        Index, FGameplayTag::Size());
+                    if (Tag.TagName.IsValid() &&
+                        Tag.TagName.ToWString() == Expected)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+        return HasInArray(Tags.GameplayTags) ||
+            HasInArray(Tags.ParentTags);
+    }
+
+    EAthenaScoringEventCompat GetCoinEventFromTags(
+        const FGameplayTagContainer& Tags,
+        const UObject* ScoreActor)
+    {
+        if (HasExactScoreTag(
+                Tags,
+                L"Gameplay.ScoreActor.Coin.Gold"))
+        {
+            return EAthenaScoringEventCompat::CollectedCoinGold;
+        }
+        if (HasExactScoreTag(
+                Tags,
+                L"Gameplay.ScoreActor.Coin.Silver"))
+        {
+            return EAthenaScoringEventCompat::CollectedCoinSilver;
+        }
+        if (HasExactScoreTag(
+                Tags,
+                L"Gameplay.ScoreActor.Coin.Bronze"))
+        {
+            return EAthenaScoringEventCompat::CollectedCoinBronze;
+        }
+
+        std::wstring Name;
+        if (ScoreActor)
+        {
+            const auto ActorName = ScoreActor->Name.ToWString();
+            Name.assign(ActorName.c_str());
+        }
+        std::transform(
+            Name.begin(), Name.end(), Name.begin(),
+            [](wchar_t Character)
+            {
+                return static_cast<wchar_t>(
+                    std::towlower(Character));
+            });
+        if (Name.find(L"gold") != std::wstring::npos)
+            return EAthenaScoringEventCompat::CollectedCoinGold;
+        if (Name.find(L"silver") != std::wstring::npos)
+            return EAthenaScoringEventCompat::CollectedCoinSilver;
+        if (Name.find(L"bronze") != std::wstring::npos)
+            return EAthenaScoringEventCompat::CollectedCoinBronze;
+        return EAthenaScoringEventCompat::None;
+    }
+
+    FGameplayTagContainer MakeScoreEventTags(
+        EAthenaScoringEventCompat Event)
+    {
+        FGameplayTagContainer Result{};
+        const wchar_t* TagName = GetScoreEventTag(Event);
+        if (TagName)
+        {
+            FGameplayTag Tag{};
+            Tag.TagName = FName(TagName);
+            Result.GameplayTags.Add(
+                Tag, FGameplayTag::Size());
+        }
+        return Result;
+    }
+
+    void FreeScoreEventTags(FGameplayTagContainer& Tags)
+    {
+        Tags.GameplayTags.Free();
+        Tags.ParentTags.Free();
+    }
+
+    int32 GetOfficialScoreAward(
+        EAthenaScoringEventCompat Event)
+    {
+        switch (Event)
+        {
+        case EAthenaScoringEventCompat::Elimination:
+            return 100;
+        case EAthenaScoringEventCompat::ChestOpened:
+            return 50;
+        case EAthenaScoringEventCompat::AmmoCanOpened:
+            return 25;
+        case EAthenaScoringEventCompat::SupplyDropOpened:
+            return 100;
+        case EAthenaScoringEventCompat::SupplyLlamaOpened:
+            return 50;
+        case EAthenaScoringEventCompat::ForagedItemConsumed:
+            return 10;
+        case EAthenaScoringEventCompat::CollectedCoinBronze:
+            return 30;
+        case EAthenaScoringEventCompat::CollectedCoinSilver:
+            return 50;
+        case EAthenaScoringEventCompat::CollectedCoinGold:
+            return 100;
+        default:
+            return 0;
+        }
+    }
+
+    int32 EvaluateScoreValue(
+        FScalableFloat& Value,
+        int32 Fallback)
+    {
+        int32 Evaluated = 0;
+        return TryEvaluateMutatorGrantCount(Value, Evaluated)
+            ? Evaluated : Fallback;
+    }
+
+    int32 ResolveScoreGoal(
+        const UFortPlaylistAthena* Playlist)
+    {
+        if (!IsLiveObject(Playlist))
+            return 0;
+
+        int32 Fallback = 4500;
+        if (Playlist->HasMaxSquadSize())
+        {
+            Fallback = Playlist->MaxSquadSize <= 1
+                ? 2000
+                : (Playlist->MaxSquadSize == 2 ? 3000 : 4500);
+        }
+        if (!Playlist->HasScoringData() ||
+            !FWinConditionScoreData::HasGoalScore())
+        {
+            return Fallback;
+        }
+        auto& Goal = const_cast<UFortPlaylistAthena*>(Playlist)
+                         ->ScoringData.GoalScore;
+        return EvaluateScoreValue(Goal, Fallback);
+    }
+
+    bool ResolveAuthoredScoreAward(
+        const UFortPlaylistAthena* Playlist,
+        EAthenaScoringEventCompat Event,
+        const FGameplayTagContainer* ContextTags,
+        int32 Occurrence,
+        int32& OutAward)
+    {
+        OutAward = 0;
+        const auto ScoreStruct = FAthenaScoreData::StaticStruct();
+        if (!IsLiveObject(Playlist) ||
+            !Playlist->HasScoringData() ||
+            !FWinConditionScoreData::HasScoreDataList() ||
+            !ScoreStruct ||
+            !FAthenaScoreData::HasScoringEvent() ||
+            !FAthenaScoreData::HasScoreAwarded())
+        {
+            return false;
+        }
+
+        const int32 EntrySize = ScoreStruct->GetPropertiesSize();
+        auto& Entries = const_cast<UFortPlaylistAthena*>(Playlist)
+                            ->ScoringData.ScoreDataList;
+        if (EntrySize <= 0 || EntrySize > 0x200 ||
+            !IsSaneArray(Entries.Num(), Entries.Max(), 64) ||
+            !IsReadableArrayStorage(
+                Entries.Data, Entries.Num(), EntrySize))
+        {
+            return false;
+        }
+
+        for (int32 Index = 0; Index < Entries.Num(); ++Index)
+        {
+            auto& Entry = Entries.Get(Index, EntrySize);
+            if (Entry.ScoringEvent !=
+                static_cast<uint8>(Event))
+            {
+                continue;
+            }
+
+            if (FAthenaScoreData::HasEventInclusionTags())
+            {
+                const bool bHasRequirements =
+                    Entry.EventInclusionTags.GameplayTags.Num() > 0 ||
+                    Entry.EventInclusionTags.ParentTags.Num() > 0;
+                if (bHasRequirements &&
+                    (!ContextTags ||
+                     !ContextTags->HasAll(
+                         Entry.EventInclusionTags)))
+                {
+                    continue;
+                }
+            }
+
+            const int32 Required =
+                FAthenaScoreData::HasNumOccurrencesForScore()
+                    ? (std::max)(
+                          1, Entry.NumOccurrencesForScore)
+                    : 1;
+            const int32 Permitted =
+                FAthenaScoreData::HasNumOccurrencesPermitted()
+                    ? Entry.NumOccurrencesPermitted
+                    : -1;
+            if ((Permitted > 0 && Occurrence > Permitted) ||
+                Occurrence <= 0 || Occurrence % Required != 0)
+            {
+                OutAward = 0;
+                return true;
+            }
+
+            OutAward = EvaluateScoreValue(
+                Entry.ScoreAwarded,
+                GetOfficialScoreAward(Event));
+            return true;
+        }
+        return false;
+    }
+
+    bool InvokeNativeAddScoringEvent(
+        AFortPlayerControllerAthena* PlayerController,
+        const FGameplayTagContainer& TargetTags)
+    {
+        if (!IsLiveObject(PlayerController))
+            return false;
+
+        const auto Library = UFortKismetLibrary::GetDefaultObj();
+        UFunction* Function = Library
+            ? Library->GetFunction("AddScoringEvent") : nullptr;
+        if (!Function || !Function->ExecFunction)
+            return false;
+
+        const auto Parameters = Function->GetParamsNamed();
+        constexpr uint64 CPF_Parm = 0x0000000000000080;
+        constexpr uint64 CPF_OutParm = 0x0000000000000100;
+        constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+        uint32 ControllerOffset = uint32(-1);
+        uint32 TagsOffset = uint32(-1);
+        if (Parameters.Size <= 0 || Parameters.Size > 0x100 ||
+            Parameters.NameOffsetMap.size() != 2)
+        {
+            return false;
+        }
+        for (const auto& Parameter : Parameters.NameOffsetMap)
+        {
+            if (!(Parameter.PropertyFlags & CPF_Parm) ||
+                (Parameter.PropertyFlags &
+                    (CPF_OutParm | CPF_ReturnParm)) ||
+                Parameter.Offset > Parameters.Size ||
+                Parameter.ElementSize >
+                    static_cast<uint32>(Parameters.Size) -
+                        Parameter.Offset)
+            {
+                return false;
+            }
+            if (Parameter.Name == "Controller" &&
+                Parameter.ElementSize == sizeof(void*))
+            {
+                ControllerOffset = Parameter.Offset;
+            }
+            else if (Parameter.Name == "TargetTags" &&
+                     Parameter.ElementSize ==
+                         sizeof(FGameplayTagContainer))
+            {
+                TagsOffset = Parameter.Offset;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        if (ControllerOffset == uint32(-1) ||
+            TagsOffset == uint32(-1))
+        {
+            return false;
+        }
+
+        void* Memory = FMemory::Malloc(Parameters.Size);
+        if (!Memory)
+            return false;
+        memset(Memory, 0, Parameters.Size);
+        memcpy(
+            static_cast<uint8*>(Memory) + ControllerOffset,
+            &PlayerController,
+            sizeof(PlayerController));
+        memcpy(
+            static_cast<uint8*>(Memory) + TagsOffset,
+            &TargetTags,
+            sizeof(TargetTags));
+        Library->ProcessEvent(Function, Memory);
+        FMemory::Free(Memory);
+        return true;
+    }
+
+    AFortAthenaMutator_Score* FindScoreMutator(
+        AFortGameStateAthena* GameState)
+    {
+        const UClass* ScoreClass =
+            AFortAthenaMutator_Score::StaticClass();
+        if (!ScoreClass)
+            return nullptr;
+
+        if (IsLiveObject(GameState) &&
+            GameState->HasGameplayMutators())
+        {
+            auto& Mutators = GameState->GameplayMutators;
+            if (IsSaneArray(
+                    Mutators.Num(), Mutators.Max(), 128) &&
+                IsReadableArrayStorage(
+                    Mutators.Data,
+                    Mutators.Num(),
+                    sizeof(AFortAthenaMutator*)))
+            {
+                for (auto Mutator : Mutators)
+                {
+                    if (IsLiveObject(Mutator) &&
+                        Mutator->IsA(ScoreClass))
+                    {
+                        return static_cast<
+                            AFortAthenaMutator_Score*>(Mutator);
+                    }
+                }
+            }
+        }
+        auto WorldMutator = FindWorldMutator(
+            const_cast<UClass*>(ScoreClass));
+        return IsLiveObject(WorldMutator) &&
+                WorldMutator->IsA(ScoreClass)
+            ? static_cast<AFortAthenaMutator_Score*>(
+                  WorldMutator)
+            : nullptr;
+    }
+
+    bool ResolveConfiguredScoreMutator(
+        const UFortPlaylistAthena* Playlist,
+        UFortGameplayModifierItemDefinition*& OutModifier,
+        TSoftClassPtr<UClass>& OutDefinition,
+        UClass*& OutClass)
+    {
+        OutModifier = nullptr;
+        OutDefinition = {};
+        OutClass = nullptr;
+        const UClass* ScoreBase =
+            AFortAthenaMutator_Score::StaticClass();
+        if (!IsLiveObject(Playlist) || !ScoreBase ||
+            !Playlist->HasModifierList())
+        {
+            return false;
+        }
+
+        auto& Modifiers =
+            const_cast<UFortPlaylistAthena*>(Playlist)
+                ->ModifierList;
+        if (!IsSaneArray(Modifiers.Num(), Modifiers.Max(), 64) ||
+            !IsReadableArrayStorage(
+                Modifiers.Data,
+                Modifiers.Num(),
+                FSoftObjectPtr::Size()))
+        {
+            return false;
+        }
+
+        for (int32 ModifierIndex = 0;
+             ModifierIndex < Modifiers.Num(); ++ModifierIndex)
+        {
+            auto& ModifierReference = Modifiers.Get(
+                ModifierIndex, FSoftObjectPtr::Size());
+            auto Modifier =
+                const_cast<UFortGameplayModifierItemDefinition*>(
+                    ModifierReference.Get());
+            if (!Modifier &&
+                ModifierReference.ObjectID.AssetPathName.IsValid())
+            {
+                const auto Path = ModifierReference.ObjectID
+                                      .AssetPathName.ToWString();
+                Modifier = const_cast<
+                    UFortGameplayModifierItemDefinition*>(
+                        FindObject<
+                            UFortGameplayModifierItemDefinition>(
+                                Path.c_str()));
+            }
+            if (!IsLiveObject(Modifier) ||
+                !Modifier->HasMutators())
+            {
+                continue;
+            }
+
+            auto& MutatorDefinitions = Modifier->Mutators;
+            if (!IsSaneArray(
+                    MutatorDefinitions.Num(),
+                    MutatorDefinitions.Max(), 64) ||
+                !IsReadableArrayStorage(
+                    MutatorDefinitions.Data,
+                    MutatorDefinitions.Num(),
+                    FSoftObjectPtr::Size()))
+            {
+                continue;
+            }
+            for (int32 MutatorIndex = 0;
+                 MutatorIndex < MutatorDefinitions.Num();
+                 ++MutatorIndex)
+            {
+                auto& Definition = MutatorDefinitions.Get(
+                    MutatorIndex, FSoftObjectPtr::Size());
+                UClass* MutatorClass = Definition.Get();
+                if (!MutatorClass &&
+                    Definition.ObjectID.AssetPathName.IsValid())
+                {
+                    const auto Path = Definition.ObjectID
+                                          .AssetPathName.ToWString();
+                    MutatorClass = const_cast<UClass*>(
+                        FindObject<UClass>(Path.c_str()));
+                }
+                const auto DefaultObject = MutatorClass
+                    ? MutatorClass->GetDefaultObj() : nullptr;
+                if (!IsLiveObject(MutatorClass) ||
+                    !IsLiveObject(DefaultObject) ||
+                    !DefaultObject->IsA(ScoreBase))
+                {
+                    continue;
+                }
+
+                Modifier->AddToRoot();
+                MutatorClass->AddToRoot();
+                OutModifier = Modifier;
+                OutDefinition = Definition;
+                OutClass = MutatorClass;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void EnsureScoreRoyaleMutator(
+        AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist,
+        double Now)
+    {
+        auto& State = GScoreRoyaleCompatibilityState;
+        if (auto Existing = FindScoreMutator(GameState))
+        {
+            State.Mutator = Existing;
+            SetMutatorActive(Existing);
+            return;
+        }
+
+        UFortGameplayModifierItemDefinition* Modifier = nullptr;
+        TSoftClassPtr<UClass> Definition{};
+        UClass* MutatorClass = nullptr;
+        if (!ResolveConfiguredScoreMutator(
+                Playlist, Modifier, Definition, MutatorClass))
+        {
+            return;
+        }
+
+        const auto ModifierLookup =
+            FindActiveGameplayModifier(GameState, Modifier);
+        if (ModifierLookup ==
+                EActiveGameplayModifierLookup::Missing &&
+            !State.bModifierRegistrationAttempted)
+        {
+            State.bModifierRegistrationAttempted = true;
+            const bool bInvoked =
+                InvokeRegisterGameplayModifier(
+                    GameState, Modifier);
+            SDK::DbgLog(
+                "[ScoreRoyale] requested authored gameplay "
+                "modifier registration success=%d\n",
+                bInvoked ? 1 : 0);
+            return;
+        }
+        if (ModifierLookup !=
+                EActiveGameplayModifierLookup::Found ||
+            State.bManualMutatorSpawnAttempted ||
+            Now - State.InitializedAt < 2.0)
+        {
+            return;
+        }
+
+        State.bManualMutatorSpawnAttempted = true;
+        UWorld* World = UWorld::GetWorld();
+        auto GameMode =
+            World && IsLiveObject(World->AuthorityGameMode)
+                ? World->AuthorityGameMode->Cast<AFortGameMode>()
+                : nullptr;
+        auto GameModeComponent =
+            GetMutatorListComponent(GameMode);
+        auto GameStateComponent =
+            GetMutatorListComponent(GameState);
+        const auto DefaultObject = MutatorClass
+            ? MutatorClass->GetDefaultObj() : nullptr;
+        auto AthenaDefault =
+            IsLiveObject(DefaultObject) &&
+                    DefaultObject->IsA(
+                        AFortAthenaMutator::StaticClass())
+                ? static_cast<AFortAthenaMutator*>(
+                      const_cast<UObject*>(DefaultObject))
+                : nullptr;
+        if (!World || !GameMode || !GameModeComponent ||
+            !GameStateComponent || !AthenaDefault)
+        {
+            return;
+        }
+
+        const FResolvedNativeLTMMutator Desired(
+            Modifier,
+            Definition,
+            MutatorClass,
+            AthenaDefault->HasbMutatesGameMode()
+                ? AthenaDefault->bMutatesGameMode : true,
+            AthenaDefault->HasbMutatesGameState()
+                ? AthenaDefault->bMutatesGameState : true);
+        auto Spawned = SpawnConfiguredMutator(
+            World, GameMode, GameState, Desired);
+        const bool bGameModeRegistered = Spawned &&
+            (!Desired.bMutatesGameMode ||
+             RegisterMutator(
+                 GameMode,
+                 GameModeComponent,
+                 Desired,
+                 Spawned));
+        const bool bGameStateRegistered = Spawned &&
+            (!Desired.bMutatesGameState ||
+             RegisterMutator(
+                 GameState,
+                 GameStateComponent,
+                 Desired,
+                 Spawned));
+        const bool bActive = Spawned &&
+            SetMutatorActive(Spawned);
+        if (Spawned && bGameModeRegistered &&
+            bGameStateRegistered && bActive)
+        {
+            State.Mutator = static_cast<
+                AFortAthenaMutator_Score*>(Spawned);
+        }
+        SDK::DbgLog(
+            "[ScoreRoyale] authored mutator fallback "
+            "spawned=%d gm=%d gs=%d active=%d\n",
+            Spawned ? 1 : 0,
+            bGameModeRegistered ? 1 : 0,
+            bGameStateRegistered ? 1 : 0,
+            bActive ? 1 : 0);
+    }
+
+    void FinishScoreRoyaleMatch(
+        AFortGameStateAthena* GameState,
+        AFortPlayerStateAthena* Winner,
+        int32 TeamScore)
+    {
+        auto& State = GScoreRoyaleCompatibilityState;
+        if (State.bMatchEnded || !IsLiveObject(GameState) ||
+            !IsLiveObject(Winner))
+        {
+            return;
+        }
+
+        UWorld* World = UWorld::GetWorld();
+        auto GameMode =
+            World && IsLiveObject(World->AuthorityGameMode)
+                ? World->AuthorityGameMode->Cast<AFortGameMode>()
+                : nullptr;
+        if (!IsLiveObject(GameMode))
+            return;
+
+        const bool bAlreadyTerminal =
+            (GameState->HasGamePhase() &&
+             GameState->GamePhase >=
+                 static_cast<uint8>(
+                     EAthenaGamePhase::EndGame)) ||
+            (GameMode->HasMatchState() &&
+             GameMode->MatchState == FName(L"WaitingPostMatch"));
+        if (bAlreadyTerminal)
+        {
+            State.bMatchEnded = true;
+            return;
+        }
+
+        if (GameState->HasWinningTeam() &&
+            Winner->HasTeamIndex())
+        {
+            GameState->WinningTeam = Winner->TeamIndex;
+            if (GameState->GetFunction("OnRep_WinningTeam"))
+                GameState->OnRep_WinningTeam();
+        }
+        if (GameState->HasWinningPlayerState())
+        {
+            GameState->WinningPlayerState = Winner;
+            if (GameState->GetFunction(
+                    "OnRep_WinningPlayerState"))
+            {
+                GameState->OnRep_WinningPlayerState();
+            }
+        }
+        if (Winner->HasPlace())
+        {
+            Winner->Place = 1;
+            if (Winner->GetFunction("OnRep_Place"))
+                Winner->OnRep_Place();
+            Winner->ForceNetUpdate();
+        }
+        GameState->ForceNetUpdate();
+
+        if (auto EndMatch = GameMode->GetFunction("EndMatch"))
+        {
+            GameMode->Call<void>(EndMatch);
+        }
+        else
+        {
+            if (GameState->HasGamePhase())
+            {
+                GameState->GamePhase = static_cast<uint8>(
+                    EAthenaGamePhase::EndGame);
+                if (GameState->GetFunction("OnRep_GamePhase"))
+                    GameState->OnRep_GamePhase();
+            }
+            if (GameMode->HasMatchState())
+                GameMode->MatchState = FName(L"WaitingPostMatch");
+            GameMode->ForceNetUpdate();
+        }
+        State.bMatchEnded = true;
+        SDK::DbgLog(
+            "[ScoreRoyale] reached goal: team=%u score=%d "
+            "winner=%p\n",
+            Winner->HasTeamIndex()
+                ? static_cast<unsigned>(Winner->TeamIndex) : 0,
+            TeamScore,
+            static_cast<void*>(Winner));
+    }
+
+    void ReconcileScoreRoyaleTeamTotals(
+        AFortGameStateAthena* GameState,
+        AFortPlayerStateAthena* ScoringPlayer)
+    {
+        if (!IsLiveObject(GameState) ||
+            !GameState->HasPlayerArray())
+        {
+            return;
+        }
+
+        auto& Players = GameState->PlayerArray;
+        if (!IsSaneArray(Players.Num(), Players.Max(), 256) ||
+            !IsReadableArrayStorage(
+                Players.Data,
+                Players.Num(),
+                sizeof(AFortPlayerStateAthena*)))
+        {
+            return;
+        }
+
+        std::map<uint8, int32> TeamTotals;
+        for (auto PlayerState : Players)
+        {
+            if (!IsLiveObject(PlayerState) ||
+                !PlayerState->HasTeamIndex() ||
+                !PlayerState->HasTotalPlayerScore() ||
+                (PlayerState->HasbIsSpectator() &&
+                 PlayerState->bIsSpectator))
+            {
+                continue;
+            }
+            TeamTotals[PlayerState->TeamIndex] +=
+                (std::max)(0, PlayerState->TotalPlayerScore);
+        }
+        if (TeamTotals.empty())
+            return;
+
+        int32 HighScore = -1;
+        uint8 HighTeam = 0;
+        for (const auto& [Team, Score] : TeamTotals)
+        {
+            if (Score > HighScore)
+            {
+                HighScore = Score;
+                HighTeam = Team;
+            }
+        }
+
+        for (auto PlayerState : Players)
+        {
+            if (!IsLiveObject(PlayerState) ||
+                !PlayerState->HasTeamIndex())
+            {
+                continue;
+            }
+            const auto TeamIt = TeamTotals.find(
+                PlayerState->TeamIndex);
+            if (TeamIt == TeamTotals.end())
+                continue;
+
+            if (PlayerState->HasTeamScore())
+                PlayerState->GetTeamScore() = TeamIt->second;
+            if (PlayerState->HasTeamScorePlacement())
+            {
+                int32 Placement = 1;
+                for (const auto& [OtherTeam, OtherScore] :
+                     TeamTotals)
+                {
+                    (void)OtherTeam;
+                    if (OtherScore > TeamIt->second)
+                        ++Placement;
+                }
+                PlayerState->TeamScorePlacement = Placement;
+            }
+            PlayerState->ForceNetUpdate();
+        }
+
+        if (GameState->HasCurrentHighScoreTeam())
+            GameState->CurrentHighScoreTeam = HighTeam;
+        if (GameState->HasCurrentHighScore())
+            GameState->CurrentHighScore = HighScore;
+        GameState->ForceNetUpdate();
+
+        const int32 Goal = GameState->HasWinningScore()
+            ? GameState->WinningScore
+            : ResolveScoreGoal(
+                  GScoreRoyaleCompatibilityState.Playlist);
+        if (Goal > 0 && HighScore >= Goal &&
+            IsLiveObject(ScoringPlayer) &&
+            ScoringPlayer->HasTeamIndex() &&
+            ScoringPlayer->TeamIndex == HighTeam)
+        {
+            FinishScoreRoyaleMatch(
+                GameState, ScoringPlayer, HighScore);
+        }
+    }
+
+    bool AwardScoreRoyaleEventInternal(
+        AFortPlayerControllerAthena* PlayerController,
+        EAthenaScoringEventCompat Event,
+        const FGameplayTagContainer* ContextTags,
+        bool bAllowNativeScoring)
+    {
+        auto& State = GScoreRoyaleCompatibilityState;
+        if (!IsLiveObject(PlayerController) ||
+            Event <= EAthenaScoringEventCompat::None ||
+            Event > EAthenaScoringEventCompat::AIKilled ||
+            !FFortAthenaScoreRoyaleCompatibility::IsActive())
+        {
+            return false;
+        }
+
+        auto PlayerState = PlayerController->HasPlayerState()
+            ? PlayerController->PlayerState : nullptr;
+        if (!IsLiveObject(PlayerState) ||
+            !PlayerState->HasTotalPlayerScore())
+        {
+            return false;
+        }
+
+        auto& Occurrences = State.EventOccurrences[PlayerState];
+        const size_t EventIndex = static_cast<size_t>(Event);
+        int32* Counter = ResolveScoreEventCounter(
+            PlayerState, Event);
+        const int32 ScoreBefore = PlayerState->TotalPlayerScore;
+        const int32 CounterBefore = Counter
+            ? *Counter : Occurrences[EventIndex];
+
+        FGameplayTagContainer GeneratedTags{};
+        const FGameplayTagContainer* EffectiveTags = ContextTags;
+        if (!EffectiveTags && GetScoreEventTag(Event))
+        {
+            GeneratedTags = MakeScoreEventTags(Event);
+            EffectiveTags = &GeneratedTags;
+        }
+
+        bool bInvokedNative = false;
+        if (bAllowNativeScoring && EffectiveTags)
+        {
+            bInvokedNative = InvokeNativeAddScoringEvent(
+                PlayerController, *EffectiveTags);
+        }
+
+        const int32 ScoreAfterNative =
+            PlayerState->TotalPlayerScore;
+        const int32 CounterAfterNative = Counter
+            ? *Counter : Occurrences[EventIndex];
+        if (ScoreAfterNative > ScoreBefore)
+        {
+            Occurrences[EventIndex] = (std::max)(
+                Occurrences[EventIndex],
+                CounterAfterNative > CounterBefore
+                    ? CounterAfterNative
+                    : CounterBefore + 1);
+            ReconcileScoreRoyaleTeamTotals(
+                State.GameState, PlayerState);
+            FreeScoreEventTags(GeneratedTags);
+            return true;
+        }
+
+        int32 Occurrence = CounterAfterNative;
+        if (CounterAfterNative <= CounterBefore)
+        {
+            Occurrence = (std::max)(
+                CounterBefore,
+                Occurrences[EventIndex]) + 1;
+            Occurrences[EventIndex] = Occurrence;
+            if (Counter)
+                *Counter = Occurrence;
+        }
+        else
+        {
+            Occurrences[EventIndex] = CounterAfterNative;
+        }
+
+        int32 Award = 0;
+        const bool bHasAuthoredAward =
+            ResolveAuthoredScoreAward(
+                State.Playlist,
+                Event,
+                EffectiveTags,
+                Occurrence,
+                Award);
+        if (!bHasAuthoredAward)
+            Award = GetOfficialScoreAward(Event);
+
+        if (Award > 0)
+        {
+            PlayerState->TotalPlayerScore =
+                (std::max)(0, ScoreAfterNative) + Award;
+        }
+        PlayerState->ForceNetUpdate();
+        ReconcileScoreRoyaleTeamTotals(
+            State.GameState, PlayerState);
+        FreeScoreEventTags(GeneratedTags);
+
+        SDK::DbgLog(
+            "[ScoreRoyale] fallback event=%u award=%d "
+            "occurrence=%d native=%d player=%p total=%d\n",
+            static_cast<unsigned>(Event),
+            Award,
+            Occurrence,
+            bInvokedNative ? 1 : 0,
+            static_cast<void*>(PlayerState),
+            PlayerState->TotalPlayerScore);
+        return bHasAuthoredAward || Award > 0 ||
+            bInvokedNative;
+    }
+
+    EAthenaScoringEventCompat ClassifyScoreContainer(
+        const ABuildingContainer* Container,
+        const FName& OriginalTierGroup)
+    {
+        const auto TierGroupString =
+            OriginalTierGroup.ToWString();
+        std::wstring Identifier(TierGroupString.c_str());
+        if (Container)
+        {
+            Identifier += L" ";
+            const auto ContainerName =
+                Container->Name.ToWString();
+            Identifier += ContainerName.c_str();
+            if (Container->Class)
+            {
+                Identifier += L" ";
+                const auto ClassName =
+                    Container->Class->Name.ToWString();
+                Identifier += ClassName.c_str();
+            }
+        }
+        std::transform(
+            Identifier.begin(), Identifier.end(),
+            Identifier.begin(),
+            [](wchar_t Character)
+            {
+                return static_cast<wchar_t>(
+                    std::towlower(Character));
+            });
+
+        if (Identifier.find(L"llama") != std::wstring::npos)
+            return EAthenaScoringEventCompat::SupplyLlamaOpened;
+        if (Identifier.find(L"supplydrop") != std::wstring::npos ||
+            Identifier.find(L"supply_drop") != std::wstring::npos ||
+            Identifier.find(L"supply drop") != std::wstring::npos)
+        {
+            return EAthenaScoringEventCompat::SupplyDropOpened;
+        }
+        if (Identifier.find(L"ammo") != std::wstring::npos)
+            return EAthenaScoringEventCompat::AmmoCanOpened;
+        if (Identifier.find(L"treasure") != std::wstring::npos ||
+            Identifier.find(L"chest") != std::wstring::npos)
+        {
+            return EAthenaScoringEventCompat::ChestOpened;
+        }
+        return EAthenaScoringEventCompat::None;
+    }
+
+    bool HasSingleScorePlayerStateParameter(UFunction* Function)
+    {
+        if (!Function)
+            return false;
+        const auto Parameters = Function->GetParamsNamed();
+        constexpr uint64 CPF_Parm = 0x0000000000000080;
+        constexpr uint64 CPF_OutParm = 0x0000000000000100;
+        constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+        if (Parameters.Size <= 0 || Parameters.Size > 0x20 ||
+            Parameters.NameOffsetMap.size() != 1)
+        {
+            return false;
+        }
+        const auto& Parameter = Parameters.NameOffsetMap[0];
+        return Parameter.Name == "PlayerState" &&
+            (Parameter.PropertyFlags & CPF_Parm) &&
+            !(Parameter.PropertyFlags &
+                (CPF_OutParm | CPF_ReturnParm)) &&
+            Parameter.ElementSize == sizeof(void*) &&
+            Parameter.Offset <= Parameters.Size &&
+            sizeof(void*) <=
+                static_cast<uint32>(Parameters.Size) -
+                    Parameter.Offset;
+    }
+}
+
+bool FFortAthenaScoreRoyaleCompatibility::IsSupportedBuild()
+{
+    return VersionInfo.FortniteVersion >=
+            ScoreRoyaleMinimumVersion &&
+        VersionInfo.FortniteVersion <
+            ScoreRoyaleEndVersionExclusive;
+}
+
+bool FFortAthenaScoreRoyaleCompatibility::IsScoreRoyalePlaylist(
+    const UFortPlaylistAthena* Playlist)
+{
+    return IsSupportedBuild() &&
+        FindExactScoreRoyalePlaylist(Playlist) != nullptr;
+}
+
+bool FFortAthenaScoreRoyaleCompatibility::IsActive()
+{
+    if (!IsSupportedBuild())
+        return false;
+    UWorld* World = UWorld::GetWorld();
+    auto GameState =
+        World && World->GameState
+            ? World->GameState->Cast<AFortGameStateAthena>()
+            : nullptr;
+    return ResolveCurrentScoreRoyalePlaylist(GameState) != nullptr;
+}
+
+void FFortAthenaScoreRoyaleCompatibility::PreparePlaylist(
+    AFortGameStateAthena* GameState,
+    const UFortPlaylistAthena* Playlist)
+{
+    UWorld* World = UWorld::GetWorld();
+    if (!IsSupportedBuild() || !World ||
+        !IsLiveObject(GameState) ||
+        !IsScoreRoyalePlaylist(Playlist))
+    {
+        return;
+    }
+
+    auto& State = GScoreRoyaleCompatibilityState;
+    if (State.World != World ||
+        State.GameState != GameState ||
+        State.Playlist != Playlist)
+    {
+        State = {};
+        State.World = World;
+        State.GameState = GameState;
+        State.Playlist = Playlist;
+        State.InitializedAt =
+            UGameplayStatics::GetTimeSeconds(World);
+        SDK::DbgLog(
+            "[ScoreRoyale] initialized exact playlist=%s\n",
+            Playlist->Name.ToString().c_str());
+    }
+    else
+    {
+        State.GameState = GameState;
+    }
+
+    const int32 Goal = ResolveScoreGoal(Playlist);
+    if (Goal > 0 && GameState->HasWinningScore() &&
+        GameState->WinningScore != Goal)
+    {
+        GameState->GetWinningScore() = Goal;
+        GameState->ForceNetUpdate();
+    }
+    RequestScoreRoyalePlaylistData(GameState);
+    EnsureScoreRoyaleMutator(
+        GameState,
+        Playlist,
+        UGameplayStatics::GetTimeSeconds(World));
+}
+
+void FFortAthenaScoreRoyaleCompatibility::Tick(
+    UNetDriver* Driver,
+    float DeltaSeconds)
+{
+    (void)DeltaSeconds;
+    if (!IsSupportedBuild() || !Driver)
+        return;
+
+    UWorld* World = UWorld::GetWorld();
+    if (!World || Driver != World->NetDriver ||
+        !World->GameState)
+    {
+        return;
+    }
+    auto GameState =
+        World->GameState->Cast<AFortGameStateAthena>();
+    const auto Playlist =
+        ResolveCurrentScoreRoyalePlaylist(GameState);
+    if (!Playlist)
+        return;
+
+    PreparePlaylist(GameState, Playlist);
+    auto& State = GScoreRoyaleCompatibilityState;
+    const double Now = UGameplayStatics::GetTimeSeconds(World);
+    if (Now >= State.NextPreparationAttempt)
+    {
+        State.NextPreparationAttempt = Now + 0.5;
+        RequestScoreRoyalePlaylistData(GameState);
+        EnsureScoreRoyaleMutator(GameState, Playlist, Now);
+    }
+
+    DispatchScoreRoyaleSpawnWave(GameState);
+
+    for (auto It = State.PendingForageEvents.begin();
+         It != State.PendingForageEvents.end();)
+    {
+        if (Now < It->ReadyTime)
+        {
+            ++It;
+            continue;
+        }
+        auto PlayerState =
+            IsLiveObject(It->PlayerController) &&
+                    It->PlayerController->HasPlayerState()
+                ? It->PlayerController->PlayerState
+                : nullptr;
+        auto Counter = ResolveScoreEventCounter(
+            PlayerState,
+            EAthenaScoringEventCompat::ForagedItemConsumed);
+        const bool bNativeHandled =
+            IsLiveObject(PlayerState) &&
+            PlayerState->HasTotalPlayerScore() &&
+            (PlayerState->TotalPlayerScore > It->ScoreBefore ||
+             (Counter && *Counter > It->CounterBefore));
+        if (!bNativeHandled)
+        {
+            AwardScoreRoyaleEventInternal(
+                It->PlayerController,
+                EAthenaScoringEventCompat::ForagedItemConsumed,
+                nullptr,
+                true);
+        }
+        It = State.PendingForageEvents.erase(It);
+    }
+
+    if (!IsLiveObject(State.Mutator) &&
+        !State.bLoggedMissingMutator &&
+        Now - State.InitializedAt >= 4.0)
+    {
+        State.bLoggedMissingMutator = true;
+        SDK::DbgLog(
+            "[ScoreRoyale] authored score mutator remains "
+            "unavailable; event fallback is active\n");
+    }
+}
+
+bool FFortAthenaScoreRoyaleCompatibility::AwardEvent(
+    AFortPlayerControllerAthena* PlayerController,
+    EAthenaScoringEventCompat Event,
+    const FGameplayTagContainer* ContextTags)
+{
+    return AwardScoreRoyaleEventInternal(
+        PlayerController, Event, ContextTags,
+        Event != EAthenaScoringEventCompat::Elimination);
+}
+
+void FFortAthenaScoreRoyaleCompatibility::HandleContainerSearched(
+    ABuildingContainer* Container,
+    AFortPlayerPawnAthena* SearchingPawn,
+    const FName& OriginalTierGroup)
+{
+    if (!IsActive() || !IsLiveObject(Container) ||
+        !IsLiveObject(SearchingPawn))
+    {
+        return;
+    }
+    auto& State = GScoreRoyaleCompatibilityState;
+    const uint64 ContainerIdentity =
+        GetScoreRoyaleObjectIdentity(Container);
+    if (!ContainerIdentity ||
+        !State.SearchedContainers.insert(
+            ContainerIdentity).second)
+        return;
+
+    const auto Event = ClassifyScoreContainer(
+        Container, OriginalTierGroup);
+    auto Controller = IsLiveObject(SearchingPawn->Controller)
+        ? SearchingPawn->Controller
+              ->Cast<AFortPlayerControllerAthena>()
+        : nullptr;
+    if (!IsLiveObject(Controller) ||
+        Event == EAthenaScoringEventCompat::None)
+    {
+        return;
+    }
+
+    auto Tags = MakeScoreEventTags(Event);
+    AwardEvent(Controller, Event, &Tags);
+    FreeScoreEventTags(Tags);
+}
+
+void FFortAthenaScoreRoyaleCompatibility::
+    HandleForagedItemConsumed(
+        AFortPlayerControllerAthena* PlayerController,
+        AActor* SourceActor,
+        int32 ScoreBefore)
+{
+    if (!IsActive() || !IsLiveObject(PlayerController) ||
+        !IsLiveObject(SourceActor))
+    {
+        return;
+    }
+    auto& State = GScoreRoyaleCompatibilityState;
+    const uint64 SourceIdentity =
+        GetScoreRoyaleObjectIdentity(SourceActor);
+    if (!SourceIdentity ||
+        !State.ConsumedForagedActors.insert(
+            SourceIdentity).second)
+        return;
+
+    auto PlayerState = PlayerController->HasPlayerState()
+        ? PlayerController->PlayerState : nullptr;
+    auto Counter = ResolveScoreEventCounter(
+        PlayerState,
+        EAthenaScoringEventCompat::ForagedItemConsumed);
+    FPendingScoreForageEvent Pending{};
+    Pending.PlayerController = PlayerController;
+    Pending.SourceActor = SourceActor;
+    Pending.ScoreBefore = ScoreBefore;
+    Pending.CounterBefore = Counter ? *Counter : 0;
+    UWorld* World = UWorld::GetWorld();
+    Pending.ReadyTime = World
+        ? UGameplayStatics::GetTimeSeconds(World) + 0.05
+        : 0.0;
+    State.PendingForageEvents.push_back(Pending);
+}
+
+void FFortAthenaScoreRoyaleCompatibility::HandleElimination(
+    AFortPlayerStateAthena* KillerPlayerState,
+    AFortPlayerStateAthena* VictimPlayerState,
+    int32 ScoreBefore)
+{
+    if (!IsActive() || !IsLiveObject(KillerPlayerState) ||
+        !IsLiveObject(VictimPlayerState) ||
+        KillerPlayerState == VictimPlayerState ||
+        !KillerPlayerState->HasTotalPlayerScore() ||
+        KillerPlayerState->TotalPlayerScore > ScoreBefore)
+    {
+        return;
+    }
+    auto Controller = ResolveScoreController(
+        KillerPlayerState);
+    if (Controller)
+    {
+        AwardScoreRoyaleEventInternal(
+            Controller,
+            EAthenaScoringEventCompat::Elimination,
+            nullptr,
+            false);
+    }
+}
+
+bool FFortAthenaScoreRoyaleCompatibility::TryGetRespawnAllowed(
+    AFortPlayerStateAthena* PlayerState,
+    bool& OutAllowed)
+{
+    OutAllowed = false;
+    if (!IsActive() || !IsLiveObject(PlayerState))
+        return false;
+
+    auto& State = GScoreRoyaleCompatibilityState;
+    auto Mutator = IsLiveObject(State.Mutator)
+        ? State.Mutator
+        : FindScoreMutator(State.GameState);
+    if (IsLiveObject(Mutator) &&
+        Mutator->HasbSupportsRespawnConfig() &&
+        Mutator->bSupportsRespawnConfig &&
+        Mutator->HasbRespawnsAllowed())
+    {
+        State.Mutator = Mutator;
+        OutAllowed = Mutator->bRespawnsAllowed;
+        return true;
+    }
+
+    auto GameState = State.GameState;
+    if (IsLiveObject(GameState) &&
+        GameState->HasSafeZonePhase())
+    {
+        int32 StopPhase = 5;
+        if (IsLiveObject(Mutator) &&
+            Mutator->HasStopRespawnPhase())
+        {
+            StopPhase = EvaluateScoreValue(
+                Mutator->StopRespawnPhase, 5);
+        }
+        OutAllowed = GameState->SafeZonePhase < StopPhase;
+        return true;
+    }
+    return false;
+}
+
+void AFortSpawnedScoreActor::OnScoreActorCollected_(
+    UObject* Context,
+    FFrame& Stack)
+{
+    AFortPlayerStateAthena* PlayerState = nullptr;
+    FFrame Probe = Stack;
+    Probe.StepCompiledIn(&PlayerState);
+
+    const UClass* ScoreActorClass = StaticClass();
+    auto ScoreActor = IsLiveObject(Context) &&
+            ScoreActorClass && Context->IsA(ScoreActorClass)
+        ? static_cast<AFortSpawnedScoreActor*>(Context)
+        : nullptr;
+    const auto Event = ScoreActor &&
+            ScoreActor->HasGameplayTags()
+        ? GetCoinEventFromTags(
+              ScoreActor->GameplayTags, ScoreActor)
+        : EAthenaScoringEventCompat::None;
+    auto Controller = ResolveScoreController(PlayerState);
+    int32* Counter = ResolveScoreEventCounter(
+        PlayerState, Event);
+    const int32 ScoreBefore = IsLiveObject(PlayerState) &&
+            PlayerState->HasTotalPlayerScore()
+        ? PlayerState->TotalPlayerScore : 0;
+    const int32 CounterBefore = Counter ? *Counter : 0;
+    const bool bCompatibilityCollection =
+        ScoreActor && Controller &&
+        Event != EAthenaScoringEventCompat::None &&
+        FFortAthenaScoreRoyaleCompatibility::IsActive();
+    const uint64 ScoreActorIdentity = bCompatibilityCollection
+        ? GetScoreRoyaleObjectIdentity(ScoreActor)
+        : 0;
+
+    if (bCompatibilityCollection &&
+        ScoreActorIdentity &&
+        !GScoreRoyaleCompatibilityState
+             .CollectedScoreActors.insert(
+                 ScoreActorIdentity).second)
+    {
+        AFortPlayerStateAthena* Ignored = nullptr;
+        Stack.StepCompiledIn(&Ignored);
+        Stack.IncrementCode();
+        return;
+    }
+
+    if (OnScoreActorCollected_OG)
+    {
+        OnScoreActorCollected_OG(Context, Stack);
+    }
+    else
+    {
+        AFortPlayerStateAthena* Ignored = nullptr;
+        Stack.StepCompiledIn(&Ignored);
+        Stack.IncrementCode();
+    }
+
+    if (!bCompatibilityCollection ||
+        !IsLiveObject(PlayerState) ||
+        !PlayerState->HasTotalPlayerScore())
+    {
+        return;
+    }
+    Counter = ResolveScoreEventCounter(PlayerState, Event);
+    if (PlayerState->TotalPlayerScore == ScoreBefore &&
+        (!Counter || *Counter == CounterBefore))
+    {
+        auto Tags = MakeScoreEventTags(Event);
+        FFortAthenaScoreRoyaleCompatibility::AwardEvent(
+            Controller, Event, &Tags);
+        FreeScoreEventTags(Tags);
+    }
+    else
+    {
+        ReconcileScoreRoyaleTeamTotals(
+            GScoreRoyaleCompatibilityState.GameState,
+            PlayerState);
+    }
+}
+
+void AFortSpawnedScoreActor::PostLoadHook()
+{
+    if (!FFortAthenaScoreRoyaleCompatibility::
+            IsSupportedBuild() ||
+        !StaticClass())
+    {
+        return;
+    }
+    const auto DefaultObject = GetDefaultObj();
+    UFunction* Function = DefaultObject
+        ? DefaultObject->GetFunction(
+              "OnScoreActorCollected")
+        : nullptr;
+    if (!Function || !Function->ExecFunction ||
+        !HasSingleScorePlayerStateParameter(Function))
+    {
+        SDK::DbgLog(
+            "[ScoreRoyale] score-actor collection hook "
+            "was unavailable or had an unexpected ABI\n");
+        return;
+    }
+
+    void* HookAddress = reinterpret_cast<void*>(
+        OnScoreActorCollected_);
+    if (Function->ExecFunction != HookAddress)
+    {
+        Utils::ExecHook(
+            Function,
+            OnScoreActorCollected_,
+            OnScoreActorCollected_OG);
+    }
+    SDK::DbgLog(
+        "[ScoreRoyale] installed exact-once coin "
+        "collection observer\n");
 }

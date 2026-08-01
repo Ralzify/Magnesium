@@ -1750,6 +1750,9 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         const bool bIsNative1040LTM =
             FFortAthenaNativeLTMCompatibility::
                 IsTargetPlaylist(Playlist);
+        const bool bIsOriginalFoodFight =
+            FFortAthenaNativeLTMCompatibility::
+                IsOriginalFoodFightPlaylist(Playlist);
 
         // Respawn options are user gameplay policy even for native LTMs.
         // Apply the selected values after loading the authored playlist while
@@ -1809,6 +1812,7 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
                     FFortAthenaHeistCompatibility::IsHeistPlaylist(
                         Playlist) ||
                     bIsNative1040LTM ||
+                    bIsOriginalFoodFight ||
                     bIsCarminePlaylist) &&
                 FPlaylistPropertyArray::HasOverridePlaylist())
             {
@@ -1849,6 +1853,7 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         const bool bIsHeistPlaylist =
             FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist);
         if (bIsHeistPlaylist || bIsNative1040LTM ||
+            bIsOriginalFoodFight ||
             ShouldRepairLateSeasonTeams())
         {
             SyncPlaylistTeamSettings(GameMode, GameState, Playlist);
@@ -1901,6 +1906,8 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         }
 
         FFortAthenaHeistCompatibility::PreparePlaylist(
+            GameState, Playlist);
+        FFortAthenaScoreRoyaleCompatibility::PreparePlaylist(
             GameState, Playlist);
         if (bIsNative1040LTM)
             PublishNative1040Playlist(GameState, Playlist);

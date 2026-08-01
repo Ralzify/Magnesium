@@ -2173,8 +2173,24 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			}
 			else
 			{
-				bRespawnAllowed |=
-					FConfiguration::bForceRespawns;
+				bool bScoreRoyaleRespawnAllowed = false;
+				if (FFortAthenaScoreRoyaleCompatibility::
+						TryGetRespawnAllowed(
+							PlayerController->PlayerState,
+							bScoreRoyaleRespawnAllowed))
+				{
+					// Score Royale owns its authored respawn window, while
+					// the explicit Infinite Respawns setting remains a user
+					// override for ordinary (non-terminal) gameplay.
+					bRespawnAllowed =
+						bScoreRoyaleRespawnAllowed ||
+						FConfiguration::bForceRespawns;
+				}
+				else
+				{
+					bRespawnAllowed |=
+						FConfiguration::bForceRespawns;
+				}
 			}
 		}
 	}
@@ -2610,6 +2626,11 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 	if (bRestoringRespawnPawn)
 	{
+		// A replacement pawn must never inherit the transient ghost state or its
+		// hidden backing gadget from the eliminated pawn.
+		UFortKismetLibrary::CleanupGhostMode(
+			PlayerController, true);
+
 		// Ability initialization can restore persistent death/DBNO state, so final
 		// cleanup must run after it and before any item is equipped.
 		ClearRespawnBlockingAbilityState(PlayerController, FortPawn);
@@ -2650,11 +2671,46 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		ClearLegacyPlayerStateDeathFlags(
 			(AFortPlayerStateAthena*)PlayerController->PlayerState);
 
+		// Direct Possess updates the generic Pawn field, but FN 6.21 can leave
+		// MyFortPawn pointing at the destroyed body. Bind the replacement before
+		// the client lifecycle RPC so every camera/pawn lookup sees the same actor.
+		if (VersionInfo.FortniteVersion == 6.21 &&
+			PlayerController->HasMyFortPawn() &&
+			PlayerController->MyFortPawn != FortPawn)
+		{
+			PlayerController->MyFortPawn = FortPawn;
+		}
+
 		// This reliable client notification performs the client-side half of the
 		// replacement-pawn lifecycle (including releasing death input/action
 		// state). Keep it one-shot here; ClientRestart or another server respawn
 		// from this acknowledgement would create a possession feedback loop.
 		PlayerController->ClientOnPawnSpawned();
+
+		// The custom forced-respawn path has supplied a valid pawn, but FN 6.21
+		// does not reliably replace the owning client's destroyed death/spectator
+		// view target. Cut the authoritative and remote views to this exact pawn
+		// without restarting possession (which would recurse through this ack).
+		if (VersionInfo.FortniteVersion == 6.21)
+		{
+			if (PlayerController->GetFunction(
+					"SetViewTargetWithBlend"))
+			{
+				PlayerController->SetViewTargetWithBlend(
+					(AActor*)FortPawn,
+					0.f, (uint8)0, 0.f, false);
+			}
+			FortPawn->ForceNetUpdate();
+			const bool bQueuedClientViewTarget =
+				ClientForceViewTarget(
+					PlayerController, (AActor*)FortPawn);
+			PlayerController->ForceNetUpdate();
+			SDK::DbgLog(
+				"[Respawn] repaired FN 6.21 replacement camera "
+				"controller=%p pawn=%p clientViewRPC=%d\n",
+				(void*)PlayerController, (void*)FortPawn,
+				(int)bQueuedClientViewTarget);
+		}
 
 		bool bControllerInputIgnored = false;
 		if (auto IsIgnoredFn = PlayerController->GetFunction("IsActionInputIgnored"))
@@ -3025,6 +3081,8 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 		return;
 
 	UFortItemDefinition* RealDef = (UFortItemDefinition*)entry->ItemDefinition;
+	AFortInventory::NotifyGhostModeHarvestingToolRequested(
+		PlayerController, RealDef);
 
 	// Special gadgets carry their own server execution path. The Infinity
 	// Gauntlet and Getaway Jewel both depend on it for their native gameplay
@@ -6473,6 +6531,33 @@ void AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(AFortPlayerControl
 	PlayerController->ClientGotoState(FName(L"Playing"));
 	PlayerController->OnRep_Pawn();
 
+	// FN 6.21 can finish the landing transition with the replacement pawn
+	// possessed while the owning client's view target is still the destroyed
+	// death camera. Reassert both halves after landing; GetPlayerViewPoint only
+	// repairs the server-side relevancy origin and cannot move a remote camera.
+	if (VersionInfo.FortniteVersion == 6.21)
+	{
+		if (PlayerController->HasMyFortPawn() &&
+			PlayerController->MyFortPawn != Pawn)
+		{
+			PlayerController->MyFortPawn = Pawn;
+		}
+		if (PlayerController->GetFunction("SetViewTargetWithBlend"))
+		{
+			PlayerController->SetViewTargetWithBlend(
+				(AActor*)Pawn,
+				0.f, (uint8)0, 0.f, false);
+		}
+		const bool bQueuedClientViewTarget =
+			ClientForceViewTarget(
+				PlayerController, (AActor*)Pawn);
+		SDK::DbgLog(
+			"[Respawn] reasserted FN 6.21 landing camera "
+			"controller=%p pawn=%p clientViewRPC=%d\n",
+			(void*)PlayerController, (void*)Pawn,
+			(int)bQueuedClientViewTarget);
+	}
+
 	RestoreEquipmentAfterRespawn(PlayerController,
 		UsesEarlyAthenaLandingClientRefresh());
 	Pawn->ForceNetUpdate();
@@ -7698,6 +7783,8 @@ static void TickDeathSpectateCameraHandoffs(float DeltaSeconds)
 struct FConfiguredRespawnPlaylistSnapshot
 {
 	TWeakObjectPtr<UFortPlaylistAthena> Playlist;
+	bool bHasDisplayRespawnWidget = false;
+	bool bDisplayRespawnWidget = false;
 	bool bHasRespawnInAir = false;
 	bool bRespawnInAir = false;
 	bool bHasRespawnHeight = false;
@@ -7723,6 +7810,14 @@ static void RestoreConfiguredRespawnPlaylist(
 	if (!IsUsableDeathObject(Playlist))
 		return;
 
+	if (Snapshot.bHasDisplayRespawnWidget &&
+		Playlist->HasbDisplayRespawnWidget())
+	{
+		bool OriginalDisplayRespawnWidget =
+			Snapshot.bDisplayRespawnWidget;
+		Playlist->bDisplayRespawnWidget =
+			OriginalDisplayRespawnWidget;
+	}
 	if (Snapshot.bHasRespawnInAir &&
 		Playlist->HasbRespawnInAir())
 	{
@@ -7849,6 +7944,11 @@ static FConfiguredRespawnPlaylistSnapshot*
 	FConfiguredRespawnPlaylistSnapshot Snapshot;
 	Snapshot.Playlist =
 		TWeakObjectPtr<UFortPlaylistAthena>(Playlist);
+	Snapshot.bHasDisplayRespawnWidget =
+		Playlist->HasbDisplayRespawnWidget();
+	if (Snapshot.bHasDisplayRespawnWidget)
+		Snapshot.bDisplayRespawnWidget =
+			Playlist->bDisplayRespawnWidget;
 	Snapshot.bHasRespawnInAir =
 		Playlist->HasbRespawnInAir();
 	if (Snapshot.bHasRespawnInAir)
@@ -7948,7 +8048,15 @@ void AFortPlayerControllerAthena::ApplyConfiguredRespawnPolicy()
 		ResolveAuthoritativeRespawnPlaylists(GameState);
 
 	bool bChanged = false;
-	if (GameState->HasbCheatRespawnEnabled())
+	// FN 6.21's native death path derives respawn eligibility and presentation
+	// from the playlist. Enabling the game-state cheat switch on this build
+	// takes the immediate/debug path and skips its countdown camera handshake.
+	// Keep enforcing the configured playlist fields below, but leave that native
+	// switch authored so ClientStartRespawnPreparation can run normally.
+	const bool bUseNativeCheatRespawnSwitch =
+		VersionInfo.FortniteVersion != 6.21;
+	if (bUseNativeCheatRespawnSwitch &&
+		GameState->HasbCheatRespawnEnabled())
 	{
 		if (!GConfiguredRespawnCheatCaptured)
 		{
@@ -7991,6 +8099,15 @@ void AFortPlayerControllerAthena::ApplyConfiguredRespawnPolicy()
 	{
 		FindOrCaptureConfiguredRespawnPlaylist(Playlist);
 
+		if (Playlist->HasbDisplayRespawnWidget() &&
+			!Playlist->bDisplayRespawnWidget)
+		{
+			// This is the client-side gate for AthenaRespawnBase.  Changing
+			// RespawnType alone creates lives but leaves normal BR playlists
+			// without their countdown widget.
+			Playlist->bDisplayRespawnWidget = true;
+			bChanged = true;
+		}
 		if (Playlist->HasbRespawnInAir() &&
 			!Playlist->bRespawnInAir)
 		{
@@ -8153,6 +8270,19 @@ static bool IsRespawningAllowedForDeath(
 		// Disco's authored safe-zone cutoff remains authoritative even when
 		// the global force-respawn option is enabled.
 		return bDiscoRespawnAllowed;
+	}
+
+	bool bScoreRoyaleRespawnAllowed = false;
+	if (PlayerState &&
+		FFortAthenaScoreRoyaleCompatibility::
+			TryGetRespawnAllowed(
+				PlayerState,
+				bScoreRoyaleRespawnAllowed))
+	{
+		// A configured global respawn policy remains authoritative until the
+		// terminal-match and storm checks above close the lifecycle.
+		return bScoreRoyaleRespawnAllowed ||
+			FConfiguration::bForceRespawns;
 	}
 
 	if (!GameMode || !GameState || !PlayerState)
@@ -9133,6 +9263,11 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	GVehiclePossessionVehicle.erase(PlayerController);
 	GTrackedVehicleLoadouts.erase(PlayerController);
 
+	// This point is reached only for a real player elimination. DBNO and
+	// remote/vehicle possession deaths returned above and retain their state.
+	UFortKismetLibrary::CleanupGhostMode(
+		PlayerController, true);
+
 	RestoreRespawnHiddenWeapon(PlayerController);
 	GPendingRespawnLandingFinalization.erase(
 		PlayerController);
@@ -9259,6 +9394,15 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			? KillerPlayerState->Owner
 				  ->Cast<AFortPlayerControllerAthena>()
 			: nullptr;
+	// Snapshot the authored Score Royale value before native death handling.
+	// The compatibility bridge compares this with the post-native value so it
+	// only supplies the elimination award when the stock mutator did not.
+	const int32 ScoreRoyaleKillerScoreBefore =
+		KillerPlayerState &&
+		KillerPlayerState != PlayerState &&
+		KillerPlayerState->HasTotalPlayerScore()
+			? KillerPlayerState->TotalPlayerScore
+			: 0;
 	// Capture legitimate killer ownership before the death pickup exists.
 	// Carmine's forced auto-pickup must never turn a just-collected row into
 	// a "preexisting" row that survives the post-native cleanup.
@@ -10408,7 +10552,16 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	// It observes and retires itself when native succeeds; only a missing
 	// handshake reaches the bounded fallback. Getaway's Jewel was already
 	// dropped and removed above, so this never repeats inventory processing.
+	//
+	// FN 6.21 owns the complete legacy presentation once the configured
+	// playlist respawn fields have been applied above: its death path creates the
+	// respawn camera, displays the countdown, and sends the ready RPC itself.
+	// Calling PrepareClientForRespawning again, then synthesizing a ready packet,
+	// bypasses that presentation and drops the replacement pawn straight into
+	// the world. Leave 6.21 native here; ServerAcknowledgePossession still fixes
+	// its stale post-spawn camera without disturbing the countdown.
 	if (FConfiguration::bForceRespawns &&
+		VersionInfo.FortniteVersion != 6.21 &&
 		bRespawnAllowed &&
 		GUI::gsStatus != Ended &&
 		GameMode->MatchState != FName(L"WaitingPostMatch"))
@@ -10453,6 +10606,19 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 	if (!bCalledNativeDeathEarly)
 		CallNativePawnDied();
+
+	// DBNO, remote-control, and vehicle notifications returned before reaching
+	// this path. Dispatch exactly once after native processing for a credited,
+	// finalized elimination so the bridge can observe native score progress.
+	if (KillerPlayerState &&
+		KillerPlayerState != PlayerState)
+	{
+		FFortAthenaScoreRoyaleCompatibility::
+			HandleElimination(
+				KillerPlayerState,
+				PlayerState,
+				ScoreRoyaleKillerScoreBefore);
+	}
 
 	// A solo host can eliminate themselves with nobody left to receive a
 	// Victory Royale. Several legacy builds then show Match Stats to the dead

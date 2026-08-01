@@ -496,7 +496,7 @@ namespace AutoHosting
                     "playlist",
                     static_cast<int>(Playlist::Solos)),
                 static_cast<int>(Playlist::Solos),
-                static_cast<int>(Playlist::DiscoDomination));
+                static_cast<int>(Playlist::ScoreRoyaleSquads));
             const int SelectedPlot = ClampValue(
                 ReadInt(
                     Selection,

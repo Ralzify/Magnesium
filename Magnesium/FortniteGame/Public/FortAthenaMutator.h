@@ -17,6 +17,7 @@ class AFortPlayerControllerAthena;
 class AFortPlayerPawnAthena;
 class AFortAthenaMutator_Wax;
 class AFortAthena_WaxToken;
+class ABuildingContainer;
 
 struct FBuildingSupportCellIndex
 {
@@ -174,6 +175,81 @@ public:
     DEFINE_PROP(bMutatesGameState, bool);
     DEFINE_PROP(CachedGameMode, AFortGameMode*);
     DEFINE_PROP(CachedGameState, AFortGameStateAthena*);
+};
+
+enum class EAthenaScoringEventCompat : uint8
+{
+    None = 0,
+    Elimination = 1,
+    ChestOpened = 2,
+    AmmoCanOpened = 3,
+    SupplyDropOpened = 4,
+    SupplyLlamaOpened = 5,
+    ForagedItemConsumed = 6,
+    SurvivalInMinutes = 7,
+    CollectedCoinBronze = 8,
+    CollectedCoinSilver = 9,
+    CollectedCoinGold = 10,
+    AIKilled = 11
+};
+
+class AFortAthenaMutator_Score : public AFortAthenaMutator
+{
+public:
+    UCLASS_COMMON_MEMBERS(AFortAthenaMutator_Score);
+
+    DEFINE_PROP(NumCoinWaves, int32);
+    DEFINE_PROP(bSupportsRespawnConfig, bool);
+    DEFINE_PROP(bRespawnsAllowed, bool);
+    DEFINE_PROP(StopRespawnPhase, FScalableFloat);
+    DEFINE_PROP(GameMsgText_Intro, FText);
+    DEFINE_PROP(GameMsgText_FirstCoinsSpawned, FText);
+    DEFINE_PROP(GameMsgText_CoinsSpawned, FText);
+    DEFINE_PROP(GameMsg_NoMoreRespawnsWarning, FAthenaGameMessageData);
+    DEFINE_PROP(GameMsg_NoMoreRespawns, FAthenaGameMessageData);
+};
+
+class AFortSpawnedScoreActor : public AActor
+{
+public:
+    UCLASS_COMMON_MEMBERS(AFortSpawnedScoreActor);
+
+    DEFINE_PROP(GameplayTags, FGameplayTagContainer);
+
+    DefUHookOg(OnScoreActorCollected_);
+    InitPostLoadHooks;
+};
+
+class FFortAthenaScoreRoyaleCompatibility final
+{
+public:
+    static bool IsSupportedBuild();
+    static bool IsScoreRoyalePlaylist(
+        const UFortPlaylistAthena* Playlist);
+    static bool IsActive();
+    static void PreparePlaylist(
+        AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist);
+    static void Tick(UNetDriver* Driver, float DeltaSeconds);
+    static bool AwardEvent(
+        AFortPlayerControllerAthena* PlayerController,
+        EAthenaScoringEventCompat Event,
+        const FGameplayTagContainer* ContextTags = nullptr);
+    static void HandleContainerSearched(
+        ABuildingContainer* Container,
+        AFortPlayerPawnAthena* SearchingPawn,
+        const FName& OriginalTierGroup);
+    static void HandleForagedItemConsumed(
+        AFortPlayerControllerAthena* PlayerController,
+        AActor* SourceActor,
+        int32 ScoreBefore);
+    static void HandleElimination(
+        AFortPlayerStateAthena* KillerPlayerState,
+        AFortPlayerStateAthena* VictimPlayerState,
+        int32 ScoreBefore);
+    static bool TryGetRespawnAllowed(
+        AFortPlayerStateAthena* PlayerState,
+        bool& OutAllowed);
 };
 
 struct FActiveGameplayModifier
@@ -388,6 +464,9 @@ class FFortAthenaNativeLTMCompatibility final
 {
 public:
     static bool IsSupportedBuild();
+    static bool IsOriginalFoodFightSupportedBuild();
+    static bool IsOriginalFoodFightPlaylist(
+        const UFortPlaylistAthena* Playlist);
     static bool IsTargetPlaylist(
         const UFortPlaylistAthena* Playlist);
     static bool IsReadyForMatch(
@@ -561,6 +640,11 @@ public:
     DEFINE_FUNC(OnRep_FoodTeam, void);
     DEFINE_FUNC(GetObjectiveActor, AAthenaBarrierObjective*);
     DEFINE_FUNC(SetTeam, void);
+
+    static inline AAthenaBarrierObjective*
+        (*GetObjectiveActorOG)(AAthenaBarrierFlag*) = nullptr;
+    static AAthenaBarrierObjective* GetObjectiveActorHook(
+        AAthenaBarrierFlag* Flag);
 };
 
 struct FBarrierTeamState

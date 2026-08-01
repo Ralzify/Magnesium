@@ -12,13 +12,1481 @@
 #include <ShlObj.h>
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 #include <vector>
 
 uint32_t OnItemInstanceAddedVft;
 uint64_t ApplyGadgetDataAddress;
+uint64_t ClearAbility_;
 
 namespace
 {
+    constexpr int32 GhostCharacterPartSlotCount = 6;
+
+    struct FGhostCharacterPartRestore
+    {
+        AFortPlayerPawnAthena* Pawn = nullptr;
+        AFortPlayerStateAthena* PlayerState = nullptr;
+        UObject* Parts[GhostCharacterPartSlotCount]{};
+        bool bRestore[GhostCharacterPartSlotCount]{};
+    };
+
+    std::unordered_map<
+        AFortPlayerControllerAthena*,
+        FGhostCharacterPartRestore>
+        GhostCharacterPartRestores;
+
+    struct FPendingGhostModeCleanup
+    {
+        TWeakObjectPtr<AFortPlayerControllerAthena> Owner;
+        TWeakObjectPtr<UFortItemDefinition> ItemDefinition;
+        FGhostCharacterPartRestore CharacterParts{};
+        bool bRestoreCharacterParts = false;
+        double EarliestFinalizeTime = 0.0;
+        double RetryDeadline = 0.0;
+        double ForceFinalizeDeadline = 0.0;
+        int32 NativeEndAttempts = 0;
+        int32 FinalizationPass = 0;
+        bool bLoggedWaitingForPawn = false;
+    };
+
+    std::vector<FPendingGhostModeCleanup>
+        PendingGhostModeCleanups;
+
+    struct FTrackedGhostModeSession
+    {
+        TWeakObjectPtr<AFortPlayerControllerAthena> Owner;
+        TWeakObjectPtr<UFortItemDefinition> ItemDefinition;
+        FGuid ItemGuid{};
+        double StartedAt = 0.0;
+        double ExpireAt = 0.0;
+        double EarliestExitCleanupTime = 0.0;
+        float InitialPawnExitStartTime = 0.0f;
+        bool bHasInitialPawnExitStartTime = false;
+        bool bObservedControllerGhostMode = false;
+        bool bBackingRemovalObserved = false;
+        bool bExitRequested = false;
+    };
+
+    std::vector<FTrackedGhostModeSession>
+        TrackedGhostModeSessions;
+
+    bool ResolveFixedCharacterPartArray(
+        UObject* Owner,
+        const char* PropertyName,
+        UObject**& OutParts)
+    {
+        OutParts = nullptr;
+        if (!Owner || !Owner->Class || !PropertyName ||
+            Offsets::ElementSize < sizeof(int32))
+        {
+            return false;
+        }
+
+        auto Property = Owner->GetProperty(PropertyName);
+        if (!Property)
+            return false;
+
+        const size_t RequiredPropertyBytes =
+            static_cast<size_t>(max(
+                Offsets::Offset_Internal,
+                Offsets::ElementSize)) + sizeof(uint32);
+        if (!SDK::MemReadable(
+                Property, RequiredPropertyBytes))
+        {
+            return false;
+        }
+
+        const int32 PropertyOffset =
+            static_cast<int32>(SDK::DecryptPropOffset(
+                GetFromOffset<uint32>(
+                    Property, Offsets::Offset_Internal)));
+        const uint32 ElementSize = GetFromOffset<uint32>(
+            Property, Offsets::ElementSize);
+        const int32 ArrayDimension = GetFromOffset<int32>(
+            Property,
+            Offsets::ElementSize - sizeof(int32));
+        const int32 OwnerSize =
+            Owner->Class->GetPropertiesSize();
+        if (PropertyOffset < 0 ||
+            ElementSize != sizeof(UObject*) ||
+            ArrayDimension < GhostCharacterPartSlotCount ||
+            ArrayDimension > 16 ||
+            OwnerSize <= PropertyOffset ||
+            static_cast<size_t>(ElementSize) *
+                    ArrayDimension >
+                static_cast<size_t>(
+                    OwnerSize - PropertyOffset))
+        {
+            return false;
+        }
+
+        auto Parts = reinterpret_cast<UObject**>(
+            reinterpret_cast<uint8*>(Owner) +
+            PropertyOffset);
+        if (!SDK::MemReadable(
+                Parts,
+                static_cast<size_t>(ElementSize) *
+                    ArrayDimension))
+        {
+            return false;
+        }
+
+        OutParts = Parts;
+        return true;
+    }
+
+    bool ResolvePlayerStateCharacterPartArray(
+        AFortPlayerStateAthena* PlayerState,
+        UObject**& OutParts,
+        const wchar_t*& OutDirtyProperty)
+    {
+        OutParts = nullptr;
+        OutDirtyProperty = nullptr;
+        if (!PlayerState || !PlayerState->Class)
+            return false;
+
+        // 6.21 uses the flat fixed array. Keep the adjacent struct layout
+        // supported as well so the Shadow Stone compatibility range does not
+        // rely on a hard-coded season boundary.
+        if (ResolveFixedCharacterPartArray(
+                PlayerState, "CharacterParts", OutParts))
+        {
+            OutDirtyProperty = L"CharacterParts";
+            return true;
+        }
+        if (ResolveFixedCharacterPartArray(
+                PlayerState, "LocalCharacterParts", OutParts))
+        {
+            OutDirtyProperty = L"LocalCharacterParts";
+            return true;
+        }
+
+        auto CharacterPartsProperty =
+            PlayerState->GetProperty(
+                "CharacterParts", 0x100000);
+        auto CharacterPartsStruct = FindObject<UStruct>(
+            L"/Script/FortniteGame.CustomCharacterParts");
+        if (!CharacterPartsProperty ||
+            !CharacterPartsStruct ||
+            Offsets::ElementSize < sizeof(int32))
+        {
+            return false;
+        }
+
+        auto PartsProperty =
+            CharacterPartsStruct->GetProperty("Parts");
+        if (!PartsProperty)
+            return false;
+
+        const int32 OuterOffset =
+            static_cast<int32>(SDK::DecryptPropOffset(
+                GetFromOffset<uint32>(
+                    CharacterPartsProperty,
+                    Offsets::Offset_Internal)));
+        const uint32 OuterSize = GetFromOffset<uint32>(
+            CharacterPartsProperty,
+            Offsets::ElementSize);
+        const int32 PartsOffset =
+            static_cast<int32>(SDK::DecryptPropOffset(
+                GetFromOffset<uint32>(
+                    PartsProperty,
+                    Offsets::Offset_Internal)));
+        const uint32 PartElementSize = GetFromOffset<uint32>(
+            PartsProperty, Offsets::ElementSize);
+        const int32 PartArrayDimension = GetFromOffset<int32>(
+            PartsProperty,
+            Offsets::ElementSize - sizeof(int32));
+        const int32 PlayerStateSize =
+            PlayerState->Class->GetPropertiesSize();
+        if (OuterOffset < 0 || PartsOffset < 0 ||
+            PartElementSize != sizeof(UObject*) ||
+            PartArrayDimension < GhostCharacterPartSlotCount ||
+            PartArrayDimension > 16 ||
+            OuterSize < static_cast<uint32>(PartsOffset) ||
+            static_cast<size_t>(PartElementSize) *
+                    PartArrayDimension >
+                static_cast<size_t>(OuterSize - PartsOffset) ||
+            PlayerStateSize <= OuterOffset ||
+            OuterSize > static_cast<uint32>(
+                PlayerStateSize - OuterOffset))
+        {
+            return false;
+        }
+
+        auto Parts = reinterpret_cast<UObject**>(
+            reinterpret_cast<uint8*>(PlayerState) +
+            OuterOffset + PartsOffset);
+        if (!SDK::MemReadable(
+                Parts,
+                static_cast<size_t>(PartElementSize) *
+                    PartArrayDimension))
+        {
+            return false;
+        }
+
+        OutParts = Parts;
+        OutDirtyProperty = L"CharacterParts";
+        return true;
+    }
+
+    bool CaptureCurrentGhostCharacterParts(
+        AFortPlayerControllerAthena* PlayerController,
+        FGhostCharacterPartRestore& OutRestore)
+    {
+        OutRestore = {};
+        if (!PlayerController)
+            return false;
+
+        auto Pawn = PlayerController->MyFortPawn
+            ? PlayerController->MyFortPawn
+            : PlayerController->Pawn
+                ? PlayerController->Pawn
+                    ->Cast<AFortPlayerPawnAthena>()
+                : nullptr;
+        auto PlayerState = PlayerController->PlayerState
+            ? PlayerController->PlayerState
+                ->Cast<AFortPlayerStateAthena>()
+            : nullptr;
+        if (!Pawn || !PlayerState)
+            return false;
+
+        UObject** PawnParts = nullptr;
+        UObject** PlayerStateParts = nullptr;
+        const wchar_t* IgnoredDirtyProperty = nullptr;
+        ResolveFixedCharacterPartArray(
+            Pawn, "CharacterParts", PawnParts);
+        ResolvePlayerStateCharacterPartArray(
+            PlayerState,
+            PlayerStateParts,
+            IgnoredDirtyProperty);
+
+        int32 CapturedCount = 0;
+        for (int32 PartType = 0;
+            PartType < GhostCharacterPartSlotCount;
+            PartType++)
+        {
+            UObject* Part = PawnParts
+                ? PawnParts[PartType]
+                : nullptr;
+            if (!Part && PlayerStateParts)
+                Part = PlayerStateParts[PartType];
+            if (!Part && PartType == 3)
+            {
+                Part = const_cast<UObject*>(
+                    FindObject<UObject>(
+                        L"/Game/Characters/CharacterParts/Backpacks/"
+                        L"NoBackpack.NoBackpack"));
+            }
+            if (!Part)
+                continue;
+
+            OutRestore.Parts[PartType] = Part;
+            OutRestore.bRestore[PartType] = true;
+            ++CapturedCount;
+        }
+
+        if (CapturedCount == 0)
+            return false;
+        OutRestore.Pawn = Pawn;
+        OutRestore.PlayerState = PlayerState;
+        return true;
+    }
+
+    bool CaptureGhostCharacterPartRestore(
+        AFortPlayerControllerAthena* PlayerController,
+        const UFortItemDefinition* ItemDefinition,
+        FGhostCharacterPartRestore& OutRestore)
+    {
+        OutRestore = {};
+        if (!PlayerController ||
+            !UFortKismetLibrary::IsGhostModeItemDefinition(
+                ItemDefinition))
+        {
+            return false;
+        }
+
+        auto Gadget = ItemDefinition
+            ->Cast<UFortGadgetItemDefinition>();
+        auto Pawn = PlayerController->MyFortPawn
+            ? PlayerController->MyFortPawn
+            : PlayerController->Pawn
+                ? PlayerController->Pawn
+                    ->Cast<AFortPlayerPawnAthena>()
+                : nullptr;
+        auto PlayerState = PlayerController->PlayerState
+            ? PlayerController->PlayerState
+                ->Cast<AFortPlayerStateAthena>()
+            : nullptr;
+
+        auto PreGrantRestore =
+            GhostCharacterPartRestores.find(
+                PlayerController);
+        if (PreGrantRestore !=
+            GhostCharacterPartRestores.end())
+        {
+            OutRestore = PreGrantRestore->second;
+            GhostCharacterPartRestores.erase(
+                PreGrantRestore);
+            // Death cleanup can replace the pawn between grant and terminal
+            // removal. The cosmetic snapshot still belongs to this controller,
+            // but it must be applied to the currently possessed pawn/state.
+            OutRestore.Pawn = Pawn;
+            OutRestore.PlayerState = PlayerState;
+            if (OutRestore.Pawn && OutRestore.PlayerState)
+                return true;
+            OutRestore = {};
+        }
+
+        if (!Gadget || !Gadget->HasCharacterParts() ||
+            !Pawn || !Pawn->Class || !PlayerState ||
+            Gadget->CharacterParts.Num() <= 0 ||
+            Gadget->CharacterParts.Num() >
+                GhostCharacterPartSlotCount ||
+            Gadget->CharacterParts.Max() <
+                Gadget->CharacterParts.Num() ||
+            !SDK::MemReadable(
+                Gadget->CharacterParts.Data,
+                static_cast<size_t>(
+                    Gadget->CharacterParts.Num()) *
+                    sizeof(UObject*)) ||
+            Offsets::ElementSize < sizeof(int32))
+        {
+            return false;
+        }
+
+        auto PreviousPartsProperty =
+            Pawn->GetProperty("PreviousCharacterParts");
+        const size_t RequiredPropertyBytes =
+            static_cast<size_t>(max(
+                Offsets::Offset_Internal,
+                Offsets::ElementSize)) + sizeof(uint32);
+        if (!PreviousPartsProperty ||
+            !SDK::MemReadable(
+                PreviousPartsProperty,
+                RequiredPropertyBytes))
+        {
+            return false;
+        }
+
+        const int32 PreviousPartsOffset =
+            static_cast<int32>(SDK::DecryptPropOffset(
+                GetFromOffset<uint32>(
+                    PreviousPartsProperty,
+                    Offsets::Offset_Internal)));
+        const uint32 PartElementSize =
+            GetFromOffset<uint32>(
+                PreviousPartsProperty,
+                Offsets::ElementSize);
+        const int32 PartArrayDimension =
+            GetFromOffset<int32>(
+                PreviousPartsProperty,
+                Offsets::ElementSize - sizeof(int32));
+        const int32 PawnPropertiesSize =
+            Pawn->Class->GetPropertiesSize();
+        if (PreviousPartsOffset < 0 ||
+            PartElementSize != sizeof(UObject*) ||
+            PartArrayDimension < GhostCharacterPartSlotCount ||
+            PartArrayDimension > 16 ||
+            PawnPropertiesSize <= PreviousPartsOffset ||
+            static_cast<size_t>(PartElementSize) *
+                    PartArrayDimension >
+                static_cast<size_t>(PawnPropertiesSize -
+                    PreviousPartsOffset))
+        {
+            return false;
+        }
+
+        auto PreviousParts = reinterpret_cast<UObject**>(
+            reinterpret_cast<uint8*>(Pawn) +
+            PreviousPartsOffset);
+        if (!SDK::MemReadable(
+                PreviousParts,
+                static_cast<size_t>(PartElementSize) *
+                    PartArrayDimension))
+        {
+            return false;
+        }
+
+        int32 CapturedCount = 0;
+        for (int32 Index = 0;
+            Index < Gadget->CharacterParts.Num(); Index++)
+        {
+            auto GadgetPart = Gadget->CharacterParts[Index];
+            if (!GadgetPart || !GadgetPart->Class)
+                continue;
+
+            const int32 PartTypeOffset =
+                GadgetPart->GetOffset("CharacterPartType");
+            if (PartTypeOffset < 0 ||
+                PartTypeOffset >=
+                    GadgetPart->Class->GetPropertiesSize() ||
+                !SDK::MemReadable(
+                    reinterpret_cast<uint8*>(GadgetPart) +
+                        PartTypeOffset,
+                    sizeof(uint8)))
+            {
+                continue;
+            }
+
+            const uint8 PartType = GetFromOffset<uint8>(
+                GadgetPart, PartTypeOffset);
+            if (PartType >= GhostCharacterPartSlotCount ||
+                OutRestore.bRestore[PartType])
+            {
+                continue;
+            }
+
+            UObject* PreviousPart = PreviousParts[PartType];
+            if (!PreviousPart && PartType == 3)
+            {
+                PreviousPart = const_cast<UObject*>(
+                    FindObject<UObject>(
+                        L"/Game/Characters/CharacterParts/Backpacks/"
+                        L"NoBackpack.NoBackpack"));
+            }
+            if (!PreviousPart)
+                continue;
+
+            OutRestore.Parts[PartType] = PreviousPart;
+            OutRestore.bRestore[PartType] = true;
+            ++CapturedCount;
+        }
+
+        if (CapturedCount == 0)
+            return false;
+        OutRestore.Pawn = Pawn;
+        OutRestore.PlayerState = PlayerState;
+        return true;
+    }
+
+    void ApplyGhostCharacterPartRestore(
+        const FGhostCharacterPartRestore& Restore)
+    {
+        if (!Restore.Pawn || !Restore.PlayerState)
+            return;
+
+        int32 RestoredCount = 0;
+        for (uint8 PartType = 0;
+            PartType < GhostCharacterPartSlotCount; PartType++)
+        {
+            if (!Restore.bRestore[PartType] ||
+                !Restore.Parts[PartType])
+            {
+                continue;
+            }
+            Restore.Pawn->ServerChoosePart(
+                PartType, Restore.Parts[PartType]);
+            ++RestoredCount;
+        }
+
+        // ServerChoosePart is an RPC entry point and is not a reliable local
+        // state writer on the 6.21 dedicated server. Write the two fixed arrays
+        // that its native implementation normally synchronizes so the
+        // subsequent visualization pass cannot read the stale ghost parts back.
+        int32 PawnArrayWrites = 0;
+        UObject** PawnParts = nullptr;
+        if (ResolveFixedCharacterPartArray(
+                Restore.Pawn,
+                "CharacterParts",
+                PawnParts))
+        {
+            for (int32 PartType = 0;
+                PartType < GhostCharacterPartSlotCount;
+                PartType++)
+            {
+                if (!Restore.bRestore[PartType] ||
+                    !Restore.Parts[PartType])
+                {
+                    continue;
+                }
+                PawnParts[PartType] =
+                    Restore.Parts[PartType];
+                ++PawnArrayWrites;
+            }
+        }
+
+        int32 PlayerStateArrayWrites = 0;
+        UObject** PlayerStateParts = nullptr;
+        const wchar_t* DirtyProperty = nullptr;
+        if (ResolvePlayerStateCharacterPartArray(
+                Restore.PlayerState,
+                PlayerStateParts,
+                DirtyProperty))
+        {
+            for (int32 PartType = 0;
+                PartType < GhostCharacterPartSlotCount;
+                PartType++)
+            {
+                if (!Restore.bRestore[PartType] ||
+                    !Restore.Parts[PartType])
+                {
+                    continue;
+                }
+                PlayerStateParts[PartType] =
+                    Restore.Parts[PartType];
+                ++PlayerStateArrayWrites;
+            }
+            if (DirtyProperty)
+            {
+                VersionFeatureAdapter::
+                    MarkReplicatedPropertyDirty(
+                        Restore.PlayerState,
+                        DirtyProperty);
+            }
+        }
+
+        if (auto OnRepCharacterParts =
+                Restore.PlayerState->GetFunction(
+                    "OnRep_CharacterParts"))
+        {
+            Restore.PlayerState->ProcessEvent(
+                OnRepCharacterParts, nullptr);
+        }
+        if (auto PartsReinitialized =
+                Restore.Pawn->GetFunction(
+                    "OnCharacterPartsReinitialized"))
+        {
+            Restore.Pawn->ProcessEvent(
+                PartsReinitialized, nullptr);
+        }
+        if (auto KismetDefault =
+                UFortKismetLibrary::GetDefaultObj())
+        {
+            if (KismetDefault->GetFunction(
+                    "UpdatePlayerCustomCharacterPartsVisualization"))
+            {
+                UFortKismetLibrary::
+                    UpdatePlayerCustomCharacterPartsVisualization(
+                        Restore.PlayerState);
+            }
+        }
+        Restore.PlayerState->ForceNetUpdate();
+        Restore.Pawn->ForceNetUpdate();
+        SDK::DbgLog(
+            "[GhostMode] restored pre-gadget character parts "
+            "pawn=%p playerState=%p selected=%d "
+            "pawnWrites=%d playerStateWrites=%d\n",
+            static_cast<void*>(Restore.Pawn),
+            static_cast<void*>(Restore.PlayerState),
+            RestoredCount,
+            PawnArrayWrites,
+            PlayerStateArrayWrites);
+    }
+
+    void RemoveGhostGadgetAbilitySetFallback(
+        AFortPlayerControllerAthena* PlayerController,
+        const UFortItemDefinition* ItemDefinition)
+    {
+        if (!PlayerController ||
+            !UFortKismetLibrary::IsGhostModeItemDefinition(
+                ItemDefinition) ||
+            !PlayerController->PlayerState)
+        {
+            return;
+        }
+
+        auto Gadget = ItemDefinition
+            ->Cast<UFortGadgetItemDefinition>();
+        auto PlayerState = PlayerController->PlayerState
+            ->Cast<AFortPlayerStateAthena>();
+        auto AbilitySystemComponent =
+            PlayerState
+                ? PlayerState->AbilitySystemComponent
+                : nullptr;
+        const UFortAbilitySet* AbilitySet =
+            Gadget && Gadget->HasAbilitySet()
+                ? Gadget->AbilitySet.Get()
+                : nullptr;
+        if (!AbilitySystemComponent || !AbilitySet)
+            return;
+
+        std::vector<FGameplayAbilitySpecHandle> AbilitiesToRemove;
+        auto& AbilitySpecs =
+            AbilitySystemComponent->ActivatableAbilities.Items;
+        for (int32 SpecIndex = 0;
+            SpecIndex < AbilitySpecs.Num(); SpecIndex++)
+        {
+            auto& Spec = AbilitySpecs.Get(
+                SpecIndex, FGameplayAbilitySpec::Size());
+            if (!Spec.Ability)
+                continue;
+
+            bool bFromGhostSet = false;
+            for (int32 AbilityIndex = 0;
+                AbilityIndex < AbilitySet->GameplayAbilities.Num();
+                AbilityIndex++)
+            {
+                auto AbilityClass =
+                    AbilitySet->GameplayAbilities[AbilityIndex]
+                        .Get();
+                if (AbilityClass &&
+                    Spec.Ability->Class == AbilityClass)
+                {
+                    bFromGhostSet = true;
+                    break;
+                }
+            }
+            if (bFromGhostSet)
+            {
+                AbilitiesToRemove.push_back(Spec.Handle);
+            }
+        }
+
+        std::vector<FActiveGameplayEffectHandle>
+            EffectHandlesToRemove;
+        std::vector<UClass*> EffectClassesToRemove;
+        int32 IndirectSpookyEffects = 0;
+        // GA_SpookyMist_PassiveSetup applies its presentation effects at
+        // runtime and keeps the looping one in its own LoopingGC handle. Those
+        // effects are not necessarily present in the gadget AbilitySet's
+        // GrantedGameplayEffects array, so matching only that array leaves
+        // GCN_Loop_SpookyMist alive on the owning client. Its OnRemoval event
+        // is what restores the pawn materials and stops the purple loop FX.
+        // Include the exact Spooky Mist effect family so removing the active
+        // effect follows GAS's normal replicated gameplay-cue teardown.
+        {
+            auto& ActiveEffects = AbilitySystemComponent
+                ->ActiveGameplayEffects.GameplayEffects_Internal;
+            for (int32 EffectIndex = 0;
+                EffectIndex < ActiveEffects.Num(); EffectIndex++)
+            {
+                auto& ActiveEffect = ActiveEffects.Get(
+                    EffectIndex, FActiveGameplayEffect::Size());
+                if (!ActiveEffect.Spec.Def)
+                    continue;
+
+                bool bFromGhostSet = false;
+                if (AbilitySet->HasGrantedGameplayEffects())
+                {
+                    for (int32 GrantedIndex = 0;
+                        GrantedIndex <
+                            AbilitySet->GrantedGameplayEffects.Num();
+                        GrantedIndex++)
+                    {
+                        auto& GrantedEffect =
+                            AbilitySet->GrantedGameplayEffects.Get(
+                                GrantedIndex,
+                                FGameplayEffectApplicationInfoHard::
+                                    Size());
+                        auto EffectClass =
+                            GrantedEffect.GameplayEffect.Get();
+                        if (EffectClass &&
+                            ActiveEffect.Spec.Def->Class ==
+                                EffectClass)
+                        {
+                            bFromGhostSet = true;
+                            break;
+                        }
+                    }
+                }
+
+                bool bIndirectSpookyEffect = false;
+                if (ActiveEffect.Spec.Def->Class)
+                {
+                    const auto EffectClassName =
+                        ActiveEffect.Spec.Def->Class->Name.ToWString();
+                    static const wchar_t* const
+                        GhostEffectClassNames[] =
+                    {
+                        L"GE_CBGA_SpookyMist_C",
+                        L"GE_SpookyMist_Equipped_C",
+                        L"GE_SpookyMist_FallDamageImmune_C",
+                        L"GE_SpookyMist_Speed_C",
+                        L"GE_SpookyMist_GC_LoopingOnPlayer_C",
+                        L"GE_SpookyMist_GC_Trail_C",
+                        L"GE_SpookyMist_GC_Wobble_C"
+                    };
+                    for (const auto KnownClassName :
+                        GhostEffectClassNames)
+                    {
+                        if (EffectClassName == KnownClassName)
+                        {
+                            bIndirectSpookyEffect = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!bFromGhostSet && !bIndirectSpookyEffect)
+                    continue;
+
+                auto Handle =
+                    *reinterpret_cast<FActiveGameplayEffectHandle*>(
+                        reinterpret_cast<uint8*>(&ActiveEffect) +
+                        0xC);
+                if (Handle.Handle <= 0)
+                    continue;
+
+                EffectHandlesToRemove.push_back(Handle);
+                EffectClassesToRemove.push_back(
+                    ActiveEffect.Spec.Def->Class);
+                if (bIndirectSpookyEffect && !bFromGhostSet)
+                    ++IndirectSpookyEffects;
+            }
+        }
+
+        int32 RemovedEffects = 0;
+        int32 SourceEffectFallbacks = 0;
+        auto RemoveActiveEffect = AbilitySystemComponent
+            ->GetFunction("RemoveActiveGameplayEffect");
+        auto RemoveBySourceEffect = AbilitySystemComponent
+            ->GetFunction(
+                "RemoveActiveGameplayEffectBySourceEffect");
+        std::unordered_set<UClass*> SourceFallbackClasses;
+        for (size_t EffectIndex = 0;
+            EffectIndex < EffectHandlesToRemove.size();
+            ++EffectIndex)
+        {
+            bool bRemoved = false;
+            if (RemoveActiveEffect)
+            {
+                bRemoved = AbilitySystemComponent->Call<bool>(
+                    RemoveActiveEffect,
+                    EffectHandlesToRemove[EffectIndex],
+                    -1);
+            }
+            if (bRemoved)
+            {
+                ++RemovedEffects;
+                continue;
+            }
+
+            if (EffectIndex < EffectClassesToRemove.size() &&
+                EffectClassesToRemove[EffectIndex])
+            {
+                SourceFallbackClasses.insert(
+                    EffectClassesToRemove[EffectIndex]);
+            }
+        }
+        if (RemoveBySourceEffect)
+        {
+            for (auto EffectClass : SourceFallbackClasses)
+            {
+                AbilitySystemComponent->Call<void>(
+                    RemoveBySourceEffect,
+                    EffectClass,
+                    static_cast<UAbilitySystemComponent*>(
+                        nullptr),
+                    -1);
+                ++SourceEffectFallbacks;
+            }
+        }
+
+        // Preserve the dynamically applied effect handles before clearing the
+        // abilities. Raw ClearAbility can discard the passive ability instance
+        // (and its LoopingGC member) without giving this compatibility path a
+        // second opportunity to identify the effect that owns the client cue.
+        int32 RemovedAbilities = 0;
+        if (ClearAbility_)
+        {
+            auto ClearAbility =
+                (void(*)(UAbilitySystemComponent*,
+                    FGameplayAbilitySpecHandle&))ClearAbility_;
+            for (auto& AbilityHandle : AbilitiesToRemove)
+            {
+                ClearAbility(
+                    AbilitySystemComponent, AbilityHandle);
+                ++RemovedAbilities;
+            }
+        }
+
+        if (RemovedEffects > 0 || SourceEffectFallbacks > 0)
+        {
+            PlayerState->ForceNetUpdate();
+            PlayerController->ForceNetUpdate();
+        }
+
+        if (!AbilitiesToRemove.empty() ||
+            !EffectHandlesToRemove.empty())
+        {
+            SDK::DbgLog(
+                "[GhostMode] removed residual gadget ability set "
+                "controller=%p abilities=%d/%zu effects=%d/%zu "
+                "sourceFallbacks=%d indirectSpooky=%d\n",
+                static_cast<void*>(PlayerController),
+                RemovedAbilities, AbilitiesToRemove.size(),
+                RemovedEffects, EffectHandlesToRemove.size(),
+                SourceEffectFallbacks,
+                IndirectSpookyEffects);
+        }
+    }
+
+    bool ClearPawnGhostModeFlag(
+        AFortPlayerPawnAthena* Pawn)
+    {
+        if (!Pawn || !Pawn->Class)
+            return false;
+
+        auto Property = Pawn->GetProperty(
+            "GhostMode", 0x20000);
+        if (!Property)
+            return false;
+
+        const int32 Offset = static_cast<int32>(
+            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                Property, Offsets::Offset_Internal)));
+        const uint8 FieldMask = Property->GetFieldMask();
+        if (Offset < 0 || FieldMask == 0 ||
+            Offset >= Pawn->Class->GetPropertiesSize() ||
+            !SDK::MemReadable(
+                reinterpret_cast<uint8*>(Pawn) + Offset,
+                sizeof(uint8)))
+        {
+            return false;
+        }
+
+        auto& Value = GetFromOffset<uint8>(Pawn, Offset);
+        const bool bWasSet = (Value & FieldMask) != 0;
+        Value &= static_cast<uint8>(~FieldMask);
+        return bWasSet;
+    }
+
+    bool ForceClearControllerGhostModeState(
+        AFortPlayerControllerAthena* PlayerController)
+    {
+        if (!PlayerController || !PlayerController->Class)
+            return false;
+
+        auto RepDataStruct = FindObject<UStruct>(
+            L"/Script/FortniteGame.GhostModeRepData");
+        auto RepDataProperty = PlayerController->GetProperty(
+            "GhostModeRepData");
+        auto InGhostModeProperty = RepDataStruct
+            ? RepDataStruct->GetProperty(
+                "bInGhostMode", 0x20000)
+            : nullptr;
+        if (!RepDataStruct || !RepDataProperty ||
+            !InGhostModeProperty)
+        {
+            return false;
+        }
+
+        const int32 RepDataOffset = static_cast<int32>(
+            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                RepDataProperty, Offsets::Offset_Internal)));
+        const int32 InGhostModeOffset = static_cast<int32>(
+            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                InGhostModeProperty,
+                Offsets::Offset_Internal)));
+        const int32 RepDataSize =
+            RepDataStruct->GetPropertiesSize();
+        const uint8 FieldMask =
+            InGhostModeProperty->GetFieldMask();
+        if (RepDataOffset < 0 || InGhostModeOffset < 0 ||
+            RepDataSize < static_cast<int32>(sizeof(uint8)) ||
+            RepDataSize > 0x40 || FieldMask == 0 ||
+            InGhostModeOffset >= RepDataSize ||
+            RepDataOffset >
+                PlayerController->Class->GetPropertiesSize() -
+                    RepDataSize)
+        {
+            return false;
+        }
+
+        auto RepData = reinterpret_cast<uint8*>(
+            PlayerController) + RepDataOffset;
+        if (!SDK::MemReadable(
+                RepData, static_cast<size_t>(RepDataSize)))
+        {
+            return false;
+        }
+
+        auto& InGhostMode =
+            *reinterpret_cast<uint8*>(
+                RepData + InGhostModeOffset);
+        const bool bWasSet =
+            (InGhostMode & FieldMask) != 0;
+        InGhostMode &= static_cast<uint8>(~FieldMask);
+
+        auto ItemDefinitionProperty =
+            RepDataStruct->GetProperty("GhostModeItemDef");
+        if (ItemDefinitionProperty)
+        {
+            const int32 ItemDefinitionOffset =
+                static_cast<int32>(SDK::DecryptPropOffset(
+                    GetFromOffset<uint32>(
+                        ItemDefinitionProperty,
+                        Offsets::Offset_Internal)));
+            const uint32 ItemDefinitionSize =
+                GetFromOffset<uint32>(
+                    ItemDefinitionProperty,
+                    Offsets::ElementSize);
+            if (ItemDefinitionOffset >= 0 &&
+                ItemDefinitionSize == sizeof(UObject*) &&
+                ItemDefinitionOffset <=
+                    RepDataSize -
+                        static_cast<int32>(sizeof(UObject*)))
+            {
+                *reinterpret_cast<UObject**>(
+                    RepData + ItemDefinitionOffset) = nullptr;
+            }
+        }
+
+        if (auto OnRepGhostMode =
+                PlayerController->GetFunction(
+                    "OnRep_GhostModeRepData"))
+        {
+            PlayerController->ProcessEvent(
+                OnRepGhostMode, nullptr);
+        }
+        PlayerController->ForceNetUpdate();
+        return bWasSet;
+    }
+
+    bool RefocusHarvestingToolAfterGhostMode(
+        AFortPlayerControllerAthena* PlayerController)
+    {
+        if (!PlayerController ||
+            !PlayerController->WorldInventory)
+        {
+            return false;
+        }
+
+        auto Entry = PlayerController->WorldInventory
+            ->Inventory.ReplicatedEntries.Search(
+                [](FFortItemEntry& Candidate)
+                {
+                    return Candidate.ItemDefinition &&
+                        Candidate.ItemDefinition->ItemType ==
+                            EFortItemType::GetWeaponHarvest();
+                },
+                FFortItemEntry::Size());
+        if (!Entry)
+            return false;
+
+        const FGuid Guid = Entry->ItemGuid;
+        PlayerController->ClientEquipItem(Guid, true);
+        PlayerController->ServerExecuteInventoryItem(Guid);
+        SDK::DbgLog(
+            "[GhostMode] retried harvesting-tool focus "
+            "controller=%p definition=%s\n",
+            static_cast<void*>(PlayerController),
+            Entry->ItemDefinition->Name.ToString().c_str());
+        return true;
+    }
+
+    AFortPlayerControllerAthena* ResolveGhostModeController(
+        UAbilitySystemComponent* AbilitySystemComponent)
+    {
+        if (!AbilitySystemComponent)
+            return nullptr;
+
+        AActor* OwnerActor =
+            AbilitySystemComponent->HasOwnerActor()
+                ? AbilitySystemComponent->OwnerActor
+                : nullptr;
+        if (OwnerActor)
+        {
+            if (auto Controller = OwnerActor
+                    ->Cast<AFortPlayerControllerAthena>())
+            {
+                return Controller;
+            }
+            if (OwnerActor->Owner)
+            {
+                if (auto Controller = OwnerActor->Owner
+                        ->Cast<AFortPlayerControllerAthena>())
+                {
+                    return Controller;
+                }
+            }
+        }
+
+        auto Avatar =
+            AbilitySystemComponent->HasAvatarActor()
+                ? AbilitySystemComponent->AvatarActor
+                : nullptr;
+        auto Pawn = Avatar
+            ? Avatar->Cast<AFortPlayerPawnAthena>()
+            : nullptr;
+        return Pawn && Pawn->Controller
+            ? Pawn->Controller
+                ->Cast<AFortPlayerControllerAthena>()
+            : nullptr;
+    }
+
+    double ResolveGhostModeLifetimeSeconds(
+        const UFortItemDefinition* ItemDefinition)
+    {
+        constexpr double FallbackLifetimeSeconds = 45.0;
+        auto Gadget = ItemDefinition
+            ? ItemDefinition->Cast<UFortGadgetItemDefinition>()
+            : nullptr;
+        auto AbilitySet =
+            Gadget && Gadget->HasAbilitySet()
+                ? Gadget->AbilitySet.Get()
+                : nullptr;
+        if (!AbilitySet || !AbilitySet->HasGameplayAbilities())
+            return FallbackLifetimeSeconds;
+
+        for (int32 Index = 0;
+            Index < AbilitySet->GameplayAbilities.Num(); ++Index)
+        {
+            auto AbilityClass =
+                AbilitySet->GameplayAbilities[Index].Get();
+            if (!AbilityClass ||
+                AbilityClass->Name.ToWString() !=
+                    L"GA_SpookyMist_PassiveSetup_C")
+            {
+                continue;
+            }
+
+            auto AbilityDefault = AbilityClass->GetDefaultObj();
+            auto DurationProperty = AbilityDefault
+                ? AbilityDefault->GetProperty("AbilityDuration")
+                : nullptr;
+            if (!AbilityDefault || !AbilityDefault->Class ||
+                !DurationProperty)
+                break;
+
+            const int32 Offset = static_cast<int32>(
+                SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                    DurationProperty,
+                    Offsets::Offset_Internal)));
+            const uint32 ElementSize = GetFromOffset<uint32>(
+                DurationProperty, Offsets::ElementSize);
+            if (Offset < 0 ||
+                ElementSize < sizeof(FScalableFloat) ||
+                Offset > AbilityDefault->Class->GetPropertiesSize() -
+                    static_cast<int32>(sizeof(FScalableFloat)) ||
+                !SDK::MemReadable(
+                    reinterpret_cast<uint8*>(AbilityDefault) + Offset,
+                    sizeof(FScalableFloat)))
+            {
+                break;
+            }
+
+            auto Duration = GetFromOffset<FScalableFloat>(
+                AbilityDefault, Offset);
+            const float Evaluated = Duration.Evaluate(1.0f);
+            if (std::isfinite(Evaluated) &&
+                Evaluated >= 5.0f && Evaluated <= 120.0f)
+            {
+                return Evaluated;
+            }
+            break;
+        }
+        return FallbackLifetimeSeconds;
+    }
+
+    auto FindTrackedGhostModeSession(
+        AFortPlayerControllerAthena* PlayerController)
+    {
+        return std::find_if(
+            TrackedGhostModeSessions.begin(),
+            TrackedGhostModeSessions.end(),
+            [&](const FTrackedGhostModeSession& Session)
+            {
+                return Session.Owner.Get() == PlayerController;
+            });
+    }
+
+    bool RequestTrackedGhostModeExit(
+        AFortPlayerControllerAthena* PlayerController,
+        const char* Source,
+        double DelaySeconds = 0.05)
+    {
+        if (!PlayerController)
+            return false;
+
+        auto Session = FindTrackedGhostModeSession(
+            PlayerController);
+        if (Session == TrackedGhostModeSessions.end())
+            return false;
+
+        auto World = UWorld::GetWorld();
+        const double Now = World
+            ? UGameplayStatics::GetTimeSeconds(World)
+            : 0.0;
+        const double RequestedTime =
+            Now + max(DelaySeconds, 0.0);
+        if (!Session->bExitRequested ||
+            RequestedTime < Session->EarliestExitCleanupTime)
+        {
+            Session->bExitRequested = true;
+            Session->EarliestExitCleanupTime = RequestedTime;
+            SDK::DbgLog(
+                "[GhostMode] observed authoritative exit signal "
+                "controller=%p source=%s cleanupAt=%.2f\n",
+                static_cast<void*>(PlayerController),
+                Source ? Source : "unknown",
+                RequestedTime);
+        }
+        return true;
+    }
+
+    void MarkTrackedGhostModeBackingRemoved(
+        AFortPlayerControllerAthena* PlayerController,
+        const FGuid& ItemGuid)
+    {
+        if (!PlayerController)
+            return;
+
+        auto Session = FindTrackedGhostModeSession(
+            PlayerController);
+        if (Session != TrackedGhostModeSessions.end() &&
+            Session->ItemGuid.A == ItemGuid.A &&
+            Session->ItemGuid.B == ItemGuid.B &&
+            Session->ItemGuid.C == ItemGuid.C &&
+            Session->ItemGuid.D == ItemGuid.D)
+        {
+            Session->bBackingRemovalObserved = true;
+        }
+    }
+
+    bool ReadGhostExitFloat(
+        AFortPlayerPawnAthena* Pawn,
+        const char* PropertyName,
+        float& OutValue)
+    {
+        OutValue = 0.0f;
+        if (!Pawn || !Pawn->Class || !PropertyName)
+            return false;
+
+        const int32 Offset = Pawn->GetOffset(PropertyName);
+        if (Offset < 0 ||
+            Offset > Pawn->Class->GetPropertiesSize() -
+                static_cast<int32>(sizeof(float)) ||
+            !SDK::MemReadable(
+                reinterpret_cast<uint8*>(Pawn) + Offset,
+                sizeof(float)))
+        {
+            return false;
+        }
+
+        const float Value = GetFromOffset<float>(Pawn, Offset);
+        if (!std::isfinite(Value))
+            return false;
+        OutValue = Value;
+        return true;
+    }
+
+    bool IsControllerStillInGhostMode(
+        AFortPlayerControllerAthena* PlayerController)
+    {
+        if (!PlayerController)
+            return false;
+        auto IsInGhostMode = PlayerController->GetFunction(
+            "IsInGhostMode");
+        return IsInGhostMode &&
+            PlayerController->Call<bool>(IsInGhostMode);
+    }
+
+    void QueueGhostModeTerminalCleanup(
+        AFortPlayerControllerAthena* PlayerController,
+        const UFortItemDefinition* ItemDefinition,
+        const FGhostCharacterPartRestore& CharacterParts,
+        bool bRestoreCharacterParts)
+    {
+        if (!PlayerController ||
+            !UFortKismetLibrary::IsGhostModeItemDefinition(
+                ItemDefinition))
+        {
+            return;
+        }
+
+        auto World = UWorld::GetWorld();
+        const double Now = World
+            ? UGameplayStatics::GetTimeSeconds(World)
+            : 0.0;
+        double EarliestFinalizeTime = Now + 0.75;
+        auto Pawn = PlayerController->MyFortPawn
+            ? PlayerController->MyFortPawn
+            : PlayerController->Pawn
+                ? PlayerController->Pawn
+                    ->Cast<AFortPlayerPawnAthena>()
+                : nullptr;
+        float ExitStartTime = 0.0f;
+        float ExitDuration = 0.0f;
+        if (ReadGhostExitFloat(
+                Pawn, "GhostModeExitDuration", ExitDuration) &&
+            ExitDuration > 0.0f && ExitDuration <= 5.0f)
+        {
+            if (ReadGhostExitFloat(
+                    Pawn,
+                    "GhostModeExitStartTime",
+                    ExitStartTime) &&
+                ExitStartTime > 0.01f &&
+                std::abs(
+                    static_cast<double>(ExitStartTime) - Now) <=
+                    10.0)
+            {
+                EarliestFinalizeTime = max(
+                    Now + 0.05,
+                    static_cast<double>(ExitStartTime) +
+                        ExitDuration + 0.10);
+            }
+            else
+            {
+                EarliestFinalizeTime =
+                    Now + ExitDuration + 0.10;
+            }
+        }
+
+        auto Existing = std::find_if(
+            PendingGhostModeCleanups.begin(),
+            PendingGhostModeCleanups.end(),
+            [&](const FPendingGhostModeCleanup& Pending)
+            {
+                return Pending.Owner.Get() == PlayerController;
+            });
+        FPendingGhostModeCleanup Pending{};
+        Pending.Owner =
+            TWeakObjectPtr<AFortPlayerControllerAthena>(
+                PlayerController);
+        Pending.ItemDefinition =
+            TWeakObjectPtr<UFortItemDefinition>(
+                const_cast<UFortItemDefinition*>(
+                    ItemDefinition));
+        Pending.CharacterParts = CharacterParts;
+        Pending.bRestoreCharacterParts =
+            bRestoreCharacterParts;
+        Pending.EarliestFinalizeTime =
+            EarliestFinalizeTime;
+        Pending.RetryDeadline =
+            EarliestFinalizeTime + 0.50;
+        Pending.ForceFinalizeDeadline =
+            EarliestFinalizeTime + 2.0;
+        if (Existing != PendingGhostModeCleanups.end())
+        {
+            // A tracker can observe the same terminal removal after the
+            // inventory callback has already queued it. Never replace a valid
+            // pre-grant snapshot with a later empty/stale capture.
+            Existing->EarliestFinalizeTime = max(
+                Existing->EarliestFinalizeTime,
+                Pending.EarliestFinalizeTime);
+            Existing->RetryDeadline = max(
+                Existing->RetryDeadline,
+                Pending.RetryDeadline);
+            Existing->ForceFinalizeDeadline = max(
+                Existing->ForceFinalizeDeadline,
+                Pending.ForceFinalizeDeadline);
+            if (!Existing->ItemDefinition.Get())
+                Existing->ItemDefinition =
+                    Pending.ItemDefinition;
+            if (!Existing->bRestoreCharacterParts &&
+                Pending.bRestoreCharacterParts)
+            {
+                Existing->CharacterParts =
+                    Pending.CharacterParts;
+                Existing->bRestoreCharacterParts = true;
+            }
+        }
+        else
+            PendingGhostModeCleanups.push_back(Pending);
+
+        SDK::DbgLog(
+            "[GhostMode] queued post-transition cleanup "
+            "controller=%p earliest=%.2f duration=%.2f "
+            "restoreParts=%d\n",
+            static_cast<void*>(PlayerController),
+            EarliestFinalizeTime,
+            ExitDuration,
+            bRestoreCharacterParts ? 1 : 0);
+    }
+
+    void TickPendingGhostModeCleanups(double Now)
+    {
+        for (size_t Index = 0;
+            Index < PendingGhostModeCleanups.size();)
+        {
+            auto& Pending = PendingGhostModeCleanups[Index];
+            auto PlayerController = Pending.Owner.Get();
+            if (!PlayerController)
+            {
+                PendingGhostModeCleanups.erase(
+                    PendingGhostModeCleanups.begin() + Index);
+                continue;
+            }
+
+            if (Now < Pending.EarliestFinalizeTime)
+            {
+                ++Index;
+                continue;
+            }
+
+            bool bControllerStateForceAttempted = false;
+            if (IsControllerStillInGhostMode(PlayerController))
+            {
+                if (Now < Pending.RetryDeadline)
+                {
+                    ++Index;
+                    continue;
+                }
+
+                if (auto EndGhostMode =
+                        PlayerController->GetFunction(
+                            "EndGhostMode"))
+                {
+                    PlayerController->Call<void>(EndGhostMode);
+                    PlayerController->ForceNetUpdate();
+                }
+                ++Pending.NativeEndAttempts;
+
+                if (IsControllerStillInGhostMode(
+                        PlayerController) &&
+                    Now < Pending.ForceFinalizeDeadline &&
+                    Pending.NativeEndAttempts < 3)
+                {
+                    Pending.RetryDeadline = Now + 0.50;
+                    ++Index;
+                    continue;
+                }
+
+                if (IsControllerStillInGhostMode(
+                        PlayerController))
+                {
+                    const bool bCleared =
+                        ForceClearControllerGhostModeState(
+                            PlayerController);
+                    bControllerStateForceAttempted = true;
+                    SDK::DbgLog(
+                        "[GhostMode] forced stale controller exit "
+                        "controller=%p attempts=%d cleared=%d\n",
+                        static_cast<void*>(PlayerController),
+                        Pending.NativeEndAttempts,
+                        bCleared ? 1 : 0);
+                }
+            }
+
+            if (Pending.FinalizationPass == 0 &&
+                !bControllerStateForceAttempted)
+            {
+                const bool bCleared =
+                    ForceClearControllerGhostModeState(
+                        PlayerController);
+                SDK::DbgLog(
+                    "[GhostMode] normalized controller exit state "
+                    "controller=%p cleared=%d\n",
+                    static_cast<void*>(PlayerController),
+                    bCleared ? 1 : 0);
+            }
+
+            auto ExitPawn = PlayerController->MyFortPawn
+                ? PlayerController->MyFortPawn
+                : PlayerController->Pawn
+                    ? PlayerController->Pawn
+                        ->Cast<AFortPlayerPawnAthena>()
+                    : nullptr;
+            auto ExitPlayerState =
+                PlayerController->PlayerState
+                    ? PlayerController->PlayerState
+                        ->Cast<AFortPlayerStateAthena>()
+                    : nullptr;
+            const bool bPawnIsDying =
+                ExitPawn && ExitPawn->HasbIsDying() &&
+                ExitPawn->bIsDying;
+            if (Pending.bRestoreCharacterParts &&
+                (!ExitPawn || !ExitPlayerState || bPawnIsDying))
+            {
+                // Death removes the backing item before RestartPlayer has
+                // supplied its replacement pawn. Keep the pre-ghost snapshot
+                // alive across that gap; finalizing here would silently throw
+                // it away and the new pawn would inherit the spooky body.
+                if (!Pending.bLoggedWaitingForPawn)
+                {
+                    SDK::DbgLog(
+                        "[GhostMode] waiting for replacement pawn before "
+                        "visual restore controller=%p pawn=%p state=%p "
+                        "dying=%d\n",
+                        static_cast<void*>(PlayerController),
+                        static_cast<void*>(ExitPawn),
+                        static_cast<void*>(ExitPlayerState),
+                        bPawnIsDying ? 1 : 0);
+                    Pending.bLoggedWaitingForPawn = true;
+                }
+                ++Index;
+                continue;
+            }
+
+            // EndGhostMode starts a timed pawn-side exit on 6.21. The stock
+            // completion timer is client-authored and is not dependable on a
+            // stripped dedicated server, so close that transition after its
+            // reflected duration before publishing the original parts. This
+            // also clears the pawn BP GhostMode flag/cues that can otherwise
+            // reapply CP_Body_SpookyMist after the part replication below.
+            if (ExitPawn)
+            {
+                if (Pending.FinalizationPass == 0)
+                {
+                    if (auto EndGhostModeExit =
+                            ExitPawn->GetFunction(
+                                "EndGhostModeExit"))
+                    {
+                        ExitPawn->ProcessEvent(
+                            EndGhostModeExit, nullptr);
+                    }
+                }
+
+                // PlayerPawn_Athena_Generic keeps a separate Blueprint bit
+                // that drives the CP_Body_SpookyMist presentation. The
+                // stripped dedicated-server path does not reliably clear it,
+                // even after EndGhostModeExit. Clear only its reflected bit;
+                // it can share a byte with unrelated pawn flags.
+                if (ClearPawnGhostModeFlag(ExitPawn))
+                {
+                    SDK::DbgLog(
+                        "[GhostMode] cleared pawn presentation flag "
+                        "controller=%p pawn=%p\n",
+                        static_cast<void*>(PlayerController),
+                        static_cast<void*>(ExitPawn));
+                }
+                ExitPawn->ForceNetUpdate();
+            }
+
+            auto ItemDefinition =
+                Pending.ItemDefinition.Get();
+            if (ItemDefinition)
+            {
+                RemoveGhostGadgetAbilitySetFallback(
+                    PlayerController, ItemDefinition);
+            }
+
+            if (Pending.bRestoreCharacterParts)
+            {
+                auto& Restore = Pending.CharacterParts;
+                Restore.Pawn = ExitPawn;
+                Restore.PlayerState = ExitPlayerState;
+                ApplyGhostCharacterPartRestore(Restore);
+            }
+
+            RefocusHarvestingToolAfterGhostMode(
+                PlayerController);
+
+            SDK::DbgLog(
+                "[GhostMode] finalized post-transition cleanup "
+                "controller=%p pass=%d\n",
+                static_cast<void*>(PlayerController),
+                Pending.FinalizationPass);
+
+            static constexpr double ReassertionDelays[] =
+            {
+                0.25,
+                0.75,
+                1.50
+            };
+            if (Pending.FinalizationPass <
+                static_cast<int32>(
+                    std::size(ReassertionDelays)))
+            {
+                const double Delay = ReassertionDelays[
+                    Pending.FinalizationPass];
+                ++Pending.FinalizationPass;
+                Pending.EarliestFinalizeTime = Now + Delay;
+                Pending.RetryDeadline =
+                    Pending.EarliestFinalizeTime;
+                Pending.ForceFinalizeDeadline = max(
+                    Pending.ForceFinalizeDeadline,
+                    Pending.EarliestFinalizeTime + 1.0);
+                ++Index;
+                continue;
+            }
+            PendingGhostModeCleanups.erase(
+                PendingGhostModeCleanups.begin() + Index);
+        }
+    }
+
     struct FRegeneratingInventoryItem
     {
         TWeakObjectPtr<AFortPlayerControllerAthena> Owner;
@@ -831,6 +2299,363 @@ namespace
             MaxCount,
             CooldownSeconds);
     }
+
+    bool HasTrackedGhostBackingItem(
+        const FTrackedGhostModeSession& Session,
+        const UFortItemDefinition*& OutDefinition)
+    {
+        OutDefinition = Session.ItemDefinition.Get();
+        auto PlayerController = Session.Owner.Get();
+        if (!PlayerController || !PlayerController->WorldInventory)
+            return false;
+
+        auto Entry = PlayerController->WorldInventory
+            ->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(
+                        Candidate.ItemGuid,
+                        Session.ItemGuid);
+                },
+                FFortItemEntry::Size());
+        if (!Entry ||
+            !UFortKismetLibrary::IsGhostModeItemDefinition(
+                Entry->ItemDefinition))
+        {
+            return false;
+        }
+
+        OutDefinition = Entry->ItemDefinition;
+        return true;
+    }
+
+    void BeginTrackedGhostModeCleanup(
+        FTrackedGhostModeSession& Session,
+        const char* Source)
+    {
+        auto PlayerController = Session.Owner.Get();
+        if (!PlayerController)
+            return;
+
+        const UFortItemDefinition* ItemDefinition = nullptr;
+        const bool bHadBackingItem =
+            HasTrackedGhostBackingItem(
+                Session, ItemDefinition);
+        if (!ItemDefinition)
+            ItemDefinition = Session.ItemDefinition.Get();
+        if (!ItemDefinition)
+            return;
+
+        SDK::DbgLog(
+            "[GhostMode] beginning tracked terminal cleanup "
+            "controller=%p source=%s backing=%d\n",
+            static_cast<void*>(PlayerController),
+            Source ? Source : "unknown",
+            bHadBackingItem ? 1 : 0);
+
+        if (bHadBackingItem)
+        {
+            // Removing through AFortInventory::Remove preserves the normal
+            // CheckGhostModeItemRemoved callback and captures the pre-gadget
+            // character parts for the timed exit finalizer below.
+            UFortKismetLibrary::CleanupGhostMode(
+                PlayerController, true);
+            return;
+        }
+
+        // A native path can erase the forced-overflow row without traversing
+        // AFortInventory::Remove. Complete the same transition explicitly so
+        // the saved cosmetic snapshot is not stranded.
+        FGhostCharacterPartRestore Restore{};
+        const bool bRestoreCharacterParts =
+            CaptureGhostCharacterPartRestore(
+                PlayerController,
+                ItemDefinition,
+                Restore);
+        UFortKismetLibrary::CleanupGhostMode(
+            PlayerController, false);
+        UFortKismetLibrary::NotifyGhostModeItemRemoved(
+            PlayerController, ItemDefinition);
+        QueueGhostModeTerminalCleanup(
+            PlayerController,
+            ItemDefinition,
+            Restore,
+            bRestoreCharacterParts);
+    }
+
+    void TickTrackedGhostModeSessions(double Now)
+    {
+        for (size_t Index = 0;
+            Index < TrackedGhostModeSessions.size();)
+        {
+            auto& Session = TrackedGhostModeSessions[Index];
+            auto PlayerController = Session.Owner.Get();
+            if (!PlayerController ||
+                !PlayerController->WorldInventory)
+            {
+                TrackedGhostModeSessions.erase(
+                    TrackedGhostModeSessions.begin() + Index);
+                continue;
+            }
+
+            const UFortItemDefinition* ItemDefinition = nullptr;
+            const bool bBackingItemPresent =
+                HasTrackedGhostBackingItem(
+                    Session, ItemDefinition);
+            if (!bBackingItemPresent)
+            {
+                // AFortInventory::Remove already captured/queued this
+                // session's original parts. Do not recapture and overwrite
+                // that valid snapshot on the following tick.
+                if (!Session.bBackingRemovalObserved)
+                {
+                    BeginTrackedGhostModeCleanup(
+                        Session,
+                        "backing-item-falling-edge");
+                }
+                TrackedGhostModeSessions.erase(
+                    TrackedGhostModeSessions.begin() + Index);
+                continue;
+            }
+
+            if (!Session.bExitRequested)
+            {
+                const bool bControllerInGhostMode =
+                    IsControllerStillInGhostMode(
+                        PlayerController);
+                if (bControllerInGhostMode)
+                {
+                    Session.bObservedControllerGhostMode = true;
+                }
+                else if (Session.bObservedControllerGhostMode)
+                {
+                    RequestTrackedGhostModeExit(
+                        PlayerController,
+                        "controller-ghost-falling-edge",
+                        0.05);
+                }
+
+                auto Pawn = PlayerController->MyFortPawn
+                    ? PlayerController->MyFortPawn
+                    : PlayerController->Pawn
+                        ? PlayerController->Pawn
+                            ->Cast<AFortPlayerPawnAthena>()
+                        : nullptr;
+                float ExitStartTime = 0.0f;
+                if (ReadGhostExitFloat(
+                        Pawn,
+                        "GhostModeExitStartTime",
+                        ExitStartTime))
+                {
+                    const bool bChangedFromBaseline =
+                        Session.bHasInitialPawnExitStartTime
+                            ? std::abs(
+                                  ExitStartTime -
+                                  Session.InitialPawnExitStartTime) >
+                                0.01f
+                            : ExitStartTime > 0.0f;
+                    if (bChangedFromBaseline &&
+                        ExitStartTime >= 0.0f &&
+                        std::abs(
+                            static_cast<double>(ExitStartTime) -
+                            Now) <= 10.0)
+                    {
+                        RequestTrackedGhostModeExit(
+                            PlayerController,
+                            "pawn-exit-transition",
+                            0.05);
+                    }
+                }
+            }
+
+            if (!Session.bExitRequested &&
+                Now >= Session.ExpireAt)
+            {
+                // The authored Shadow Stone duration is evaluated from
+                // GA_SpookyMist_PassiveSetup (45 seconds on 6.21). This is a
+                // fail-safe for stripped servers that never receive the
+                // forced-exit activation; it does not shorten normal gravity.
+                Session.bExitRequested = true;
+                Session.EarliestExitCleanupTime = Now;
+                SDK::DbgLog(
+                    "[GhostMode] authored lifetime watchdog expired "
+                    "controller=%p elapsed=%.2f\n",
+                    static_cast<void*>(PlayerController),
+                    Now - Session.StartedAt);
+            }
+
+            if (!Session.bExitRequested ||
+                Now < Session.EarliestExitCleanupTime)
+            {
+                ++Index;
+                continue;
+            }
+
+            BeginTrackedGhostModeCleanup(
+                Session, "latched-exit");
+            TrackedGhostModeSessions.erase(
+                TrackedGhostModeSessions.begin() + Index);
+        }
+    }
+}
+
+// StartGhostMode calls the patched inventory grant before ApplyGadgetData
+// replaces the pawn's parts. Keep that pre-gadget state here instead of trying
+// to reconstruct it from PreviousCharacterParts during the later exit RPC.
+void CaptureGhostModeCharacterPartsBeforeGrant(
+    AFortPlayerControllerAthena* PlayerController)
+{
+    if (VersionInfo.FortniteVersion < 5.30 ||
+        VersionInfo.FortniteVersion > 8.00 ||
+        !PlayerController)
+    {
+        return;
+    }
+
+    if (GhostCharacterPartRestores.contains(
+            PlayerController))
+    {
+        return;
+    }
+
+    FGhostCharacterPartRestore Restore{};
+    if (!CaptureCurrentGhostCharacterParts(
+            PlayerController, Restore))
+    {
+        SDK::DbgLog(
+            "[GhostMode] pre-grant character-part snapshot "
+            "unavailable controller=%p\n",
+            static_cast<void*>(PlayerController));
+        return;
+    }
+
+    GhostCharacterPartRestores.emplace(
+        PlayerController, Restore);
+    int32 CapturedCount = 0;
+    for (const bool bCaptured : Restore.bRestore)
+        CapturedCount += bCaptured ? 1 : 0;
+    SDK::DbgLog(
+        "[GhostMode] captured pre-grant character parts "
+        "controller=%p pawn=%p count=%d\n",
+        static_cast<void*>(PlayerController),
+        static_cast<void*>(Restore.Pawn),
+        CapturedCount);
+}
+
+void AFortInventory::TrackGhostModeActivation(
+    AFortPlayerControllerAthena* PlayerController,
+    const UFortItemDefinition* ItemDefinition,
+    const FGuid& ItemGuid)
+{
+    if (VersionInfo.FortniteVersion < 5.30 ||
+        VersionInfo.FortniteVersion > 8.00 ||
+        !PlayerController ||
+        !UFortKismetLibrary::IsGhostModeItemDefinition(
+            ItemDefinition))
+    {
+        return;
+    }
+
+    auto World = UWorld::GetWorld();
+    if (!World)
+        return;
+
+    const double Now = UGameplayStatics::GetTimeSeconds(World);
+    const double LifetimeSeconds =
+        ResolveGhostModeLifetimeSeconds(ItemDefinition);
+    FTrackedGhostModeSession Session{};
+    Session.Owner =
+        TWeakObjectPtr<AFortPlayerControllerAthena>(
+            PlayerController);
+    Session.ItemDefinition =
+        TWeakObjectPtr<UFortItemDefinition>(
+            const_cast<UFortItemDefinition*>(ItemDefinition));
+    Session.ItemGuid = ItemGuid;
+    Session.StartedAt = Now;
+    // Give the authored ability one second to publish its normal forced-exit
+    // transition before the watchdog supplies the missing server callback.
+    Session.ExpireAt = Now + LifetimeSeconds + 1.0;
+
+    auto Pawn = PlayerController->MyFortPawn
+        ? PlayerController->MyFortPawn
+        : PlayerController->Pawn
+            ? PlayerController->Pawn
+                ->Cast<AFortPlayerPawnAthena>()
+            : nullptr;
+    Session.bHasInitialPawnExitStartTime =
+        ReadGhostExitFloat(
+            Pawn,
+            "GhostModeExitStartTime",
+            Session.InitialPawnExitStartTime);
+
+    auto Existing = FindTrackedGhostModeSession(
+        PlayerController);
+    if (Existing != TrackedGhostModeSessions.end())
+        *Existing = Session;
+    else
+        TrackedGhostModeSessions.push_back(Session);
+
+    SDK::DbgLog(
+        "[GhostMode] armed lifecycle tracker controller=%p "
+        "item=%08X-%08X-%08X-%08X lifetime=%.2f\n",
+        static_cast<void*>(PlayerController),
+        static_cast<uint32>(ItemGuid.A),
+        static_cast<uint32>(ItemGuid.B),
+        static_cast<uint32>(ItemGuid.C),
+        static_cast<uint32>(ItemGuid.D),
+        LifetimeSeconds);
+}
+
+void AFortInventory::NotifyGhostModeExitAbilityActivated(
+    UAbilitySystemComponent* AbilitySystemComponent,
+    const UFortGameplayAbility* Ability)
+{
+    if (VersionInfo.FortniteVersion < 5.30 ||
+        VersionInfo.FortniteVersion > 8.00 ||
+        !Ability || !Ability->Class)
+    {
+        return;
+    }
+
+    const auto AbilityClassName =
+        Ability->Class->Name.ToWString();
+    if (AbilityClassName != L"GA_Exit_SpookyMist_C" &&
+        AbilityClassName !=
+            L"GA_SpookyMist_ForcedExit_C")
+    {
+        return;
+    }
+
+    auto PlayerController = ResolveGhostModeController(
+        AbilitySystemComponent);
+    RequestTrackedGhostModeExit(
+        PlayerController,
+        AbilityClassName == L"GA_Exit_SpookyMist_C"
+            ? "GA_Exit_SpookyMist"
+            : "GA_SpookyMist_ForcedExit",
+        0.05);
+}
+
+void AFortInventory::NotifyGhostModeHarvestingToolRequested(
+    AFortPlayerControllerAthena* PlayerController,
+    const UFortItemDefinition* ItemDefinition)
+{
+    if (VersionInfo.FortniteVersion < 5.30 ||
+        VersionInfo.FortniteVersion > 8.00 ||
+        !PlayerController || !ItemDefinition ||
+        ItemDefinition->ItemType !=
+            EFortItemType::GetWeaponHarvest())
+    {
+        return;
+    }
+
+    // Both the manual Exit ability and the authored forced exit return to the
+    // harvesting tool. On stripped 6.21 servers that request can arrive even
+    // when the instant exit ability's own inventory-removal callback did not.
+    RequestTrackedGhostModeExit(
+        PlayerController,
+        "harvesting-tool-request",
+        0.05);
 }
 
 bool UFortWorldItemDefinition::ServerExecute(UFortItem* Item, AFortPlayerControllerAthena* Instigator) const
@@ -1732,7 +3557,6 @@ _out:
     return Entry ? Inventory.MarkItemDirty(*Entry) : Inventory.MarkArrayDirty();*/
 }
 
-uint64_t ClearAbility_;
 void AFortInventory::RemoveWeaponAbilities(AActor* Weapon__Uncasted)
 {
     auto Weapon = (AFortWeapon*)Weapon__Uncasted;
@@ -1830,6 +3654,11 @@ void AFortInventory::Remove(FGuid Guid)
     auto& RemovedEntry = Inventory.ReplicatedEntries.Get(
         ItemEntryIdx, FFortItemEntry::Size());
     auto EntryDef = RemovedEntry.ItemDefinition;
+    FGhostCharacterPartRestore GhostCharacterPartRestore{};
+    const bool bRestoreGhostCharacterParts =
+        CaptureGhostCharacterPartRestore(
+            PendingOwner, EntryDef,
+            GhostCharacterPartRestore);
 
     auto ItemInstanceIdx = Inventory.ItemInstances.SearchIndex([&](UFortWorldItem* entry)
         { return entry && entry->ItemEntry.ItemGuid == Guid; });
@@ -1922,6 +3751,22 @@ _Skip:
     {
         ((bool(*)(const UFortWorldItem*, const IInterface*, uint32_t)) Instance->Vft[OnItemInstanceAddedVft + 1])(Instance, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()), Instance->ItemEntry.Count);
         //((bool(*)(const UFortItemDefinition*, const IInterface*, UFortWorldItem*)) Instance->ItemEntry.ItemDefinition->Vft[OnItemInstanceAddedVft + 1])(Instance->ItemEntry.ItemDefinition, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()), Instance);
+    }
+    UFortKismetLibrary::NotifyGhostModeItemRemoved(
+        PendingOwner, EntryDef);
+    // The authored 6.21 exit is timed. Defer residual ability removal and the
+    // visual restore until GhostModeRepData has finished its transition so it
+    // cannot immediately re-apply the spooky body part.
+    QueueGhostModeTerminalCleanup(
+        PendingOwner,
+        EntryDef,
+        GhostCharacterPartRestore,
+        bRestoreGhostCharacterParts);
+    if (UFortKismetLibrary::IsGhostModeItemDefinition(
+            EntryDef))
+    {
+        MarkTrackedGhostModeBackingRemoved(
+            PendingOwner, Guid);
     }
     //HandleInventoryLocalUpdate();
     //Update(nullptr);
@@ -2265,7 +4110,9 @@ bool AFortInventory::IsPrimaryQuickbar(const UFortItemDefinition* ItemDefinition
 void AFortInventory::TickRegeneratingItems()
 {
     if (RegeneratingInventoryItems.empty() &&
-        RechargingWeaponAmmo.empty())
+        RechargingWeaponAmmo.empty() &&
+        PendingGhostModeCleanups.empty() &&
+        TrackedGhostModeSessions.empty())
         return;
 
     auto World = UWorld::GetWorld();
@@ -2274,6 +4121,9 @@ void AFortInventory::TickRegeneratingItems()
 
     const double NowSeconds =
         UGameplayStatics::GetTimeSeconds(World);
+
+    TickTrackedGhostModeSessions(NowSeconds);
+    TickPendingGhostModeCleanups(NowSeconds);
 
     for (size_t Index = 0;
         Index < RegeneratingInventoryItems.size();)
@@ -2778,13 +4628,16 @@ bool RemoveInventoryItemInternal(
             bForceRemoveFromQuickBars,
             bForceRemoval);
     }
+    auto ItemDefinition = ItemEntry->ItemDefinition;
 
     // Item instances are not materialized consistently for every inventory
     // stack on every supported build. A valid replicated row is sufficient
     // to identify and suppress ordinary consumption. The quickbar flag is
     // commonly set when the final trap or throwable is used, so only the
     // distinct force-removal flag may override Infinite Ammo here.
-    if (AFortInventory::ShouldBypassItemConsumption(
+    if (!UFortKismetLibrary::IsGhostModeItemDefinition(
+            ItemDefinition) &&
+        AFortInventory::ShouldBypassItemConsumption(
             PlayerController, Count, bForceRemoval))
     {
         return true;
@@ -2792,6 +4645,40 @@ bool RemoveInventoryItemInternal(
 
     if (!ItemInstance || !*ItemInstance)
     {
+        // Forced-overflow gadgets are not guaranteed to materialize a
+        // UFortWorldItem on 6.21. Sending AGID_SpookyMist through the stripped
+        // native remover in that case erases its replicated row without ever
+        // reaching AFortInventory::Remove, so neither the controller exit nor
+        // the cosmetic restore runs. Keep this exact gadget on the same
+        // authoritative terminal-removal path regardless of instance state.
+        if (UFortKismetLibrary::IsGhostModeItemDefinition(
+                ItemDefinition))
+        {
+            const int32 ExistingCount =
+                max(ItemEntry->Count, 0);
+            const bool bTerminalRemoval =
+                Count < 0 || bForceRemoval ||
+                ExistingCount <= 0 ||
+                Count >= ExistingCount;
+            if (bTerminalRemoval)
+            {
+                WorldInventory->Remove(ItemGuid);
+                SDK::DbgLog(
+                    "[GhostMode] removed instance-less backing "
+                    "entry through inventory lifecycle "
+                    "controller=%p count=%d\n",
+                    static_cast<void*>(PlayerController),
+                    ExistingCount);
+            }
+            else
+            {
+                ItemEntry->Count =
+                    max(ExistingCount - Count, 0);
+                WorldInventory->UpdateEntry(*ItemEntry);
+            }
+            return true;
+        }
+
         return CallRemoveInventoryItemOriginal(
             Interface,
             ItemGuid,
@@ -2801,7 +4688,6 @@ bool RemoveInventoryItemInternal(
     }
 
     auto Item = *ItemInstance;
-    auto ItemDefinition = ItemEntry->ItemDefinition;
     const bool bForceRemoveItem =
         bForceRemoveFromQuickBars || bForceRemoval;
 

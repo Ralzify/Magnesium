@@ -73,6 +73,10 @@ uint64_t InternalTryActivateAbility_ = 0;
 void UAbilitySystemComponent::InternalServerTryActivateAbility(
     UAbilitySystemComponent* AbilitySystemComponent, FGameplayAbilitySpecHandle Handle, bool InputPressed, FPredictionKey* PredictionKey, void* TriggerEventData)
 {
+    if (!AbilitySystemComponent || !PredictionKey ||
+        !InternalTryActivateAbility_)
+        return;
+
     auto Spec = AbilitySystemComponent->ActivatableAbilities.Items.Search(
         [&](FGameplayAbilitySpec& item)
         {
@@ -83,6 +87,11 @@ void UAbilitySystemComponent::InternalServerTryActivateAbility(
     if (!Spec)
         return AbilitySystemComponent->ClientActivateAbilityFailed(Handle, PredictionKey->Current);
 
+    // Instant abilities may remove their granting gameplay effect and mutate
+    // ActivatableAbilities while InternalTryActivateAbility is unwinding.
+    // Keep only stable values across that call and resolve the spec again
+    // afterward before marking it dirty.
+    UFortGameplayAbility* AbilityToActivate = Spec->Ability;
     Spec->InputPressed = true;
     UObject* AbilitySourceObject =
         Spec->HasSourceObject()
@@ -119,13 +128,37 @@ void UAbilitySystemComponent::InternalServerTryActivateAbility(
             NotifyServerAbilityActivationFailed(
                 AbilitySourceObject);
         AbilitySystemComponent->ClientActivateAbilityFailed(Handle, PredictionKey->Current);
-        Spec->InputPressed = false;
-        AbilitySystemComponent->ActivatableAbilities.MarkItemDirty(*Spec);
     }
     else
     {
         AFortWeaponRanged::NotifyServerAbilityActivated(
             AbilitySourceObject);
+        AFortInventory::NotifyGhostModeExitAbilityActivated(
+            AbilitySystemComponent,
+            AbilityToActivate);
+    }
+
+    auto PostActivationSpec =
+        AbilitySystemComponent->ActivatableAbilities.Items.Search(
+            [&](FGameplayAbilitySpec& Item)
+            {
+                return Item.Handle.Handle == Handle.Handle;
+            },
+            FGameplayAbilitySpec::Size());
+    if (PostActivationSpec)
+    {
+        if (!Activated)
+            PostActivationSpec->InputPressed = false;
+
+        // UE 4.21's native RPC path expects this explicit dirty mark after
+        // both successful and failed activation. Without it, instant exit
+        // abilities can remain client-only and their state never reaches the
+        // authoritative Ghost Mode lifecycle.
+        if (VersionInfo.EngineVersion <= 4.21 || !Activated)
+        {
+            AbilitySystemComponent->ActivatableAbilities
+                .MarkItemDirty(*PostActivationSpec);
+        }
     }
 }
 

@@ -249,6 +249,9 @@ public:
     DEFINE_PROP(WarmupCountdownStartTime, float);
     DEFINE_PROP(WarmupCountdownEndTime, float);
     DEFINE_PROP(PlayersLeft, int32);
+    DEFINE_PROP(CurrentHighScoreTeam, int32);
+    DEFINE_PROP(CurrentHighScore, int32);
+    DEFINE_PROP(WinningScore, int32);
     DEFINE_PROP(WinningTeam, int32);
     DEFINE_PROP(WinningPlayerState, AFortPlayerStateAthena*);
     DEFINE_PROP(SafeZonePhase, uint8);
@@ -298,6 +301,8 @@ public:
     DEFINE_FUNC(OnRep_WinningPlayerState, void);
     DEFINE_FUNC(OnRep_GamePhase, void);
     DEFINE_FUNC(OnRep_PlayersLeft, void);
+    DEFINE_FUNC(OnRep_CurrentHighScore, void);
+    DEFINE_FUNC(OnRep_WinningScore, void);
     DEFINE_FUNC(OnRep_SafeZoneIndicator, void);
     DEFINE_FUNC(OnRep_MissionManager, void);
     DEFINE_FUNC(OnFinishedStreamingAdditionalPlaylistLevel, void);

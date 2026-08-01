@@ -1505,9 +1505,11 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
+		FortVehicleBump::Tick();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
+	FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
 	// Consume a new UI request before a legacy phase fallback can advance.
 	SyncErbiumSafeZonePause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
@@ -1628,9 +1630,11 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
+		FortVehicleBump::Tick();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
+	FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
 	SyncErbiumSafeZonePause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	SyncErbiumSafeZonePause(Driver);
@@ -1788,9 +1792,11 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickPendingVehicleSpawns();
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
+		FortVehicleBump::Tick();
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
+	FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
 	SyncErbiumSafeZonePause(Driver);
 	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
 	SyncErbiumSafeZonePause(Driver);

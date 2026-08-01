@@ -549,7 +549,9 @@ void UFortLootPackage::SpawnLoot(FName& TierGroup, FVector Loc)
 }
 
 
-bool ServerOnAttemptInteract(ABuildingContainer* BuildingContainer, AFortPlayerPawnAthena*)
+bool ServerOnAttemptInteract(
+	ABuildingContainer* BuildingContainer,
+	AFortPlayerPawnAthena* SearchingPawn)
 {
 
 	if (!BuildingContainer)
@@ -558,8 +560,19 @@ bool ServerOnAttemptInteract(ABuildingContainer* BuildingContainer, AFortPlayerP
 	if (BuildingContainer->bAlreadySearched)
 		return true;
 
+	const FName OriginalTierGroup =
+		BuildingContainer->SearchLootTierGroup;
 	//SpawnLoot(BuildingContainer->SearchLootTierGroup, BuildingContainer->K2_GetActorLocation() + BuildingContainer->GetActorRightVector() * 70.f + FVector{ 0, 0, 50 });
-	UFortLootPackage::SpawnLootHook(BuildingContainer);
+	const bool bSpawnedLoot =
+		UFortLootPackage::SpawnLootHook(BuildingContainer);
+	if (bSpawnedLoot)
+	{
+		FFortAthenaScoreRoyaleCompatibility::
+			HandleContainerSearched(
+				BuildingContainer,
+				SearchingPawn,
+				OriginalTierGroup);
+	}
 
 	/*BuildingContainer->bAlreadySearched = true;
 	BuildingContainer->OnRep_bAlreadySearched();
@@ -758,6 +771,8 @@ static void HopRockApplyGameplayEffectSpecToOwner(
 		L"CBGA_LowGravity_UsingJump_C");
 
 	UObject* SourceObject = nullptr;
+	AFortPlayerControllerAthena* ScorePlayerController = nullptr;
+	int32 ScoreBefore = 0;
 	const bool bHasGenericConsumeName =
 		HasExactClassName(Context, GenericConsumeClassName);
 	const auto GenericConsumeClass = bHasGenericConsumeName
@@ -777,6 +792,33 @@ static void HopRockApplyGameplayEffectSpecToOwner(
 			SourceObject =
 				Context->Call<UObject*>(GetCurrentSourceObject);
 		}
+
+		if (FFortAthenaScoreRoyaleCompatibility::IsActive())
+		{
+			auto Ability = Context->Cast<UFortGameplayAbility>();
+			auto AbilitySystemComponent = Ability
+				? static_cast<UAbilitySystemComponent*>(
+					Ability
+						->GetAbilitySystemComponentFromActorInfo())
+				: nullptr;
+			auto Avatar = AbilitySystemComponent &&
+					AbilitySystemComponent->HasAvatarActor()
+				? AbilitySystemComponent->AvatarActor
+				: nullptr;
+			auto Pawn = Avatar
+				? Avatar->Cast<AFortPlayerPawnAthena>()
+				: nullptr;
+			ScorePlayerController = Pawn && Pawn->Controller
+				? Pawn->Controller
+					->Cast<AFortPlayerControllerAthena>()
+				: nullptr;
+			auto PlayerState = ScorePlayerController &&
+					ScorePlayerController->HasPlayerState()
+				? ScorePlayerController->PlayerState
+				: nullptr;
+			if (PlayerState && PlayerState->HasTotalPlayerScore())
+				ScoreBefore = PlayerState->TotalPlayerScore;
+		}
 	}
 
 	// The original thunk consumes the opaque 4.20 effect-spec parameter and
@@ -793,6 +835,18 @@ static void HopRockApplyGameplayEffectSpecToOwner(
 		SourceObject->Class == HopRockClass;
 	const bool bEffectApplied =
 		Result && Result->bPassedFiltersAndWasExecuted;
+	if (bEffectApplied && ScorePlayerController && SourceObject)
+	{
+		auto SourceActor = SourceObject->Cast<AActor>();
+		if (SourceActor)
+		{
+			FFortAthenaScoreRoyaleCompatibility::
+				HandleForagedItemConsumed(
+					ScorePlayerController,
+					SourceActor,
+					ScoreBefore);
+		}
+	}
 
 	static int32 TraceCount = 0;
 	if (bHasGenericConsumeName && TraceCount++ < 16)
@@ -821,7 +875,11 @@ static void HopRockApplyGameplayEffectSpecToOwner(
 	// This is deliberately post-success. A press that is rejected, interrupted,
 	// or filtered cannot remove the rock. Removal is scheduled after the
 	// consume ability returns so its remaining bytecode can safely finish.
-	if (bEffectApplied && !bAlreadyDestroying &&
+	const bool bLegacyHopRockCleanup =
+		VersionInfo.FortniteVersion >= 4.00 &&
+		VersionInfo.FortniteVersion < 5.00;
+	if (bLegacyHopRockCleanup &&
+		bEffectApplied && !bAlreadyDestroying &&
 		HopRock->HasAuthority())
 	{
 		ScheduleHopRockClusterRemoval(
@@ -831,8 +889,12 @@ static void HopRockApplyGameplayEffectSpecToOwner(
 
 static void InstallHopRockConsumeHook()
 {
-	if (VersionInfo.FortniteVersion < 4.00 ||
-		VersionInfo.FortniteVersion >= 5.00)
+	const bool bLegacyHopRockBuild =
+		VersionInfo.FortniteVersion >= 4.00 &&
+		VersionInfo.FortniteVersion < 5.00;
+	if (!bLegacyHopRockBuild &&
+		!FFortAthenaScoreRoyaleCompatibility::
+			IsSupportedBuild())
 	{
 		return;
 	}
@@ -1054,7 +1116,8 @@ bool UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
 			LootDrops, Spawner->SpawnLootTierGroup);
 	}
 
-	AActor* SpawnedHopRockForSpawner = nullptr;
+	std::unordered_map<UClass*, AActor*>
+		SpawnedActorsForSpawner;
 	auto SpawnEntry = [&](FFortItemEntry& Entry) -> bool
 	{
 		if (!Entry.ItemDefinition)
@@ -1088,37 +1151,35 @@ bool UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
 
 		if (ConsumableActorClass)
 		{
-			const auto HopRockClass = ResolveHopRockClass();
-			const bool bIsSeasonFourHopRock =
-				VersionInfo.FortniteVersion >= 4.00 &&
-				VersionInfo.FortniteVersion < 5.00 &&
-				HopRockClass &&
-				ConsumableActorClass == HopRockClass;
-
 			// A loot package can yield duplicate entries for one consumable
 			// spawner. It previously created visually stacked actors: consuming
 			// one revealed the identical actor underneath. Treat an exact-class
 			// actor already on this transform as the spawner's resolved result.
+			// This applies to every actor-backed foraged consumable (including
+			// Shadow Stones), while ordinary inventory pickups remain untouched.
 			constexpr double DuplicateRadiusSquared = 100.0;
 			AActor* ExistingActor = nullptr;
-			if (bIsSeasonFourHopRock &&
-				SpawnedHopRockForSpawner &&
-				!IsActorBeingDestroyed(SpawnedHopRockForSpawner))
+			auto SpawnedForClass =
+				SpawnedActorsForSpawner.find(ConsumableActorClass);
+			if (SpawnedForClass != SpawnedActorsForSpawner.end() &&
+				SpawnedForClass->second &&
+				!IsActorBeingDestroyed(SpawnedForClass->second))
 			{
 				SDK::DbgLog(
-					"[HopRock] duplicate-spawn-skipped "
+					"[ConsumableSpawner] duplicate-spawn-skipped "
 					"spawner=%p existing=%p reason=same-spawner\n",
 					(void*)Spawner,
-					(void*)SpawnedHopRockForSpawner);
+					(void*)SpawnedForClass->second);
 				return true;
 			}
-			if (bIsSeasonFourHopRock &&
-				HasNearbyLiveActorOfClass(
-				ConsumableActorClass, SpawnLocation,
-				DuplicateRadiusSquared, &ExistingActor))
+			if (HasNearbyLiveActorOfClass(
+					ConsumableActorClass, SpawnLocation,
+					DuplicateRadiusSquared, &ExistingActor))
 			{
+				SpawnedActorsForSpawner[ConsumableActorClass] =
+					ExistingActor;
 				SDK::DbgLog(
-					"[HopRock] duplicate-spawn-skipped "
+					"[ConsumableSpawner] duplicate-spawn-skipped "
 					"spawner=%p existing=%p "
 					"loc=(%.1f,%.1f,%.1f)\n",
 					(void*)Spawner,
@@ -1142,13 +1203,14 @@ bool UFortLootPackage::SpawnConsumableActor(ABGAConsumableSpawner* Spawner)
 			auto SpawnedActor = (AActor*)World->SpawnActor(
 				ConsumableActorClass,
 				FTransform(SpawnLocation, SpawnRotation));
-			if (SpawnedActor && bIsSeasonFourHopRock)
+			if (SpawnedActor)
 			{
-				SpawnedHopRockForSpawner = SpawnedActor;
+				SpawnedActorsForSpawner[ConsumableActorClass] =
+					SpawnedActor;
 				const auto ActualLocation =
 					SpawnedActor->K2_GetActorLocation();
 				SDK::DbgLog(
-					"[HopRock] spawned actor=%p spawner=%p "
+					"[ConsumableSpawner] spawned actor=%p spawner=%p "
 					"requested=(%.1f,%.1f,%.1f) "
 					"actual=(%.1f,%.1f,%.1f)\n",
 					(void*)SpawnedActor,

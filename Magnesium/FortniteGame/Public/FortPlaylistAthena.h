@@ -47,6 +47,32 @@ public:
     DEFINE_STRUCT_PROP(AbilitySets, TArray<TSoftObjectPtr<UFortAbilitySet>>);
 };
 
+// Authored Score Royale rules.  These are reflection-backed because Epic
+// changed their native layout between the legacy and plugin-mounted versions
+// of the mode; callers must index ScoreDataList with FAthenaScoreData::Size().
+struct FAthenaScoreData
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FAthenaScoreData);
+
+    DEFINE_STRUCT_PROP(ScoringEvent, uint8);
+    DEFINE_STRUCT_PROP(ScoreNameText, FText);
+    DEFINE_STRUCT_PROP(EventInclusionTags, FGameplayTagContainer);
+    DEFINE_STRUCT_PROP(NumOccurrencesForScore, int32);
+    DEFINE_STRUCT_PROP(NumOccurrencesPermitted, int32);
+    DEFINE_STRUCT_PROP(ScoreAwarded, FScalableFloat);
+};
+
+struct FWinConditionScoreData
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FWinConditionScoreData);
+
+    DEFINE_STRUCT_PROP(GoalScore, FScalableFloat);
+    DEFINE_STRUCT_PROP(BigScoreThreshold, FScalableFloat);
+    DEFINE_STRUCT_PROP(ScoreDataList, TArray<FAthenaScoreData>);
+};
+
 class UFortGameplayModifierItemDefinition : public UObject
 {
 public:
@@ -74,6 +100,7 @@ public:
     DEFINE_PROP(SafeZoneStartUp, uint8);
     DEFINE_PROP(StormEffectDelay, float);
     DEFINE_PROP(LastSafeZoneIndex, int32);
+    DEFINE_PROP(bDisplayRespawnWidget, bool);
     DEFINE_PROP(bRespawnInAir, bool);
     DEFINE_PROP(RespawnHeight, FScalableFloat);
     DEFINE_PROP(RespawnTime, FScalableFloat);
@@ -92,4 +119,6 @@ public:
     DEFINE_PROP(PreloadPersistentLevel, TSoftObjectPtr<UWorld>);
     DEFINE_PROP(UIDisplayName, FText);
     DEFINE_PROP(JoinInProgressMatchType, FText);
+    DEFINE_PROP(ScoringData, FWinConditionScoreData);
+    DEFINE_PROP(bDisplayScoreInHUD, bool);
 };

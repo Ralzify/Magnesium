@@ -5366,6 +5366,12 @@ static const char* GetSelectedPlaylistModeName()
         return "Avengers: Endgame";
     case (int)Playlist::DiscoDomination:
         return "Disco Domination";
+    case (int)Playlist::ScoreRoyaleSolo:
+        return "Score Royale Solos";
+    case (int)Playlist::ScoreRoyaleDuos:
+        return "Score Royale Duos";
+    case (int)Playlist::ScoreRoyaleSquads:
+        return "Score Royale Squads";
     case (int)Playlist::InfinityGauntletSolos:
         return "Infinity Gauntlet Solos";
     case (int)Playlist::ZBSolos:
@@ -5461,8 +5467,34 @@ static const char* GetSelectedPlaylistModeName()
     }
 }
 
+static bool IsScoreRoyalePlaylistBuild()
+{
+    constexpr double Tolerance = 0.001;
+    return VersionInfo.FortniteVersion + Tolerance >= 7.30 &&
+        VersionInfo.FortniteVersion <= 10.00 + Tolerance;
+}
+
 static bool IsNativeLTMSelection(int SelectedPlaylist)
 {
+    if (IsScoreRoyalePlaylistBuild() &&
+        (SelectedPlaylist ==
+             static_cast<int>(Playlist::ScoreRoyaleSolo) ||
+         SelectedPlaylist ==
+             static_cast<int>(Playlist::ScoreRoyaleDuos) ||
+         SelectedPlaylist ==
+             static_cast<int>(Playlist::ScoreRoyaleSquads)))
+    {
+        return true;
+    }
+
+    if (SelectedPlaylist ==
+            static_cast<int>(Playlist::FoodFight) &&
+        FFortAthenaNativeLTMCompatibility::
+            IsOriginalFoodFightSupportedBuild())
+    {
+        return true;
+    }
+
     if (VersionInfo.FortniteVersion != 10.40)
         return false;
 
@@ -7386,6 +7418,12 @@ void GUI::Init()
                 FFortAthenaHeistCompatibility::IsSupportedBuild();
             const bool bNative1040LTMsAvailable =
                 VersionInfo.FortniteVersion == 10.40;
+            const bool bFoodFightAvailable =
+                bNative1040LTMsAvailable ||
+                FFortAthenaNativeLTMCompatibility::
+                    IsOriginalFoodFightSupportedBuild();
+            const bool bScoreRoyaleAvailable =
+                IsScoreRoyalePlaylistBuild();
 
             const bool bInfinityGauntletAvailable =
                 VersionInfo.FortniteVersion == 4.20;
@@ -7464,6 +7502,33 @@ void GUI::Init()
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
+            if (bScoreRoyaleAvailable &&
+                ImGui::RadioButton(
+                    "Score Royale Solos",
+                    &SelectedPlaylist,
+                    (int)Playlist::ScoreRoyaleSolo))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bScoreRoyaleAvailable &&
+                ImGui::RadioButton(
+                    "Score Royale Duos",
+                    &SelectedPlaylist,
+                    (int)Playlist::ScoreRoyaleDuos))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
+            if (bScoreRoyaleAvailable &&
+                ImGui::RadioButton(
+                    "Score Royale Squads",
+                    &SelectedPlaylist,
+                    (int)Playlist::ScoreRoyaleSquads))
+            {
+                SanitizeNativeLTMSelection(SelectedPlaylist);
+            }
+
             if (VersionInfo.FortniteVersion >= 7.10)
             {
                 ImGui::RadioButton("Siphon Solos", &SelectedPlaylist, (int)Playlist::SiphonSolos);
@@ -7493,7 +7558,7 @@ void GUI::Init()
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
+            if (bFoodFightAvailable &&
                 ImGui::RadioButton(
                     "Food Fight",
                     &SelectedPlaylist,
@@ -7678,9 +7743,69 @@ void GUI::Init()
                 }
                 break;
             }
+            case (int)Playlist::ScoreRoyaleSolo:
+            {
+                if (bScoreRoyaleAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Score/"
+                        L"Playlist_Score_Solo."
+                        L"Playlist_Score_Solo";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Solos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSolo."
+                        L"Playlist_DefaultSolo";
+                }
+                break;
+            }
+            case (int)Playlist::ScoreRoyaleDuos:
+            {
+                if (bScoreRoyaleAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Score/"
+                        L"Playlist_Score_Duos."
+                        L"Playlist_Score_Duos";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Duos;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultDuo."
+                        L"Playlist_DefaultDuo";
+                }
+                break;
+            }
+            case (int)Playlist::ScoreRoyaleSquads:
+            {
+                if (bScoreRoyaleAvailable)
+                {
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/Score/"
+                        L"Playlist_Score_Squads."
+                        L"Playlist_Score_Squads";
+                    SanitizeNativeLTMSelection(SelectedPlaylist);
+                }
+                else
+                {
+                    SelectedPlaylist = (int)Playlist::Squads;
+                    FConfiguration::Playlist =
+                        L"/Game/Athena/Playlists/"
+                        L"Playlist_DefaultSquad."
+                        L"Playlist_DefaultSquad";
+                }
+                break;
+            }
             case (int)Playlist::FoodFight:
             {
-                if (bNative1040LTMsAvailable)
+                if (bFoodFightAvailable)
                 {
                     FConfiguration::Playlist =
                         L"/Game/Athena/Playlists/Barrier/"
@@ -9500,6 +9625,33 @@ void GUI::Init()
                     FConfiguration::bCancelVelocityOnWin);
 
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
+
+            AtomicCheckbox(
+                "Vehicle Bump Launch",
+                FConfiguration::bVehicleBumpLaunch);
+
+            if (FConfiguration::bVehicleBumpLaunch)
+            {
+                ImGui::Indent(12.f);
+
+                AtomicCheckbox(
+                    "Bump Damage",
+                    FConfiguration::bVehicleBumpDamage);
+
+                AtomicLabeledSliderFloat(
+                    "Bump Minimum Speed",
+                    "##vehicle-bump-min-speed",
+                    FConfiguration::VehicleBumpMinSpeedKmh,
+                    0.0f, 120.0f, "%.0f km/h", Width);
+
+                AtomicLabeledSliderFloat(
+                    "Bump Force Multiplier",
+                    "##vehicle-bump-force-multiplier",
+                    FConfiguration::VehicleBumpForceMultiplier,
+                    0.0f, 10.0f, "%.1fx", Width);
+
+                ImGui::Unindent(12.f);
+            }
 
             AtomicCheckbox(
                 "Auto Pause TODM",
