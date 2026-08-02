@@ -47,6 +47,7 @@
 static const UClass* GetRemoteControlledPawnClass();
 static bool IsNativeVehiclePossessionPawn(AActor* Actor);
 static bool IsUsableDeathObject(const UObject* Object);
+static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory);
 static bool IsManagedNonRespawningBot(
 	AFortPlayerControllerAthena* PlayerController);
 static bool IsTerminalManagedBot(
@@ -205,11 +206,11 @@ static bool VehicleLoadoutContainsGuid(
 		});
 }
 
-static bool VehicleInventoryContainsGuid(
+static FFortItemEntry* FindVehicleInventoryEntry(
 	AFortInventory* Inventory, const FGuid& Guid)
 {
 	if (!Inventory)
-		return false;
+		return nullptr;
 
 	for (int32 Index = 0;
 		Index < Inventory->Inventory.ReplicatedEntries.Num(); ++Index)
@@ -217,10 +218,16 @@ static bool VehicleInventoryContainsGuid(
 		auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(
 			Index, FFortItemEntry::Size());
 		if (VehicleLoadoutGuidsEqual(Entry.ItemGuid, Guid))
-			return true;
+			return &Entry;
 	}
 
-	return false;
+	return nullptr;
+}
+
+static bool VehicleInventoryContainsGuid(
+	AFortInventory* Inventory, const FGuid& Guid)
+{
+	return FindVehicleInventoryEntry(Inventory, Guid) != nullptr;
 }
 
 static std::vector<FGuid> SnapshotVehicleInventoryGuids(
@@ -315,24 +322,67 @@ static void RemoveTrackedVehicleItems(
 	State.TemporaryItemGuids.clear();
 }
 
-static bool EquipTrackedVehicleOriginalItem(
+// Puts an inventory entry back in the pawn's hands for real. The two RPCs alone
+// move the quickbar selection and tell the client what to show, but neither
+// replaces the weapon actor the server pawn is holding - so on their own they
+// leave a player whose UI says "pickaxe" still carrying a mounted vehicle gun.
+// EquipWeaponDefinition is the part that actually swaps the actor.
+static bool EquipInventoryEntryOnPawn(
 	AFortPlayerControllerAthena* PlayerController,
-	const FTrackedVehicleLoadout& State)
+	AFortPlayerPawnAthena* RiderPawn,
+	FFortItemEntry* Entry)
 {
-	if (!State.bHasOriginalEquippedItem ||
-		!PlayerController || !PlayerController->WorldInventory ||
-		!VehicleInventoryContainsGuid(
-			PlayerController->WorldInventory,
-			State.OriginalEquippedItem))
-	{
+	if (!PlayerController || !Entry || !Entry->ItemDefinition)
 		return false;
+
+	// ServerExecuteInventoryItem_ normally performs the authoritative equip.
+	// Snapshot the reflected entry first because an RPC is allowed to mutate
+	// the inventory array, then direct-equip only if that path did not leave the
+	// requested weapon actor in the rider's hands.
+	const auto ItemDefinition = Entry->ItemDefinition;
+	const auto ItemGuid = Entry->ItemGuid;
+	const auto TrackerGuid = Entry->HasTrackerGuid()
+		? Entry->TrackerGuid : FGuid();
+	PlayerController->ServerExecuteInventoryItem(ItemGuid);
+
+	if (RiderPawn)
+	{
+		auto EquippedWeapon = RiderPawn->HasCurrentWeapon() &&
+			IsUsableDeathObject(RiderPawn->CurrentWeapon)
+			? RiderPawn->CurrentWeapon->Cast<AFortWeapon>()
+			: nullptr;
+		if (!EquippedWeapon ||
+			!VehicleLoadoutGuidsEqual(
+				EquippedWeapon->ItemEntryGuid, ItemGuid))
+		{
+			RiderPawn->EquipWeaponDefinition(
+				ItemDefinition, ItemGuid, TrackerGuid, false);
+		}
 	}
 
-	PlayerController->ServerExecuteInventoryItem(
-		State.OriginalEquippedItem);
-	PlayerController->ClientEquipItem(
-		State.OriginalEquippedItem, true);
+	PlayerController->ClientEquipItem(ItemGuid, true);
 	return true;
+}
+
+static bool EquipTrackedVehicleOriginalItem(
+	AFortPlayerControllerAthena* PlayerController,
+	const FTrackedVehicleLoadout& State,
+	AFortPlayerPawnAthena* RiderPawn = nullptr)
+{
+	if (!State.bHasOriginalEquippedItem || !PlayerController)
+		return false;
+
+	auto Entry = FindVehicleInventoryEntry(
+		PlayerController->WorldInventory,
+		State.OriginalEquippedItem);
+	if (!Entry)
+		return false;
+
+	return EquipInventoryEntryOnPawn(
+		PlayerController,
+		RiderPawn ? RiderPawn :
+			ResolveVehicleRiderPawn(PlayerController),
+		Entry);
 }
 
 void AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(
@@ -355,29 +405,178 @@ void AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(
 		return;
 	}
 
-	GVehiclePossessionReturnPawn.erase(PlayerController);
-	GVehiclePossessionVehicle.erase(PlayerController);
-
 	auto Tracked = GTrackedVehicleLoadouts.find(PlayerController);
 	if (Tracked == GTrackedVehicleLoadouts.end())
 		return;
 
+	// Capture the character while the vehicle-return map is still available;
+	// character vehicles can temporarily leave Controller->Pawn on the vehicle.
+	auto RiderPawn = ResolveVehicleRiderPawn(PlayerController);
+	GVehiclePossessionReturnPawn.erase(PlayerController);
+	GVehiclePossessionVehicle.erase(PlayerController);
+
 	auto State = std::move(Tracked->second);
 	GTrackedVehicleLoadouts.erase(Tracked);
+	auto HeldWeapon = RiderPawn && RiderPawn->HasCurrentWeapon() &&
+		IsUsableDeathObject(RiderPawn->CurrentWeapon)
+		? RiderPawn->CurrentWeapon->Cast<AFortWeapon>()
+		: nullptr;
+	const bool bHeldTrackedTemporaryItem = HeldWeapon &&
+		VehicleLoadoutContainsGuid(
+			State.TemporaryItemGuids,
+			HeldWeapon->ItemEntryGuid);
 	RemoveTrackedVehicleItems(PlayerController, State);
 
-	if (!EquipTrackedVehicleOriginalItem(
-		PlayerController, State))
+	bool bRestoredOriginal = EquipTrackedVehicleOriginalItem(
+		PlayerController, State, RiderPawn);
+	if (!bRestoredOriginal && bHeldTrackedTemporaryItem)
+	{
+		// If entry-time capture could not identify the equipped player item,
+		// never leave the now-removed vehicle actor selected. Fall back only for
+		// a GUID this exact tracked ride granted.
+		auto Entry = FindHarvestingToolEntry(
+			PlayerController->WorldInventory);
+		if (!Entry && PlayerController->WorldInventory &&
+			PlayerController->WorldInventory->Inventory
+				.ReplicatedEntries.Num() > 0)
+		{
+			Entry = &PlayerController->WorldInventory->Inventory
+				.ReplicatedEntries.Get(0, FFortItemEntry::Size());
+		}
+		if (!EquipInventoryEntryOnPawn(
+			PlayerController, RiderPawn, Entry))
+		{
+			return;
+		}
+	}
+	else if (!bRestoredOriginal)
+	{
 		return;
+	}
 
 	SDK::DbgLog(
-		"[Vehicles] restored exact pre-entry equipped item "
+		"[Vehicles] restored %s after vehicle exit "
 		"controller=%p guid=%08x-%08x-%08x-%08x\n",
+		bRestoredOriginal ? "exact pre-entry item" : "safe fallback item",
 		(void*)PlayerController,
 		(unsigned)State.OriginalEquippedItem.A,
 		(unsigned)State.OriginalEquippedItem.B,
 		(unsigned)State.OriginalEquippedItem.C,
 		(unsigned)State.OriginalEquippedItem.D);
+}
+
+// Only a weapon GUID granted by a vehicle lifecycle Magnesium recorded is
+// eligible for deferred cleanup. Actor-only LTM/form weapons and consumed
+// gadgets commonly have no inventory row, so absence from WorldInventory is
+// never treated as vehicle provenance.
+static bool IsHoldingTrackedVehicleItemOnFoot(
+	AFortPlayerControllerAthena* PlayerController,
+	const FTrackedVehicleLoadout& State)
+{
+	if (!PlayerController)
+		return false;
+
+	auto RiderPawn = ResolveVehicleRiderPawn(PlayerController);
+	if (!RiderPawn || !RiderPawn->HasCurrentWeapon() ||
+		!IsUsableDeathObject(RiderPawn->CurrentWeapon) ||
+		ResolveVehicleForPawn(RiderPawn) ||
+		(AActor*)PlayerController->Pawn != (AActor*)RiderPawn)
+	{
+		return false;
+	}
+
+	auto Weapon = RiderPawn->CurrentWeapon->Cast<AFortWeapon>();
+	return Weapon && VehicleLoadoutContainsGuid(
+		State.TemporaryItemGuids, Weapon->ItemEntryGuid);
+}
+
+// A deferred restore gets no second chance of its own. RestoreVehicleLoadoutAfterExit
+// only ever runs off an exit RPC, so any exit that still shows the rider seated at
+// that exact instant loses the cleanup entirely and strands the temporary vehicle
+// weapon in the player's hands - equipped, and with no vehicle left to use it on.
+// A cannon does precisely that: the launch clears the seat after the exit has
+// already been handled.
+//
+// So the rule is enforced as an invariant rather than as an event. A rider that is
+// no longer in the vehicle its loadout was captured for gets the cleanup it missed,
+// on the next tick, whichever way it left.
+void AFortPlayerControllerAthena::TickVehicleLoadoutReconcile()
+{
+	auto World = UWorld::GetWorld();
+	if (!World)
+		return;
+
+	// Pass one: give back the loadout for any tracked ride that has ended.
+	// Only controllers whose entry this code actually recorded are considered.
+	// Without a known vehicle there is nothing to test occupancy against, and
+	// guessing "not in one" would strip the weapon from a live rider.
+	// Snapshotted because the restore erases from both maps.
+	if (!GTrackedVehicleLoadouts.empty() &&
+		!GVehiclePossessionVehicle.empty())
+	{
+		std::vector<AFortPlayerControllerAthena*> Candidates;
+		Candidates.reserve(GVehiclePossessionVehicle.size());
+
+		for (const auto& Entry : GVehiclePossessionVehicle)
+		{
+			if (GTrackedVehicleLoadouts.count(Entry.first) != 0)
+				Candidates.push_back(Entry.first);
+		}
+
+		for (auto* PlayerController : Candidates)
+		{
+			// Asked here as well as inside the restore so an ordinary seated
+			// rider costs one occupancy test per tick and logs nothing.
+			if (!IsUsableDeathObject(PlayerController) ||
+				IsControllerStillUsingTrackedVehicle(PlayerController))
+			{
+				continue;
+			}
+
+			SDK::DbgLog(
+				"[Vehicles] reconciling stranded vehicle loadout "
+				"controller=%p\n",
+				(void*)PlayerController);
+			RestoreVehicleLoadoutAfterExit(PlayerController);
+		}
+	}
+
+	// A legacy path can record the temporary GUID without retaining a usable
+	// vehicle actor. Reconcile those entries only when that exact GUID is still
+	// held on foot; never infer a vehicle weapon by scanning arbitrary players.
+	if (GTrackedVehicleLoadouts.empty())
+		return;
+
+	std::vector<AFortPlayerControllerAthena*> Candidates;
+	Candidates.reserve(GTrackedVehicleLoadouts.size());
+	for (const auto& Entry : GTrackedVehicleLoadouts)
+		Candidates.push_back(Entry.first);
+
+	for (auto* PlayerController : Candidates)
+	{
+		if (!IsUsableDeathObject(PlayerController))
+			continue;
+
+		auto Tracked =
+			GTrackedVehicleLoadouts.find(PlayerController);
+		if (Tracked == GTrackedVehicleLoadouts.end())
+			continue;
+
+		auto Vehicle =
+			GVehiclePossessionVehicle.find(PlayerController);
+		if (Vehicle != GVehiclePossessionVehicle.end() &&
+			IsUsableDeathObject(Vehicle->second))
+		{
+			// Pass one already handled every controller with a known vehicle.
+			continue;
+		}
+
+		if (IsHoldingTrackedVehicleItemOnFoot(
+			PlayerController, Tracked->second))
+		{
+			RestoreVehicleLoadoutAfterExit(PlayerController);
+		}
+	}
 }
 
 static bool IsRemoteControlledPawn(AActor* Actor)
@@ -541,6 +740,50 @@ static std::unordered_set<AFortPlayerControllerAthena*> GRespawnSkydivingObserve
 // skydive flags actually clear.
 static std::unordered_set<AFortPlayerControllerAthena*> GPendingLegacyAircraftLandingEquipment;
 static std::unordered_set<AFortPlayerControllerAthena*> GLegacyAircraftSkydivingObserved;
+
+// Native landing focuses the harvesting tool even when the player entered the
+// skydive with another inventory item selected. Keep the inventory identity,
+// never the transient weapon actor, so the same selection can be restored
+// after EndSkydiving replaces CurrentWeapon.
+struct FLandingItemRestoreState
+{
+	TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+	FGuid PreferredItemGuid{};
+	FGuid SuppressingItemGuid{};
+	FGuid SuppressionBaselineGuid{};
+	bool bHasPreferredItem = false;
+	bool bHasSuppressingItem = false;
+	bool bHasSuppressionBaseline = false;
+	bool bObservedSuppressingEquipment = false;
+	bool bSuppressRestore = false;
+	bool bPersistentSuppression = false;
+	bool bObservedSkydiving = false;
+	bool bLandingRestorePending = false;
+	int32 LandingRestoreAttempts = 0;
+};
+
+constexpr int32 MaxLandingItemRestoreAttempts = 4;
+
+static std::unordered_map<AFortPlayerControllerAthena*,
+	FLandingItemRestoreState> GLandingItemRestoreStates;
+static TWeakObjectPtr<UWorld> GLandingItemRestoreWorld;
+static UWorld* GLandingItemRestoreWorldIdentity = nullptr;
+static std::unordered_set<AFortPlayerControllerAthena*>
+	GProgrammaticLandingEquipmentControllers;
+
+static void RememberLandingItemSelection(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	const FGuid& ItemGuid,
+	bool bForceSuppressRestore = false,
+	const FGuid* SuppressionBaselineGuid = nullptr);
+static void EnsureLandingItemTracking(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn);
+static void TickLandingItemSelectionRestores();
+static AFortWeapon* GetPawnCurrentWeaponSafe(
+	AFortPlayerPawnAthena* Pawn);
 // Aircraft lifecycle functions can be replayed while the bus is still flying.
 // Remember the authoritative match in which each controller was cleaned so a
 // duplicate RPC can never erase loot collected after that player jumped.
@@ -997,35 +1240,309 @@ static bool IsLiveRemoteControlReturnPawn(AActor* Actor);
 // a death respawn so it always receives the configured late-game loadout once.
 static std::unordered_set<AFortPlayerControllerAthena*> GPendingLateGameAircraftLoadout;
 
-static bool IsFiniteRespawnLocation(FVector Location)
+static bool IsFiniteRespawnLocation(const FVector& Location)
 {
 	return std::isfinite(static_cast<double>(Location.X)) &&
 		std::isfinite(static_cast<double>(Location.Y)) &&
 		std::isfinite(static_cast<double>(Location.Z));
 }
 
-static AFortSafeZoneIndicator* GetRespawnSafeZoneIndicator(AFortGameMode* GameMode)
+static bool IsFiniteRespawnRotation(const FRotator& Rotation)
 {
-	if (!GameMode)
+	return std::isfinite(static_cast<double>(Rotation.Pitch)) &&
+		std::isfinite(static_cast<double>(Rotation.Yaw)) &&
+		std::isfinite(static_cast<double>(Rotation.Roll));
+}
+
+static UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
+	GetRespawnSafeZonePhaseLogic()
+{
+	auto World = UWorld::GetWorld();
+	if (!World || VersionInfo.FortniteVersion < 25.20)
 		return nullptr;
 
-	if (GameMode->HasSafeZoneIndicator() && GameMode->SafeZoneIndicator)
-		return GameMode->SafeZoneIndicator;
+	// From 25.20 onward the game-state component is the authoritative storm
+	// owner. The older GameMode/GameState pointers can remain populated with the
+	// superseded indicator during an owner hand-off, which is how a respawn can
+	// be sent to an old (occasionally still-zero) circle on modern builds.
+	auto PhaseLogic = VersionInfo.FortniteVersion >= 32.00
+		? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed()
+		: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
+	return IsUsableDeathObject(PhaseLogic) ? PhaseLogic : nullptr;
+}
 
+static AFortSafeZoneIndicator* GetRespawnSafeZoneIndicator(
+	AFortGameMode* GameMode,
+	UFortGameStateComponent_BattleRoyaleGamePhaseLogic** OutPhaseLogic = nullptr)
+{
+	if (OutPhaseLogic)
+		*OutPhaseLogic = nullptr;
+
+	auto PhaseLogic = GetRespawnSafeZonePhaseLogic();
+	if (OutPhaseLogic)
+		*OutPhaseLogic = PhaseLogic;
+	if (PhaseLogic && PhaseLogic->HasSafeZoneIndicator() &&
+		IsUsableDeathObject(PhaseLogic->SafeZoneIndicator))
+	{
+		return PhaseLogic->SafeZoneIndicator;
+	}
+
+	if (!IsUsableDeathObject(GameMode))
+		return nullptr;
+
+	// Prefer the replicated GameState owner over GameMode. During a safe-zone
+	// ownership transition the former is updated first and the latter can still
+	// point at the previous indicator for a frame.
 	auto GameState = GameMode->GameState;
-
-	if (GameState && GameState->HasSafeZoneIndicator() && GameState->SafeZoneIndicator)
+	if (IsUsableDeathObject(GameState) &&
+		GameState->HasSafeZoneIndicator() &&
+		IsUsableDeathObject(GameState->SafeZoneIndicator))
+	{
 		return (AFortSafeZoneIndicator*)GameState->SafeZoneIndicator;
+	}
+
+	if (GameMode->HasSafeZoneIndicator() &&
+		IsUsableDeathObject(GameMode->SafeZoneIndicator))
+		return GameMode->SafeZoneIndicator;
 
 	return nullptr;
 }
 
-static bool TryGetSafeZoneRespawnCenter(AFortGameMode* GameMode, FVector& OutCenter)
+static int32 GetRespawnSafeZonePhase(
+	AFortGameMode* GameMode,
+	AFortSafeZoneIndicator* SafeZoneIndicator)
 {
-	auto SafeZoneIndicator = GetRespawnSafeZoneIndicator(GameMode);
+	constexpr int32 MaxSupportedSafeZonePhase = 63;
+	auto IsSanePhase = [=](int32 Phase)
+	{
+		return Phase >= 0 && Phase <= MaxSupportedSafeZonePhase;
+	};
 
-	if (!SafeZoneIndicator)
+	if (SafeZoneIndicator && SafeZoneIndicator->HasCurrentPhase())
+	{
+		const int32 Phase = SafeZoneIndicator->CurrentPhase;
+		if (IsSanePhase(Phase))
+			return Phase;
+	}
+
+	if (GameMode && GameMode->HasSafeZonePhase())
+	{
+		const int32 Phase = GameMode->SafeZonePhase;
+		if (IsSanePhase(Phase))
+			return Phase;
+	}
+
+	auto GameState = GameMode ? GameMode->GameState : nullptr;
+	if (IsUsableDeathObject(GameState) && GameState->HasSafeZonePhase())
+	{
+		const int32 Phase = GameState->SafeZonePhase;
+		if (IsSanePhase(Phase))
+			return Phase;
+	}
+
+	return -1;
+}
+
+static bool TryGetSafeZonePhaseCenter(
+	AFortSafeZoneIndicator* SafeZoneIndicator,
+	int32 SafeZonePhase,
+	FVector& OutCenter)
+{
+	if (!SafeZoneIndicator || !SafeZoneIndicator->HasSafeZonePhases() ||
+		SafeZonePhase < 0 || VersionInfo.FortniteVersion >= 32.00)
+	{
 		return false;
+	}
+	// FN 32.x encrypts/relocates the reflected FProperty layout used by
+	// UScriptStruct::Size(). Never stride SafeZonePhases with that value there;
+	// the component's published NextCenter/interface is the safe source.
+	auto PhaseStruct = FFortSafeZonePhaseInfo::StaticStruct();
+	if (!PhaseStruct || !FFortSafeZonePhaseInfo::HasCenter() ||
+		!FFortSafeZonePhaseInfo::HasRadius())
+	{
+		return false;
+	}
+
+	auto& SafeZonePhases = SafeZoneIndicator->SafeZonePhases;
+	const int32 PhaseCount = SafeZonePhases.Num();
+	const int32 PhaseCapacity = SafeZonePhases.Max();
+	const int32 PhaseSize = FFortSafeZonePhaseInfo::Size();
+	if (PhaseCount <= 0 || PhaseCount > 64 ||
+		PhaseCapacity < PhaseCount || PhaseCapacity > 128 ||
+		PhaseSize <= 0 || PhaseSize > 0x400 ||
+		!SafeZonePhases.IsValidIndex(SafeZonePhase) ||
+		!SDK::MemReadable(
+			SafeZonePhases.GetData(),
+			static_cast<size_t>(PhaseCount) * PhaseSize))
+	{
+		return false;
+	}
+
+	auto& PhaseInfo = SafeZonePhases.Get(SafeZonePhase, PhaseSize);
+	if (!std::isfinite(PhaseInfo.Center.X) ||
+		!std::isfinite(PhaseInfo.Center.Y) ||
+		!std::isfinite(PhaseInfo.Center.Z) ||
+		!std::isfinite(PhaseInfo.Radius) || PhaseInfo.Radius <= 0.f)
+	{
+		return false;
+	}
+
+	OutCenter = PhaseInfo.Center;
+	return true;
+}
+
+static bool TryGetSafeZoneLocationCenter(
+	AFortGameMode* GameMode,
+	int32 SafeZonePhase,
+	FVector& OutCenter,
+	bool bAllowZero = false)
+{
+	if (!GameMode || !GameMode->HasSafeZoneLocations())
+		return false;
+	if (GameMode->HasbSafeZoneLocationsInitialized() &&
+		!GameMode->bSafeZoneLocationsInitialized)
+	{
+		return false;
+	}
+
+	auto& Locations = GameMode->SafeZoneLocations;
+	const int32 LocationCount = Locations.Num();
+	const int32 LocationCapacity = Locations.Max();
+	const int32 VectorSize = FVector::Size();
+	if (LocationCount <= 0 || LocationCount > 64 ||
+		LocationCapacity < LocationCount || LocationCapacity > 128 ||
+		VectorSize <= 0 || VectorSize > 0x40 ||
+		!SDK::MemReadable(
+			Locations.GetData(),
+			static_cast<size_t>(LocationCount) * VectorSize))
+	{
+		return false;
+	}
+
+	// Phase zero is the full-map current circle. Before the indicator publishes
+	// phase one, SafeZoneLocations[1] is already the first visible white target.
+	// Once phases advance, the phase number itself is the white-target index on
+	// both the legacy Last/Next schema and the component-driven schema.
+	int32 TargetIndex = SafeZonePhase;
+	if (TargetIndex < 0)
+		TargetIndex = LocationCount > 1 ? 1 : 0;
+	else if (TargetIndex == 0 && LocationCount > 1)
+		TargetIndex = 1;
+
+	if (!Locations.IsValidIndex(TargetIndex))
+		return false;
+
+	auto& Candidate = Locations.Get(TargetIndex, VectorSize);
+	if (!IsFiniteRespawnLocation(Candidate) ||
+		(!bAllowZero && Candidate.IsZero()))
+		return false;
+
+	OutCenter = Candidate;
+	return true;
+}
+
+static bool TryCallRespawnSafeZoneVectorGetter(
+	const UObject* Owner,
+	const char* FunctionName,
+	FVector& OutCenter,
+	bool bAllowZero = false)
+{
+	if (!IsUsableDeathObject(Owner) || !FunctionName)
+		return false;
+
+	auto Function = Owner->GetFunction(FunctionName);
+	if (!IsUsableDeathObject(Function))
+		return false;
+
+	// UObject::Call's no-argument return fast path assumes ReturnValue lives at
+	// offset zero. That is normally true, but a schema mismatch writes into an
+	// undersized FVector buffer; on FN32 its generic return decoder also cannot
+	// trust encrypted PropertyFlags. Validate the exact getter shape and own the
+	// ProcessEvent buffer instead.
+	const auto Parameters = Function->GetParamsNamed();
+	if (Parameters.NameOffsetMap.size() != 1)
+		return false;
+
+	const auto& ReturnParameter = Parameters.NameOffsetMap[0];
+	const uint32 VectorSize = static_cast<uint32>(FVector::Size());
+	if (ReturnParameter.Name != "ReturnValue" ||
+		VectorSize == 0 || VectorSize > 0x40)
+	{
+		return false;
+	}
+
+	constexpr uint64 CPF_Parm = 0x0000000000000080;
+	constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+	const bool bFN32PropertyLayout = VersionInfo.FortniteVersion >= 32.00;
+	const uint32 BufferSize = bFN32PropertyLayout
+		? 0x1000u : Parameters.Size;
+	if (BufferSize == 0 || BufferSize > 0x1000 ||
+		ReturnParameter.Offset > BufferSize ||
+		VectorSize > BufferSize - ReturnParameter.Offset)
+	{
+		return false;
+	}
+	if (!bFN32PropertyLayout &&
+		(!(ReturnParameter.PropertyFlags & CPF_Parm) ||
+		 !(ReturnParameter.PropertyFlags & CPF_ReturnParm) ||
+		 ReturnParameter.ElementSize != VectorSize))
+	{
+		return false;
+	}
+
+	void* Memory = FMemory::Malloc(BufferSize);
+	if (!Memory)
+		return false;
+	memset(Memory, 0, BufferSize);
+	Owner->ProcessEvent(Function, Memory);
+	FVector Candidate{};
+	memcpy(
+		&Candidate,
+		(PBYTE)Memory + ReturnParameter.Offset,
+		VectorSize);
+	FMemory::Free(Memory);
+	if (!IsFiniteRespawnLocation(Candidate) ||
+		(!bAllowZero && Candidate.IsZero()))
+		return false;
+
+	OutCenter = Candidate;
+	return true;
+}
+
+static bool IsConfiguredRespawnSafeZoneOrigin()
+{
+	return FConfiguration::bLateGame && FConfiguration::bCustomSafeZone &&
+		IsFiniteRespawnLocation(FConfiguration::CustomSafeZoneCenter) &&
+		FConfiguration::CustomSafeZoneCenter.IsZero();
+}
+
+static bool TryGetSafeZoneRespawnCenter(
+	AFortGameMode* GameMode,
+	FVector& OutCenter)
+{
+	UFortGameStateComponent_BattleRoyaleGamePhaseLogic* PhaseLogic = nullptr;
+	auto SafeZoneIndicator = GetRespawnSafeZoneIndicator(
+		GameMode, &PhaseLogic);
+
+	// A few early builds fill SafeZoneLocations before publishing an indicator.
+	// That source is still sufficient to resolve their first white circle.
+	if (!SafeZoneIndicator)
+	{
+		const int32 SafeZonePhase = GetRespawnSafeZonePhase(
+			GameMode, nullptr);
+		auto GameState = GameMode ? GameMode->GameState : nullptr;
+		const bool bAllowConfiguredOrigin =
+			IsConfiguredRespawnSafeZoneOrigin();
+		return TryCallRespawnSafeZoneVectorGetter(
+				PhaseLogic, "GetSafeZoneNextCenter", OutCenter,
+				SafeZonePhase > 0 || bAllowConfiguredOrigin) ||
+			TryCallRespawnSafeZoneVectorGetter(
+				GameState, "GetSafeZoneNextCenter", OutCenter,
+				SafeZonePhase > 0 || bAllowConfiguredOrigin) ||
+			TryGetSafeZoneLocationCenter(
+				GameMode, SafeZonePhase, OutCenter,
+				bAllowConfiguredOrigin);
+	}
 
 	auto TryUseCenter = [&](FVector Center, bool bAllowZero) -> bool
 	{
@@ -1036,41 +1553,66 @@ static bool TryGetSafeZoneRespawnCenter(AFortGameMode* GameMode, FVector& OutCen
 		return true;
 	};
 
+	const int32 SafeZonePhase = GetRespawnSafeZonePhase(
+		GameMode, SafeZoneIndicator);
 	FVector PhaseCenter{};
-	bool bHasPhaseCenter = false;
+	const bool bHasPhaseCenter = TryGetSafeZonePhaseCenter(
+		SafeZoneIndicator, SafeZonePhase, PhaseCenter);
+	const bool bAllowConfiguredOrigin =
+		IsConfiguredRespawnSafeZoneOrigin();
+	const bool bHasActiveTargetPhase = SafeZonePhase > 0;
 
-	if (SafeZoneIndicator->HasSafeZonePhases() && SafeZoneIndicator->HasCurrentPhase())
+	// NextCenter is the center of the white target circle. GetSafeZoneCenter is
+	// the interpolated/live blue wall on legacy builds, so it must never outrank
+	// NextCenter or the phase/location target.
+	if (SafeZoneIndicator->HasNextCenter())
 	{
-		auto& SafeZonePhases = SafeZoneIndicator->SafeZonePhases;
-		auto CurrentPhase = SafeZoneIndicator->CurrentPhase;
-
-		if (SafeZonePhases.IsValidIndex(CurrentPhase))
+		const bool bHasPublishedNextRadius =
+			SafeZoneIndicator->HasNextRadius() &&
+			std::isfinite(SafeZoneIndicator->NextRadius) &&
+			SafeZoneIndicator->NextRadius > 0.f;
+		if (TryUseCenter(
+			SafeZoneIndicator->NextCenter,
+			bAllowConfiguredOrigin ||
+			(bHasActiveTargetPhase && bHasPublishedNextRadius)))
 		{
-			auto& PhaseInfo = SafeZonePhases.Get(CurrentPhase, FFortSafeZonePhaseInfo::Size());
-			PhaseCenter = PhaseInfo.Center;
-			bHasPhaseCenter = true;
+			return true;
 		}
 	}
 
-	if (auto GetSafeZoneCenterFn = SafeZoneIndicator->GetFunction("GetSafeZoneCenter"))
+	if (PhaseLogic && TryCallRespawnSafeZoneVectorGetter(
+		PhaseLogic, "GetSafeZoneNextCenter", OutCenter,
+		bHasActiveTargetPhase || bAllowConfiguredOrigin))
 	{
-		auto Center = SafeZoneIndicator->Call<FVector>(GetSafeZoneCenterFn);
-
-		if (TryUseCenter(Center, bHasPhaseCenter || !Center.IsZero()))
-			return true;
+		return true;
 	}
 
-	if (bHasPhaseCenter && TryUseCenter(PhaseCenter, true))
+	auto GameState = GameMode ? GameMode->GameState : nullptr;
+	if (TryCallRespawnSafeZoneVectorGetter(
+		GameState, "GetSafeZoneNextCenter", OutCenter,
+		bHasActiveTargetPhase || bAllowConfiguredOrigin) ||
+		TryCallRespawnSafeZoneVectorGetter(
+			SafeZoneIndicator, "GetSafeZoneNextCenter", OutCenter,
+			bHasActiveTargetPhase || bAllowConfiguredOrigin))
+	{
+		return true;
+	}
+
+	if (bHasPhaseCenter && TryUseCenter(
+		PhaseCenter, bHasActiveTargetPhase || bAllowConfiguredOrigin))
 		return true;
 
-	if (SafeZoneIndicator->HasNextCenter() && TryUseCenter(SafeZoneIndicator->NextCenter, false))
+	if (TryGetSafeZoneLocationCenter(
+		GameMode, SafeZonePhase, OutCenter,
+		bAllowConfiguredOrigin))
+	{
 		return true;
+	}
 
-	if (SafeZoneIndicator->HasLastCenter() && TryUseCenter(SafeZoneIndicator->LastCenter, false))
-		return true;
-
-	if (SafeZoneIndicator->HasPreviousCenter() && TryUseCenter(SafeZoneIndicator->PreviousCenter, false))
-		return true;
+	// GetSafeZoneCenter/LastCenter represent the interpolated blue wall on
+	// legacy builds, not the white target requested by Mid-Zone Respawning.
+	// Fail closed if no target representation was published instead of silently
+	// respawning at the wrong circle (or at an uninitialized origin).
 
 	return false;
 }
@@ -1762,16 +2304,150 @@ uint64_t InitializePlayerGameplayAbilities_;
 struct FGameplayAbilityInitializationState
 {
 	TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
-	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+	TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
+	TWeakObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
 };
 
 static std::vector<FGameplayAbilityInitializationState>
 	GGameplayAbilityInitializationStates;
 
-// The PlayerState ASC can survive pawn replacement, and more than one pawn
-// lifecycle callback may observe the replacement. Apply the default/playlist
-// ability sets exactly once for each controller+pawn pair so their persistent
-// modifiers cannot stack or be reordered.
+enum class EDefaultPlayerAbilityCoverage : uint8
+{
+	Unavailable,
+	None,
+	Partial,
+	Complete
+};
+
+struct FDefaultPlayerAbilityInspection
+{
+	EDefaultPlayerAbilityCoverage Coverage =
+		EDefaultPlayerAbilityCoverage::Unavailable;
+	const UFortAbilitySet* AbilitySet = nullptr;
+	std::vector<const UClass*> MissingAbilityClasses;
+	int32 ExpectedAbilityCount = 0;
+	int32 MatchedAbilityCount = 0;
+};
+
+static const UFortAbilitySet* FindDefaultPlayerAbilitySet()
+{
+	for (auto AbilitySet : AFortGameMode::AbilitySets)
+	{
+		if (!AbilitySet || !AbilitySet->HasGameplayAbilities())
+			continue;
+
+		const auto Name = AbilitySet->Name.ToString();
+		if (Name.find("GAS_AthenaPlayer") != std::string::npos ||
+			Name.find("GAS_DefaultPlayer") != std::string::npos)
+		{
+			return AbilitySet;
+		}
+	}
+
+	return nullptr;
+}
+
+static FDefaultPlayerAbilityInspection InspectDefaultPlayerAbilities(
+	UAbilitySystemComponent* AbilitySystemComponent)
+{
+	FDefaultPlayerAbilityInspection Result;
+	if (!AbilitySystemComponent)
+		return Result;
+
+	Result.AbilitySet = FindDefaultPlayerAbilitySet();
+	if (!Result.AbilitySet)
+		return Result;
+
+	for (int32 AbilityIndex = 0;
+		AbilityIndex < Result.AbilitySet->GameplayAbilities.Num();
+		++AbilityIndex)
+	{
+		auto AbilityClass =
+			Result.AbilitySet->GameplayAbilities[AbilityIndex].Get();
+		if (!AbilityClass)
+			continue;
+
+		++Result.ExpectedAbilityCount;
+		bool bFound = false;
+		for (int32 SpecIndex = 0;
+			SpecIndex < AbilitySystemComponent->
+				ActivatableAbilities.Items.Num(); ++SpecIndex)
+		{
+			auto& Spec = AbilitySystemComponent->
+				ActivatableAbilities.Items.Get(
+					SpecIndex, FGameplayAbilitySpec::Size());
+			if (Spec.Ability && Spec.Ability->Class == AbilityClass)
+			{
+				bFound = true;
+				break;
+			}
+		}
+
+		if (bFound)
+			++Result.MatchedAbilityCount;
+		else
+			Result.MissingAbilityClasses.push_back(AbilityClass);
+	}
+
+	if (Result.ExpectedAbilityCount <= 0)
+		return Result;
+
+	if (Result.MatchedAbilityCount == Result.ExpectedAbilityCount)
+		Result.Coverage = EDefaultPlayerAbilityCoverage::Complete;
+	else if (Result.MatchedAbilityCount > 0)
+		Result.Coverage = EDefaultPlayerAbilityCoverage::Partial;
+	else
+		Result.Coverage = EDefaultPlayerAbilityCoverage::None;
+
+	return Result;
+}
+
+static bool HasDefaultPlayerDeathAbility(
+	UAbilitySystemComponent* AbilitySystemComponent)
+{
+	if (!AbilitySystemComponent)
+		return false;
+
+	for (int32 SpecIndex = 0;
+		SpecIndex < AbilitySystemComponent->
+			ActivatableAbilities.Items.Num(); ++SpecIndex)
+	{
+		auto& Spec = AbilitySystemComponent->
+			ActivatableAbilities.Items.Get(
+				SpecIndex, FGameplayAbilitySpec::Size());
+		if (!Spec.Ability)
+			continue;
+
+		const auto Name = Spec.Ability->Name.ToString();
+		if (Name.find("DefaultPlayer_Death") != std::string::npos ||
+			Name.find("GenericDeath") != std::string::npos)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void RememberGameplayAbilityInitialization(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerStateAthena* PlayerState,
+	UAbilitySystemComponent* AbilitySystemComponent)
+{
+	FGameplayAbilityInitializationState State;
+	State.PlayerController =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
+	State.PlayerState =
+		TWeakObjectPtr<AFortPlayerStateAthena>(PlayerState);
+	State.AbilitySystemComponent =
+		TWeakObjectPtr<UAbilitySystemComponent>(AbilitySystemComponent);
+	GGameplayAbilityInitializationStates.emplace_back(State);
+}
+
+// The PlayerState ASC survives pawn replacement. Default player abilities are
+// therefore a property of that persistent ASC generation, not of each pawn.
+// Re-granting them on respawn stacks multiple death/DBNO abilities that can all
+// race the same lethal hit and leave the pawn at zero health without death.
 static bool EnsurePawnGameplayAbilitiesInitialized(
 	AFortPlayerControllerAthena* PlayerController,
 	AFortPlayerPawnAthena* Pawn)
@@ -1779,34 +2455,102 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 	if (!PlayerController || !Pawn || !PlayerController->PlayerState)
 		return false;
 
+	auto PlayerState = PlayerController->PlayerState;
+	auto AbilitySystemComponent =
+		PlayerState->AbilitySystemComponent;
+	if (!AbilitySystemComponent)
+		return false;
+
 	for (auto It = GGameplayAbilityInitializationStates.begin();
 		It != GGameplayAbilityInitializationStates.end();)
 	{
-		auto ExistingController = It->PlayerController.Get();
-		auto ExistingPawn = It->Pawn.Get();
-		if (!ExistingController || !ExistingPawn)
+		auto ExistingPlayerState = It->PlayerState.Get();
+		auto ExistingAbilitySystem = It->AbilitySystemComponent.Get();
+		if (!ExistingPlayerState || !ExistingAbilitySystem)
 		{
 			It = GGameplayAbilityInitializationStates.erase(It);
 			continue;
 		}
 
-		if (ExistingController == PlayerController &&
-			ExistingPawn == Pawn)
+		if (ExistingPlayerState == PlayerState &&
+			ExistingAbilitySystem == AbilitySystemComponent)
 		{
+			It->PlayerController =
+				TWeakObjectPtr<AFortPlayerControllerAthena>(
+					PlayerController);
 			return true;
-		}
-
-		if (ExistingController == PlayerController)
-		{
-			It = GGameplayAbilityInitializationStates.erase(It);
-			continue;
 		}
 
 		++It;
 	}
 
+	const auto Inspection = InspectDefaultPlayerAbilities(
+		AbilitySystemComponent);
+	if (Inspection.Coverage ==
+		EDefaultPlayerAbilityCoverage::Complete ||
+		(Inspection.Coverage ==
+			EDefaultPlayerAbilityCoverage::Unavailable &&
+		 HasDefaultPlayerDeathAbility(AbilitySystemComponent)))
+	{
+		// Native possession already granted the persistent default set. Its actor
+		// info is rebound separately by Possess; initialization is not an avatar
+		// refresh API and must not be replayed for the replacement pawn.
+		RememberGameplayAbilityInitialization(
+			PlayerController, PlayerState, AbilitySystemComponent);
+		SDK::DbgLog(
+			"[AbilityInit] reused native ASC controller=%p playerState=%p "
+			"asc=%p specs=%d matched=%d/%d version=%.2f\n",
+			(void*)PlayerController,
+			(void*)PlayerState,
+			(void*)AbilitySystemComponent,
+			AbilitySystemComponent->ActivatableAbilities.Items.Num(),
+			Inspection.MatchedAbilityCount,
+			Inspection.ExpectedAbilityCount,
+			VersionInfo.FortniteVersion);
+		return true;
+	}
+
+	if (Inspection.Coverage ==
+		EDefaultPlayerAbilityCoverage::Partial)
+	{
+		// Never replay the whole set over a partial native grant: doing so adds
+		// another death/DBNO spec and re-applies instant effects. Repair only the
+		// missing ability specs, which is idempotent and does not touch effects.
+		for (auto AbilityClass : Inspection.MissingAbilityClasses)
+		{
+			if (AbilityClass)
+				AbilitySystemComponent->GiveAbility(
+					AbilityClass->GetDefaultObj());
+		}
+		const auto RepairedInspection = InspectDefaultPlayerAbilities(
+			AbilitySystemComponent);
+		const bool bRepairComplete = RepairedInspection.Coverage ==
+			EDefaultPlayerAbilityCoverage::Complete;
+		if (bRepairComplete)
+		{
+			RememberGameplayAbilityInitialization(
+				PlayerController, PlayerState, AbilitySystemComponent);
+		}
+		SDK::DbgLog(
+			"[AbilityInit] partial native ASC repair controller=%p "
+			"playerState=%p asc=%p specs=%d before=%d/%d "
+			"requested=%zu after=%d/%d complete=%d version=%.2f\n",
+			(void*)PlayerController,
+			(void*)PlayerState,
+			(void*)AbilitySystemComponent,
+			AbilitySystemComponent->ActivatableAbilities.Items.Num(),
+			Inspection.MatchedAbilityCount,
+			Inspection.ExpectedAbilityCount,
+			Inspection.MissingAbilityClasses.size(),
+			RepairedInspection.MatchedAbilityCount,
+			RepairedInspection.ExpectedAbilityCount,
+			bRepairComplete ? 1 : 0,
+			VersionInfo.FortniteVersion);
+		return bRepairComplete;
+	}
+
 	bool bInitialized = false;
-	auto Interface = PlayerController->PlayerState->GetInterface(
+	auto Interface = PlayerState->GetInterface(
 		IFortAbilitySystemInterface::StaticClass());
 	if (InitializePlayerGameplayAbilities_ && Interface)
 	{
@@ -1816,8 +2560,7 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 		InitializePlayerGameplayAbilities(Interface);
 		bInitialized = true;
 	}
-	else if (auto AbilitySystemComponent =
-		PlayerController->PlayerState->AbilitySystemComponent)
+	else if (AbilitySystemComponent)
 	{
 		for (auto& AbilitySet : AFortGameMode::AbilitySets)
 			AbilitySystemComponent->GiveAbilitySet(AbilitySet);
@@ -1827,11 +2570,42 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 	if (!bInitialized)
 		return false;
 
-	FGameplayAbilityInitializationState State;
-	State.PlayerController =
-		TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
-	State.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
-	GGameplayAbilityInitializationStates.emplace_back(State);
+	const auto InitializedInspection = InspectDefaultPlayerAbilities(
+		AbilitySystemComponent);
+	const bool bInitializationVerified =
+		InitializedInspection.Coverage ==
+			EDefaultPlayerAbilityCoverage::Complete ||
+		(InitializedInspection.Coverage ==
+			EDefaultPlayerAbilityCoverage::Unavailable &&
+		 HasDefaultPlayerDeathAbility(AbilitySystemComponent));
+	if (!bInitializationVerified)
+	{
+		SDK::DbgLog(
+			"[AbilityInit] initialization could not be verified "
+			"controller=%p playerState=%p asc=%p specs=%d "
+			"matched=%d/%d version=%.2f\n",
+			(void*)PlayerController,
+			(void*)PlayerState,
+			(void*)AbilitySystemComponent,
+			AbilitySystemComponent->ActivatableAbilities.Items.Num(),
+			InitializedInspection.MatchedAbilityCount,
+			InitializedInspection.ExpectedAbilityCount,
+			VersionInfo.FortniteVersion);
+		return false;
+	}
+
+	RememberGameplayAbilityInitialization(
+		PlayerController, PlayerState, AbilitySystemComponent);
+	SDK::DbgLog(
+		"[AbilityInit] initialized empty ASC controller=%p playerState=%p "
+		"asc=%p specs=%d matched=%d/%d version=%.2f\n",
+		(void*)PlayerController,
+		(void*)PlayerState,
+		(void*)AbilitySystemComponent,
+		AbilitySystemComponent->ActivatableAbilities.Items.Num(),
+		InitializedInspection.MatchedAbilityCount,
+		InitializedInspection.ExpectedAbilityCount,
+		VersionInfo.FortniteVersion);
 	return true;
 }
 
@@ -2620,8 +3394,24 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		FortPawn->OnRep_IsInsideSafeZone();
 	}
 
-	EnsurePawnGameplayAbilitiesInitialized(
-		PlayerController, FortPawn);
+	// FN 10.40's stripped server can expose the ASC before the initial
+	// inventory/customization pass has finished. Initializing the default set at
+	// that early point leaves the specs present, but the native death lifecycle
+	// is not reliably wired and a lethal hit can sit at zero health until a
+	// watchdog forces it. The old known-good ordering had a native checkpoint
+	// after customization. Defer the single compatibility initialization to that
+	// checkpoint instead of granting the whole set twice (which breaks One Shot's
+	// shield aggregators).
+	const bool bDeferInitial1040AbilityInitialization =
+		VersionInfo.FortniteVersion == 10.40 &&
+		Num == 0 &&
+		!bRestoringRespawnPawn &&
+		!PlayersInitialized.contains(PlayerController);
+	if (!bDeferInitial1040AbilityInitialization)
+	{
+		EnsurePawnGameplayAbilitiesInitialized(
+			PlayerController, FortPawn);
+	}
 	AFortInventory::HandlePendingCarmineFocus(
 		PlayerController);
 
@@ -2815,9 +3605,23 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			((void (*)(AActor*, AActor*)) ApplyCharacterCustomization)(PlayerController->PlayerState, Pawn);
 		}
 
-		// Gameplay abilities were initialized once above for this pawn. Repeating
-		// that work here used to apply the base and playlist ability sets twice
-		// on an empty-inventory spawn, corrupting One Shot's shield aggregator.
+		if (bDeferInitial1040AbilityInitialization)
+		{
+			const bool bInitializedAtLateCheckpoint =
+				EnsurePawnGameplayAbilitiesInitialized(
+					PlayerController, FortPawn);
+			SDK::DbgLog(
+				"[AbilityInit] FN10.40 late initial checkpoint "
+				"controller=%p pawn=%p initialized=%d specs=%d\n",
+				(void*)PlayerController,
+				(void*)FortPawn,
+				bInitializedAtLateCheckpoint ? 1 : 0,
+				PlayerController->PlayerState &&
+					PlayerController->PlayerState->AbilitySystemComponent
+					? PlayerController->PlayerState->AbilitySystemComponent
+						->ActivatableAbilities.Items.Num()
+					: 0);
+		}
 	}
 	if (FConfiguration::bLateGame && (bPendingLateGameAircraftLoadout || Num != 0) &&
 		(!FConfiguration::bKeepInventory || FConfiguration::bLateGame))
@@ -2943,6 +3747,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		HandleDiscoPlayerReady(PlayerController);
 	FFortAthenaNativeLTMCompatibility::
 		HandleAshtonPlayerReady(PlayerController);
+	EnsureLandingItemTracking(PlayerController, FortPawn);
 
 	// Very last thing: if this ack is a "possess" command takeover, put the pawn
 	// on the ground and give it health. Nothing above overrode it because this
@@ -3097,6 +3902,16 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 	// ServerExecute virtual.
 	if (auto Gadget = RealDef->Cast<UFortGadgetItemDefinition>())
 	{
+		FGuid PreGadgetWeaponGuid{};
+		bool bHadPreGadgetWeapon = false;
+		if (auto PreGadgetWeapon = GetPawnCurrentWeaponSafe(
+			PlayerController->MyFortPawn))
+		{
+			PreGadgetWeaponGuid =
+				PreGadgetWeapon->ItemEntryGuid;
+			bHadPreGadgetWeapon = true;
+		}
+
 		auto ItemInstance = PlayerController->WorldInventory->Inventory.ItemInstances.Search(
 			[&](UFortWorldItem* Item)
 			{
@@ -3106,6 +3921,15 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 		if (ItemInstance && *ItemInstance &&
 			Gadget->ServerExecute((UFortItem*)*ItemInstance, PlayerController))
 		{
+			// A successful special execution can apply a complete player form
+			// (Shadow, Ashton, Infinity, and similar states). Never replay an older
+			// gun over that form at landing, even if native execution consumed the
+			// backing inventory row before returning.
+			RememberLandingItemSelection(
+				PlayerController, PlayerController->MyFortPawn,
+				ItemGuid, true,
+				bHadPreGadgetWeapon
+					? &PreGadgetWeaponGuid : nullptr);
 			return;
 		}
 	}
@@ -3169,6 +3993,9 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 			ContextTrapTool->ContextTrapItemDefinition = (UFortContextTrapItemDefinition*)ItemDefinition;
 	}
 	Weapon->ForceNetUpdate();
+	RememberLandingItemSelection(
+		PlayerController, PlayerController->MyFortPawn,
+		ItemGuid);
 
 	if (PlayerController->MyFortPawn->HasVehicleInputComponent())
 	{
@@ -3233,6 +4060,9 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryWeapon(UObject* Context,
 			ContextTrapTool->ContextTrapItemDefinition = (UFortContextTrapItemDefinition*)ItemDefinition;
 	}
 	Weapon->ForceNetUpdate();
+	RememberLandingItemSelection(
+		PlayerController, PlayerController->MyFortPawn,
+		entry->ItemGuid);
 
 	if (PlayerController->MyFortPawn->HasVehicleInputComponent())
 	{
@@ -4070,6 +4900,811 @@ static void RefreshEditingRestoreOnClient(
 
 	ActivateLegacyEditingRestoreSlot(
 		PlayerController, Entry);
+}
+
+static void RefreshLandingItemRestoreWorld()
+{
+	auto CurrentWorld = UWorld::GetWorld();
+	if (GLandingItemRestoreWorldIdentity == CurrentWorld &&
+		GLandingItemRestoreWorld.Get() == CurrentWorld)
+	{
+		return;
+	}
+
+	GLandingItemRestoreStates.clear();
+	GProgrammaticLandingEquipmentControllers.clear();
+	GLandingItemRestoreWorld = CurrentWorld
+		? TWeakObjectPtr<UWorld>(CurrentWorld)
+		: TWeakObjectPtr<UWorld>{};
+	GLandingItemRestoreWorldIdentity = CurrentWorld;
+}
+
+static bool IsValidLandingItemPlayer(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	auto ControllerClass =
+		AFortPlayerControllerAthena::StaticClass();
+	auto PawnClass = AFortPlayerPawnAthena::StaticClass();
+	if (!IsUsableDeathObject(PlayerController) ||
+		!ControllerClass ||
+		!PlayerController->IsA(ControllerClass) ||
+		!IsUsableDeathObject(Pawn) || !PawnClass ||
+		!Pawn->IsA(PawnClass))
+	{
+		return false;
+	}
+
+	auto CurrentPawn = PlayerController->MyFortPawn;
+	const bool bHasDifferentLiveCurrentPawn =
+		CurrentPawn && CurrentPawn != Pawn &&
+		IsUsableDeathObject(CurrentPawn) &&
+		CurrentPawn->IsA(PawnClass);
+	return !bHasDifferentLiveCurrentPawn &&
+		(PlayerController->MyFortPawn == Pawn ||
+			Pawn->Controller == PlayerController);
+}
+
+static bool IsPawnInSkydiveOrGlide(
+	AFortPlayerPawnAthena* Pawn)
+{
+	return IsUsableDeathObject(Pawn) &&
+		((Pawn->HasbIsSkydiving() && Pawn->bIsSkydiving) ||
+			(Pawn->HasbIsSkydivingFromBus() &&
+				Pawn->bIsSkydivingFromBus));
+}
+
+static bool IsLandingItemPawnCombatReady(
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!IsUsableDeathObject(Pawn) || Pawn->GetHealth() <= 0.f)
+		return false;
+	if (Pawn->HasbIsDying() && Pawn->bIsDying)
+		return false;
+	if (Pawn->HasbPlayedDying() && Pawn->bPlayedDying)
+		return false;
+	if (Pawn->HasbIsDBNO() && Pawn->bIsDBNO)
+		return false;
+	return true;
+}
+
+static bool UsesLandingItemPollingFallback()
+{
+	if (UsesEarlyAthenaLandingClientRefresh())
+		return true;
+
+	auto PawnDefault = AFortPlayerPawnAthena::GetDefaultObj();
+	return !PawnDefault ||
+		PawnDefault->GetFunction("EndSkydiving") == nullptr;
+}
+
+static FFortItemEntry* FindLandingInventoryEntry(
+	AFortPlayerControllerAthena* PlayerController,
+	const FGuid& ItemGuid)
+{
+	if (!PlayerController ||
+		!IsUsableDeathObject(PlayerController->WorldInventory))
+		return nullptr;
+
+	return PlayerController->WorldInventory
+		->Inventory.ReplicatedEntries.Search(
+			[&](FFortItemEntry& Entry)
+			{
+				return VehicleLoadoutGuidsEqual(
+					Entry.ItemGuid, ItemGuid);
+			}, FFortItemEntry::Size());
+}
+
+static bool IsTrackedVehicleLandingItem(
+	AFortPlayerControllerAthena* PlayerController,
+	const FGuid& ItemGuid)
+{
+	auto VehicleLoadout =
+		GTrackedVehicleLoadouts.find(PlayerController);
+	return VehicleLoadout != GTrackedVehicleLoadouts.end() &&
+		VehicleLoadoutContainsGuid(
+			VehicleLoadout->second.TemporaryItemGuids,
+			ItemGuid);
+}
+
+static FFortItemEntry* FindLandingItemRestoreEntry(
+	AFortPlayerControllerAthena* PlayerController,
+	const FGuid& ItemGuid)
+{
+	auto Entry = FindLandingInventoryEntry(
+		PlayerController, ItemGuid);
+	if (!IsRestorableAfterEditing(Entry) ||
+		Entry->ItemDefinition->Cast<UFortGadgetItemDefinition>())
+	{
+		return nullptr;
+	}
+	auto WeaponDefinition = Entry->ItemDefinition
+		? Entry->ItemDefinition->Cast<UFortWeaponItemDefinition>()
+		: nullptr;
+	if (WeaponDefinition &&
+		WeaponDefinition->HasbValidForLastEquipped() &&
+		!WeaponDefinition->bValidForLastEquipped)
+	{
+		return nullptr;
+	}
+
+	// A vehicle-owned weapon can disappear as part of seat cleanup. Never make
+	// that temporary grant the selection restored after a later glide.
+	if (IsTrackedVehicleLandingItem(
+		PlayerController, ItemGuid))
+	{
+		return nullptr;
+	}
+
+	return Entry;
+}
+
+static bool IsLandingHarvestingToolEntry(
+	AFortPlayerControllerAthena* PlayerController,
+	const FFortItemEntry* Entry)
+{
+	if (!PlayerController || !Entry)
+		return false;
+
+	auto HarvestingTool = FindHarvestingToolEntry(
+		PlayerController->WorldInventory);
+	return HarvestingTool && VehicleLoadoutGuidsEqual(
+		HarvestingTool->ItemGuid, Entry->ItemGuid);
+}
+
+static bool IsLandingRestoreSuppressedBySpecialState(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!IsUsableDeathObject(PlayerController))
+		return false;
+
+	auto PlayerState = PlayerController->PlayerState;
+	if (IsUsableDeathObject(PlayerState) &&
+		PlayerState->HasbInGhostMode() &&
+		PlayerState->bInGhostMode)
+	{
+		return true;
+	}
+
+	return FFortAthenaNativeLTMCompatibility::
+		IsCurrentAshtonLeader(PlayerController);
+}
+
+static void ObservePersistentLandingSuppression(
+	AFortPlayerPawnAthena* Pawn,
+	FLandingItemRestoreState& State)
+{
+	if (!State.bPersistentSuppression ||
+		State.bObservedSuppressingEquipment ||
+		!State.bHasSuppressionBaseline)
+	{
+		return;
+	}
+
+	auto CurrentWeapon = GetPawnCurrentWeaponSafe(Pawn);
+	if (CurrentWeapon &&
+		!VehicleLoadoutGuidsEqual(
+			CurrentWeapon->ItemEntryGuid,
+			State.SuppressionBaselineGuid))
+	{
+		State.bObservedSuppressingEquipment = true;
+	}
+}
+
+static bool CanRefreshSuppressedLandingItem(
+	AFortPlayerControllerAthena* PlayerController,
+	const FLandingItemRestoreState& State,
+	bool bSpecialState)
+{
+	if (!State.bSuppressRestore)
+		return true;
+	if (bSpecialState)
+		return false;
+	if (State.bPersistentSuppression)
+	{
+		if (!State.bObservedSuppressingEquipment)
+			return false;
+
+		auto CurrentWeapon = GetPawnCurrentWeaponSafe(
+			PlayerController->MyFortPawn);
+		return CurrentWeapon &&
+			FindLandingItemRestoreEntry(
+				PlayerController,
+				CurrentWeapon->ItemEntryGuid) != nullptr;
+	}
+
+	// An explicitly selected gadget/edit/form entry owns the suppression for as
+	// long as its backing inventory row exists. Once native cleanup removes that
+	// row, a normal CurrentWeapon can become the new landing selection again.
+	return !State.bHasSuppressingItem ||
+		FindLandingInventoryEntry(
+			PlayerController, State.SuppressingItemGuid) == nullptr;
+}
+
+static void BindLandingItemStateToPawn(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	FLandingItemRestoreState& State)
+{
+	if (State.Pawn.Get() == Pawn)
+	{
+		State.Controller =
+			TWeakObjectPtr<AFortPlayerControllerAthena>(
+				PlayerController);
+		return;
+	}
+
+	const FGuid PreviousGuid = State.PreferredItemGuid;
+	const FGuid PreviousSuppressingGuid =
+		State.SuppressingItemGuid;
+	const FGuid PreviousSuppressionBaselineGuid =
+		State.SuppressionBaselineGuid;
+	const bool bPreviousHasSuppressingItem =
+		State.bHasSuppressingItem;
+	const bool bPreviousHasSuppressionBaseline =
+		State.bHasSuppressionBaseline;
+	const bool bPreviousObservedSuppressingEquipment =
+		State.bObservedSuppressingEquipment;
+	const bool bPreviousPersistentSuppression =
+		State.bPersistentSuppression;
+	const bool bRetainPrevious =
+		State.bHasPreferredItem &&
+		FindLandingItemRestoreEntry(
+			PlayerController, PreviousGuid) != nullptr;
+	const bool bRetainSuppression =
+		State.bSuppressRestore &&
+		GPendingRespawnLandingFinalization.find(
+			PlayerController) ==
+			GPendingRespawnLandingFinalization.end();
+
+	State = {};
+	State.Controller =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(
+			PlayerController);
+	State.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+	if (bRetainPrevious)
+	{
+		State.PreferredItemGuid = PreviousGuid;
+		State.bHasPreferredItem = true;
+	}
+	State.bSuppressRestore = bRetainSuppression;
+	State.bPersistentSuppression =
+		bRetainSuppression && bPreviousPersistentSuppression;
+	if (State.bPersistentSuppression)
+	{
+		State.SuppressionBaselineGuid =
+			PreviousSuppressionBaselineGuid;
+		State.bHasSuppressionBaseline =
+			bPreviousHasSuppressionBaseline;
+		State.bObservedSuppressingEquipment =
+			bPreviousObservedSuppressingEquipment;
+	}
+	if (bRetainSuppression && bPreviousHasSuppressingItem)
+	{
+		State.SuppressingItemGuid = PreviousSuppressingGuid;
+		State.bHasSuppressingItem = true;
+	}
+}
+
+static bool CaptureCurrentLandingItem(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	FLandingItemRestoreState& State,
+	bool bPreservePreferredAgainstBootstrapItem = false)
+{
+	auto CurrentWeapon = GetPawnCurrentWeaponSafe(Pawn);
+	if (!CurrentWeapon)
+		return false;
+
+	auto RawEntry = FindLandingInventoryEntry(
+		PlayerController, CurrentWeapon->ItemEntryGuid);
+	if (!RawEntry ||
+		IsTrackedVehicleLandingItem(
+			PlayerController, RawEntry->ItemGuid))
+	{
+		return false;
+	}
+
+	auto Entry = FindLandingItemRestoreEntry(
+		PlayerController, RawEntry->ItemGuid);
+	if (!Entry)
+	{
+		// Do not replay gadgets or transient edit/form equipment. Executing those
+		// definitions at landing can re-run their gameplay side effects, while
+		// retaining an older gun would overwrite the state the player chose.
+		State.bHasPreferredItem = false;
+		State.SuppressingItemGuid = RawEntry->ItemGuid;
+		State.bHasSuppressingItem = true;
+		State.bSuppressRestore = true;
+		State.bPersistentSuppression = false;
+		State.bHasSuppressionBaseline = false;
+		State.bObservedSuppressingEquipment = false;
+		State.LandingRestoreAttempts = 0;
+		return true;
+	}
+
+	bool bIsRespawnBootstrapItem =
+		IsLandingHarvestingToolEntry(PlayerController, Entry);
+	auto HiddenWeapon = GRespawnHiddenWeapons.find(
+		PlayerController);
+	if (!bIsRespawnBootstrapItem &&
+		HiddenWeapon != GRespawnHiddenWeapons.end())
+	{
+		auto Weapon = HiddenWeapon->second.Get();
+		bIsRespawnBootstrapItem =
+			IsUsableDeathObject(Weapon) &&
+			VehicleLoadoutGuidsEqual(
+				Weapon->ItemEntryGuid, Entry->ItemGuid);
+	}
+
+	if (bPreservePreferredAgainstBootstrapItem &&
+		State.bHasPreferredItem && bIsRespawnBootstrapItem &&
+		!VehicleLoadoutGuidsEqual(
+			State.PreferredItemGuid, Entry->ItemGuid))
+	{
+		return false;
+	}
+
+	State.PreferredItemGuid = Entry->ItemGuid;
+	State.bHasPreferredItem = true;
+	State.bHasSuppressingItem = false;
+	State.bSuppressRestore = false;
+	State.bPersistentSuppression = false;
+	State.bHasSuppressionBaseline = false;
+	State.bObservedSuppressingEquipment = false;
+	State.LandingRestoreAttempts = 0;
+	return true;
+}
+
+static void RememberLandingItemSelection(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	const FGuid& ItemGuid,
+	bool bForceSuppressRestore,
+	const FGuid* SuppressionBaselineGuid)
+{
+	RefreshLandingItemRestoreWorld();
+	if (!IsValidLandingItemPlayer(PlayerController, Pawn) ||
+		!IsLandingItemPawnCombatReady(Pawn) ||
+		IsTrackedSpawnedBotController(PlayerController) ||
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(
+			PlayerController))
+	{
+		return;
+	}
+
+	if (GProgrammaticLandingEquipmentControllers.find(
+		PlayerController) !=
+		GProgrammaticLandingEquipmentControllers.end())
+	{
+		return;
+	}
+
+	auto RawEntry = FindLandingInventoryEntry(
+		PlayerController, ItemGuid);
+	if ((!RawEntry && !bForceSuppressRestore) ||
+		IsTrackedVehicleLandingItem(
+		PlayerController, ItemGuid))
+		return;
+
+	auto& State = GLandingItemRestoreStates[PlayerController];
+	BindLandingItemStateToPawn(
+		PlayerController, Pawn, State);
+	if (State.bLandingRestorePending)
+		return;
+
+	const bool bSkydiving = IsPawnInSkydiveOrGlide(Pawn);
+	auto Entry = bForceSuppressRestore
+		? nullptr : FindLandingItemRestoreEntry(
+		PlayerController, ItemGuid);
+	if (!Entry)
+	{
+		State.bHasPreferredItem = false;
+		State.SuppressingItemGuid = ItemGuid;
+		State.bHasSuppressingItem = RawEntry != nullptr;
+		State.bSuppressRestore = true;
+		State.bPersistentSuppression =
+			bForceSuppressRestore;
+		State.bHasSuppressionBaseline =
+			bForceSuppressRestore &&
+			SuppressionBaselineGuid != nullptr;
+		if (State.bHasSuppressionBaseline)
+		{
+			State.SuppressionBaselineGuid =
+				*SuppressionBaselineGuid;
+		}
+		State.bObservedSuppressingEquipment = false;
+		State.LandingRestoreAttempts = 0;
+		ObservePersistentLandingSuppression(Pawn, State);
+		if (bSkydiving)
+			State.bObservedSkydiving = true;
+		return;
+	}
+
+	// Callback-less legacy clients can issue their native landing pickaxe focus
+	// after the replicated skydive flag clears but before the polling fallback
+	// runs. Keep the airborne selection in that narrow native transition.
+	const bool bAutomaticLandingPickaxe =
+		UsesLandingItemPollingFallback() &&
+		!bSkydiving && State.bHasPreferredItem &&
+		State.bObservedSkydiving &&
+		IsLandingHarvestingToolEntry(
+			PlayerController, Entry);
+	if (bAutomaticLandingPickaxe)
+	{
+		return;
+	}
+
+	State.PreferredItemGuid = Entry->ItemGuid;
+	State.bHasPreferredItem = true;
+	State.bHasSuppressingItem = false;
+	State.bSuppressRestore = false;
+	State.bPersistentSuppression = false;
+	State.bHasSuppressionBaseline = false;
+	State.bObservedSuppressingEquipment = false;
+	State.LandingRestoreAttempts = 0;
+	if (bSkydiving)
+		State.bObservedSkydiving = true;
+}
+
+static void EnsureLandingItemTracking(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	RefreshLandingItemRestoreWorld();
+	if (!IsValidLandingItemPlayer(PlayerController, Pawn) ||
+		!IsLandingItemPawnCombatReady(Pawn) ||
+		IsTrackedSpawnedBotController(PlayerController) ||
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(
+			PlayerController))
+	{
+		return;
+	}
+
+	auto& State = GLandingItemRestoreStates[PlayerController];
+	BindLandingItemStateToPawn(
+		PlayerController, Pawn, State);
+	ObservePersistentLandingSuppression(Pawn, State);
+	const bool bSpecialState =
+		IsLandingRestoreSuppressedBySpecialState(
+			PlayerController);
+	if (bSpecialState)
+	{
+		State.bHasPreferredItem = false;
+		State.bSuppressRestore = true;
+	}
+	else if (!State.bHasPreferredItem &&
+		CanRefreshSuppressedLandingItem(
+			PlayerController, State, bSpecialState))
+	{
+		const bool bPreserveExistingSelection =
+			IsPawnInSkydiveOrGlide(Pawn) ||
+			GPendingRespawnLandingFinalization.find(
+				PlayerController) !=
+				GPendingRespawnLandingFinalization.end();
+		CaptureCurrentLandingItem(
+			PlayerController, Pawn, State,
+			bPreserveExistingSelection);
+	}
+
+	if (IsPawnInSkydiveOrGlide(Pawn))
+		State.bObservedSkydiving = true;
+}
+
+void AFortPlayerControllerAthena::CaptureLandingItemBeforeNativeEnd(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	RefreshLandingItemRestoreWorld();
+	if (!IsValidLandingItemPlayer(PlayerController, Pawn) ||
+		!IsLandingItemPawnCombatReady(Pawn) ||
+		IsTrackedSpawnedBotController(PlayerController) ||
+		MagnesiumPlayerAIIntegration::IsPlayerAIController(
+			PlayerController))
+	{
+		return;
+	}
+
+	auto& State = GLandingItemRestoreStates[PlayerController];
+	BindLandingItemStateToPawn(
+		PlayerController, Pawn, State);
+	ObservePersistentLandingSuppression(Pawn, State);
+	const bool bSpecialState =
+		IsLandingRestoreSuppressedBySpecialState(
+			PlayerController);
+	if (bSpecialState)
+	{
+		State.bHasPreferredItem = false;
+		State.bSuppressRestore = true;
+	}
+	else if (CanRefreshSuppressedLandingItem(
+		PlayerController, State, bSpecialState))
+	{
+		// A normal non-harvesting item that is actually held at the end of the
+		// glide wins. Preserve the existing selection only against native's
+		// automatic harvesting-tool/respawn-bootstrap focus; a real player pickaxe
+		// selection has already updated PreferredItemGuid through the RPC hook.
+		const bool bPreserveExistingSelection =
+			State.bObservedSkydiving ||
+			IsPawnInSkydiveOrGlide(Pawn) ||
+			GPendingRespawnLandingFinalization.find(
+				PlayerController) !=
+				GPendingRespawnLandingFinalization.end();
+		CaptureCurrentLandingItem(
+			PlayerController, Pawn, State,
+			bPreserveExistingSelection);
+	}
+
+	// From this point until the post-native restore, ignore the harvesting-tool
+	// focus issued by EndSkydiving/respawn setup. It is implementation detail,
+	// not a new player selection.
+	State.bObservedSkydiving = true;
+	State.bLandingRestorePending = true;
+	State.LandingRestoreAttempts = 0;
+}
+
+static bool RestoreLandingItemSelection(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	RefreshLandingItemRestoreWorld();
+	if (!IsValidLandingItemPlayer(PlayerController, Pawn) ||
+		!IsLandingItemPawnCombatReady(Pawn))
+		return false;
+
+	auto StateIt =
+		GLandingItemRestoreStates.find(PlayerController);
+	if (StateIt == GLandingItemRestoreStates.end() ||
+		StateIt->second.Pawn.Get() != Pawn)
+	{
+		return false;
+	}
+
+	auto& State = StateIt->second;
+	State.bLandingRestorePending = true;
+	State.bObservedSkydiving = false;
+	if (State.bSuppressRestore ||
+		IsLandingRestoreSuppressedBySpecialState(
+			PlayerController))
+	{
+		State.bSuppressRestore = true;
+		State.bHasPreferredItem = false;
+		State.bLandingRestorePending = false;
+		State.LandingRestoreAttempts = 0;
+		SDK::DbgLog(
+			"[Equipment] preserved native landing form "
+			"controller=%p pawn=%p\n",
+			(void*)PlayerController, (void*)Pawn);
+		return true;
+	}
+
+	if (!State.bHasPreferredItem)
+	{
+		State.bLandingRestorePending = false;
+		State.LandingRestoreAttempts = 0;
+		return false;
+	}
+
+	const FGuid PreferredGuid = State.PreferredItemGuid;
+	auto Entry = FindLandingItemRestoreEntry(
+		PlayerController, PreferredGuid);
+	if (!Entry)
+	{
+		State.bHasPreferredItem = false;
+		State.bLandingRestorePending = false;
+		State.LandingRestoreAttempts = 0;
+		return false;
+	}
+
+	auto CurrentWeapon = GetPawnCurrentWeaponSafe(Pawn);
+	const bool bLegacyQuickbarOwnsTransition =
+		VersionInfo.FortniteVersion <= 3.0 &&
+		VersionInfo.FortniteVersion != 1.72 &&
+		VersionInfo.FortniteVersion != 2.50;
+	// Issue exactly one authoritative transition. Later invocations are bounded
+	// verification ticks; reissuing here can continually replace/reset the
+	// weapon actor on legacy builds before CurrentWeapon settles.
+	if (State.LandingRestoreAttempts == 0 &&
+		(bLegacyQuickbarOwnsTransition || !CurrentWeapon ||
+			!VehicleLoadoutGuidsEqual(
+				CurrentWeapon->ItemEntryGuid, PreferredGuid)))
+	{
+		GProgrammaticLandingEquipmentControllers.insert(
+			PlayerController);
+		if (bLegacyQuickbarOwnsTransition)
+		{
+			ActivateLegacyEditingRestoreSlot(
+				PlayerController, *Entry);
+		}
+		else
+		{
+			PlayerController->ServerExecuteInventoryItem(
+				PreferredGuid);
+		}
+		GProgrammaticLandingEquipmentControllers.erase(
+			PlayerController);
+	}
+
+	CurrentWeapon = GetPawnCurrentWeaponSafe(Pawn);
+	if (!CurrentWeapon ||
+		!VehicleLoadoutGuidsEqual(
+			CurrentWeapon->ItemEntryGuid, PreferredGuid))
+	{
+		++State.LandingRestoreAttempts;
+		if (State.LandingRestoreAttempts <
+			MaxLandingItemRestoreAttempts)
+		{
+			// Some builds replace the authoritative weapon actor on a later
+			// game-thread tick. Keep this transition pending so the normal
+			// landing fallback cannot immediately overwrite the requested slot.
+			SDK::DbgLog(
+				"[Equipment] landing selection equip pending "
+				"controller=%p pawn=%p attempt=%d/%d "
+				"guid=%08x-%08x-%08x-%08x\n",
+				(void*)PlayerController, (void*)Pawn,
+				State.LandingRestoreAttempts,
+				MaxLandingItemRestoreAttempts,
+				(unsigned)PreferredGuid.A,
+				(unsigned)PreferredGuid.B,
+				(unsigned)PreferredGuid.C,
+				(unsigned)PreferredGuid.D);
+			return true;
+		}
+
+		State.bLandingRestorePending = false;
+		State.bHasPreferredItem = false;
+		State.LandingRestoreAttempts = 0;
+		SDK::DbgLog(
+			"[Equipment] landing selection equip exhausted retries "
+			"controller=%p pawn=%p guid=%08x-%08x-%08x-%08x\n",
+			(void*)PlayerController, (void*)Pawn,
+			(unsigned)PreferredGuid.A,
+			(unsigned)PreferredGuid.B,
+			(unsigned)PreferredGuid.C,
+			(unsigned)PreferredGuid.D);
+		return false;
+	}
+
+	// Native EndSkydiving has already selected the harvesting-tool slot on the
+	// owner. Use only confirmed owner-client RPCs here; the generic legacy
+	// quickbar fallback performs a second authoritative equip and can split the
+	// weapon actor from the early-client animation state.
+	if (VersionInfo.FortniteVersion > 3.0 ||
+		VersionInfo.FortniteVersion == 1.72 ||
+		VersionInfo.FortniteVersion == 2.50)
+	{
+		RefreshEditingRestoreOnClient(PlayerController, *Entry);
+	}
+	if (CurrentWeapon)
+	{
+		CurrentWeapon->SetActorHiddenInGame(false);
+		CurrentWeapon->ForceNetUpdate();
+	}
+	Pawn->ForceNetUpdate();
+	PlayerController->ForceNetUpdate();
+
+	State.bLandingRestorePending = false;
+	State.bHasSuppressingItem = false;
+	State.bSuppressRestore = false;
+	State.bPersistentSuppression = false;
+	State.bHasSuppressionBaseline = false;
+	State.bObservedSuppressingEquipment = false;
+	State.LandingRestoreAttempts = 0;
+	SDK::DbgLog(
+		"[Equipment] restored pre-landing selection "
+		"controller=%p pawn=%p guid=%08x-%08x-%08x-%08x\n",
+		(void*)PlayerController, (void*)Pawn,
+		(unsigned)PreferredGuid.A,
+		(unsigned)PreferredGuid.B,
+		(unsigned)PreferredGuid.C,
+		(unsigned)PreferredGuid.D);
+	return true;
+}
+
+static void TickLandingItemSelectionRestores()
+{
+	RefreshLandingItemRestoreWorld();
+	for (auto StateIt = GLandingItemRestoreStates.begin();
+		StateIt != GLandingItemRestoreStates.end();)
+	{
+		auto PlayerController = StateIt->first;
+		auto& State = StateIt->second;
+		if (State.Controller.Get() != PlayerController ||
+			!IsUsableDeathObject(PlayerController) ||
+			!AFortPlayerControllerAthena::StaticClass() ||
+			!PlayerController->IsA(
+				AFortPlayerControllerAthena::StaticClass()) ||
+			IsTrackedSpawnedBotController(PlayerController) ||
+			MagnesiumPlayerAIIntegration::IsPlayerAIController(
+				PlayerController))
+		{
+			StateIt = GLandingItemRestoreStates.erase(StateIt);
+			continue;
+		}
+		++StateIt;
+
+		auto Pawn = PlayerController->MyFortPawn;
+		if (!IsValidLandingItemPlayer(
+				PlayerController, Pawn) ||
+			!IsUsableDeathObject(
+				PlayerController->WorldInventory))
+		{
+			continue;
+		}
+
+		BindLandingItemStateToPawn(
+			PlayerController, Pawn, State);
+		if (!IsLandingItemPawnCombatReady(Pawn))
+		{
+			State.bObservedSkydiving = false;
+			State.bLandingRestorePending = false;
+			State.LandingRestoreAttempts = 0;
+			continue;
+		}
+		ObservePersistentLandingSuppression(Pawn, State);
+		const bool bSpecialState =
+			IsLandingRestoreSuppressedBySpecialState(
+				PlayerController);
+		if (bSpecialState)
+		{
+			State.bHasPreferredItem = false;
+			State.bSuppressRestore = true;
+		}
+
+		if (IsPawnInSkydiveOrGlide(Pawn))
+		{
+			if (!bSpecialState &&
+				CanRefreshSuppressedLandingItem(
+					PlayerController, State,
+					bSpecialState))
+			{
+				CaptureCurrentLandingItem(
+					PlayerController, Pawn, State,
+					true);
+			}
+			State.bObservedSkydiving = true;
+			continue;
+		}
+
+		if (State.bLandingRestorePending)
+		{
+			const bool bRestoreHandled =
+				RestoreLandingItemSelection(
+					PlayerController, Pawn);
+			if (!bRestoreHandled &&
+				!GetPawnCurrentWeaponSafe(Pawn))
+			{
+				RestoreEquipmentAfterRespawn(
+					PlayerController,
+					UsesEarlyAthenaLandingClientRefresh());
+			}
+			continue;
+		}
+
+		if (State.bObservedSkydiving)
+		{
+			State.bLandingRestorePending = true;
+			State.LandingRestoreAttempts = 0;
+			RestoreLandingItemSelection(
+				PlayerController, Pawn);
+			continue;
+		}
+
+		// Keep the normal grounded selection fresh. Do not let the pickaxe used
+		// to bootstrap a replacement gliding pawn replace a retained weapon.
+		if (!bSpecialState &&
+			CanRefreshSuppressedLandingItem(
+				PlayerController, State,
+				bSpecialState) &&
+			!State.bLandingRestorePending &&
+			GPendingRespawnLandingFinalization.find(
+				PlayerController) ==
+				GPendingRespawnLandingFinalization.end())
+		{
+			CaptureCurrentLandingItem(
+				PlayerController, Pawn, State);
+		}
+	}
 }
 
 static bool RestoreInactiveEditingTool(
@@ -6342,7 +7977,20 @@ static void RestoreRespawnHiddenWeapon(AFortPlayerControllerAthena* PlayerContro
 
 	if (!IsUsableDeathObject(Weapon))
 		return;
+	auto CurrentWeapon = GetPawnCurrentWeaponSafe(
+		PlayerController->MyFortPawn);
+	if (CurrentWeapon != Weapon)
+	{
+		SDK::DbgLog(
+			"[Respawn] released stale hidden weapon "
+			"controller=%p stored=%p current=%p\n",
+			(void*)PlayerController, (void*)Weapon,
+			(void*)CurrentWeapon);
+	}
 
+	// SetActorHiddenInGame(true) above is our override, not native inventory
+	// ownership state. Always release it before dropping the weak record; if the
+	// old actor is later reused for its slot, it must not remain invisible.
 	Weapon->SetActorHiddenInGame(false);
 	Weapon->ForceNetUpdate();
 	SDK::DbgLog("[Respawn] restored weapon visibility controller=%p weapon=%p\n",
@@ -6480,7 +8128,12 @@ static void RestoreEquipmentAfterRespawn(AFortPlayerControllerAthena* PlayerCont
 		return;
 	}
 
-	PlayerController->ServerExecuteInventoryItem(EntryToEquip->ItemGuid);
+	GProgrammaticLandingEquipmentControllers.insert(
+		PlayerController);
+	PlayerController->ServerExecuteInventoryItem(
+		EntryToEquip->ItemGuid);
+	GProgrammaticLandingEquipmentControllers.erase(
+		PlayerController);
 	if (bRespawnGlidePending)
 		HideRespawnWeaponForGlide(PlayerController, Pawn);
 
@@ -6520,12 +8173,24 @@ void AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(AFortPlayerControl
 		if (UsesEarlyAthenaLandingClientRefresh() && bAircraftLanding)
 		{
 			GLegacyAircraftSkydivingObserved.erase(PlayerController);
-			RestoreEquipmentAfterRespawn(PlayerController, true);
+			RestoreRespawnHiddenWeapon(PlayerController);
+			if (IsLandingItemPawnCombatReady(Pawn) &&
+				!RestoreLandingItemSelection(
+					PlayerController, Pawn))
+			{
+				RestoreEquipmentAfterRespawn(
+					PlayerController, true);
+			}
 			Pawn->ForceNetUpdate();
 			PlayerController->ForceNetUpdate();
 			SDK::DbgLog("[Equipment] restored early aircraft landing equip version=%.2f controller=%p pawn=%p weapon=%p\n",
 				VersionInfo.FortniteVersion, (void*)PlayerController, (void*)Pawn,
 				(void*)GetPawnCurrentWeaponSafe(Pawn));
+		}
+		else
+		{
+			RestoreLandingItemSelection(
+				PlayerController, Pawn);
 		}
 		return;
 	}
@@ -6564,8 +8229,13 @@ void AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(AFortPlayerControl
 			(int)bQueuedClientViewTarget);
 	}
 
-	RestoreEquipmentAfterRespawn(PlayerController,
-		UsesEarlyAthenaLandingClientRefresh());
+	RestoreRespawnHiddenWeapon(PlayerController);
+	if (IsLandingItemPawnCombatReady(Pawn) &&
+		!RestoreLandingItemSelection(PlayerController, Pawn))
+	{
+		RestoreEquipmentAfterRespawn(PlayerController,
+			UsesEarlyAthenaLandingClientRefresh());
+	}
 	Pawn->ForceNetUpdate();
 	PlayerController->ForceNetUpdate();
 }
@@ -9297,6 +10967,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 	if (!GameMode || !GameState || !PlayerState)
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
+	const ULONGLONG DeathPipelineStartMs = GetTickCount64();
 
 	const bool bPlayerAIVictim =
 		MagnesiumPlayerAIIntegration::IsPlayerAIController(
@@ -9412,8 +11083,15 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	// Capture legitimate killer ownership before the death pickup exists.
 	// Carmine's forced auto-pickup must never turn a just-collected row into
 	// a "preexisting" row that survives the post-native cleanup.
-	const auto KillerCarmineArtifactsBefore =
+	const auto VictimCarmineArtifactsBefore =
 		!bIsAshtonMatch
+			? SnapshotCarmineGauntletArtifacts(
+				  PlayerController)
+			: std::vector<FGuid>{};
+	const bool bNeedsManualCarmineDeathCompat =
+		!VictimCarmineArtifactsBefore.empty();
+	const auto KillerCarmineArtifactsBefore =
+		bNeedsManualCarmineDeathCompat
 			? SnapshotCarmineGauntletArtifacts(
 				  KillerPlayerController)
 			: std::vector<FGuid>{};
@@ -9428,7 +11106,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			: FVector();
 	ManualCarmineDropLocation.Z += 50.f;
 	bool bManualCarminePickupSpawned =
-		!bIsAshtonMatch &&
+		bNeedsManualCarmineDeathCompat &&
 		DropManualCarmineGauntletOnDeath(
 			PlayerController,
 			IsUsableDeathObject(KillerPawn)
@@ -9502,8 +11180,25 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			if (bRestoreNativeCheatAfterDeath)
 				GameState->bCheatRespawnEnabled = false;
 
+			const ULONGLONG NativePawnDiedStartMs =
+				GetTickCount64();
 			ClientOnPawnDiedOG(
 				PlayerController, DeathReport);
+			const ULONGLONG NativePawnDiedElapsedMs =
+				GetTickCount64() - NativePawnDiedStartMs;
+			if (bSpawnedCommandBotVictim ||
+				NativePawnDiedElapsedMs >= 8ULL)
+			{
+				SDK::DbgLog(
+					"[EliminationTiming] ClientOnPawnDiedOG "
+					"elapsed=%llu ms victim=%p commandBot=%d "
+					"playerAI=%d version=%.2f\n",
+					NativePawnDiedElapsedMs,
+					(void*)PlayerController,
+					bSpawnedCommandBotVictim ? 1 : 0,
+					bPlayerAIVictim ? 1 : 0,
+					VersionInfo.FortniteVersion);
+			}
 
 			if (bRestoreNativeCheatAfterDeath &&
 				IsUsableDeathObject(GameState) &&
@@ -9560,7 +11255,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			}
 		}
 
-		std::vector<FGuid> DroppedItemGuids;
+		const ULONGLONG ManualInventoryDropStartMs =
+			GetTickCount64();
+		std::vector<FGuid> GetawayJewelGuidsToRemove;
+		int32 SpawnedPickupCount = 0;
 		for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
 		{
 			auto& entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Get(i, FFortItemEntry::Size());
@@ -9624,8 +11322,12 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				}
 				if (Pickup)
 				{
-					DroppedItemGuids.push_back(
-						entry.ItemGuid);
+					++SpawnedPickupCount;
+					if (bIsGetawayJewel)
+					{
+						GetawayJewelGuidsToRemove.push_back(
+							entry.ItemGuid);
+					}
 				}
 
 				if (bIsGetawayJewel)
@@ -9646,12 +11348,29 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			}
 		}
 
-		// Core's DropAllItems removes every entry after spawning its pickup.
-		// Magnesium previously spawned the world actors but left the entries in
-		// the dead player's inventory, which was especially visible with the
-		// persistent Infinity Gauntlet gadget.
-		for (const FGuid& ItemGuid : DroppedItemGuids)
+		// Let native death teardown remove ordinary rows, matching the known-good
+		// path. Calling Remove once per dropped row here performs a full local
+		// inventory update, marks the fast array dirty, and forces replication for
+		// every item before kill credit and winner selection can run. The Getaway
+		// Jewel is the sole exception: it must leave the carrier even when Keep
+		// Inventory is enabled, and its successful world pickup is verified above.
+		for (const FGuid& ItemGuid : GetawayJewelGuidsToRemove)
 			PlayerController->WorldInventory->Remove(ItemGuid);
+
+		const ULONGLONG ManualInventoryDropElapsedMs =
+			GetTickCount64() - ManualInventoryDropStartMs;
+		if (ManualInventoryDropElapsedMs >= 8ULL)
+		{
+			SDK::DbgLog(
+				"[EliminationTiming] manual inventory drop "
+				"elapsed=%llu ms victim=%p spawned=%d "
+				"explicitRemovals=%zu version=%.2f\n",
+				ManualInventoryDropElapsedMs,
+				(void*)PlayerController,
+				SpawnedPickupCount,
+				GetawayJewelGuidsToRemove.size(),
+				VersionInfo.FortniteVersion);
+		}
 	}
 
 	// Exclusive gadgets must never survive death, including keep-inventory
@@ -9977,7 +11696,25 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					bCalledNativeDeathEarly = true;
 				}
 
+				const ULONGLONG RemoveFromAlivePlayersStartMs =
+					GetTickCount64();
 				((void (*)(AFortGameMode*, AFortPlayerControllerAthena*, AFortPlayerStateAthena*, AFortPlayerPawnAthena*, UFortItemDefinition*, uint8, char))RemoveFromAlivePlayers_)(GameMode, PlayerController, KillerPlayerState == PlayerState ? nullptr : KillerPlayerState, KillerPawn, DamageCauserWeaponData, PlayerState->HasDeathInfo() ? PlayerState->DeathInfo.DeathCause : 0, 0);
+				const ULONGLONG RemoveFromAlivePlayersElapsedMs =
+					GetTickCount64() - RemoveFromAlivePlayersStartMs;
+				if (bSpawnedCommandBotVictim ||
+					RemoveFromAlivePlayersElapsedMs >= 8ULL)
+				{
+					SDK::DbgLog(
+						"[EliminationTiming] RemoveFromAlivePlayers "
+						"elapsed=%llu ms victim=%p commandBot=%d "
+						"playerAI=%d matchState=%s version=%.2f\n",
+						RemoveFromAlivePlayersElapsedMs,
+						(void*)PlayerController,
+						bSpawnedCommandBotVictim ? 1 : 0,
+						bPlayerAIVictim ? 1 : 0,
+						GameMode->MatchState.ToString().c_str(),
+						VersionInfo.FortniteVersion);
+				}
 
 				if (VersionInfo.FortniteVersion == 2.50 &&
 					IsTrackedSpawnedBotController(PlayerController))
@@ -10594,9 +12331,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		InvalidateRespawnHandshake(PlayerState);
 
 	// Command-spawned bots are not owned by PlayerAIManager, so retain their
-	// actor graph until native death has emitted its effects and then tear it
-	// down as one unit. The cleanup also catches any unauthorized replacement
-	// pawn native respawn code managed to create.
+	// actor graph through one replication pass and then tear it down as one
+	// unit. The cleanup also catches any unauthorized replacement pawn native
+	// respawn code managed to create.
 	if (bSpawnedCommandBotVictim)
 	{
 		ScheduleSpawnedBotCleanup(
@@ -10767,7 +12504,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		}
 	}
 
-	if (!bIsAshtonMatch)
+	if (bNeedsManualCarmineDeathCompat)
 	{
 		if (!bManualCarminePickupSpawned &&
 			HasNearbyCarmineGauntletPickup(
@@ -10821,6 +12558,20 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	// Run once more after native death handling, which may restore persistent
 	// gadget items as part of its pawn-replacement teardown.
 	PurgeExclusiveGadgets(PlayerController);
+	const ULONGLONG DeathPipelineElapsedMs =
+		GetTickCount64() - DeathPipelineStartMs;
+	if (bSpawnedCommandBotVictim || DeathPipelineElapsedMs >= 8ULL)
+	{
+		SDK::DbgLog(
+			"[EliminationTiming] complete custom death pipeline "
+			"elapsed=%llu ms victim=%p commandBot=%d "
+			"playerAI=%d version=%.2f\n",
+			DeathPipelineElapsedMs,
+			(void*)PlayerController,
+			bSpawnedCommandBotVictim ? 1 : 0,
+			bPlayerAIVictim ? 1 : 0,
+			VersionInfo.FortniteVersion);
+	}
 }
 
 void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context, FFrame& Stack)
@@ -10935,16 +12686,55 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 		return;
 	}
 
-	if (PlayerState->RespawnData.bRespawnDataAvailable && PlayerState->RespawnData.bServerIsReady)
+	auto& RespawnData = PlayerState->RespawnData;
+	if (!FFortRespawnData::HasbRespawnDataAvailable() ||
+		!FFortRespawnData::HasbServerIsReady())
+	{
+		SDK::DbgLog(
+			"[RespawnReady] reflected handshake fields unavailable "
+			"playerState=%p FN=%.2f\n",
+			(void*)PlayerState, VersionInfo.FortniteVersion);
+		return;
+	}
+
+	if (RespawnData.bRespawnDataAvailable && RespawnData.bServerIsReady)
 	{
 		// Consume the server half of this handshake before any spawn call. A
 		// delayed duplicate client-ready packet must not be able to create a
 		// second pawn from the same RespawnData.
-		auto RespawnData = PlayerState->RespawnData;
-		PlayerState->RespawnData.bRespawnDataAvailable =
-			false;
-		PlayerState->RespawnData.bServerIsReady = false;
-		PlayerState->RespawnData.bClientIsReady = true;
+		//
+		// FFortRespawnData is a reflected view into PlayerState, not an owning
+		// value type. Copying it by value copies only its empty SDK facade and
+		// makes reflected fields read unrelated stack memory (most visibly an
+		// origin transform on FN 30.00). Snapshot only the concrete values that
+		// must survive clearing the live handshake flags.
+		if (!FFortRespawnData::HasRespawnLocation() ||
+			!FFortRespawnData::HasRespawnRotation())
+		{
+			SDK::DbgLog(
+				"[RespawnReady] reflected transform fields unavailable "
+				"playerState=%p FN=%.2f\n",
+				(void*)PlayerState, VersionInfo.FortniteVersion);
+			return;
+		}
+
+		FVector RespawnLocation{};
+		RespawnLocation = RespawnData.RespawnLocation;
+		FRotator RespawnRotation{};
+		RespawnRotation = RespawnData.RespawnRotation;
+		if (!IsFiniteRespawnLocation(RespawnLocation) ||
+			!IsFiniteRespawnRotation(RespawnRotation))
+		{
+			SDK::DbgLog(
+				"[RespawnReady] rejected non-finite authored transform "
+				"playerState=%p FN=%.2f\n",
+				(void*)PlayerState, VersionInfo.FortniteVersion);
+			return;
+		}
+		RespawnData.bRespawnDataAvailable = false;
+		RespawnData.bServerIsReady = false;
+		if (FFortRespawnData::HasbClientIsReady())
+			RespawnData.bClientIsReady = true;
 		PlayerState->ForceNetUpdate();
 
 		PurgeExclusiveGadgets(PlayerController);
@@ -10953,19 +12743,37 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 
 		FTransform SpawnTransform{};
 
-		FQuat Rotation = RespawnData.RespawnRotation;
-		SpawnTransform.Translation = RespawnData.RespawnLocation;
+		FQuat Rotation = RespawnRotation;
+		SpawnTransform.Translation = RespawnLocation;
 		SpawnTransform.Rotation = Rotation;
 
 		FVector ConfiguredRespawnLocation{};
+		bool bUsedConfiguredRespawnLocation = false;
 		if (!bWaxRespawnManaged &&
 			TryGetConfiguredRespawnLocation(
 				GameMode,
 				ConfiguredRespawnLocation))
+		{
 			SpawnTransform.Translation = ConfiguredRespawnLocation;
+			bUsedConfiguredRespawnLocation = true;
+		}
 
 		auto Scale = FVector(1, 1, 1);
 		SpawnTransform.Scale3D = Scale;
+		SDK::DbgLog(
+			"[RespawnReady] spawning controller=%p "
+			"authored=(%.1f, %.1f, %.1f) "
+			"final=(%.1f, %.1f, %.1f) configured=%d "
+			"wax=%d FN=%.2f\n",
+			(void*)PlayerController,
+			RespawnLocation.X, RespawnLocation.Y,
+			RespawnLocation.Z,
+			SpawnTransform.Translation.X,
+			SpawnTransform.Translation.Y,
+			SpawnTransform.Translation.Z,
+			bUsedConfiguredRespawnLocation ? 1 : 0,
+			bWaxRespawnManaged ? 1 : 0,
+			VersionInfo.FortniteVersion);
 
 		auto NewPawn = GameMode->SpawnDefaultPawnAtTransform(PlayerController, SpawnTransform);
 		if (!IsUsableDeathObject(NewPawn))
@@ -11039,7 +12847,8 @@ void AFortPlayerControllerAthena::ServerClientIsReadyToRespawn(UObject* Context,
 			PlayerController);
 	}
 
-	PlayerState->RespawnData.bClientIsReady = true;
+	if (FFortRespawnData::HasbClientIsReady())
+		RespawnData.bClientIsReady = true;
 }
 
 struct FCustomCharacterParts
@@ -14611,8 +16420,13 @@ static void TryForceKillPawnForNuke(AFortPlayerPawnAthena* Pawn, AFortPlayerCont
 		return;
 	}
 
-	Pawn->SetHealth(0.f);
-	Pawn->ForceNetUpdate();
+	// Never manufacture a death by writing zero health. That bypasses the
+	// version's native death/DBNO transaction and can leave a replicated live
+	// pawn at zero. If ForceKill is absent, failing closed is the only safe
+	// attribution-preserving behavior.
+	SDK::DbgLog(
+		"[Nuke] fatal player damage skipped: ForceKill unavailable pawn=%p instigator=%p causer=%p\n",
+		(void*)Pawn, (void*)InstigatorController, (void*)DamageCauser);
 }
 
 static void ApplyNukePlayerDamageAtLocation(const FVector& ImpactLocation, AActor* InstigatorPawn, AFortPlayerControllerAthena* InstigatorController, AActor* DamageCauser)
@@ -15025,7 +16839,16 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 		{
 			GPendingLegacyAircraftLandingEquipment.erase(PlayerController);
 			GLegacyAircraftSkydivingObserved.erase(PlayerController);
-			RestoreEquipmentAfterRespawn(PlayerController, true);
+			CaptureLandingItemBeforeNativeEnd(
+				PlayerController, Pawn);
+			RestoreRespawnHiddenWeapon(PlayerController);
+			if (IsLandingItemPawnCombatReady(Pawn) &&
+				!RestoreLandingItemSelection(
+					PlayerController, Pawn))
+			{
+				RestoreEquipmentAfterRespawn(
+					PlayerController, true);
+			}
 			Pawn->ForceNetUpdate();
 			PlayerController->ForceNetUpdate();
 			SDK::DbgLog("[Equipment] polled early aircraft landing version=%.2f controller=%p pawn=%p weapon=%p\n",
@@ -15076,10 +16899,19 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 			// state and its pending marker; the normal respawn setup already ran.
 			GPendingRespawnLandingFinalization.erase(PlayerController);
 			GRespawnSkydivingObserved.erase(PlayerController);
-			if (UsesEarlyAthenaLandingClientRefresh())
-				RestoreEquipmentAfterRespawn(PlayerController, true);
-			else
-				RestoreRespawnHiddenWeapon(PlayerController);
+			CaptureLandingItemBeforeNativeEnd(
+				PlayerController, Pawn);
+			RestoreRespawnHiddenWeapon(PlayerController);
+			const bool bRestoredLandingSelection =
+				RestoreLandingItemSelection(
+					PlayerController, Pawn);
+			if (IsLandingItemPawnCombatReady(Pawn) &&
+				!bRestoredLandingSelection &&
+				UsesEarlyAthenaLandingClientRefresh())
+			{
+				RestoreEquipmentAfterRespawn(
+					PlayerController, true);
+			}
 
 			auto CurrentWeapon = GetPawnCurrentWeaponSafe(Pawn);
 			if (CurrentWeapon)
@@ -15093,6 +16925,11 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 				(void*)PlayerController, (void*)Pawn);
 		}
 	}
+
+	// EndSkydiving is absent or non-dispatching on a few legacy clients. The
+	// replicated skydive transition gives those builds the same exact-item
+	// landing restore as the native callback path.
+	TickLandingItemSelectionRestores();
 
 	if (GuidedNukeRockets.empty())
 		return;
@@ -15329,6 +17166,444 @@ static bool IsCheatCommandHost(
 		PlayerController);
 }
 
+struct FForceKillSchema
+{
+	uint32 ParamsSize = 0;
+	uint32 DeathReasonOffset = 0;
+	uint32 KillerControllerOffset = 0;
+	uint32 KillerActorOffset = 0;
+};
+
+struct FPawnServerSuicideSchema
+{
+	uint32 ParamsSize = 0;
+	uint32 SuppressResurrectionChipOffset = 0;
+	uint32 MatchPlacementOffset = 0;
+	bool bHasMatchPlacement = false;
+};
+
+struct FSuicideDeathObservation
+{
+	bool bWasControllerPawn = false;
+	bool bWasControllerFortPawn = false;
+	bool bWasClientNotified = false;
+	float InitialHealth = 0.f;
+};
+
+static bool TryResolveForceKillSchema(
+	UFunction* Function,
+	FForceKillSchema& OutSchema)
+{
+	OutSchema = {};
+	if (!Function)
+		return false;
+
+	const auto Params = Function->GetParamsNamed();
+	const UFunction::ParamNamed* DeathReason = nullptr;
+	const UFunction::ParamNamed* KillerController = nullptr;
+	const UFunction::ParamNamed* KillerActor = nullptr;
+	for (const auto& Param : Params.NameOffsetMap)
+	{
+		if (Param.Name == "DeathReason")
+			DeathReason = &Param;
+		else if (Param.Name == "KillerController")
+			KillerController = &Param;
+		else if (Param.Name == "KillerActor")
+			KillerActor = &Param;
+	}
+
+	if (!DeathReason || !KillerController || !KillerActor ||
+		Params.NameOffsetMap.size() != 3)
+	{
+		return false;
+	}
+
+	// FN32 relocates/encrypts PropertiesSize, ElementSize and PropertyFlags,
+	// while names and decrypted offsets remain usable. Mirror the engine call
+	// path with a fixed zeroed buffer there, so only bounds-check those offsets.
+	const bool bUnreliablePropertyMetadata =
+		VersionInfo.FortniteVersion >= 32.00;
+	const uint32 ParamsSize = bUnreliablePropertyMetadata
+		? 0x1000u
+		: Params.Size > 0
+			? Params.Size
+			: 0u;
+	const uint32 TagSize =
+		static_cast<uint32>(FGameplayTag::Size());
+	if (!ParamsSize || ParamsSize > 0x1000 ||
+		DeathReason->Offset > ParamsSize ||
+		TagSize > ParamsSize - DeathReason->Offset ||
+		KillerController->Offset > ParamsSize ||
+		sizeof(AController*) >
+			ParamsSize - KillerController->Offset ||
+		KillerActor->Offset > ParamsSize ||
+		sizeof(AActor*) > ParamsSize - KillerActor->Offset)
+	{
+		return false;
+	}
+
+	if (bUnreliablePropertyMetadata)
+	{
+		OutSchema = {
+			ParamsSize,
+			DeathReason->Offset,
+			KillerController->Offset,
+			KillerActor->Offset
+		};
+		return true;
+	}
+
+	constexpr uint64 CPF_Parm = 0x80;
+	constexpr uint64 CPF_ReturnParm = 0x400;
+	auto IsInput =
+		[=](const UFunction::ParamNamed* Param,
+			uint32 ExpectedSize)
+		{
+			return Param &&
+				Param->ElementSize == ExpectedSize &&
+				(Param->PropertyFlags & CPF_Parm) &&
+				!(Param->PropertyFlags & CPF_ReturnParm);
+		};
+
+	const bool bCompatible =
+		Function->GetPropertiesSize() == Params.Size &&
+		IsInput(DeathReason, TagSize) &&
+		IsInput(KillerController, sizeof(AController*)) &&
+		IsInput(KillerActor, sizeof(AActor*));
+	if (bCompatible)
+	{
+		OutSchema = {
+			ParamsSize,
+			DeathReason->Offset,
+			KillerController->Offset,
+			KillerActor->Offset
+		};
+	}
+	return bCompatible;
+}
+
+static bool TryResolvePawnServerSuicideSchema(
+	UFunction* Function,
+	FPawnServerSuicideSchema& OutSchema)
+{
+	OutSchema = {};
+	if (!Function)
+		return false;
+
+	const auto Params = Function->GetParamsNamed();
+	const UFunction::ParamNamed* SuppressResurrectionChip = nullptr;
+	const UFunction::ParamNamed* MatchPlacement = nullptr;
+	for (const auto& Param : Params.NameOffsetMap)
+	{
+		if (Param.Name == "bSuppressResurrectionChip")
+			SuppressResurrectionChip = &Param;
+		else if (Param.Name == "MatchPlacement")
+			MatchPlacement = &Param;
+	}
+
+	// Season 10 exposes only the suppression bool. By 13.40 and through
+	// 32.11 the RPC also carries MatchPlacement. Refuse every other reflected
+	// shape instead of guessing at a future parameter buffer.
+	if (!SuppressResurrectionChip ||
+		(Params.NameOffsetMap.size() != 1 &&
+		 Params.NameOffsetMap.size() != 2) ||
+		(Params.NameOffsetMap.size() == 2 && !MatchPlacement))
+	{
+		return false;
+	}
+
+	const bool bUnreliablePropertyMetadata =
+		VersionInfo.FortniteVersion >= 32.00;
+	const uint32 ParamsSize = bUnreliablePropertyMetadata
+		? 0x1000u
+		: Params.Size;
+	if (!ParamsSize || ParamsSize > 0x1000 ||
+		SuppressResurrectionChip->Offset >= ParamsSize ||
+		(MatchPlacement &&
+			(MatchPlacement->Offset > ParamsSize ||
+			 sizeof(int32) >
+				ParamsSize - MatchPlacement->Offset)))
+	{
+		return false;
+	}
+
+	if (!bUnreliablePropertyMetadata)
+	{
+		constexpr uint64 CPF_Parm = 0x80;
+		constexpr uint64 CPF_ReturnParm = 0x400;
+		auto IsInput = [](const UFunction::ParamNamed* Param,
+			uint32 ExpectedSize)
+		{
+			return Param &&
+				Param->ElementSize == ExpectedSize &&
+				(Param->PropertyFlags & CPF_Parm) &&
+				!(Param->PropertyFlags & CPF_ReturnParm);
+		};
+		if (Function->GetPropertiesSize() != Params.Size ||
+			!IsInput(SuppressResurrectionChip, sizeof(bool)) ||
+			(MatchPlacement &&
+			 !IsInput(MatchPlacement, sizeof(int32))))
+		{
+			return false;
+		}
+	}
+
+	OutSchema.ParamsSize = ParamsSize;
+	OutSchema.SuppressResurrectionChipOffset =
+		SuppressResurrectionChip->Offset;
+	OutSchema.bHasMatchPlacement = MatchPlacement != nullptr;
+	OutSchema.MatchPlacementOffset = MatchPlacement
+		? MatchPlacement->Offset : 0;
+	return true;
+}
+
+static FSuicideDeathObservation CaptureSuicideDeathObservation(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	FSuicideDeathObservation Observation{};
+	if (!IsUsableDeathObject(PlayerController) ||
+		!IsUsableDeathObject(Pawn))
+	{
+		return Observation;
+	}
+
+	Observation.bWasControllerPawn =
+		PlayerController->HasPawn() &&
+		reinterpret_cast<AActor*>(PlayerController->Pawn) ==
+			reinterpret_cast<AActor*>(Pawn);
+	Observation.bWasControllerFortPawn =
+		PlayerController->HasMyFortPawn() &&
+		PlayerController->MyFortPawn == Pawn;
+	Observation.bWasClientNotified =
+		PlayerController->HasbClientNotifiedOfPawnDied() &&
+		PlayerController->bClientNotifiedOfPawnDied;
+	Observation.InitialHealth = Pawn->GetHealth();
+	return Observation;
+}
+
+static bool HasSuicideDeathTransitionStarted(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	const FSuicideDeathObservation& Observation)
+{
+	if (!IsUsableDeathObject(Pawn))
+		return true;
+
+	if ((Pawn->HasbIsDying() && Pawn->bIsDying) ||
+		(Pawn->HasbPlayedDying() && Pawn->bPlayedDying) ||
+		(Pawn->HasbIsHiddenForDeath() &&
+		 Pawn->bIsHiddenForDeath) ||
+		(Pawn->HasbActorIsBeingDestroyed() &&
+		 Pawn->bActorIsBeingDestroyed))
+	{
+		return true;
+	}
+
+	if (!IsUsableDeathObject(PlayerController))
+		return true;
+
+	if (!Observation.bWasClientNotified &&
+		PlayerController->HasbClientNotifiedOfPawnDied() &&
+		PlayerController->bClientNotifiedOfPawnDied)
+	{
+		return true;
+	}
+
+	if (Observation.bWasControllerFortPawn &&
+		(!PlayerController->HasMyFortPawn() ||
+		 PlayerController->MyFortPawn != Pawn))
+	{
+		return true;
+	}
+	if (Observation.bWasControllerPawn &&
+		(!PlayerController->HasPawn() ||
+		 reinterpret_cast<AActor*>(PlayerController->Pawn) !=
+			reinterpret_cast<AActor*>(Pawn)))
+	{
+		return true;
+	}
+
+	const bool bIsDBNO =
+		Pawn->HasbIsDBNO() && Pawn->bIsDBNO;
+	const float Health = Pawn->GetHealth();
+	return !bIsDBNO &&
+		FPlatformMath::IsFinite(Observation.InitialHealth) &&
+		Observation.InitialHealth > 0.f &&
+		FPlatformMath::IsFinite(Health) && Health <= 0.f;
+}
+
+bool AFortPlayerControllerAthena::TryEliminatePlayer(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!IsUsableDeathObject(PlayerController))
+		return false;
+
+	// A controller can temporarily possess a guided projectile or a character
+	// vehicle. MyFortPawn/the tracked return pawn is the player who must die,
+	// never that temporary possession actor.
+	AFortPlayerPawnAthena* Pawn = nullptr;
+	auto RemoteReturn =
+		GRemoteControlReturnPawn.find(PlayerController);
+	if (RemoteReturn != GRemoteControlReturnPawn.end() &&
+		IsUsableDeathObject(RemoteReturn->second))
+	{
+		auto PlayerPawnClass = AFortPlayerPawnAthena::StaticClass();
+		if (PlayerPawnClass &&
+			RemoteReturn->second->IsA(PlayerPawnClass))
+		{
+			Pawn = (AFortPlayerPawnAthena*)RemoteReturn->second;
+		}
+	}
+	if (!Pawn)
+		Pawn = ResolveVehicleRiderPawn(PlayerController);
+	if (!IsUsableDeathObject(Pawn) || Pawn->IsDefaultObject())
+		return false;
+	if ((Pawn->HasbIsDying() && Pawn->bIsDying) ||
+		(Pawn->HasbPlayedDying() && Pawn->bPlayedDying) ||
+		(Pawn->HasbIsHiddenForDeath() &&
+		 Pawn->bIsHiddenForDeath) ||
+		(Pawn->HasbActorIsBeingDestroyed() &&
+		 Pawn->bActorIsBeingDestroyed))
+	{
+		return false;
+	}
+	const auto Observation = CaptureSuicideDeathObservation(
+		PlayerController, Pawn);
+
+	// Use the native suicide pipeline first. Modern reference servers restore
+	// this exact controller RPC from FortPlayerControllerZone, as Magnesium does
+	// during PostLoadHook, so it preserves the build's authored elimination,
+	// reboot-card and respawn behavior when that implementation is available.
+	auto ControllerServerSuicide =
+		PlayerController->GetFunction("ServerSuicide");
+	if (ControllerServerSuicide &&
+		ControllerServerSuicide->GetParamsNamed()
+			.NameOffsetMap.empty())
+	{
+		PlayerController->ProcessEvent(
+			ControllerServerSuicide, nullptr);
+		if (HasSuicideDeathTransitionStarted(
+				PlayerController, Pawn, Observation))
+		{
+			SDK::DbgLog(
+				"[Cheat] authoritative suicide started controller=%p pawn=%p via=ControllerServerSuicide version=%.2f\n",
+				(void*)PlayerController,
+				(void*)Pawn,
+				VersionInfo.FortniteVersion);
+			return true;
+		}
+		SDK::DbgLog(
+			"[Cheat] suicide path produced no transition controller=%p pawn=%p via=ControllerServerSuicide version=%.2f\n",
+			(void*)PlayerController,
+			(void*)Pawn,
+			VersionInfo.FortniteVersion);
+	}
+
+	// The pawn-side RPC is present with one bool in Season 10, and with the
+	// bool/int32 schema from 13.40 through 32.11. It is independent of the
+	// controller override and therefore covers builds where that override was
+	// compiled down to an empty stub.
+	auto PawnServerSuicide = Pawn->GetFunction("ServerSuicide");
+	FPawnServerSuicideSchema PawnSuicideSchema{};
+	if (TryResolvePawnServerSuicideSchema(
+			PawnServerSuicide, PawnSuicideSchema))
+	{
+		std::vector<uint8> Params(
+			PawnSuicideSchema.ParamsSize, 0);
+		const bool bSuppressResurrectionChip = true;
+		memcpy(
+			Params.data() +
+				PawnSuicideSchema.SuppressResurrectionChipOffset,
+			&bSuppressResurrectionChip,
+			sizeof(bSuppressResurrectionChip));
+		if (PawnSuicideSchema.bHasMatchPlacement)
+		{
+			const int32 MatchPlacement = 0;
+			memcpy(
+				Params.data() +
+					PawnSuicideSchema.MatchPlacementOffset,
+				&MatchPlacement,
+				sizeof(MatchPlacement));
+		}
+
+		Pawn->ProcessEvent(
+			PawnServerSuicide, Params.data());
+		if (HasSuicideDeathTransitionStarted(
+				PlayerController, Pawn, Observation))
+		{
+			SDK::DbgLog(
+				"[Cheat] authoritative suicide started controller=%p pawn=%p via=PawnServerSuicide version=%.2f\n",
+				(void*)PlayerController,
+				(void*)Pawn,
+				VersionInfo.FortniteVersion);
+			return true;
+		}
+		SDK::DbgLog(
+			"[Cheat] suicide path produced no transition controller=%p pawn=%p via=PawnServerSuicide version=%.2f\n",
+			(void*)PlayerController,
+			(void*)Pawn,
+			VersionInfo.FortniteVersion);
+	}
+
+	auto ForceKill = Pawn->GetFunction("ForceKill");
+	FForceKillSchema ForceKillSchema{};
+	if (TryResolveForceKillSchema(
+			ForceKill, ForceKillSchema))
+	{
+		FGameplayTag DeathReason{};
+		AController* KillerController =
+			(AController*)PlayerController;
+		AActor* KillerActor = nullptr;
+		std::vector<uint8> Params(
+			ForceKillSchema.ParamsSize, 0);
+		memcpy(
+			Params.data() +
+				ForceKillSchema.DeathReasonOffset,
+			&DeathReason,
+			static_cast<size_t>(FGameplayTag::Size()));
+		memcpy(
+			Params.data() +
+				ForceKillSchema.KillerControllerOffset,
+			&KillerController,
+			sizeof(KillerController));
+		memcpy(
+			Params.data() +
+				ForceKillSchema.KillerActorOffset,
+			&KillerActor,
+			sizeof(KillerActor));
+
+		// ForceKill is the final reflected fallback when both authored suicide
+		// paths are unavailable or stripped. Supplying the victim controller
+		// mirrors ServerSuicide, while a null killer actor prevents a weapon or
+		// environmental source from being fabricated.
+		Pawn->ProcessEvent(
+			ForceKill, Params.data());
+		if (HasSuicideDeathTransitionStarted(
+				PlayerController, Pawn, Observation))
+		{
+			SDK::DbgLog(
+				"[Cheat] authoritative suicide started controller=%p pawn=%p via=ForceKill version=%.2f\n",
+				(void*)PlayerController,
+				(void*)Pawn,
+				VersionInfo.FortniteVersion);
+			return true;
+		}
+		SDK::DbgLog(
+			"[Cheat] suicide path produced no transition controller=%p pawn=%p via=ForceKill version=%.2f\n",
+			(void*)PlayerController,
+			(void*)Pawn,
+			VersionInfo.FortniteVersion);
+	}
+
+	SDK::DbgLog(
+		"[Cheat] suicide unavailable controller=%p pawn=%p version=%.2f\n",
+		(void*)PlayerController,
+		(void*)Pawn,
+		VersionInfo.FortniteVersion);
+	return false;
+}
+
 void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 {
 	FString Msg;
@@ -15455,6 +17730,11 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 	{
 		auto& command = args[0];
 		std::transform(command.begin(), command.end(), command.begin(), tolower);
+		SDK::DbgLog(
+			"[Cheat] command received controller=%p command=%s version=%.2f\n",
+			(void*)PlayerController,
+			command.c_str(),
+			VersionInfo.FortniteVersion);
 
 		const bool bHostCheatOverride =
 			GUI::GetSelectedPlaylist() !=
@@ -15637,8 +17917,13 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			}
 			else if (command == "suicide")
 			{
-				PlayerController->ServerSuicide();
-				PlayerController->ClientMessage(FString(L"Killed player!"), FName(), 1.f);
+				const bool bRequested = TryEliminatePlayer(
+					PlayerController);
+				PlayerController->ClientMessage(
+					FString(bRequested
+						? L"Killed player!"
+						: L"Unable to eliminate player."),
+					FName(), 1.f);
 			}
 			else if (command == "infiniteammo")
 				FConfiguration::bInfiniteAmmo.store(
@@ -16572,7 +18857,28 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				float Health = 100.f;
 
 				try { Health = std::stof(std::string(args[1])); }
-				catch (...) {}
+				catch (...)
+				{
+					PlayerController->ClientMessage(FString(L"Invalid health amount!"), FName(), 1.f);
+					return;
+				}
+
+				if (!FPlatformMath::IsFinite(Health))
+				{
+					PlayerController->ClientMessage(FString(L"Invalid health amount!"), FName(), 1.f);
+					return;
+				}
+
+				if (Health <= 0.f)
+				{
+					const bool bRequested = TryEliminatePlayer(PlayerController);
+					PlayerController->ClientMessage(
+						FString(bRequested
+							? L"Killed player!"
+							: L"Unable to eliminate player."),
+						FName(), 1.f);
+					return;
+				}
 
 				Pawn->SetHealth(Health);
 				PlayerController->ClientMessage(FString(L"Set pawn's health!"), FName(), 1.f);
@@ -19943,8 +22249,13 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 		{
 			if (command == "suicide")
 			{
-				PlayerController->ServerSuicide();
-				PlayerController->ClientMessage(FString(L"Killed player!"), FName(), 1.f);
+				const bool bRequested = TryEliminatePlayer(
+					PlayerController);
+				PlayerController->ClientMessage(
+					FString(bRequested
+						? L"Killed player!"
+						: L"Unable to eliminate player."),
+					FName(), 1.f);
 			}
 			else
 			{
@@ -20188,7 +22499,19 @@ static bool ConfigureVehicleSeatWeapon(
 	// MountedWeaponInfoRepped stores a real interface pointer on FN30. Validate
 	// it before granting anything so a non-vehicle actor can never leave an
 	// unusable temporary weapon in the player's inventory.
+	//
+	// A build can also predate the whole structure. Seat weapons themselves are
+	// older than it is, so treating its absence as a failure refused to grant
+	// them at all on those builds - the reason vehicle weapons appeared to only
+	// start working around FN9. There is simply nothing to publish there, so the
+	// grant/equip below runs and the publication at the end is skipped. Probed
+	// rather than version-gated because that is the fact that actually matters.
 	const IInterface* VehicleInterface = nullptr;
+	bool bPublishMountedInfo =
+		(FMountedWeaponInfoRepped::HasHostVehicleCached() ||
+			FMountedWeaponInfoRepped::HasHostVehicleCachedActor()) &&
+		FMountedWeaponInfoRepped::HasHostVehicleSeatIndexCached();
+
 	if (FMountedWeaponInfoRepped::HasHostVehicleCached())
 	{
 		auto VehicleInterfaceClass =
@@ -20200,10 +22523,6 @@ static bool ConfigureVehicleSeatWeapon(
 			VehicleInterfaceClass);
 		if (!VehicleInterface)
 			return false;
-	}
-	else if (!FMountedWeaponInfoRepped::HasHostVehicleCachedActor())
-	{
-		return false;
 	}
 
 	auto Tracked = GTrackedVehicleLoadouts.find(PlayerController);
@@ -20313,17 +22632,31 @@ static bool ConfigureVehicleSeatWeapon(
 	}
 	// MountedWeaponInfoRepped belongs to FortWeaponRangedForVehicle, not
 	// AFortWeapon. Its generated accessor caches one reflected offset globally;
-	// never let a normal/dual ranged weapon seed or reuse that subclass offset.
+	// never let a normal/dual ranged weapon seed or reuse that subclass offset,
+	// which is why every touch of it below stays behind this class test.
 	static const UClass* VehicleWeaponClass = nullptr;
 	if (!VehicleWeaponClass)
 		VehicleWeaponClass =
 			FindClass("FortWeaponRangedForVehicle");
-	if (!MountedWeapon ||
-		!VehicleWeaponClass ||
-		!MountedWeapon->IsA(VehicleWeaponClass) ||
-		!MountedWeapon->HasMountedWeaponInfoRepped())
+	if (!MountedWeapon)
+		return false;
+
+	// The weapon is equipped and usable at this point. Only the replicated host
+	// cache is still outstanding, and a build without it has nothing to fill in.
+	if (bPublishMountedInfo &&
+		(!VehicleWeaponClass ||
+			!MountedWeapon->IsA(VehicleWeaponClass) ||
+			!MountedWeapon->HasMountedWeaponInfoRepped()))
 	{
 		return false;
+	}
+	if (bPublishMountedInfo &&
+		!MountedWeapon->GetFunction(
+			"OnRep_MountedWeaponInfoRepped"))
+	{
+		// The weapon remains usable; this build simply has no complete
+		// replicated-host publication path to invoke safely.
+		bPublishMountedInfo = false;
 	}
 
 	if (RiderPawn->HasPreviousWeapon() &&
@@ -20336,21 +22669,24 @@ static bool ConfigureVehicleSeatWeapon(
 	// Preserve the camera/aim cache populated by the final native transition.
 	// Clearing the full structure detaches a mounted projectile ray from its
 	// passenger camera and leaves only the host fields valid.
-	FMountedWeaponInfoRepped MountedInfo =
-		MountedWeapon->MountedWeaponInfoRepped;
-	if (FMountedWeaponInfoRepped::HasHostVehicleCached())
+	if (bPublishMountedInfo)
 	{
-		MountedInfo.HostVehicleCached.ObjectPointer = Vehicle;
-		MountedInfo.HostVehicleCached.InterfacePointer =
-			VehicleInterface;
+		FMountedWeaponInfoRepped MountedInfo =
+			MountedWeapon->MountedWeaponInfoRepped;
+		if (FMountedWeaponInfoRepped::HasHostVehicleCached())
+		{
+			MountedInfo.HostVehicleCached.ObjectPointer = Vehicle;
+			MountedInfo.HostVehicleCached.InterfacePointer =
+				VehicleInterface;
+		}
+		else
+		{
+			MountedInfo.HostVehicleCachedActor = Vehicle;
+		}
+		MountedInfo.HostVehicleSeatIndexCached = SeatIndex;
+		MountedWeapon->MountedWeaponInfoRepped = MountedInfo;
+		MountedWeapon->OnRep_MountedWeaponInfoRepped();
 	}
-	else
-	{
-		MountedInfo.HostVehicleCachedActor = Vehicle;
-	}
-	MountedInfo.HostVehicleSeatIndexCached = SeatIndex;
-	MountedWeapon->MountedWeaponInfoRepped = MountedInfo;
-	MountedWeapon->OnRep_MountedWeaponInfoRepped();
 
 	// The enhanced-input F toggle passes this transient value to SeatIsTurret.
 	// Publish it only after the native equip path has settled, on the exact
@@ -21563,7 +23899,11 @@ void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFram
 		auto InventoryBeforeEntry = SnapshotVehicleInventoryGuids(
 			PlayerController->WorldInventory);
 
+		GProgrammaticLandingEquipmentControllers.insert(
+			PlayerController);
 		ServerAttemptInteract_OG(Context, Stack);
+		GProgrammaticLandingEquipmentControllers.erase(
+			PlayerController);
 		sendStat();
 
 		auto VehicleActor = Vehicle
@@ -22542,7 +24882,11 @@ void AFortPlayerControllerAthena::ServerRequestSeatChange_(UObject* Context, FFr
 	auto InventoryBeforeSeatChange =
 		SnapshotVehicleInventoryGuids(
 			PlayerController->WorldInventory);
+	GProgrammaticLandingEquipmentControllers.insert(
+		PlayerController);
 	callOG(PlayerController, Stack.GetCurrentNativeFunction(), ServerRequestSeatChange, TargetSeatIndex);
+	GProgrammaticLandingEquipmentControllers.erase(
+		PlayerController);
 
 	// A rejected seat-change RPC must not receive a weapon configured for a
 	// seat the pawn never entered. The old path also stored the pre-change
@@ -22828,7 +25172,11 @@ void AFortPlayerControllerAthena::ServerVehicleModSeatRpc_(
 	// Preserve Epic's request-tag handling first. Raw-spawned/mod-replayed
 	// vehicles can leave its internal seat-input state incomplete, in which
 	// case the native RPC returns without changing the equipped mode.
+	GProgrammaticLandingEquipmentControllers.insert(
+		PlayerController);
 	CallOriginal();
+	GProgrammaticLandingEquipmentControllers.erase(
+		PlayerController);
 
 	bool bIsMounted =
 		IsVehicleModSeatWeaponEquipped(RiderPawn);
@@ -22844,8 +25192,12 @@ void AFortPlayerControllerAthena::ServerVehicleModSeatRpc_(
 		if (auto* Action =
 				LiveModInstance->GetFunction(AuthorityAction))
 		{
+			GProgrammaticLandingEquipmentControllers.insert(
+				PlayerController);
 			LiveModInstance->Call<void>(
 				Action, SeatIndex);
+			GProgrammaticLandingEquipmentControllers.erase(
+				PlayerController);
 		}
 		bIsMounted =
 			IsVehicleModSeatWeaponEquipped(RiderPawn);
@@ -24197,11 +26549,31 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	}
 	SDK::DbgLog("  [FPC] 5 ServerRestartPlayer done\n");
 
-	auto ServerSuicideIdx = GetDefaultObj()->GetFunction("ServerSuicide")->GetVTableIndex();
+	auto ServerSuicideFunction =
+		GetDefaultObj()->GetFunction("ServerSuicide");
+	const int32 ServerSuicideIdx = ServerSuicideFunction
+		? ServerSuicideFunction->GetVTableIndex()
+		: -1;
 	auto DefaultFortPCZone = DefaultObjImpl("FortPlayerControllerZone");
 	SDK::DbgLog("  [FPC] 6 ServerSuicideIdx=0x%X\n", ServerSuicideIdx);
-	if (DefaultFortPCZone && ServerSuicideIdx < 0x1000)
-		Utils::Hook<AFortPlayerControllerAthena>(ServerSuicideIdx, DefaultFortPCZone->Vft[ServerSuicideIdx]);
+	void* ZoneServerSuicide = nullptr;
+	if (DefaultFortPCZone &&
+		ServerSuicideIdx >= 0 &&
+		ServerSuicideIdx < 0x1000 &&
+		SDK::MemReadable(
+			&DefaultFortPCZone->Vft[ServerSuicideIdx],
+			sizeof(void*)))
+	{
+		ZoneServerSuicide =
+			DefaultFortPCZone->Vft[ServerSuicideIdx];
+	}
+	if (ZoneServerSuicide &&
+		SDK::MemReadable(ZoneServerSuicide, 1))
+	{
+		Utils::Hook<AFortPlayerControllerAthena>(
+			static_cast<uint32>(ServerSuicideIdx),
+			ZoneServerSuicide);
+	}
 
 	//if (VersionInfo.FortniteVersion >= 11)
 	//{
@@ -24252,7 +26624,40 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	Utils::Hook(ClientOnPawnDiedAddr, ClientOnPawnDied, ClientOnPawnDiedOG);
 
 	if (VersionInfo.FortniteVersion >= 16)
-		Utils::ExecHook(GetDefaultObj()->GetFunction("ServerClientIsReadyToRespawn"), ServerClientIsReadyToRespawn);
+	{
+		auto ServerClientReadyFunction =
+			GetDefaultObj()->GetFunction(
+				"ServerClientIsReadyToRespawn");
+		auto PlayerStateDefault =
+			AFortPlayerStateAthena::GetDefaultObj();
+		const bool bHasCompleteRespawnSchema =
+			PlayerStateDefault &&
+			PlayerStateDefault->HasRespawnData() &&
+			FFortRespawnData::StaticStruct() &&
+			FFortRespawnData::HasRespawnLocation() &&
+			FFortRespawnData::HasRespawnRotation() &&
+			FFortRespawnData::HasbRespawnDataAvailable() &&
+			FFortRespawnData::HasbServerIsReady() &&
+			FFortRespawnData::HasbClientIsReady();
+		if (ServerClientReadyFunction &&
+			bHasCompleteRespawnSchema)
+		{
+			Utils::ExecHook(
+				ServerClientReadyFunction,
+				ServerClientIsReadyToRespawn);
+		}
+		else
+		{
+			// Unknown future schemas retain Epic's native handler instead of
+			// entering a custom path that cannot read an authored transform.
+			SDK::DbgLog(
+				"[RespawnReady] leaving native handler installed "
+				"function=%p schema=%d FN=%.2f\n",
+				(void*)ServerClientReadyFunction,
+				bHasCompleteRespawnSchema ? 1 : 0,
+				VersionInfo.FortniteVersion);
+		}
+	}
 
 	Utils::ExecHook(GetDefaultObj()->GetFunction("ServerCheat"), ServerCheat);
 

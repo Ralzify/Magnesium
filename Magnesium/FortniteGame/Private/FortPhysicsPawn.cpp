@@ -5,6 +5,8 @@
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
 #include "../Public/FortVehicleMods.h"
 
+#include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <iterator>
@@ -56,6 +58,22 @@ public:
 // ---------------------------------------------------------------------------
 namespace
 {
+    bool IsUsablePhysicsObject(const UObject* Object)
+    {
+        if (!Object || IsBadReadPtr((void*)Object) ||
+            Object->Index < 0 || Object->Index >= TUObjectArray::Num())
+        {
+            return false;
+        }
+
+        auto* Item = TUObjectArray::GetItemByIndex(Object->Index);
+        const int32 InvalidObjectFlags =
+            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        return Item && Item->GetObject() == Object &&
+            !(Item->GetFlags() & InvalidObjectFlags) &&
+            Object->Class && !IsBadReadPtr(Object->Class);
+    }
+
     constexpr double BumpKmhToCentimetersPerSecond = 27.7777778;
     constexpr double BumpDegreesToRadians = 0.017453292519943295;
 
@@ -569,14 +587,14 @@ namespace
         return GBumpPawnCache;
     }
 
-    // Riders move with the vehicle instead of being run over by it, and the
-    // driver's own pawn is attached to the vehicle - so it sits inside the hull
-    // permanently and would otherwise be launched out of its own car on every
-    // move RPC. Getting this wrong is the one failure that breaks driving
-    // outright, so it is asked two independent ways.
-    bool IsRidingAVehicle(AFortPlayerPawnAthena* Pawn, AActor* Vehicle)
+    // The server-owned pawn -> vehicle association, which stays valid for as
+    // long as the pawn occupies a seat. Legacy pawn subclasses expose it under
+    // one of several names.
+    AActor* GetRiddenVehicle(AFortPlayerPawnAthena* Pawn)
     {
-        // Legacy pawn subclasses expose this under one of several names.
+        if (!IsUsablePhysicsObject(Pawn))
+            return nullptr;
+
         UFunction* GetVehicleFunction = Pawn->GetFunction("GetVehicleActor");
 
         if (!GetVehicleFunction)
@@ -585,7 +603,19 @@ namespace
         if (!GetVehicleFunction)
             GetVehicleFunction = Pawn->GetFunction("BP_GetVehicle");
 
-        if (GetVehicleFunction && Pawn->Call<AActor*>(GetVehicleFunction))
+        auto* Vehicle = GetVehicleFunction
+            ? Pawn->Call<AActor*>(GetVehicleFunction) : nullptr;
+        return IsUsablePhysicsObject(Vehicle) ? Vehicle : nullptr;
+    }
+
+    // Riders move with the vehicle instead of being run over by it, and the
+    // driver's own pawn is attached to the vehicle - so it sits inside the hull
+    // permanently and would otherwise be launched out of its own car on every
+    // move RPC. Getting this wrong is the one failure that breaks driving
+    // outright, so it is asked two independent ways.
+    bool IsRidingAVehicle(AFortPlayerPawnAthena* Pawn, AActor* Vehicle)
+    {
+        if (GetRiddenVehicle(Pawn))
             return true;
 
         // Ask the vehicle instead when the pawn side is unavailable. This is the
@@ -747,16 +777,28 @@ namespace
         return IsEveryPlayerTheirOwnTeam();
     }
 
-    void ApplyBumpDamage(
-        AFortPlayerPawnAthena* Pawn,
-        AActor* Vehicle,
-        AFortPlayerPawnAthena* Driver,
-        double Damage)
-    {
-        if (Damage <= 0.0)
-            return;
+	void ApplyBumpDamage(
+		AFortPlayerPawnAthena* Pawn,
+		AActor* Vehicle,
+		AFortPlayerPawnAthena* Driver,
+		double Damage)
+	{
+		if (!IsUsablePhysicsObject(Pawn) ||
+			!std::isfinite(Damage) || Damage <= 0.0)
+			return;
 
-        if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
+		const auto Health = Pawn->GetHealth();
+		const auto Shield = Pawn->GetShield();
+		if (!std::isfinite(Health) || Health <= 0.f ||
+			!std::isfinite(Shield) || Shield < 0.f)
+		{
+			SDK::DbgLog(
+				"[VehicleBump] damage skipped: invalid health state pawn=%p health=%.3f shield=%.3f\n",
+				(void*)Pawn, Health, Shield);
+			return;
+		}
+
+		if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
             return;
 
         if (AFortPlayerPawnAthena::HasFullHealthGodMode(Pawn))
@@ -764,23 +806,20 @@ namespace
 
         auto* DriverController = Driver && Driver->Controller
             ? Driver->Controller->Cast<AFortPlayerControllerAthena>()
-            : nullptr;
+			: nullptr;
 
-        auto Remaining = (float)Damage;
-        const auto Shield = Pawn->GetShield();
+		auto Remaining = (float)Damage;
 
-        if (Shield > 0.f)
+		if (Shield > 0.f)
         {
             const auto ShieldDamage = Shield < Remaining ? Shield : Remaining;
             Pawn->SetShield(Shield - ShieldDamage);
             Remaining -= ShieldDamage;
         }
 
-        if (Remaining > 0.f)
-        {
-            const auto Health = Pawn->GetHealth();
-
-            if (Health <= Remaining)
+		if (Remaining > 0.f)
+		{
+			if (Health <= Remaining)
             {
                 if (AFortPlayerPawnAthena::HasMinimumHealthGodMode(Pawn))
                 {
@@ -795,22 +834,30 @@ namespace
                     FGameplayTag DeathTag{};
                     Pawn->Call<void>(
                         ForceKillFunction, DeathTag, DriverController, Vehicle);
-                }
-                else
-                {
-                    Pawn->SetHealth(0.f);
-                }
+				}
+				else
+				{
+					// A raw zero-health write bypasses the authored death/DBNO
+					// transaction and can strand a live pawn at zero health.
+					// Without ForceKill there is no safe attribution-preserving
+					// fatal path, so leave health unchanged and fail closed.
+					SDK::DbgLog(
+						"[VehicleBump] fatal damage skipped: ForceKill unavailable pawn=%p vehicle=%p\n",
+						(void*)Pawn, (void*)Vehicle);
+				}
             }
             else
                 Pawn->SetHealth(Health - Remaining);
         }
     }
 
-    void LaunchBumpedPawn(AFortPlayerPawnAthena* Pawn, const FVector& LaunchVelocity)
+    // Shared with the cannon launch below. The velocity overrides the pawn's own
+    // on both axes rather than adding to it: for a bump, adding lets a player
+    // sprinting into the grille cancel most of the hit, which reads as the bump
+    // randomly not working; for a cannon, it keeps a moving cannon from eating
+    // part of the shot.
+    void LaunchPawnWithVelocity(AFortPlayerPawnAthena* Pawn, const FVector& LaunchVelocity)
     {
-        // The launch overrides the pawn's velocity on both axes. Adding to it
-        // instead lets a player sprinting into the grille cancel most of the
-        // hit, which reads as the bump randomly not working.
         if (auto* LaunchJump = Pawn->GetFunction("LaunchCharacterJump"))
         {
             Pawn->Call<void>(LaunchJump, LaunchVelocity, true, true, true, true);
@@ -920,7 +967,7 @@ namespace
             const FVector LaunchVelocity =
                 BuildBumpLaunchVelocity(TravelDirection, Speed, Tuning);
 
-            LaunchBumpedPawn(Pawn, LaunchVelocity);
+            LaunchPawnWithVelocity(Pawn, LaunchVelocity);
 
             double Damage = 0.0;
 
@@ -1183,238 +1230,6 @@ void AFortPhysicsPawn::ServerMove(UObject* Context, FFrame& Stack)
     FortVehicleBump::OnVehicleMoved(Pawn, Translation, LinearVelocity);
 }
 
-void AFortPlayerPawnAthena::ServerNotifyPawnHit(UObject* Context, FFrame& Stack) // 28.00+ func for registering hits, this will be a lot of work
-{
-    /*FHitResult Hit;
-    FVector ProjectileOriginPosition;
-    float ProjectileStartTimestamp;
-    TArray<uint8> ArrayContext;
-    FVector LocalSpaceImpactPoint;
-    FVector LocalSpaceImpactNormal;
-    bool bWasTargetingWhenProjectileFired;
-
-    Stack.StepCompiledIn(&Hit);
-    Stack.StepCompiledIn(&ProjectileOriginPosition);
-    Stack.StepCompiledIn(&ProjectileStartTimestamp);
-    Stack.StepCompiledIn(&ArrayContext);
-    Stack.StepCompiledIn(&LocalSpaceImpactPoint);
-    Stack.StepCompiledIn(&LocalSpaceImpactNormal);
-    Stack.StepCompiledIn(&bWasTargetingWhenProjectileFired);
-    Stack.IncrementCode();
-
-    UFortWeaponItemDefinition* Weapon = (UFortWeaponItemDefinition*)Context;
-
-    if (!Weapon)
-        return;
-
-    AFortPlayerControllerAthena* PlayerController = (AFortPlayerControllerAthena*)Weapon->PlayerController;
-
-    auto Component = Hit.Component.Get();
-
-    if (!Component)
-        return;
-
-    auto Actor = Component->GetOwner();
-
-    if (!Actor)
-        return;
-
-    auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-
-    if (!GamePhaseLogic)
-        return;
-
-    if (Weapon->WeaponStatHandle.DataTable)
-    {
-        auto StatHandle = Weapon->WeaponStatHandle;
-
-        if (!StatHandle.DataTable)
-            return;
-
-        auto Equals = [](const FName& LeftKey, const FName& RightKey) -> bool
-            {
-                return LeftKey == RightKey;
-            };
-
-        auto Index = StatHandle.DataTable->RowMap.Find(StatHandle.RowName, Equals).GetIndex();
-        auto WeaponStats = (FFortRangedWeaponStats*)StatHandle.DataTable->RowMap[Index].Second;
-
-        if (WeaponStats)
-        {
-            if (Actor->bCanBeDamaged == 1 && PlayerController->MyFortPawn)
-            {
-                if (Actor->IsA(AFortPlayerPawn::StaticClass()))
-                {
-                    float Multiplier = 1;
-                    if (Hit.BoneName.ToString() == "Head")
-                        Multiplier = WeaponStats->DamageZone_Critical;
-
-                    float Damage = WeaponStats->DmgPB * Multiplier;
-
-                    FAthenaBatchedDamageGameplayCues_Shared SharedCue{};
-                    SharedCue.Location = (FVector_NetQuantize10)Hit.ImpactPoint;
-                    SharedCue.Normal = Hit.ImpactNormal;
-                    SharedCue.bIsCritical = Hit.BoneName.ToString() == "Head";
-                    SharedCue.Magnitude = Damage;
-                    SharedCue.bWeaponActivate = true;
-                    SharedCue.bIsFatal = false;
-                    SharedCue.bIsShield = false;
-                    SharedCue.bIsShieldDestroyed = false;
-                    SharedCue.bIsShieldApplied = false;
-                    SharedCue.bIsBallistic = false;
-                    SharedCue.bIsBeam = false;
-                    SharedCue.bIsValid = true;
-
-                    FAthenaBatchedDamageGameplayCues_NonShared NonSharedCue{};
-                    NonSharedCue.HitActor = Actor;
-                    NonSharedCue.NonPlayerHitActor = Actor;
-
-                    AFortPlayerPawnAthena* Pawn = (AFortPlayerPawnAthena*)Actor;
-                    if (Pawn->Controller && ((AFortGameStateAthena*)UWorld::GetWorld()->GameState)->CurrentPlaylistInfo.BasePlaylist->MaxSquadSize > 1)
-                    {
-                        AFortPlayerStateAthena* EnemyPlayerState = (AFortPlayerStateAthena*)Pawn->Controller->PlayerState;
-                        AFortPlayerStateAthena* PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
-
-                        if (EnemyPlayerState && PlayerState)
-                        {
-                            if (EnemyPlayerState->TeamIndex == PlayerState->TeamIndex)
-                                return;
-                        }
-                    }
-
-                    if (GamePhaseLogic->GamePhase != EAthenaGamePhase::Warmup && Pawn) 
-                    {
-                        auto PlayerShield = Pawn->GetShield();
-                        auto PlayerHealth = Pawn->GetHealth();
-                        float RemainingDamage = SharedCue.Magnitude;
-
-                        if (PlayerShield > 0.f)
-                        {
-                            SharedCue.bIsShield = true;
-
-                            if (PlayerShield <= RemainingDamage)
-                            {
-                                SharedCue.bIsShieldDestroyed = true;
-
-                                RemainingDamage -= PlayerShield;
-                                Pawn->SetShield(0.f);
-                            }
-                            else
-                            {
-                                Pawn->SetShield(PlayerShield - RemainingDamage);
-                                RemainingDamage = 0.f;
-                            }
-                        }
-
-                        if (RemainingDamage > 0.f)
-                        {
-                            if (PlayerHealth <= RemainingDamage)
-                            {
-                                Pawn->ForceKill(FGameplayTag(), PlayerController, Weapon);
-                                return;
-                            }
-                            else
-                            {
-                                Pawn->SetHealth(PlayerHealth - RemainingDamage);
-                            }
-                        }
-
-                        Pawn->ForceNetUpdate();
-                    }
-
-                    PlayerController->MyFortPawn->NetMulticast_Athena_BatchedDamageCues(SharedCue, NonSharedCue);
-                }
-                else
-                {
-                    FAthenaBatchedDamageGameplayCues_Shared SharedCue{};
-
-                    SharedCue.Location = (FVector_NetQuantize10)Hit.ImpactPoint;
-                    SharedCue.Normal = Hit.ImpactNormal;
-                    SharedCue.Magnitude = WeaponStats->EnvDmgPB;
-                    SharedCue.bWeaponActivate = true;
-                    SharedCue.bIsFatal = false;
-                    SharedCue.bIsCritical = false;
-                    SharedCue.bIsBallistic = true;
-                    SharedCue.bIsBeam = false;
-                    SharedCue.bIsValid = true;
-
-                    FAthenaBatchedDamageGameplayCues_NonShared NonSharedCue{};
-                    NonSharedCue.HitActor = Actor;
-                    NonSharedCue.NonPlayerHitActor = Actor;
-
-                    PlayerController->MyFortPawn->NetMulticast_Athena_BatchedDamageCues(SharedCue, NonSharedCue);
-                    if (Actor->IsA(ABuildingSMActor::StaticClass()))
-                    {
-                        ABuildingSMActor* BuildingActor = (ABuildingSMActor*)Actor;
-                        if (BuildingActor)
-                        {
-                            float RemainingHealth = BuildingActor->GetHealth() - SharedCue.Magnitude;
-                            BuildingActor->SetHealth(RemainingHealth);
-                            BuildingActor->ForceNetUpdate();
-
-                            if (BuildingActor->GetHealth() <= 0)
-                                BuildingActor->K2_DestroyActor();
-                        }
-                    }
-                    else if (Actor->IsA(AAthenaSuperDingo::StaticClass()))
-                    {
-                        AAthenaSuperDingo* SuperDingo = (AAthenaSuperDingo*)Actor;
-                        if (SuperDingo)
-                        {
-                            float RemainingHealth = SuperDingo->GetHealth() - SharedCue.Magnitude;
-                            SuperDingo->SetHealth(RemainingHealth);
-                            SuperDingo->ForceNetUpdate();
-
-                            if (SuperDingo->GetHealth() <= 0)
-                                SuperDingo->K2_DestroyActor();
-                        }
-                    }
-                    else if (Actor->IsA(AFortAthenaVehicle::StaticClass()))
-                    {
-                        AFortAthenaVehicle* Vehicle = (AFortAthenaVehicle*)Actor;
-                        if (Vehicle)
-                        {
-                            Vehicle->HealthSet->Health.CurrentValue -= WeaponStats->EnvDmgPB;
-                            Vehicle->OnRep_HealthSet();
-
-                            if (Vehicle->HealthSet->Health.CurrentValue <= 0)
-                                Vehicle->DestroyVehicle();
-                        }
-                    }
-                    else if (Actor->IsA(ABuildingGameplayActorCrashpad::StaticClass()))
-                    {
-                        ABuildingGameplayActorCrashpad* CrashPad = (ABuildingGameplayActorCrashpad*)Actor;
-                        if (CrashPad)
-                        {
-                            float RemainingHealth = CrashPad->GetHealth() - SharedCue.Magnitude;
-                            CrashPad->SetHealth(RemainingHealth);
-                            CrashPad->ForceNetUpdate();
-
-                            if (CrashPad->GetHealth() <= 0)
-                                CrashPad->K2_DestroyActor();
-                        }
-                    }
-                    else if (Actor->IsA(ABuildingGameplayActorBalloon::StaticClass()))
-                    {
-                        ABuildingGameplayActorBalloon* Balloon = (ABuildingGameplayActorBalloon*)Actor;
-                        if (Balloon)
-                        {
-                            float RemainingHealth = Balloon->GetHealth() - SharedCue.Magnitude;
-                            Balloon->SetHealth(RemainingHealth);
-                            Balloon->ForceNetUpdate();
-
-                            if (Balloon->GetHealth() <= 0)
-                                Balloon->K2_DestroyActor();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return;*/
-}
-
 void AFortOctopusVehicle::ServerUpdateTowhook(UObject* Context, FFrame& Stack)
 {
     FVector InNetTowhookAimDir;
@@ -1510,32 +1325,296 @@ void OnRep_ReplicatedAttachedInfo(AFortOctopusTowhookAttachableProjectile* _this
     //printf("CALLED!!!!\n");
 }
 
+// ---------------------------------------------------------------------------
+// Mounted cannon -> player launch
+//
+// ServerFireActorInCannon belongs to the cannon *weapon* - the thing the
+// operator holds while they are pushing the cannon around - and not to the
+// cannon itself. So the exec hook's Context is a weapon actor, while every
+// piece of state the launch needs (the seats, OnPreLaunchPawn/OnLaunchPawn, the
+// multicast that plays the effect) lives one hop away on the host vehicle.
+// Bridging that gap is most of the work here: weapon -> the pawn holding it ->
+// the vehicle that pawn is riding.
+//
+// The other half is deciding who gets fired. The cannon pushes from seat 0 and
+// launches out of the barrel, which is seat 1, so a rider in the barrel is the
+// friend the operator is launching and an empty barrel means the operator is
+// firing themselves. Both are the same RPC.
+// ---------------------------------------------------------------------------
+namespace
+{
+    AFortPlayerPawnAthena* GetCannonPawnAtSeat(AActor* Vehicle, int32 SeatIndex)
+    {
+        if (!IsUsablePhysicsObject(Vehicle) || SeatIndex < 0)
+            return nullptr;
+
+        if (auto* GetPawnAtSeatFunction = Vehicle->GetFunction("GetPawnAtSeat"))
+        {
+            auto* Occupant = Vehicle->Call<AActor*>(
+                GetPawnAtSeatFunction, SeatIndex);
+            return IsUsablePhysicsObject(Occupant)
+                ? Occupant->Cast<AFortPlayerPawnAthena>() : nullptr;
+        }
+
+        // Builds that do not reflect GetPawnAtSeat still keep the same slot
+        // array on the seat component.
+        auto* SeatComponent = (UFortVehicleSeatComponent*)Vehicle->GetComponentByClass(
+            UFortVehicleSeatComponent::StaticClass());
+
+        if (!IsUsablePhysicsObject(SeatComponent) ||
+            !SeatComponent->HasPlayerSlots() ||
+            SeatIndex >= SeatComponent->PlayerSlots.Num())
+        {
+            return nullptr;
+        }
+
+        auto* Occupant = SeatComponent->PlayerSlots
+            .Get(SeatIndex, FAthenaCarPlayerSlot::Size()).Player;
+        return IsUsablePhysicsObject(Occupant) ? Occupant : nullptr;
+    }
+
+    // Identified by behaviour rather than by class name: OnLaunchPawn is what
+    // actually throws a player out of a cannon, so probing for it keeps this
+    // working on builds that call the class something other than
+    // FortAthenaSKPushCannon.
+    bool IsCannonVehicle(AActor* Vehicle)
+    {
+        return IsUsablePhysicsObject(Vehicle) &&
+            Vehicle->GetFunction("OnPreLaunchPawn") &&
+            Vehicle->GetFunction("OnLaunchPawn");
+    }
+
+    // A weapon is owned by the pawn holding it, but the chain is walked rather
+    // than assumed: some builds hang a mounted weapon off the controller, with
+    // the pawn a further step up.
+    AFortPlayerPawnAthena* GetWeaponHolder(AActor* Weapon)
+    {
+        AActor* Current = Weapon;
+
+        for (int32 Step = 0;
+            IsUsablePhysicsObject(Current) && Step < 4; ++Step)
+        {
+            if (auto* Pawn = Current->Cast<AFortPlayerPawnAthena>())
+                return Pawn;
+
+            if (auto* Controller = Current->Cast<AFortPlayerControllerAthena>())
+            {
+                auto* Pawn = (Controller->HasMyFortPawn() &&
+                    Controller->MyFortPawn)
+                    ? Controller->MyFortPawn
+                    : Controller->Pawn;
+                return IsUsablePhysicsObject(Pawn)
+                    ? Pawn->Cast<AFortPlayerPawnAthena>() : nullptr;
+            }
+
+            auto* Owner = Current->HasOwner()
+                ? Current->Owner : nullptr;
+            Current = IsUsablePhysicsObject(Owner) ? Owner : nullptr;
+        }
+
+        return nullptr;
+    }
+
+    // Base speed of a direct cannon launch, before the per-axis multipliers.
+    // Horizontal is deliberately not symmetric and vertical carries the most,
+    // which is the shape a cannon shot has: mostly up, and further along the
+    // barrel than across it.
+    constexpr double CannonLaunchForwardSpeed = 6000.0;
+    constexpr double CannonLaunchLateralSpeed = 5000.0;
+    constexpr double CannonLaunchVerticalSpeed = 7500.0;
+
+    double SanitizeCannonMultiplier(float Value)
+    {
+        return (std::isfinite(Value) && Value >= 0.f) ? (double)Value : 1.0;
+    }
+
+    bool NormalizeCannonLaunchDirection(FVector& Direction)
+    {
+        const double X = Direction.X;
+        const double Y = Direction.Y;
+        const double Z = Direction.Z;
+        const double SizeSquared = X * X + Y * Y + Z * Z;
+        if (!std::isfinite(X) || !std::isfinite(Y) ||
+            !std::isfinite(Z) || !std::isfinite(SizeSquared) ||
+            SizeSquared <= 1.e-8)
+        {
+            return false;
+        }
+
+        const double Scale = 1.0 / std::sqrt(SizeSquared);
+        Direction = FVector(X * Scale, Y * Scale, Z * Scale);
+        return true;
+    }
+
+    bool HasCannonLaunchDirectionParameter(UFunction* Function)
+    {
+        if (!Function)
+            return false;
+
+        constexpr uint64 CPF_Parm = 0x80;
+        constexpr uint64 CPF_OutParm = 0x100;
+        constexpr uint64 CPF_ReturnParm = 0x400;
+        const auto Parameters = Function->GetParamsNamed();
+        int32 InputCount = 0;
+        bool bFoundDirection = false;
+        for (const auto& Parameter : Parameters.NameOffsetMap)
+        {
+            if (!(Parameter.PropertyFlags & CPF_Parm) ||
+                (Parameter.PropertyFlags & CPF_ReturnParm))
+            {
+                continue;
+            }
+
+            ++InputCount;
+            bFoundDirection =
+                !(Parameter.PropertyFlags & CPF_OutParm) &&
+                Parameter.ElementSize ==
+                    static_cast<uint32>(FVector::Size()) &&
+                Parameter.Offset <= Parameters.Size &&
+                Parameter.ElementSize <=
+                    Parameters.Size - Parameter.Offset;
+        }
+
+        return InputCount == 1 && bFoundDirection;
+    }
+
+    bool IsCannonFireFunctionOwner(UFunction* Function)
+    {
+        if (!IsUsablePhysicsObject(Function) ||
+            !IsUsablePhysicsObject(Function->Outer))
+        {
+            return false;
+        }
+
+        auto OwnerName = Function->Outer->Name.ToString();
+        std::transform(
+            OwnerName.begin(), OwnerName.end(), OwnerName.begin(),
+            [](unsigned char Character)
+            {
+                return static_cast<char>(std::tolower(Character));
+            });
+        return OwnerName.find("cannon") != std::string::npos;
+    }
+
+    // ServerOnExitVehicle takes a single enum on old builds and a 0x30-byte
+    // struct from FN29 on, and it returns the vehicle that was left. Calling it
+    // through the generated Call<AActor*>() with no arguments hands ProcessEvent
+    // an 8-byte return slot as the entire parameter block, so native reads past
+    // it and writes the return value somewhere further up this frame. Give it a
+    // buffer the size the running build actually asks for instead.
+    void ForcePawnOutOfCannon(AFortPlayerPawnAthena* Pawn)
+    {
+        auto* ExitFunction = IsUsablePhysicsObject(Pawn)
+            ? Pawn->GetFunction("ServerOnExitVehicle") : nullptr;
+
+        if (!ExitFunction)
+            return;
+
+        // Zeroed, which is exit behaviour "none" and no vehicle destruction -
+        // what an ordinary dismount passes.
+        alignas(16) std::array<uint8, 0x100> ExitParams{};
+
+        if (ExitFunction->GetParamsNamed().Size > ExitParams.size())
+            return;
+
+        Pawn->ProcessEvent(ExitFunction, ExitParams.data());
+    }
+}
+
 void AFortWeaponRangedMountedCannon::ServerFireActorInCannon(UObject* Context, FFrame& Stack)
 {
-    FVector LaunchDir;
+    FVector LaunchDir{};
+
+    // Stepping a parameter the build does not declare consumes caller
+    // bytecode. Require the exact single-vector input shape before reading it.
+    auto* FireFunction = Stack.GetCurrentNativeFunction();
+    if (FireFunction &&
+        !HasCannonLaunchDirectionParameter(FireFunction))
+    {
+        Stack.IncrementCode();
+        return;
+    }
 
     Stack.StepCompiledIn(&LaunchDir);
+
     Stack.IncrementCode();
 
-    auto Vehicle = (AFortWeaponRangedMountedCannon*)Context;
-
-    if (!Vehicle)
+    // The direct-launch branch bypasses Epic's validation, so never trust the
+    // magnitude or numeric validity of the client-authored direction. Native
+    // animation mode receives the same normalized direction for consistency.
+    if (!NormalizeCannonLaunchDirection(LaunchDir))
         return;
 
-    auto PushCannon = Vehicle->Cast<AFortAthenaSKPushCannon>();
+    auto* Weapon = (AActor*)Context;
 
-    if (!PushCannon)
+    if (!IsUsablePhysicsObject(Weapon))
         return;
 
-    if (auto TargetPawn = PushCannon->GetPawnAtSeat(1))
+    // Context is the cannon weapon, so the cannon has to be found through the
+    // operator holding it. That association is the server's own, which is why
+    // no actor named by the caller is trusted here.
+    auto* Operator = GetWeaponHolder(Weapon);
+    auto* Cannon = GetRiddenVehicle(Operator);
+
+    if (!IsCannonVehicle(Cannon))
+        return;
+
+    auto* PreLaunchFunction = Cannon->GetFunction("OnPreLaunchPawn");
+    auto* LaunchFunction = Cannon->GetFunction("OnLaunchPawn");
+    if (!PreLaunchFunction || !LaunchFunction)
+        return;
+
+    // Seat 1 is the cannon barrel. A different passenger seat is never a valid
+    // substitute: launching the first non-operator occupant could throw an
+    // unrelated rider on variants with more than two seats.
+    AFortPlayerPawnAthena* TargetPawn =
+        GetCannonPawnAtSeat(Cannon, 1);
+    if (TargetPawn == Operator)
+        TargetPawn = nullptr;
+
+    if (!TargetPawn)
+        TargetPawn = Operator;
+
+    if (!TargetPawn)
+        return;
+
+    Cannon->Call<void>(
+        PreLaunchFunction, TargetPawn, LaunchDir);
+    ForcePawnOutOfCannon(TargetPawn);
+
+    if (FConfiguration::bCannonLaunchAnimations)
     {
-        PushCannon->OnPreLaunchPawn(TargetPawn, LaunchDir);
-
-        TargetPawn->ServerOnExitVehicle();
-
-        PushCannon->OnLaunchPawn(TargetPawn, LaunchDir);
-        PushCannon->MultiCastPushCannonLaunchedPlayer();
+        // Native owns the whole launch: the animation, and the arc it decides
+        // the aim direction deserves. The multipliers do not apply here because
+        // there is nothing to multiply - the velocity never passes through us.
+        Cannon->Call<void>(
+            LaunchFunction, TargetPawn, LaunchDir);
     }
+    else
+    {
+        LaunchPawnWithVelocity(
+            TargetPawn,
+            FVector(
+                LaunchDir.X * CannonLaunchForwardSpeed *
+                    SanitizeCannonMultiplier(FConfiguration::CannonLaunchXMultiplier),
+                LaunchDir.Y * CannonLaunchLateralSpeed *
+                    SanitizeCannonMultiplier(FConfiguration::CannonLaunchYMultiplier),
+                LaunchDir.Z * CannonLaunchVerticalSpeed *
+                    SanitizeCannonMultiplier(FConfiguration::CannonLaunchZMultiplier)));
+    }
+
+    // Same hazard as the exit above: a no-argument Call<void>() passes
+    // ProcessEvent a null parameter block, which a build whose multicast does
+    // declare parameters would read through.
+    if (auto* LaunchedFunction = Cannon->GetFunction("MultiCastPushCannonLaunchedPlayer"))
+    {
+        alignas(16) std::array<uint8, 0x80> LaunchedParams{};
+
+        if (LaunchedFunction->GetParamsNamed().Size <= LaunchedParams.size())
+            Cannon->ProcessEvent(LaunchedFunction, LaunchedParams.data());
+    }
+
+    TargetPawn->ForceNetUpdate();
 }
 
 void AFortPhysicsPawn::Hook()
@@ -1610,10 +1689,43 @@ void AFortPhysicsPawn::Hook()
         Utils::Hook<AFortOctopusTowhookAttachableProjectile>(OnRep_ReplicatedAttachedInfoIdx, OnRep_ReplicatedAttachedInfo, OnRep_ReplicatedAttachedInfoOG);
     }
 
-    auto MountedCannonVehicle = AFortWeaponRangedMountedCannon::GetDefaultObj();
+    // The RPC hangs off the cannon weapon rather than off any vehicle, so this
+    // resolves FortWeaponRangedMountedCannon. A renamed class may still be
+    // found by function name, but only a cannon-owned function with the exact
+    // single-vector RPC shape is safe to replace.
+    auto MountedCannonWeapon = AFortWeaponRangedMountedCannon::GetDefaultObj();
+    auto FireActorInCannonFn = MountedCannonWeapon
+        ? MountedCannonWeapon->GetFunction("ServerFireActorInCannon")
+        : nullptr;
 
-    if (MountedCannonVehicle)
+    if (!FireActorInCannonFn)
     {
-        Utils::ExecHook(MountedCannonVehicle->GetFunction("ServerFireActorInCannon"), AFortWeaponRangedMountedCannon::ServerFireActorInCannon);
-	}
+        auto* Candidate = (UFunction*)TUObjectArray::FindObject(
+            "ServerFireActorInCannon", 0, FindClass("Function"));
+        if (IsCannonFireFunctionOwner(Candidate))
+            FireActorInCannonFn = Candidate;
+    }
+
+    if (FireActorInCannonFn &&
+        !HasCannonLaunchDirectionParameter(FireActorInCannonFn))
+    {
+        SDK::DbgLog(
+            "[Cannon] rejected incompatible ServerFireActorInCannon "
+            "owner=%p FN=%.2f\n",
+            (void*)FireActorInCannonFn->Outer,
+            VersionInfo.FortniteVersion);
+        FireActorInCannonFn = nullptr;
+    }
+
+    if (FireActorInCannonFn)
+    {
+        Utils::ExecHook(
+            FireActorInCannonFn,
+            AFortWeaponRangedMountedCannon::ServerFireActorInCannon);
+    }
+
+    SDK::DbgLog(
+        "[Cannon] ServerFireActorInCannon %s (class=%p)\n",
+        FireActorInCannonFn ? "hooked" : "not present on this build",
+        (void*)MountedCannonWeapon);
 }

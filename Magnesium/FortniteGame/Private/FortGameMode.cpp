@@ -3122,6 +3122,14 @@ namespace
         ResolveCurrentGamePhaseLogic(
             UWorld* World, bool bForceDiscovery)
     {
+        // The component-owned phase runtime is a modern Athena path. Legacy
+        // builds such as FN 10.40 keep the supply-drop cache on GameMode and/or
+        // an active mutator; walking every live UObject once per second can
+        // never find this component there and stalls the same game thread that
+        // processes lethal damage and winner replication.
+        if (VersionInfo.FortniteVersion < 25.20)
+            return nullptr;
+
         auto& State = GSupplyDropSuppressionState;
         auto Cached = State.GamePhaseLogic.Get();
         if (IsSaneObject(Cached) &&
@@ -3254,19 +3262,21 @@ namespace
             return nullptr;
         }
         State.NextSupplyDropMutatorResolveTimeMs =
-            CurrentTimeMs + 1000ULL;
+            CurrentTimeMs + 15000ULL;
 
         const UClass* MutatorClass =
             FindClass("FortAthenaMutator_SupplyDrop");
         if (!MutatorClass)
             return nullptr;
 
+        bool bInspectedAuthoritativeMutatorList = false;
         if (World && IsSaneObject(World->GameState))
         {
             auto GameState =
                 static_cast<AFortGameStateAthena*>(World->GameState);
             if (GameState->HasGameplayMutators())
             {
+                bInspectedAuthoritativeMutatorList = true;
                 auto& ActiveMutators = GameState->GetGameplayMutators();
                 const auto& ActiveMutatorHeader =
                     reinterpret_cast<
@@ -3305,6 +3315,14 @@ namespace
                 }
             }
         }
+
+        // Registered gameplay mutators are authoritative once that reflected
+        // list exists. A loaded-but-unregistered UObject cannot schedule a
+        // supply drop, so a normal live tick must not fall through to a global
+        // registry scan. Forced discovery at startup/phase transitions retains
+        // the fallback for builds whose list is populated unusually late.
+        if (bInspectedAuthoritativeMutatorList && !bForceDiscovery)
+            return nullptr;
 
         for (int32 Index = 0; Index < TUObjectArray::Num(); ++Index)
         {

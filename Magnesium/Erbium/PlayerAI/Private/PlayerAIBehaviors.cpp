@@ -3444,16 +3444,17 @@ void CombatBehavior::Tick(PlayerAIController& AI, float Now, float DeltaSeconds,
 
 bool DamageBehavior::ApplyWeaponDamage(PlayerAIController& Attacker, AFortPlayerControllerAthena* VictimPC, float Damage)
 {
-    if (!VictimPC)
-        return false;
+	if (!VictimPC || !FPlatformMath::IsFinite(Damage) || Damage <= 0.f)
+		return false;
 
     auto VictimPawn = VictimPC->Pawn; // AController base property - safe for any controller kind
 
     auto PlayerPawnClass =
         AFortPlayerPawnAthena::StaticClass();
-    if (!VictimPawn || !PlayerPawnClass ||
-        !VictimPawn->IsA(PlayerPawnClass) ||
-        VictimPawn->GetHealth() <= 0.f)
+	if (!VictimPawn || !PlayerPawnClass ||
+		!VictimPawn->IsA(PlayerPawnClass) ||
+		!FPlatformMath::IsFinite(VictimPawn->GetHealth()) ||
+		VictimPawn->GetHealth() <= 0.f)
         return false;
 
     if (AFortPlayerPawnAthena::HasFullHealthGodMode(
@@ -3481,8 +3482,13 @@ bool DamageBehavior::ApplyWeaponDamage(PlayerAIController& Attacker, AFortPlayer
         }
     }
 
-    const float Shield = VictimPawn->GetShield();
-    const float Health = VictimPawn->GetHealth();
+	const float Shield = VictimPawn->GetShield();
+	const float Health = VictimPawn->GetHealth();
+	if (!FPlatformMath::IsFinite(Shield) || Shield < 0.f ||
+		!FPlatformMath::IsFinite(Health) || Health <= 0.f)
+	{
+		return false;
+	}
     const bool bMinimumHealthGod =
         AFortPlayerPawnAthena::HasMinimumHealthGodMode(
             VictimPC) ||
@@ -3511,16 +3517,15 @@ bool DamageBehavior::ApplyWeaponDamage(PlayerAIController& Attacker, AFortPlayer
             {
                 VictimPawn->SetHealth(1.f);
             }
-            else
-            {
-                bFatal = true;
-
-                // NOTE: on versions with down-but-not-out squads, the native
+			else
+			{
+				// NOTE: on versions with down-but-not-out squads, the native
                 // ForceKill flow applies the appropriate DBNO/elimination result.
                 // TODO: connect this to the Magnesium damage system for explicit
                 //       DBNO downing instead of direct elimination if desired.
                 auto Weapon = VictimPawn && Attacker.GetPawn() && Attacker.GetPawn()->HasCurrentWeapon() ? Attacker.GetPawn()->CurrentWeapon : nullptr;
-                VersionFeatureAdapter::KillPawn(VictimPawn, Attacker.Entity.PC, Weapon);
+				bFatal = VersionFeatureAdapter::KillPawn(
+					VictimPawn, Attacker.Entity.PC, Weapon);
             }
         }
         else
@@ -3535,7 +3540,10 @@ bool DamageBehavior::ApplyWeaponDamage(PlayerAIController& Attacker, AFortPlayer
 
 bool DamageBehavior::ApplyEnvironmentalDamage(PlayerAIController& AI, float Damage)
 {
-    auto Pawn = AI.GetPawn();
+	if (!FPlatformMath::IsFinite(Damage) || Damage <= 0.f)
+		return false;
+
+	auto Pawn = AI.GetPawn();
 
     auto PlayerPawnClass =
         AFortPlayerPawnAthena::StaticClass();
@@ -3551,7 +3559,7 @@ bool DamageBehavior::ApplyEnvironmentalDamage(PlayerAIController& AI, float Dama
         AFortPlayerPawnAthena::HasMinimumHealthGodMode(
             Pawn);
 
-    if (Health <= 0.f)
+	if (!FPlatformMath::IsFinite(Health) || Health <= 0.f)
         return false;
 
     AIDebugLogger::Verbose("Damage", "%s takes %.0f storm damage (health %.0f)", AI.Entity.DisplayName.c_str(), Damage, Health);
@@ -3566,8 +3574,8 @@ bool DamageBehavior::ApplyEnvironmentalDamage(PlayerAIController& AI, float Dama
         }
 
         // Storm/zone deaths give no kill credit (native rules unchanged).
-        VersionFeatureAdapter::KillPawn(Pawn, nullptr, nullptr);
-        return true;
+		return VersionFeatureAdapter::KillPawn(
+			Pawn, nullptr, nullptr);
     }
 
     Pawn->SetHealth(Health - Damage);

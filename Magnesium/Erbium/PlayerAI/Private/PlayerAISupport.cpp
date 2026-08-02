@@ -2747,10 +2747,16 @@ bool VersionFeatureAdapter::KillPawn(AFortPlayerPawnAthena* Pawn, AFortPlayerCon
         return true;
     }
 
-    AIDebugLogger::MissingFeature("ForceKill", "using direct health zeroing (kill credit may be reduced)");
-    Pawn->SetHealth(0.f);
-    Pawn->ForceNetUpdate();
-    return true;
+	// Directly setting zero health bypasses the native death/DBNO transaction
+	// and can strand a replicated live pawn. Without ForceKill there is no
+	// safe way to preserve attribution, so fail closed.
+	AIDebugLogger::MissingFeature(
+		"ForceKill", "fatal PlayerAI damage was skipped safely");
+	AIDebugLogger::Error(
+		"Damage",
+		"fatal damage skipped: ForceKill unavailable pawn=%p killer=%p causer=%p",
+		(void*)Pawn, (void*)KillerPC, (void*)DamageCauser);
+	return false;
 }
 
 // ---- Cosmetics ----------------------------------------------------------------------------

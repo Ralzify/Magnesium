@@ -1473,6 +1473,7 @@ namespace
 			State.bEndLatched = true;
 			GUI::gsStatus.store(
 				Ended, std::memory_order_release);
+
 			AutoHosting::OnAuthoritativeMatchEnded();
 
 			const char* Source =
@@ -1507,6 +1508,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -1546,7 +1548,25 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 	AFortPlayerControllerAthena::TickEditingToolStateRepair(Driver);
 	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ClientConnections.Num() > 0)
+	{
+		const ULONGLONG ReplicationStartMs = GetTickCount64();
 		ServerReplicateActors(Driver, DeltaSeconds);
+		const ULONGLONG ReplicationElapsedMs =
+			GetTickCount64() - ReplicationStartMs;
+		static uint32 SlowManualReplicationLogs = 0;
+		if (ReplicationElapsedMs >= 8ULL &&
+			GUI::gsStatus == Ended &&
+			SlowManualReplicationLogs < 8)
+		{
+			++SlowManualReplicationLogs;
+			SDK::DbgLog(
+				"[ReplicationTiming] manual ServerReplicateActors "
+				"elapsed=%llu ms clients=%d version=%.2f\n",
+				ReplicationElapsedMs,
+				Driver->ClientConnections.Num(),
+				VersionInfo.FortniteVersion);
+		}
+	}
 
     if (GUI::gsStatus == Joinable && VersionInfo.FortniteVersion >= 11.00)
     { 
@@ -1609,7 +1629,22 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		}
 	}
 
+	const ULONGLONG NativeTickFlushStartMs = GetTickCount64();
 	TickFlushOG(Driver, DeltaSeconds);
+	const ULONGLONG NativeTickFlushElapsedMs =
+		GetTickCount64() - NativeTickFlushStartMs;
+	static uint32 SlowNativeTickFlushLogs = 0;
+	if (NativeTickFlushElapsedMs >= 8ULL &&
+		GUI::gsStatus == Ended &&
+		SlowNativeTickFlushLogs < 8)
+	{
+		++SlowNativeTickFlushLogs;
+		SDK::DbgLog(
+			"[ReplicationTiming] native TickFlush "
+			"elapsed=%llu ms version=%.2f\n",
+			NativeTickFlushElapsedMs,
+			VersionInfo.FortniteVersion);
+	}
 	auto World = UWorld::GetWorld();
 	if (World && Driver == World->NetDriver &&
 		Driver->ClientConnections.Num() > 0)
@@ -1633,6 +1668,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -1665,7 +1701,25 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 	{
 		// this is our main netdriver
 		if (Driver->ClientConnections.Num() > 0)
+		{
+			const ULONGLONG ReplicationStartMs = GetTickCount64();
 			((void (*)(UObject*, float)) ServerReplicateActors_)(Driver->ReplicationDriver, DeltaSeconds);
+			const ULONGLONG ReplicationElapsedMs =
+				GetTickCount64() - ReplicationStartMs;
+			static uint32 SlowRepGraphReplicationLogs = 0;
+			if (ReplicationElapsedMs >= 8ULL &&
+				GUI::gsStatus == Ended &&
+				SlowRepGraphReplicationLogs < 8)
+			{
+				++SlowRepGraphReplicationLogs;
+				SDK::DbgLog(
+					"[ReplicationTiming] RepGraph ServerReplicateActors "
+					"elapsed=%llu ms clients=%d version=%.2f\n",
+					ReplicationElapsedMs,
+					Driver->ClientConnections.Num(),
+					VersionInfo.FortniteVersion);
+			}
+		}
 
 
 		if (GUI::gsStatus == Joinable && VersionInfo.FortniteVersion >= 11.00)
@@ -1730,7 +1784,22 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		}
 	}
 
+	const ULONGLONG NativeTickFlushStartMs = GetTickCount64();
 	TickFlushOG(Driver, DeltaSeconds);
+	const ULONGLONG NativeTickFlushElapsedMs =
+		GetTickCount64() - NativeTickFlushStartMs;
+	static uint32 SlowRepGraphNativeTickFlushLogs = 0;
+	if (NativeTickFlushElapsedMs >= 8ULL &&
+		GUI::gsStatus == Ended &&
+		SlowRepGraphNativeTickFlushLogs < 8)
+	{
+		++SlowRepGraphNativeTickFlushLogs;
+		SDK::DbgLog(
+			"[ReplicationTiming] RepGraph native TickFlush "
+			"elapsed=%llu ms version=%.2f\n",
+			NativeTickFlushElapsedMs,
+			VersionInfo.FortniteVersion);
+	}
 	auto World = UWorld::GetWorld();
 	if (World && Driver == World->NetDriver &&
 		Driver->ClientConnections.Num() > 0)
@@ -1796,6 +1865,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		AFortGameMode::TickSupplyDropSuppression();
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
+		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -1859,7 +1929,23 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 			SendClientMoveAdjustments(Driver);
 			FSendUpdateParams Params;
 			Params.DeltaSeconds = DeltaSeconds;
+			const ULONGLONG PreSendStartMs = GetTickCount64();
 			PreSendUpdate(ReplicationSystem, Params);
+			const ULONGLONG PreSendElapsedMs =
+				GetTickCount64() - PreSendStartMs;
+			static uint32 SlowIrisPreSendLogs = 0;
+			if (PreSendElapsedMs >= 8ULL &&
+				GUI::gsStatus == Ended &&
+				SlowIrisPreSendLogs < 8)
+			{
+				++SlowIrisPreSendLogs;
+				SDK::DbgLog(
+					"[ReplicationTiming] Iris PreSendUpdate "
+					"elapsed=%llu ms clients=%d version=%.2f\n",
+					PreSendElapsedMs,
+					Driver->ClientConnections.Num(),
+					VersionInfo.FortniteVersion);
+			}
 		}
 	}
 
@@ -1926,7 +2012,22 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	}
 
 	if (_lg) { SDK::DbgLog("[TickFlush] #%d pre-OG (calling TickFlushOG)\n", _tf); }
+	const ULONGLONG NativeTickFlushStartMs = GetTickCount64();
 	TickFlushOG(Driver, DeltaSeconds);
+	const ULONGLONG NativeTickFlushElapsedMs =
+		GetTickCount64() - NativeTickFlushStartMs;
+	static uint32 SlowIrisNativeTickFlushLogs = 0;
+	if (NativeTickFlushElapsedMs >= 8ULL &&
+		GUI::gsStatus == Ended &&
+		SlowIrisNativeTickFlushLogs < 8)
+	{
+		++SlowIrisNativeTickFlushLogs;
+		SDK::DbgLog(
+			"[ReplicationTiming] Iris native TickFlush "
+			"elapsed=%llu ms version=%.2f\n",
+			NativeTickFlushElapsedMs,
+			VersionInfo.FortniteVersion);
+	}
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OG done\n", _tf);
 	if (VersionInfo.FortniteVersion >= 32.00 && _tf < 4) _tf++;
 }

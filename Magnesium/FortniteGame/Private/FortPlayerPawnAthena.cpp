@@ -7,6 +7,7 @@
 #include "../Public/FortWeapon.h"
 #include "../Public/FortPhysicsPawn.h"
 #include "../../Engine/Public/NetDriver.h"
+#include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/GUI.h"
 
 #include <array>
@@ -382,6 +383,51 @@ namespace
 		return GameMode->MatchState == InProgressName;
 	}
 
+	bool IsDBNOAuthoritativelyDisabled(UWorld* World)
+	{
+		if (!FConfiguration::bEnableDBNO.load(
+				std::memory_order_acquire))
+		{
+			return true;
+		}
+		if (!World ||
+			!IsLiveHealthStateObject(World->AuthorityGameMode))
+		{
+			return false;
+		}
+
+		auto GameMode = static_cast<AFortGameMode*>(
+			World->AuthorityGameMode);
+		bool bHasAuthoritativeState = false;
+		bool bAnyStateEnabled = false;
+		if (GameMode->HasbEnableDBNO())
+		{
+			bHasAuthoritativeState = true;
+			bAnyStateEnabled =
+				bAnyStateEnabled || GameMode->bEnableDBNO;
+		}
+		if (GameMode->HasbDBNOEnabled())
+		{
+			bHasAuthoritativeState = true;
+			bAnyStateEnabled =
+				bAnyStateEnabled || GameMode->bDBNOEnabled;
+		}
+
+		auto GameState = GameMode->GameState
+			? static_cast<AFortGameStateAthena*>(
+				GameMode->GameState)
+			: nullptr;
+		if (IsLiveHealthStateObject(GameState) &&
+			GameState->HasbDBNOEnabledForGameMode())
+		{
+			bHasAuthoritativeState = true;
+			bAnyStateEnabled = bAnyStateEnabled ||
+				GameState->bDBNOEnabledForGameMode;
+		}
+
+		return bHasAuthoritativeState && !bAnyStateEnabled;
+	}
+
 	FTrackedHealthState& FindTrackedHealthState(
 		AFortPlayerPawnAthena* Pawn,
 		AFortPlayerControllerAthena* Controller)
@@ -668,15 +714,21 @@ namespace
 
 		// This is the broken state: the exact possessed pawn was previously
 		// alive, now has a finite zero health value and positive capacity, but
-		// native damage produced neither DBNO nor death. A few supported builds
-		// publish DBNO on the following frame, so allow exactly one completed
-		// flush and recheck every native flag on the next pre-replication pass.
-		// This removes the old 500-550 ms wall-clock delay while retaining that
-		// cross-version DBNO guard. LastDamagedTime is diagnostic only because
-		// several high-damage GAS paths do not advance it.
-		if (State.ConsecutiveUnresolvedZeroFlushes < 2)
+		// native damage produced neither DBNO nor death. When DBNO is explicitly
+		// disabled by the authoritative match settings, there is no next-frame
+		// knock transition to preserve, so finalize before the first bad zero can
+		// replicate. Otherwise retain one completed-flush grace period for builds
+		// that publish DBNO on the following frame. LastDamagedTime is diagnostic
+		// only because several high-damage GAS paths do not advance it.
+		const bool bDBNOKnownDisabled =
+			IsDBNOAuthoritativelyDisabled(UWorld::GetWorld());
+		const uint8 RequiredZeroFlushes =
+			bDBNOKnownDisabled ? 1 : 2;
+		if (State.ConsecutiveUnresolvedZeroFlushes <
+			RequiredZeroFlushes)
 			++State.ConsecutiveUnresolvedZeroFlushes;
-		if (State.ConsecutiveUnresolvedZeroFlushes < 2)
+		if (State.ConsecutiveUnresolvedZeroFlushes <
+			RequiredZeroFlushes)
 			return;
 
 		if (State.ForceKillAttempts >= 2)
@@ -715,13 +767,18 @@ namespace
 		SDK::DbgLog(
 			"[HealthRepair] finalizing stuck lethal state before replication "
 			"pawn=%p controller=%p killer=%p causer=%p "
-			"health=%.2f attempt=%u version=%.2f\n",
+			"health=%.2f attempt=%u dbnoKnownDisabled=%d "
+			"zeroFlush=%u/%u version=%.2f\n",
 			(void*)Pawn,
 			(void*)PlayerController,
 			(void*)KillerController,
 			(void*)KillerActor,
 			Health,
 			static_cast<unsigned>(State.ForceKillAttempts),
+			bDBNOKnownDisabled ? 1 : 0,
+			static_cast<unsigned>(
+				State.ConsecutiveUnresolvedZeroFlushes),
+			static_cast<unsigned>(RequiredZeroFlushes),
 			VersionInfo.FortniteVersion);
 
 		FGameplayTag DeathReason{};
@@ -730,6 +787,8 @@ namespace
 			DeathReason,
 			KillerController,
 			KillerActor);
+		if (IsLiveHealthStateObject(Pawn))
+			Pawn->ForceNetUpdate();
 	}
 
 	bool IsDBNOAbility(const UFortGameplayAbility* Ability)
@@ -3447,15 +3506,56 @@ void AFortPlayerPawnAthena::EmoteStopped_(UObject* Context, FFrame& Stack)
 
 void AFortPlayerPawnAthena::EndSkydiving(AFortPlayerPawnAthena* Pawn)
 {
+	auto PlayerControllerClass =
+		AFortPlayerControllerAthena::StaticClass();
+	auto ResolveCurrentPlayerController =
+		[PlayerControllerClass](AFortPlayerPawnAthena* CurrentPawn)
+			-> AFortPlayerControllerAthena*
+	{
+		if (!IsLiveHealthStateObject(CurrentPawn) ||
+			!PlayerControllerClass)
+		{
+			return nullptr;
+		}
+
+		auto Controller = CurrentPawn->Controller;
+		if (!IsLiveHealthStateObject(Controller) ||
+			!Controller->IsA(PlayerControllerClass))
+		{
+			return nullptr;
+		}
+
+		auto PlayerController =
+			(AFortPlayerControllerAthena*)Controller;
+		auto CurrentFortPawn = PlayerController->MyFortPawn;
+		if (CurrentFortPawn != CurrentPawn &&
+			IsLiveHealthStateObject(CurrentFortPawn))
+		{
+			return nullptr;
+		}
+
+		return CurrentFortPawn == CurrentPawn ||
+			(!IsLiveHealthStateObject(CurrentFortPawn) &&
+				PlayerController->Pawn == CurrentPawn)
+			? PlayerController
+			: nullptr;
+	};
+
+	auto PlayerController = ResolveCurrentPlayerController(Pawn);
+	AFortPlayerControllerAthena::CaptureLandingItemBeforeNativeEnd(
+		PlayerController, Pawn);
+
 	EndSkydivingOG(Pawn);
 
-	auto PlayerController = (AFortPlayerControllerAthena*)Pawn->Controller;
+	// Native may unpossess or replace the pawn. Resolve ownership again instead
+	// of using a pre-native controller pointer for restore and quest work.
+	PlayerController = ResolveCurrentPlayerController(Pawn);
 	AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(PlayerController, Pawn);
 
 	if (PlayerController && Pawn->bIsSkydiving)
 		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetLand(), 1, Pawn);
 
-	if (Pawn && Pawn->bIsSkydivingFromBus)
+	if (PlayerController && Pawn && Pawn->bIsSkydivingFromBus)
 	{
 		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetVisit(), 1, Pawn);
 	}

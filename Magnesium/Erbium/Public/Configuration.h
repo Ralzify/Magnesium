@@ -118,7 +118,16 @@ struct FConfiguration
     static inline std::atomic_bool bEnableDBNO{ true };
     static inline std::atomic_bool bInfiniteRender{ false };
     static inline std::atomic_bool bFModCannon{ false };
-	static inline std::atomic<float> CannonLaunchMultiplier{ 1.f };
+    // How a cannon throws the player it fires. Native OnLaunchPawn plays the
+    // whole thing - the launch animation and the arc the cannon was aimed
+    // along - and is what retail does. Off, the pawn is launched directly
+    // instead, which skips the animation entirely and makes the distance a
+    // number rather than whatever the cannon felt like doing; the per-axis
+    // multipliers below scale that launch and only apply in that mode.
+    static inline std::atomic_bool bCannonLaunchAnimations{ true };
+    static inline std::atomic<float> CannonLaunchXMultiplier{ 1.f };
+    static inline std::atomic<float> CannonLaunchYMultiplier{ 1.f };
+    static inline std::atomic<float> CannonLaunchZMultiplier{ 1.f };
     static inline std::atomic_bool bCrownSlomo{ true };
     static inline std::atomic_bool bDisableJumpFatigue{ false };
     static inline std::atomic_bool bCancelVelocityOnWin{ false };

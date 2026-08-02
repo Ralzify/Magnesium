@@ -546,8 +546,18 @@ public:
     static void ServerPlayEmoteItem_(UObject*, FFrame&);
     static void PlayEmoteInternal(AFortPlayerControllerAthena* PC, UObject* Asset);
     static void ServerClientIsReadyToRespawn(UObject*, FFrame&);
+    static void CaptureLandingItemBeforeNativeEnd(
+        AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
     static void FinalizeRespawnAfterLanding(AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
     static void RestoreVehicleLoadoutAfterExit(AFortPlayerControllerAthena*);
+    // Catches the exits the RPC above cannot see, so a temporary vehicle weapon
+    // never outlives the ride. Call once per server tick.
+    static void TickVehicleLoadoutReconcile();
+    // Requests an authoritative self-elimination through FortPawn::ForceKill.
+    // Unlike the stripped controller ServerSuicide stub on later clients, this
+    // enters the normal death-report, scoring, inventory, and respawn pipeline.
+    static bool TryEliminatePlayer(
+        AFortPlayerControllerAthena* PlayerController);
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
     static void TickNukeRockets(float DeltaSeconds);

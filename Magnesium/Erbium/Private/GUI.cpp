@@ -5154,8 +5154,12 @@ static void ApplyInitialTrickshotDefaults()
         true, std::memory_order_release);
     FConfiguration::bDisableJumpFatigue.store(
         true, std::memory_order_release);
-    FConfiguration::bAutoPauseTODM.store(
+    FConfiguration::bDisableSupplyDrops.store(
         true, std::memory_order_release);
+    FConfiguration::bVehicleBumpLaunch.store(
+        false, std::memory_order_release);
+    FConfiguration::bAutoPauseTODM.store(
+        false, std::memory_order_release);
 
     if (GUI::IsArenaPlaylist() ||
         GUI::IsTournamentPlaylist())
@@ -8714,7 +8718,8 @@ void GUI::Init()
 
                 if (ImGui::Button("Eliminate Player", ImVec2(Width, Height)))
                 {
-                    TargetPC->ServerSuicide();
+                    AFortPlayerControllerAthena::TryEliminatePlayer(
+                        TargetPC);
                     bIsInspecting = false;
                 }
 
@@ -9626,6 +9631,35 @@ void GUI::Init()
                     FConfiguration::bCancelVelocityOnWin);
 
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
+
+            AtomicCheckbox(
+                "Cannon Launch Animations",
+                FConfiguration::bCannonLaunchAnimations);
+
+            // The multipliers scale a launch this code applies itself, so they
+            // have nothing to act on while native owns the shot.
+            if (!FConfiguration::bCannonLaunchAnimations)
+            {
+                ImGui::Indent(12.f);
+
+                AtomicLabeledSliderFloat(
+                    "Cannon Launch X",
+                    "##cannon-launch-x",
+                    FConfiguration::CannonLaunchXMultiplier,
+                    0.0f, 5.0f, "%.2fx", Width);
+                AtomicLabeledSliderFloat(
+                    "Cannon Launch Y",
+                    "##cannon-launch-y",
+                    FConfiguration::CannonLaunchYMultiplier,
+                    0.0f, 5.0f, "%.2fx", Width);
+                AtomicLabeledSliderFloat(
+                    "Cannon Launch Z",
+                    "##cannon-launch-z",
+                    FConfiguration::CannonLaunchZMultiplier,
+                    0.0f, 5.0f, "%.2fx", Width);
+
+                ImGui::Unindent(12.f);
+            }
 
             AtomicCheckbox(
                 "Vehicle Bump Launch",

@@ -339,6 +339,11 @@ namespace AutoHosting
                 { "randomize_levels", FConfiguration::RandomizeLevels.load(std::memory_order_acquire) },
                 { "disable_jump_fatigue", FConfiguration::bDisableJumpFatigue.load(std::memory_order_acquire) },
                 { "disable_supply_drops", FConfiguration::bDisableSupplyDrops.load(std::memory_order_acquire) },
+                { "vehicle_bump_launch", FConfiguration::bVehicleBumpLaunch.load(std::memory_order_acquire) },
+                { "cannon_launch_animations", FConfiguration::bCannonLaunchAnimations.load(std::memory_order_acquire) },
+                { "cannon_launch_x_multiplier", FConfiguration::CannonLaunchXMultiplier.load(std::memory_order_acquire) },
+                { "cannon_launch_y_multiplier", FConfiguration::CannonLaunchYMultiplier.load(std::memory_order_acquire) },
+                { "cannon_launch_z_multiplier", FConfiguration::CannonLaunchZMultiplier.load(std::memory_order_acquire) },
                 { "crown_slow_motion", FConfiguration::bCrownSlomo.load(std::memory_order_acquire) },
                 { "cancel_velocity_on_win", FConfiguration::bCancelVelocityOnWin.load(std::memory_order_acquire) },
                 { "auto_pause_time_of_day", FConfiguration::bAutoPauseTODM.load(std::memory_order_acquire) },
@@ -474,6 +479,21 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Trickshot["disable_supply_drops"] =
                 FConfiguration::bDisableSupplyDrops.load(
+                    std::memory_order_acquire);
+            Trickshot["vehicle_bump_launch"] =
+                FConfiguration::bVehicleBumpLaunch.load(
+                    std::memory_order_acquire);
+            Trickshot["cannon_launch_animations"] =
+                FConfiguration::bCannonLaunchAnimations.load(
+                    std::memory_order_acquire);
+            Trickshot["cannon_launch_x_multiplier"] =
+                FConfiguration::CannonLaunchXMultiplier.load(
+                    std::memory_order_acquire);
+            Trickshot["cannon_launch_y_multiplier"] =
+                FConfiguration::CannonLaunchYMultiplier.load(
+                    std::memory_order_acquire);
+            Trickshot["cannon_launch_z_multiplier"] =
+                FConfiguration::CannonLaunchZMultiplier.load(
                     std::memory_order_acquire);
             Trickshot["crown_slow_motion"] =
                 FConfiguration::bCrownSlomo.load(
@@ -933,7 +953,45 @@ namespace AutoHosting
                 ReadBool(
                     Trickshot,
                     "disable_supply_drops",
-                    false),
+                    FConfiguration::bEnableTrickshotTab.load(
+                        std::memory_order_acquire)),
+                std::memory_order_release);
+            FConfiguration::bVehicleBumpLaunch.store(
+                ReadBool(
+                    Trickshot,
+                    "vehicle_bump_launch",
+                    !FConfiguration::bEnableTrickshotTab.load(
+                        std::memory_order_acquire)),
+                std::memory_order_release);
+            FConfiguration::bCannonLaunchAnimations.store(
+                ReadBool(
+                    Trickshot,
+                    "cannon_launch_animations",
+                    true),
+                std::memory_order_release);
+            FConfiguration::CannonLaunchXMultiplier.store(
+                ClampValue(
+                    ReadFloat(
+                        Trickshot,
+                        "cannon_launch_x_multiplier",
+                        1.f),
+                    0.f, 5.f),
+                std::memory_order_release);
+            FConfiguration::CannonLaunchYMultiplier.store(
+                ClampValue(
+                    ReadFloat(
+                        Trickshot,
+                        "cannon_launch_y_multiplier",
+                        1.f),
+                    0.f, 5.f),
+                std::memory_order_release);
+            FConfiguration::CannonLaunchZMultiplier.store(
+                ClampValue(
+                    ReadFloat(
+                        Trickshot,
+                        "cannon_launch_z_multiplier",
+                        1.f),
+                    0.f, 5.f),
                 std::memory_order_release);
             FConfiguration::bCrownSlomo.store(
                 ReadBool(
