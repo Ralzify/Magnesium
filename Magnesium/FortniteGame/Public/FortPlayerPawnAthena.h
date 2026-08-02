@@ -486,6 +486,13 @@ public:
         AFortPlayerPawnAthena* Pawn,
         AController* EventInstigator);
 
+    // Adds and configures Fortnite's native replicated map component for a
+    // possessed player pawn. The implementation probes reflected capabilities
+    // so the same call works from the earliest Athena builds through UE5.
+    static bool EnsurePlayerMapIcon(
+        AFortPlayerControllerAthena* Controller,
+        AFortPlayerPawnAthena* Pawn);
+
     DefUHookOg(ServerHandlePickup_);
     DefUHookOg(ServerHandlePickupInfo);
     DefHookOg(bool, FinishedTargetSpline, void*);

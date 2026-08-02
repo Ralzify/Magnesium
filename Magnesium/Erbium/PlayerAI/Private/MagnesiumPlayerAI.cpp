@@ -696,6 +696,9 @@ PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
         {
             PlayerAIApplyDisplayName(nullptr, Entity.NativeController, Entity.PlayerState, Name);
             VersionFeatureAdapter::ApplyRandomSkin(Entity.PlayerState, Entity.GetPawn());
+            AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+                nullptr,
+                Entity.GetPawn());
             PlayerAIApplyFallImmunity(Entity.PlayerState);
 
             auto Registered =
@@ -792,6 +795,7 @@ PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
     }
 
     VersionFeatureAdapter::ApplyRandomSkin(PlayerState, Pawn);
+    AFortPlayerPawnAthena::EnsurePlayerMapIcon(PC, Pawn);
     PlayerAIApplyFallImmunity(PlayerState);
 
     PlayerAIGiveStartingItems(PC);
@@ -850,6 +854,7 @@ AFortPlayerPawnAthena* MagnesiumPlayerAISpawner::SpawnPawnAt(PlayerAIController&
         }
 
         ReplicationBehavior::SetupPawnReplication(Pawn);
+        AFortPlayerPawnAthena::EnsurePlayerMapIcon(PC, Pawn);
         ReplicationBehavior::PushTeleportUpdate(Pawn);
 
         if (bGround)
@@ -899,6 +904,7 @@ AFortPlayerPawnAthena* MagnesiumPlayerAISpawner::SpawnPawnAt(PlayerAIController&
     Pawn->SetShield(0.f);
 
     ReplicationBehavior::SetupPawnReplication(Pawn);
+    AFortPlayerPawnAthena::EnsurePlayerMapIcon(PC, Pawn);
     // The persistent PlayerState already owns the build-randomized cosmetic
     // selection from initial spawn. Re-running discovery/customization for a
     // recovery pawn both changed its skin and multiplied bus-exit workload.

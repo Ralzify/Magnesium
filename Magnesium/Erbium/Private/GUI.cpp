@@ -9597,6 +9597,10 @@ void GUI::Init()
                         "Randomize Arena Points",
                         FConfiguration::RandomizeArenaPoints);
 
+                AtomicCheckbox(
+                    "Player Map Icons",
+                    FConfiguration::bPlayerMapIcons);
+
                 if (FConfiguration::bLateGame)
                     AtomicCheckbox(
                         "Randomize Kills",

@@ -113,6 +113,7 @@ struct FConfiguration
     static inline std::atomic_bool bEnableTrickshotTab{ false };
     static inline std::atomic_bool bUseWinLines{ true };
     static inline std::atomic_bool RandomizeArenaPoints{ false };
+    static inline std::atomic_bool bPlayerMapIcons{ false };
     static inline std::atomic_bool RandomizeKills{ false };
     static inline std::atomic_bool RandomizeLevels{ false };
     static inline std::atomic_bool bEnableDBNO{ true };

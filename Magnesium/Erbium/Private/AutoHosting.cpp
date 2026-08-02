@@ -335,6 +335,7 @@ namespace AutoHosting
                 { "swag_lines", FConfiguration::bUseWinLines.load(std::memory_order_acquire) },
                 { "infinite_render", FConfiguration::bInfiniteRender.load(std::memory_order_acquire) },
                 { "randomize_arena_points", FConfiguration::RandomizeArenaPoints.load(std::memory_order_acquire) },
+                { "player_map_icons", FConfiguration::bPlayerMapIcons.load(std::memory_order_acquire) },
                 { "randomize_kills", FConfiguration::RandomizeKills.load(std::memory_order_acquire) },
                 { "randomize_levels", FConfiguration::RandomizeLevels.load(std::memory_order_acquire) },
                 { "disable_jump_fatigue", FConfiguration::bDisableJumpFatigue.load(std::memory_order_acquire) },
@@ -467,6 +468,9 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Trickshot["randomize_arena_points"] =
                 FConfiguration::RandomizeArenaPoints.load(
+                    std::memory_order_acquire);
+            Trickshot["player_map_icons"] =
+                FConfiguration::bPlayerMapIcons.load(
                     std::memory_order_acquire);
             Trickshot["randomize_kills"] =
                 FConfiguration::RandomizeKills.load(
@@ -929,6 +933,12 @@ namespace AutoHosting
                 ReadBool(
                     Trickshot,
                     "randomize_arena_points",
+                    false),
+                std::memory_order_release);
+            FConfiguration::bPlayerMapIcons.store(
+                ReadBool(
+                    Trickshot,
+                    "player_map_icons",
                     false),
                 std::memory_order_release);
             FConfiguration::RandomizeKills.store(

@@ -3748,6 +3748,9 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	FFortAthenaNativeLTMCompatibility::
 		HandleAshtonPlayerReady(PlayerController);
 	EnsureLandingItemTracking(PlayerController, FortPawn);
+	AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+		PlayerController,
+		FortPawn);
 
 	// Very last thing: if this ack is a "possess" command takeover, put the pawn
 	// on the ground and give it health. Nothing above overrode it because this
@@ -19756,6 +19759,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						((void (*)(AActor*, AFortPlayerPawnAthena*)) ApplyCharacterCustomization)(PlayerState, Pawn);
 
 					SetActorScaleForCommand(Pawn, BotScale);
+					AFortPlayerPawnAthena::EnsurePlayerMapIcon(PC, Pawn);
 
 					PlayerBotID++;
 

@@ -149,6 +149,861 @@ namespace
 			SDK::MemReadable(Object->Class, 0x40);
 	}
 
+	struct FPlayerMapIconLinearColor
+	{
+		float R;
+		float G;
+		float B;
+		float A;
+	};
+
+	constexpr float PlayerMapIconViewableDistance = 500000.f;
+	bool GWarnedMissingPlayerMapIconClass = false;
+	bool GWarnedMissingPlayerMapIconTexture = false;
+	bool GWarnedPlayerMapIconCreation = false;
+	bool GWarnedPlayerMapIconSetup = false;
+	bool GWarnedPlayerMapIconException = false;
+	bool GPlayerMapIconSetupDisabled = false;
+
+	UObject* ResolvePlayerMapIconPreview(
+		const UObject* Definition,
+		const UClass* TextureClass)
+	{
+		if (!IsLiveHealthStateObject(Definition) || !TextureClass)
+			return nullptr;
+
+		constexpr const char* PreviewProperties[] = {
+			"LargePreviewImage",
+			"SmallPreviewImage"
+		};
+
+		for (const char* PropertyName : PreviewProperties)
+		{
+			const uint32 PropertyOffset =
+				Definition->GetOffset(PropertyName);
+			if (PropertyOffset == UINT32_MAX ||
+				PropertyOffset > 0x10000)
+			{
+				continue;
+			}
+
+			auto SoftTexture = reinterpret_cast<FSoftObjectPtr*>(
+				reinterpret_cast<uint8_t*>(
+					const_cast<UObject*>(Definition)) +
+				PropertyOffset);
+			if (!SDK::MemReadable(
+					SoftTexture,
+					FSoftObjectPtr::Size()))
+			{
+				continue;
+			}
+
+			// A cosmetic preview is optional, so only reuse one that is already
+			// resident. InternalGet may synchronously load each bot's soft path
+			// during spawn and can stall the game thread on large bot fills.
+			auto Texture = const_cast<UObject*>(SoftTexture->Get());
+			if (IsLiveHealthStateObject(Texture) &&
+				Texture->IsA(TextureClass))
+			{
+				return Texture;
+			}
+		}
+
+		return nullptr;
+	}
+
+	UObject* ResolvePlayerMapIconTexture(
+		AFortPlayerControllerAthena* Controller,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		static const UClass* TextureClass = FindClass("Texture2D");
+		if (!TextureClass)
+			return nullptr;
+
+		AFortPlayerStateAthena* PlayerState = nullptr;
+		if (Pawn && Pawn->HasPlayerState() && Pawn->PlayerState)
+		{
+			PlayerState =
+				Pawn->PlayerState->Cast<AFortPlayerStateAthena>();
+		}
+		if (!PlayerState && Controller &&
+			Controller->HasPlayerState() && Controller->PlayerState)
+		{
+			PlayerState = Controller->PlayerState;
+		}
+
+		if (IsLiveHealthStateObject(PlayerState) &&
+			PlayerState->HasHeroType())
+		{
+			if (auto Texture = ResolvePlayerMapIconPreview(
+					PlayerState->HeroType,
+					TextureClass))
+			{
+				return Texture;
+			}
+		}
+
+		UAthenaCharacterItemDefinition* Character = nullptr;
+		if (IsLiveHealthStateObject(Controller))
+		{
+			if (Controller->HasCosmeticLoadoutPC())
+				Character = Controller->CosmeticLoadoutPC.Character;
+			if (!Character && Controller->HasCustomizationLoadout())
+				Character = Controller->CustomizationLoadout.Character;
+		}
+
+		if (IsLiveHealthStateObject(Character))
+		{
+			if (Character->HasHeroDefinition())
+			{
+				if (auto Texture = ResolvePlayerMapIconPreview(
+						Character->HeroDefinition,
+						TextureClass))
+				{
+					return Texture;
+				}
+			}
+
+			if (auto Texture = ResolvePlayerMapIconPreview(
+					Character,
+					TextureClass))
+			{
+				return Texture;
+			}
+		}
+
+		static UObject* FallbackTexture = nullptr;
+		static bool bFallbackTextureResolved = false;
+		if (!bFallbackTextureResolved)
+		{
+			bFallbackTextureResolved = true;
+			FallbackTexture = const_cast<UObject*>(SDK::FindObject(
+				L"/Game/UI/Foundation/Textures/Icons/Heroes/Athena/Soldier/"
+				L"T-Soldier-HID-001-Athena-Commando-F-L."
+				L"T-Soldier-HID-001-Athena-Commando-F-L",
+				TextureClass));
+		}
+
+		return IsLiveHealthStateObject(FallbackTexture) &&
+			FallbackTexture->IsA(TextureClass)
+			? FallbackTexture
+			: nullptr;
+	}
+
+	void ApplyPlayerMapIconPawnBrush(
+		AFortPlayerPawnAthena* Pawn,
+		UObject* IconTexture)
+	{
+		if (!Pawn || !IconTexture)
+			return;
+
+		static const UStruct* SlateBrushStruct =
+			SDK::Offsets::StaticFindObject
+				? static_cast<const UStruct*>(
+					SDK::StaticFindObject(
+						L"/Script/SlateCore.SlateBrush",
+						nullptr))
+				: nullptr;
+		if (!SlateBrushStruct)
+			return;
+
+		const uint32 BrushOffset =
+			Pawn->GetOffset("MiniMapIconBrush");
+		const uint32 ResourceOffset =
+			SlateBrushStruct->GetOffset("ResourceObject");
+		if (BrushOffset == UINT32_MAX ||
+			BrushOffset > 0x10000 ||
+			ResourceOffset == UINT32_MAX ||
+			ResourceOffset > 0x400)
+		{
+			return;
+		}
+
+		auto ResourceAddress =
+			reinterpret_cast<uint8_t*>(Pawn) +
+				BrushOffset + ResourceOffset;
+		if (!SDK::MemReadable(
+				ResourceAddress,
+				sizeof(IconTexture)))
+		{
+			return;
+		}
+
+		memcpy(
+			ResourceAddress,
+			&IconTexture,
+			sizeof(IconTexture));
+	}
+
+	constexpr size_t PlayerMapIconParameterBufferSize = 0x1000;
+
+	bool IsPlayerMapIconParameterRangeValid(
+		uint32 Offset,
+		size_t Size)
+	{
+		return Offset != UINT32_MAX &&
+			Offset < PlayerMapIconParameterBufferSize &&
+			Size <= PlayerMapIconParameterBufferSize - Offset;
+	}
+
+	bool WritePlayerMapIconParameter(
+		uint8_t* Parameters,
+		UFunction* Function,
+		const char* Name,
+		const void* Value,
+		size_t Size)
+	{
+		if (!Parameters || !Function || !Name || !Value || !Size)
+			return false;
+
+		const uint32 Offset = Function->GetOffset(Name);
+		if (!IsPlayerMapIconParameterRangeValid(Offset, Size))
+			return false;
+
+		memcpy(Parameters + Offset, Value, Size);
+		return true;
+	}
+
+	UObject* ReadPlayerMapIconObjectReturn(
+		const uint8_t* Parameters,
+		UFunction* Function)
+	{
+		if (!Parameters || !Function)
+			return nullptr;
+
+		const uint32 ReturnOffset =
+			Function->GetOffset("ReturnValue");
+		if (!IsPlayerMapIconParameterRangeValid(
+				ReturnOffset,
+				sizeof(UObject*)))
+		{
+			return nullptr;
+		}
+
+		UObject* Result = nullptr;
+		memcpy(
+			&Result,
+			Parameters + ReturnOffset,
+			sizeof(Result));
+		return Result;
+	}
+
+	bool InvokePlayerMapIconObjectEventGuarded(
+		const UObject* Context,
+		UFunction* Function,
+		void* Parameters,
+		UObject*& Result)
+	{
+		Result = nullptr;
+		bool bSucceeded = false;
+		__try
+		{
+			Context->ProcessEvent(Function, Parameters);
+			Result = ReadPlayerMapIconObjectReturn(
+				reinterpret_cast<const uint8_t*>(Parameters),
+				Function);
+			bSucceeded = true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+		}
+
+		if (!bSucceeded)
+		{
+			GPlayerMapIconSetupDisabled = true;
+			if (!GWarnedPlayerMapIconException)
+			{
+				GWarnedPlayerMapIconException = true;
+				SDK::DbgLog(
+					"[PlayerMapIcons] reflected setup faulted and was "
+					"disabled for object=%p on FN %.2f\n",
+					(void*)Context,
+					VersionInfo.FortniteVersion);
+			}
+		}
+
+		return bSucceeded;
+	}
+
+	UObject* InvokeGetPlayerMapIconComponent(
+		AFortPlayerPawnAthena* Pawn,
+		UFunction* Function,
+		const UClass* ComponentClass)
+	{
+		if (!Pawn || !Function || !ComponentClass)
+			return nullptr;
+
+		alignas(16) uint8 Parameters[
+			PlayerMapIconParameterBufferSize]{};
+		if (!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"ComponentClass",
+				&ComponentClass,
+				sizeof(ComponentClass)))
+		{
+			return nullptr;
+		}
+
+		Pawn->ProcessEvent(Function, Parameters);
+		return ReadPlayerMapIconObjectReturn(
+			Parameters,
+			Function);
+	}
+
+	UObject* FindPlayerMapIconComponent(
+		AFortPlayerPawnAthena* Pawn,
+		const UClass* ComponentClass)
+	{
+		if (!IsLiveHealthStateObject(Pawn) || !ComponentClass)
+			return nullptr;
+
+		static UFunction* GetComponentFunction =
+			Pawn->GetFunction("GetComponentByClass");
+		auto Component = InvokeGetPlayerMapIconComponent(
+			Pawn,
+			GetComponentFunction,
+			ComponentClass);
+		return IsLiveHealthStateObject(Component) &&
+			Component->IsA(ComponentClass)
+			? Component
+			: nullptr;
+	}
+
+	UObject* InvokeAddPlayerMapIconComponent(
+		AFortPlayerPawnAthena* Pawn,
+		UFunction* Function,
+		const UClass* ComponentClass)
+	{
+		if (!Pawn || !Function || !ComponentClass)
+			return nullptr;
+
+		alignas(16) uint8 Parameters[
+			PlayerMapIconParameterBufferSize]{};
+		const char* ClassParameterName =
+			Function->GetProperty("Class")
+				? "Class"
+				: "ComponentClass";
+		bool bManualAttachment = false;
+		bool bDeferredFinish = false;
+		FTransform RelativeTransform{};
+		if (!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				ClassParameterName,
+				&ComponentClass,
+				sizeof(ComponentClass)) ||
+			!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"bManualAttachment",
+				&bManualAttachment,
+				sizeof(bManualAttachment)) ||
+			!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"RelativeTransform",
+				&RelativeTransform,
+				FTransform::Size()) ||
+			!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"bDeferredFinish",
+				&bDeferredFinish,
+				sizeof(bDeferredFinish)))
+		{
+			return nullptr;
+		}
+
+		Pawn->ProcessEvent(Function, Parameters);
+		return ReadPlayerMapIconObjectReturn(
+			Parameters,
+			Function);
+	}
+
+	UObject* InvokeSpawnPlayerMapIconComponent(
+		UObject* GameplayStaticsDefault,
+		UFunction* Function,
+		const UClass* ComponentClass,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		if (!GameplayStaticsDefault || !Function ||
+			!ComponentClass || !Pawn)
+		{
+			return nullptr;
+		}
+
+		alignas(16) uint8 Parameters[
+			PlayerMapIconParameterBufferSize]{};
+		UObject* Outer = Pawn;
+		if (!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"ObjectClass",
+				&ComponentClass,
+				sizeof(ComponentClass)) ||
+			!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"Outer",
+				&Outer,
+				sizeof(Outer)))
+		{
+			return nullptr;
+		}
+
+		GameplayStaticsDefault->ProcessEvent(
+			Function,
+			Parameters);
+		return ReadPlayerMapIconObjectReturn(
+			Parameters,
+			Function);
+	}
+
+	struct FPlayerMapIconFunctions
+	{
+		UFunction* Setup = nullptr;
+		UFunction* SetReplicated = nullptr;
+		UFunction* Activate = nullptr;
+		UFunction* SetViewableDistance = nullptr;
+		UFunction* SetVisible = nullptr;
+		UFunction* SetVisibleOnMap = nullptr;
+		UFunction* SetVisibleOnMiniMap = nullptr;
+		UFunction* RepNotify = nullptr;
+	};
+
+	const FPlayerMapIconFunctions& GetPlayerMapIconFunctions(
+		UObject* Component)
+	{
+		static const FPlayerMapIconFunctions Functions = [Component]
+		{
+			FPlayerMapIconFunctions Result{};
+			if (!Component)
+				return Result;
+
+			Result.Setup = Component->GetFunction("SetupMiniMapComponent");
+			Result.SetReplicated = Component->GetFunction("SetIsReplicated");
+			Result.Activate = Component->GetFunction("Activate");
+			Result.SetViewableDistance =
+				Component->GetFunction("SetMiniMapViewableDistance");
+			if (!Result.SetViewableDistance)
+			{
+				Result.SetViewableDistance =
+					Component->GetFunction("SetMinimapViewableDistance");
+			}
+			Result.SetVisible = Component->GetFunction(
+				"SetMiniMapIndicatorIsVisible");
+			Result.SetVisibleOnMap = Component->GetFunction(
+				"SetMiniMapIndicatorIsVisibleOnMap");
+			Result.SetVisibleOnMiniMap = Component->GetFunction(
+				"SetMiniMapIndicatorIsVisibleOnMiniMap");
+			Result.RepNotify = Component->GetFunction("OnRep_MiniMapData");
+			return Result;
+		}();
+		return Functions;
+	}
+
+	bool IsPlayerMapIconTemplateArrayValid(
+		const TArray<UActorComponent*>* Templates)
+	{
+		if (!Templates ||
+			!SDK::MemReadable(Templates, sizeof(*Templates)))
+		{
+			return false;
+		}
+
+		const int32 Count = Templates->Num();
+		const int32 Capacity = Templates->Max();
+		constexpr int32 MaximumTemplateCount = 65536;
+		if (Count < 0 || Capacity < Count ||
+			Capacity > MaximumTemplateCount)
+		{
+			return false;
+		}
+
+		return Count == 0 ||
+			(Templates->GetData() &&
+				SDK::MemReadable(
+					Templates->GetData(),
+					static_cast<size_t>(Count) *
+						sizeof(UActorComponent*)));
+	}
+
+	bool ResolveLegacyPlayerMapIconTemplate(
+		AFortPlayerPawnAthena* Pawn,
+		const UClass* ComponentClass,
+		FName& TemplateName,
+		TArray<UActorComponent*>*& ModifiedTemplates,
+		int32& AddedTemplateIndex)
+	{
+		ModifiedTemplates = nullptr;
+		AddedTemplateIndex = -1;
+		if (!Pawn || !Pawn->Class || !ComponentClass)
+			return false;
+
+		const uint32 TemplatesOffset =
+			Pawn->Class->GetOffset("ComponentTemplates");
+		if (TemplatesOffset == UINT32_MAX ||
+			TemplatesOffset > 0x10000)
+		{
+			return false;
+		}
+
+		auto Templates = reinterpret_cast<
+			TArray<UActorComponent*>*>(
+				reinterpret_cast<uint8_t*>(Pawn->Class) +
+				TemplatesOffset);
+		if (!IsPlayerMapIconTemplateArrayValid(Templates))
+			return false;
+
+		for (int32 Index = 0; Index < Templates->Num(); ++Index)
+		{
+			auto Candidate = (*Templates)[Index];
+			if (IsLiveHealthStateObject(Candidate) &&
+				Candidate->IsA(ComponentClass))
+			{
+				TemplateName = Candidate->Name;
+				return TemplateName.IsValid();
+			}
+		}
+
+		auto ComponentTemplate = ComponentClass->GetDefaultObj();
+		if (!IsLiveHealthStateObject(ComponentTemplate) ||
+			!ComponentTemplate->IsA(ComponentClass) ||
+			!ComponentTemplate->Name.IsValid())
+		{
+			return false;
+		}
+
+		// Legacy AActor::AddComponent looks up a template by name in this
+		// reflected array. A component CDO is a valid duplication template;
+		// exposing it here lets the engine own, initialize, and register the
+		// new component through its normal version-specific implementation.
+		auto TypedTemplate =
+			static_cast<UActorComponent*>(ComponentTemplate);
+		const int32 PreviousCount = Templates->Num();
+		auto& AddedTemplate = Templates->Add(TypedTemplate);
+		ModifiedTemplates = Templates;
+		AddedTemplateIndex = PreviousCount;
+		TemplateName = ComponentTemplate->Name;
+		return AddedTemplate == TypedTemplate;
+	}
+
+	bool InvokeLegacyAddPlayerMapIconComponent(
+		AFortPlayerPawnAthena* Pawn,
+		UFunction* Function,
+		const FName& TemplateName,
+		UObject*& Component)
+	{
+		Component = nullptr;
+		if (!Pawn || !Function || !TemplateName.IsValid())
+			return false;
+
+		alignas(16) uint8 Parameters[
+			PlayerMapIconParameterBufferSize]{};
+		bool bManualAttachment = false;
+		FTransform RelativeTransform{};
+		const UObject* ComponentTemplateContext = Pawn;
+		if (!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"TemplateName",
+				&TemplateName,
+				sizeof(TemplateName)) ||
+			!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"bManualAttachment",
+				&bManualAttachment,
+				sizeof(bManualAttachment)) ||
+			!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"RelativeTransform",
+				&RelativeTransform,
+				FTransform::Size()) ||
+			!WritePlayerMapIconParameter(
+				Parameters,
+				Function,
+				"ComponentTemplateContext",
+				&ComponentTemplateContext,
+				sizeof(ComponentTemplateContext)))
+		{
+			return false;
+		}
+
+		return InvokePlayerMapIconObjectEventGuarded(
+			Pawn,
+			Function,
+			Parameters,
+			Component);
+	}
+
+	UObject* CreatePlayerMapIconComponent(
+		AFortPlayerPawnAthena* Pawn,
+		const UClass* ComponentClass,
+		bool& bUsedLegacyFallback)
+	{
+		bUsedLegacyFallback = false;
+		if (!Pawn || !ComponentClass)
+			return nullptr;
+
+		static UFunction* AddComponentFunction =
+			Pawn->GetFunction("AddComponentByClass");
+		if (AddComponentFunction)
+		{
+			auto Component = InvokeAddPlayerMapIconComponent(
+				Pawn,
+				AddComponentFunction,
+				ComponentClass);
+			if (!IsLiveHealthStateObject(Component) ||
+				!Component->IsA(ComponentClass))
+			{
+				Component = FindPlayerMapIconComponent(
+					Pawn,
+					ComponentClass);
+			}
+			if (Component)
+				return Component;
+		}
+
+		// Before AddComponentByClass, AddComponent accepted a named blueprint
+		// component template. Expose the component CDO as such a template and let
+		// the legacy engine duplicate and register it normally.
+		static UFunction* LegacyAddComponentFunction =
+			Pawn->GetFunction("AddComponent");
+		FName TemplateName{};
+		TArray<UActorComponent*>* ModifiedTemplates = nullptr;
+		int32 AddedTemplateIndex = -1;
+		if (LegacyAddComponentFunction)
+		{
+			const bool bTemplateResolved =
+				ResolveLegacyPlayerMapIconTemplate(
+				Pawn,
+				ComponentClass,
+				TemplateName,
+				ModifiedTemplates,
+				AddedTemplateIndex);
+			UObject* Component = nullptr;
+			const bool bInvoked = bTemplateResolved &&
+				InvokeLegacyAddPlayerMapIconComponent(
+					Pawn,
+					LegacyAddComponentFunction,
+					TemplateName,
+					Component);
+			if (ModifiedTemplates &&
+				IsPlayerMapIconTemplateArrayValid(
+					ModifiedTemplates) &&
+				ModifiedTemplates->IsValidIndex(
+					AddedTemplateIndex) &&
+				(*ModifiedTemplates)[AddedTemplateIndex] ==
+					static_cast<UActorComponent*>(
+						ComponentClass->GetDefaultObj()))
+			{
+				ModifiedTemplates->Remove(AddedTemplateIndex);
+			}
+			if (!bInvoked && GPlayerMapIconSetupDisabled)
+				return nullptr;
+
+			if (!IsLiveHealthStateObject(Component) ||
+				!Component->IsA(ComponentClass))
+			{
+				Component = FindPlayerMapIconComponent(
+					Pawn,
+					ComponentClass);
+			}
+			if (Component)
+			{
+				bUsedLegacyFallback = true;
+				return Component;
+			}
+		}
+
+		// Native pawn classes have no ComponentTemplates array. SpawnObject still
+		// creates an owned actor component in cooked builds; SetIsReplicated below
+		// puts it in the actor's dynamic subobject list, and the receiving actor
+		// channel registers the client component before applying replicated data.
+		// UE 4.16 explicitly rejects component classes in SpawnObject, so its
+		// registered template path above is mandatory on those earliest builds.
+		if (VersionInfo.EngineVersion <= 4.16)
+			return nullptr;
+
+		auto GameplayStaticsClass = UGameplayStatics::StaticClass();
+		auto GameplayStaticsDefault = GameplayStaticsClass
+			? GameplayStaticsClass->GetDefaultObj()
+			: nullptr;
+		static UFunction* SpawnObjectFunction = GameplayStaticsDefault
+			? GameplayStaticsDefault->GetFunction("SpawnObject")
+			: nullptr;
+		if (!SpawnObjectFunction)
+			return nullptr;
+
+		auto Component = InvokeSpawnPlayerMapIconComponent(
+			GameplayStaticsDefault,
+			SpawnObjectFunction,
+			ComponentClass,
+			Pawn);
+		if (!IsLiveHealthStateObject(Component) ||
+			!Component->IsA(ComponentClass))
+			return nullptr;
+		if (FindPlayerMapIconComponent(
+				Pawn,
+				ComponentClass) != Component)
+		{
+			return nullptr;
+		}
+
+		bUsedLegacyFallback = true;
+		return Component;
+	}
+
+	bool EnsurePlayerMapIconUnsafe(
+		AFortPlayerControllerAthena* Controller,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		if (!IsLiveHealthStateObject(Pawn))
+			return false;
+
+		static const UClass* ComponentClass =
+			FindClass("FortMiniMapComponent");
+		if (!ComponentClass)
+		{
+			if (!GWarnedMissingPlayerMapIconClass)
+			{
+				GWarnedMissingPlayerMapIconClass = true;
+				SDK::DbgLog(
+					"[PlayerMapIcons] FortMiniMapComponent is unavailable "
+					"on FN %.2f\n",
+					VersionInfo.FortniteVersion);
+			}
+			return false;
+		}
+
+		auto IconTexture = ResolvePlayerMapIconTexture(
+			Controller,
+			Pawn);
+		if (!IconTexture)
+		{
+			if (!GWarnedMissingPlayerMapIconTexture)
+			{
+				GWarnedMissingPlayerMapIconTexture = true;
+				SDK::DbgLog(
+					"[PlayerMapIcons] no character or fallback icon texture "
+					"was available on FN %.2f\n",
+					VersionInfo.FortniteVersion);
+			}
+			return false;
+		}
+
+		auto Component = FindPlayerMapIconComponent(
+			Pawn,
+			ComponentClass);
+		bool bUsedLegacyFallback = false;
+		const bool bCreated = Component == nullptr;
+		if (!Component)
+		{
+			Component = CreatePlayerMapIconComponent(
+				Pawn,
+				ComponentClass,
+				bUsedLegacyFallback);
+		}
+		if (!Component)
+		{
+			if (!GWarnedPlayerMapIconCreation)
+			{
+				GWarnedPlayerMapIconCreation = true;
+				SDK::DbgLog(
+					"[PlayerMapIcons] component creation failed on FN %.2f\n",
+					VersionInfo.FortniteVersion);
+			}
+			return false;
+		}
+
+		const auto& Functions = GetPlayerMapIconFunctions(Component);
+		if (!Functions.Setup || !Functions.SetReplicated)
+		{
+			if (!GWarnedPlayerMapIconSetup)
+			{
+				GWarnedPlayerMapIconSetup = true;
+				SDK::DbgLog(
+					"[PlayerMapIcons] required component API is unavailable "
+					"on FN %.2f\n",
+					VersionInfo.FortniteVersion);
+			}
+			return false;
+		}
+
+		bool bReplicated = true;
+		Component->Call<void>(
+			Functions.SetReplicated,
+			bReplicated);
+
+		if (Functions.Activate)
+		{
+			bool bReset = true;
+			Component->Call<void>(Functions.Activate, bReset);
+		}
+
+		const FPlayerMapIconLinearColor White{
+			1.f, 1.f, 1.f, 1.f
+		};
+		float ColorPulsesPerSecond = 0.f;
+		float SizePulsesPerSecond = 0.f;
+		Component->Call<void>(
+			Functions.Setup,
+			IconTexture,
+			White,
+			White,
+			ColorPulsesPerSecond,
+			SizePulsesPerSecond);
+
+		if (Functions.SetViewableDistance)
+		{
+			float Distance = PlayerMapIconViewableDistance;
+			Component->Call<void>(
+				Functions.SetViewableDistance,
+				Distance);
+		}
+
+		bool bVisible = true;
+		UFunction* VisibilityFunctions[] = {
+			Functions.SetVisible,
+			Functions.SetVisibleOnMap,
+			Functions.SetVisibleOnMiniMap
+		};
+		for (auto VisibilityFunction : VisibilityFunctions)
+		{
+			if (VisibilityFunction)
+			{
+				Component->Call<void>(
+					VisibilityFunction,
+					bVisible);
+			}
+		}
+
+		ApplyPlayerMapIconPawnBrush(Pawn, IconTexture);
+
+		if (Functions.RepNotify)
+		{
+			Component->Call<void>(Functions.RepNotify);
+		}
+
+		Pawn->ForceNetUpdate();
+		if (bCreated)
+		{
+			SDK::DbgLog(
+				"[PlayerMapIcons] configured pawn=%p component=%p icon=%p "
+				"legacyFallback=%d FN=%.2f\n",
+				(void*)Pawn,
+				(void*)Component,
+				(void*)IconTexture,
+				bUsedLegacyFallback ? 1 : 0,
+				VersionInfo.FortniteVersion);
+		}
+
+		return true;
+	}
+
 	void ResetMinimumHealthGodStatesForWorld(UWorld* World)
 	{
 		if (GMinimumHealthGodStateWorld.Get() == World)
@@ -2315,6 +3170,41 @@ namespace
 			(int)bSucceeded);
 		return bSucceeded;
 	}
+}
+
+bool AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+	AFortPlayerControllerAthena* Controller,
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!FConfiguration::bPlayerMapIcons.load(
+			std::memory_order_acquire) ||
+		GPlayerMapIconSetupDisabled)
+	{
+		return false;
+	}
+
+	bool bConfigured = false;
+	__try
+	{
+		bConfigured = EnsurePlayerMapIconUnsafe(
+			Controller,
+			Pawn);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		GPlayerMapIconSetupDisabled = true;
+		if (!GWarnedPlayerMapIconException)
+		{
+			GWarnedPlayerMapIconException = true;
+			SDK::DbgLog(
+				"[PlayerMapIcons] reflected setup faulted and was disabled "
+				"for pawn=%p on FN %.2f\n",
+				(void*)Pawn,
+				VersionInfo.FortniteVersion);
+		}
+	}
+
+	return bConfigured;
 }
 
 bool AFortPlayerPawnAthena::SetMinimumHealthGodMode(
