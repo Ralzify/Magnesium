@@ -67,6 +67,32 @@ namespace
 
     FLateSeasonHumanTeamState GLateSeasonHumanTeams;
 
+    bool IsSaneObject(UObject* Object)
+    {
+        if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
+            return false;
+
+        const int32 ObjectIndex = Object->Index;
+        if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
+            return false;
+
+        auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+        const int32 InvalidObjectFlags =
+            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        return Item && Item->GetObject() == Object &&
+            !(Item->GetFlags() & InvalidObjectFlags) &&
+            Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
+    }
+
+    bool IsSanePlaylist(const UFortPlaylistAthena* Playlist)
+    {
+        auto MutablePlaylist =
+            const_cast<UFortPlaylistAthena*>(Playlist);
+        auto PlaylistClass = UFortPlaylistAthena::StaticClass();
+        return IsSaneObject(MutablePlaylist) && PlaylistClass &&
+            MutablePlaylist->IsA(PlaylistClass);
+    }
+
     bool ShouldRepairLateSeasonTeams()
     {
         return VersionInfo.FortniteVersion >= 17.0 && VersionInfo.FortniteVersion < 19.0;
@@ -74,7 +100,7 @@ namespace
 
     uint8 GetPlaylistFirstTeam(const UFortPlaylistAthena* Playlist)
     {
-        if (Playlist)
+        if (IsSanePlaylist(Playlist))
         {
             const int32 Offset = (int32)Playlist->GetOffset("DefaultFirstTeam");
             if (Offset >= 0 && SDK::MemReadable((const uint8*)Playlist + Offset, sizeof(uint8)))
@@ -174,23 +200,6 @@ namespace
         return AssignedTeam;
     }
 
-    bool IsSaneObject(UObject* Object)
-    {
-        if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
-            return false;
-
-        const int32 ObjectIndex = Object->Index;
-        if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
-            return false;
-
-        auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 InvalidObjectFlags =
-            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
-        return Item && Item->GetObject() == Object &&
-            !(Item->GetFlags() & InvalidObjectFlags) &&
-            Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
-    }
-
     UObject* GetLiveObjectByIndex(int32 ObjectIndex)
     {
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
@@ -208,7 +217,7 @@ namespace
         const char* Name,
         int32 Fallback)
     {
-        if (!Object)
+        if (!IsSaneObject(const_cast<UObject*>(Object)))
             return Fallback;
 
         const int32 Offset = (int32)Object->GetOffset(Name);
@@ -1679,7 +1688,7 @@ namespace
     const UFortPlaylistAthena* GetPublishedPlaylist(
         AFortGameStateAthena* GameState)
     {
-        if (!GameState)
+        if (!IsSaneObject(GameState))
             return nullptr;
 
         if (GameState->HasCurrentPlaylistInfo())
@@ -1690,16 +1699,27 @@ namespace
                         GameState->CurrentPlaylistInfo
                             .OverridePlaylist)
                 {
-                    return OverridePlaylist;
+                    if (IsSanePlaylist(OverridePlaylist))
+                        return OverridePlaylist;
                 }
             }
             if (FPlaylistPropertyArray::HasBasePlaylist())
-                return GameState->CurrentPlaylistInfo.BasePlaylist;
+            {
+                const auto BasePlaylist =
+                    GameState->CurrentPlaylistInfo.BasePlaylist;
+                if (IsSanePlaylist(BasePlaylist))
+                    return BasePlaylist;
+            }
         }
 
-        return GameState->HasCurrentPlaylistData()
-            ? GameState->CurrentPlaylistData
-            : nullptr;
+        if (GameState->HasCurrentPlaylistData())
+        {
+            const auto Playlist = GameState->CurrentPlaylistData;
+            if (IsSanePlaylist(Playlist))
+                return Playlist;
+        }
+
+        return nullptr;
     }
 
     bool PublishNative1040Playlist(
@@ -7567,14 +7587,20 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
     uint8& OutTeamIndex)
 {
     OutTeamIndex = 0;
-    if (!IsSaneObject(GameMode) || !IsSaneObject(BotController) ||
-        !BotController->PlayerState)
+    // Playlist-backed team graphs did not exist before FN 3.5. Let the
+    // caller use its established numeric-team compatibility path there.
+    if (VersionInfo.FortniteVersion < 3.5 ||
+        !IsSaneObject(GameMode) || !IsSaneObject(BotController))
     {
         return false;
     }
 
+    auto RawPlayerState = BotController->PlayerState;
+    if (!IsSaneObject(RawPlayerState))
+        return false;
+
     auto PlayerState =
-        BotController->PlayerState->Cast<AFortPlayerStateAthena>();
+        RawPlayerState->Cast<AFortPlayerStateAthena>();
     auto GameState = GameMode->GameState;
     if (!IsSaneObject(PlayerState) || !IsSaneObject(GameState) ||
         !PlayerState->HasTeamIndex())
@@ -7598,9 +7624,11 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
 
             auto Controller =
                 Actor->Cast<AFortPlayerControllerAthena>();
-            auto State = Controller && Controller->PlayerState
-                ? Controller->PlayerState->Cast<
-                    AFortPlayerStateAthena>()
+            auto RawState = IsSaneObject(Controller)
+                ? Controller->PlayerState
+                : nullptr;
+            auto State = IsSaneObject(RawState)
+                ? RawState->Cast<AFortPlayerStateAthena>()
                 : nullptr;
             if (IsSaneObject(State) && State->HasTeamIndex())
                 UsedTeams[State->TeamIndex] = true;
@@ -7627,9 +7655,11 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
         }
     }
 
-    auto Playlist = GameState->HasCurrentPlaylistInfo()
-        ? GameState->CurrentPlaylistInfo.BasePlaylist
-        : GameState->CurrentPlaylistData;
+    // Resolve through the capability-checked shared path. In particular,
+    // never read CurrentPlaylistData merely because CurrentPlaylistInfo is
+    // absent: pre-playlist builds have neither property, and DEFINE_PROP's
+    // missing offset would otherwise manufacture a garbage pointer.
+    auto Playlist = GetPublishedPlaylist(GameState);
     const uint8 FirstTeam = GetPlaylistFirstTeam(Playlist);
     int32 LastTeamExclusive = 250;
     bool bHasActiveTeamBound = false;
@@ -8360,7 +8390,12 @@ uint8_t AFortGameMode::PickTeam(AFortGameMode* GameMode, uint8_t PreferredTeam, 
     if (!GameMode->HasWarmupRequiredPlayerCount())
         return 0;
 
-    auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+    auto Playlist =
+        VersionInfo.FortniteVersion >= 3.5 &&
+            GameMode->HasWarmupRequiredPlayerCount()
+        ? GetPublishedPlaylist(
+            (AFortGameStateAthena*)GameMode->GameState)
+        : nullptr;
 
     // FN17/18's native human join path can bypass this hook. Route any later
     // direct PickTeam call (notably `spawnbot`) through the same idempotent
