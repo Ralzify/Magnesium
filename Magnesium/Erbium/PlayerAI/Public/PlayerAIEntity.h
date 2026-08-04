@@ -22,6 +22,13 @@ struct PlayerAIEntity
     AFortPlayerPawnAthena* NativePawn = nullptr;
 
     AFortPlayerStateAthena* PlayerState = nullptr;
+    // Exact CID selected by ApplyRandomSkin. Some early PlayerState layouts
+    // have no HeroType property and synthetic AI controllers do not own a
+    // cosmetic loadout, so the map-icon path cannot rediscover this choice
+    // after cosmetics have been applied. Keep a serial-aware weak reference
+    // across pawn recovery without retaining a stale raw UObject address.
+    TWeakObjectPtr<UAthenaCharacterItemDefinition>
+        SelectedCharacterDefinition;
     std::string DisplayName;
     bool bNativeBacked = false;
 

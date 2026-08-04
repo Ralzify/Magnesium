@@ -17,6 +17,7 @@
 #include "../../FortniteGame/Public/GameplayTagContainer.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
+#include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
 #include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
 #include "../../Engine/Public/Texture.h"
 #include <sstream>
@@ -954,6 +955,34 @@ std::string GUI::GetPlayerName(
     // The menu renders on a separate thread, so a cache miss must never touch
     // live Unreal objects. PlayerNamesGameTick reads the connection identity
     // and any PlayerState fallback on the game thread.
+    return {};
+}
+
+std::string GUI::GetPlayerNameGameThread(
+    AFortPlayerStateAthena* PlayerState,
+    UNetConnection* Connection)
+{
+    // Prefer the snapshot when one exists so ordinary connected players keep
+    // the exact same URL-name resolution as the menu. Cheat bots do not own a
+    // UNetConnection and therefore can never enter that cache; resolving their
+    // PlayerState here is safe because elimination reports run on the game
+    // thread.
+    std::string Cached = GetPlayerName(PlayerState, Connection);
+    if (!Cached.empty())
+        return Cached;
+
+    std::array<char, 1025> Resolved{};
+    size_t ResolvedLength = 0;
+    if (TryCopyResolvedPlayerNameGuarded(
+            PlayerState,
+            Connection,
+            Resolved.data(),
+            Resolved.size(),
+            &ResolvedLength))
+    {
+        return std::string(Resolved.data(), ResolvedLength);
+    }
+
     return {};
 }
 
@@ -4929,6 +4958,7 @@ void GUI::SafeZoneMapGameTick()
 {
     SafeZoneMap::GameThreadTick();
     PlayerLoadout::GameThreadTick();
+    AFortPlayerPawnAthena::TickPendingPlayerMapIcons();
 }
 
 bool GameTextureBridge::ExtractToRGBA(
@@ -5478,6 +5508,65 @@ static bool IsScoreRoyalePlaylistBuild()
         VersionInfo.FortniteVersion <= 10.00 + Tolerance;
 }
 
+static bool IsSpecialMapSelection(int SelectedPlaylist)
+{
+    switch (static_cast<Playlist>(SelectedPlaylist))
+    {
+    case Playlist::Gav:
+    case Playlist::Retrac1v1:
+    case Playlist::RetracTurtle:
+    case Playlist::RetracWater:
+    case Playlist::TiltedZW:
+    case Playlist::OnlyUp:
+    case Playlist::Twine1v1:
+    case Playlist::Boxfight:
+    case Playlist::Backrooms:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool GUI::UsesDefaultMatchSettings(int SelectedPlaylist)
+{
+    return !IsSpecialMapSelection(SelectedPlaylist) &&
+        SelectedPlaylist != static_cast<int>(Playlist::Creative) &&
+        SelectedPlaylist != static_cast<int>(Playlist::Event);
+}
+
+static bool LocksLateGameForSelection(int SelectedPlaylist)
+{
+    if (IsSpecialMapSelection(SelectedPlaylist))
+        return true;
+
+    switch (static_cast<Playlist>(SelectedPlaylist))
+    {
+    case Playlist::Event:
+    case Playlist::GetawaySolos:
+    case Playlist::GetawayDuos:
+    case Playlist::GetawaySquads:
+    case Playlist::InfinityGauntletSolos:
+    case Playlist::FoodFight:
+    case Playlist::DeepFriedSquads:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool EventUsesSpawnIslandBusControl()
+{
+    const double Version = VersionInfo.FortniteVersion;
+    return Version <= 4.50 ||
+        Version == 6.21 ||
+        Version == 7.20 ||
+        Version == 7.30 ||
+        Version == 8.51 ||
+        Version == 9.40 ||
+        Version == 9.41 ||
+        Version == 10.40;
+}
+
 static bool IsNativeLTMSelection(int SelectedPlaylist)
 {
     if (IsScoreRoyalePlaylistBuild() &&
@@ -5662,6 +5751,12 @@ static void SanitizeNativeLTMSelection(int SelectedPlaylist)
     // Publish the render-thread selection through an atomic handoff before
     // the game thread evaluates early mode ownership or lifecycle policy.
     GUI::PublishSelectedPlaylist(SelectedPlaylist);
+
+    // These modes own their map/objective phase flow. Enforce the lock every
+    // frame so restored preferences and later tab visits cannot re-enable Late
+    // Game after the one-time selection preset has run.
+    if (LocksLateGameForSelection(SelectedPlaylist))
+        FConfiguration::SetLateGameEnabled(false);
 
     // Apply the native-mode defaults only when the selected mode changes.
     // This function is intentionally called from the render loop, so without
@@ -6832,110 +6927,133 @@ void GUI::Init()
 
             EndSectionBody();
 
-            bool bIsOnlyUp = (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp));
+            const bool bIsOnlyUp =
+                SelectedPlaylist ==
+                    static_cast<int>(Playlist::OnlyUp);
+            const bool bIsEventPlaylist =
+                SelectedPlaylist ==
+                    static_cast<int>(Playlist::Event);
+            const bool bShowsOnlyUpPreGameConfig =
+                bIsOnlyUp && gsStatus < Joinable;
+            const bool bShowsDefaultPreGameConfig =
+                UsesDefaultMatchSettings(SelectedPlaylist);
+            const bool bShowsEventBusControl =
+                bIsEventPlaylist &&
+                EventUsesSpawnIslandBusControl() &&
+                gsStatus == Joinable;
+            const bool bShowsDefaultMatchSettings =
+                bShowsDefaultPreGameConfig;
 
             if (gsStatus <= Joinable &&
+                (bShowsOnlyUpPreGameConfig ||
+                 bShowsDefaultPreGameConfig ||
+                 bShowsEventBusControl) &&
                 !(gsStatus == Joinable &&
-                    bStartBusEarlyDismissed))
+                  bStartBusEarlyDismissed))
             {
-                    SectionHeader("Pre-Game Configuration", SectionWidth);
-                    BeginSectionBody();
+                SectionHeader(
+                    "Pre-Game Configuration", SectionWidth);
+                BeginSectionBody();
 
-                    if (gsStatus < Joinable)
+                if (bShowsOnlyUpPreGameConfig)
+                {
+                    AtomicCheckbox(
+                        "Disable Jump Fatigue",
+                        FConfiguration::bDisableJumpFatigue);
+                    AtomicCheckbox(
+                        "Player Has Pickaxe",
+                        FConfiguration::bHasPickaxe);
+                }
+                else if (bShowsDefaultPreGameConfig &&
+                         gsStatus < Joinable)
+                {
+                    if (AtomicCheckbox(
+                            "Auto Bus Start",
+                            FConfiguration::bAutoBusStart))
                     {
-                        if (AtomicCheckbox(
-                                "Auto Bus Start",
-                                FConfiguration::bAutoBusStart))
+                        FConfiguration::bBusSettingsUserOverride.store(
+                            true, std::memory_order_release);
+                    }
+
+                    static bool bInitializedZone = false;
+
+                    if (!bInitializedZone)
+                    {
+                        if (!AutoHosting::
+                                HasRestoredPreferences())
                         {
-                            FConfiguration::bBusSettingsUserOverride.store(
-                                true, std::memory_order_release);
+                            FConfiguration::LateGameZone =
+                                FConfiguration::IsS27()
+                                    ? 1
+                                    : 4;
                         }
+                        bInitializedZone = true;
+                    }
 
-                        static bool bInitializedZone = false;
-
-                        if (!bInitializedZone)
+                    static bool bAutoDumpDefaultInitialized =
+                        false;
+                    if (!bAutoDumpDefaultInitialized)
+                    {
+                        if (!AutoHosting::
+                                HasRestoredPreferences() &&
+                            VersionInfo.FortniteVersion == 19.20)
                         {
-                            if (!AutoHosting::
-                                    HasRestoredPreferences())
-                            {
-                                FConfiguration::LateGameZone =
-                                    FConfiguration::IsS27()
-                                        ? 1
-                                        : 4;
-                            }
-                            bInitializedZone = true;
+                            FConfiguration::bAutoDump = false;
                         }
+                        bAutoDumpDefaultInitialized = true;
+                    }
 
-                        static bool bAutoDumpDefaultInitialized =
-                            false;
-                        if (!bAutoDumpDefaultInitialized)
-                        {
-                            if (!AutoHosting::
-                                    HasRestoredPreferences() &&
-                                VersionInfo.FortniteVersion == 19.20)
-                            {
-                                FConfiguration::bAutoDump = false;
-                            }
-                            bAutoDumpDefaultInitialized = true;
-                        }
+                    AtomicCheckbox(
+                        "Auto Dump Text",
+                        FConfiguration::bAutoDump);
+                    AtomicCheckbox(
+                        "Use Custom Map",
+                        FConfiguration::bIsCustomMap);
 
-                        AtomicCheckbox(
-                            "Auto Dump Text",
-                            FConfiguration::bAutoDump);
-                        AtomicCheckbox(
-                            "Use Custom Map",
-                            FConfiguration::bIsCustomMap);
+                    if (!FConfiguration::bReadyToStart)
+                    {
+                        TrickshotTabCheckbox(
+                            "Enable Trickshot Tab");
+                    }
 
-                        if (!FConfiguration::bReadyToStart)
-                        {
-                            TrickshotTabCheckbox(
-                                "Enable Trickshot Tab");
-                        }
-
-                        if (FConfiguration::bAutoBusStart &&
-                            AtomicLabeledSliderFloat(
-                                "Bus Start Delay",
-                                "##bus-start-delay",
-                                FConfiguration::BusStartDelay,
-                                0.0f, 300.0f,
-                                "%.0f sec", Width))
-                        {
-                            FConfiguration::bBusSettingsUserOverride.store(
-                                true, std::memory_order_release);
-                        }
-
+                    if (FConfiguration::bAutoBusStart &&
                         AtomicLabeledSliderFloat(
-                            "Max Tick Rate",
-                            "##max-tick-rate",
-                            FConfiguration::MaxTickRate,
-                            5.0f, 180.0f,
-                            "%.0f sec", Width);
-
-                        if (bIsOnlyUp)
-                        {
-                            AtomicCheckbox(
-                                "Disable Jump Fatigue",
-                                FConfiguration::bDisableJumpFatigue);
-                            AtomicCheckbox(
-                                "Player Has Pickaxe",
-                                FConfiguration::bHasPickaxe);
-                        }
-                    }
-
-                    if (gsStatus == Joinable &&
-                        !bStartBusEarlyDismissed)
+                            "Bus Start Delay",
+                            "##bus-start-delay",
+                            FConfiguration::BusStartDelay,
+                            0.0f, 300.0f,
+                            "%.0f sec", Width))
                     {
-                        ImGui::Spacing();
-
-                        if (ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
-                        {
-                            bStartBusEarlyDismissed = true;
-                            FConfiguration::bStartBusRequested.store(
-                                true, std::memory_order_release);
-                        }
+                        FConfiguration::bBusSettingsUserOverride.store(
+                            true, std::memory_order_release);
                     }
 
-                    EndSectionBody();
+                    AtomicLabeledSliderFloat(
+                        "Max Tick Rate",
+                        "##max-tick-rate",
+                        FConfiguration::MaxTickRate,
+                        5.0f, 180.0f,
+                        "%.0f sec", Width);
+                }
+
+                if (gsStatus == Joinable &&
+                    (bShowsDefaultPreGameConfig ||
+                     bShowsEventBusControl) &&
+                    !bStartBusEarlyDismissed)
+                {
+                    ImGui::Spacing();
+
+                    if (ImGui::Button(
+                            "Start Bus Early",
+                            ImVec2(Width, Height)))
+                    {
+                        bStartBusEarlyDismissed = true;
+                        FConfiguration::bStartBusRequested.store(
+                            true, std::memory_order_release);
+                    }
+                }
+
+                EndSectionBody();
             }
 
             if (gsStatus == StartedMatch)
@@ -7070,11 +7188,13 @@ void GUI::Init()
             }
 
             const bool bCanShowGliderRedeploy =
+                bShowsDefaultMatchSettings &&
                 gsStatus >= Joinable &&
                 gsStatus < Ended &&
-                VersionInfo.FortniteVersion > 5.41 &&
-                VersionInfo.FortniteVersion <= 16.00;
+                FConfiguration::
+                    IsGliderRedeploySupportedBuild();
             const bool bPlaylistHidesRespawnSection =
+                !bShowsDefaultMatchSettings ||
                 SelectedPlaylist ==
                     static_cast<int>(Playlist::FoodFight) ||
                 SelectedPlaylist ==
@@ -7083,9 +7203,8 @@ void GUI::Init()
                     static_cast<int>(Playlist::ArsenalSolos);
             const bool bCanShowRespawns =
                 !bPlaylistHidesRespawnSection &&
-                ((VersionInfo.FortniteVersion >= 8.00 ||
-                    gsStatus < Joinable) &&
-                    VersionInfo.FortniteVersion > 2.50);
+                (VersionInfo.FortniteVersion >= 8.00 ||
+                    gsStatus < Joinable);
 
             if (bCanShowRespawns)
             {
@@ -7142,6 +7261,53 @@ void GUI::Init()
 
                     ImGui::Unindent(12.f);
                 }
+
+                EndSectionBody();
+            }
+
+            const bool bFoodFightConfiguration =
+                SelectedPlaylist ==
+                    static_cast<int>(Playlist::FoodFight) ||
+                SelectedPlaylist ==
+                    static_cast<int>(Playlist::DeepFriedSquads);
+            if (bFoodFightConfiguration && gsStatus < Ended)
+            {
+                SectionHeader("LTM Configuration", SectionWidth);
+                BeginSectionBody();
+
+                const int MaximumObjectiveHealth =
+                    FConfiguration::
+                        GetFoodFightObjectiveHealthMaximum();
+                const int StoredObjectiveHealth =
+                    FConfiguration::FoodFightObjectiveHealth.load(
+                        std::memory_order_acquire);
+                int DisplayObjectiveHealth =
+                    StoredObjectiveHealth ==
+                            FConfiguration::
+                                FoodFightObjectiveHealthAuthored
+                        ? MaximumObjectiveHealth
+                        : std::clamp(
+                              StoredObjectiveHealth,
+                              FConfiguration::
+                                  FoodFightObjectiveHealthMinimum,
+                              MaximumObjectiveHealth);
+
+                ImGui::BeginDisabled(gsStatus >= StartedMatch);
+                if (LabeledSliderInt(
+                        "Objective Health",
+                        "##food-fight-objective-health",
+                        &DisplayObjectiveHealth,
+                        FConfiguration::
+                            FoodFightObjectiveHealthMinimum,
+                        MaximumObjectiveHealth,
+                        Width,
+                        "%d HP"))
+                {
+                    FConfiguration::FoodFightObjectiveHealth.store(
+                        DisplayObjectiveHealth,
+                        std::memory_order_release);
+                }
+                ImGui::EndDisabled();
 
                 EndSectionBody();
             }
@@ -8832,9 +8998,11 @@ void GUI::Init()
 
             if (gsStatus < StartedMatch)
             {
-                // PlayerAI owns the match phase while enabled. Playlists no
-                // longer hide or lock this user-facing control.
+                // Special maps and native objective modes require their normal
+                // phase flow. PlayerAI also owns match setup while enabled.
                 const bool bLockLateGame =
+                    LocksLateGameForSelection(
+                        SelectedPlaylist) ||
                     MagnesiumPlayerAISettings::bEnableAIs;
                 if (bLockLateGame)
                     FConfiguration::SetLateGameEnabled(false);

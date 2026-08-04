@@ -1507,6 +1507,9 @@ namespace
         int32 LastObservedLoadedAmmo = 0;
         double RechargeIntervalSeconds = 0.0;
         double NextRefillTime = 0.0;
+        int32 EquipSnapshotLoadedAmmo = 0;
+        double EquipSnapshotNextRefillTime = 0.0;
+        bool bEquipInProgress = false;
     };
 
     std::vector<FRegeneratingInventoryItem> RegeneratingInventoryItems;
@@ -1520,7 +1523,9 @@ namespace
         FGuid>
         PendingCarmineFocus;
 
-    constexpr size_t MaxTrackedRechargingWeapons = 128;
+    // Five rechargeable quickbar entries for every player in a full BR lobby
+    // still fit without silently dropping the last players' items.
+    constexpr size_t MaxTrackedRechargingWeapons = 512;
     constexpr double NativeRechargeGraceSeconds = 0.10;
 
     bool IsExact1040CarmineGadget(
@@ -1899,7 +1904,7 @@ namespace
             "WID_Moonflax_NitroGauntlet", 0) == 0;
     }
 
-    bool NotifyNitroFistsRechargeStarted(
+    bool NotifyWeaponRechargeStarted(
         AFortPlayerControllerAthena* Owner,
         const FGuid& ItemGuid,
         double ServerStartTime)
@@ -1914,22 +1919,84 @@ namespace
                 ? Owner->GetComponentByClass(
                     RechargeComponentClass)
                 : nullptr;
+        UObject* NotificationTarget = RechargeComponent;
         auto ClientStartedFunction =
-            RechargeComponent
-                ? RechargeComponent->GetFunction(
+            NotificationTarget
+                ? NotificationTarget->GetFunction(
                     "ClientItemStartedRecharging")
                 : nullptr;
         if (!ClientStartedFunction)
+        {
+            // Some transition builds already instantiate the component while
+            // retaining this RPC on the controller. Probe the reflected owner
+            // as a second capability, not merely when the component is absent.
+            NotificationTarget = static_cast<UObject*>(Owner);
+            ClientStartedFunction = Owner->GetFunction(
+                "ClientItemStartedRecharging");
+        }
+        if (!ClientStartedFunction)
             return false;
 
-        // This native client RPC seeds the same server-time countdown used
-        // by WBP_NitroGautletReticle's GetRemainingCooldownTimer path. The
-        // client component also keeps a pending-GUID map, so this remains
-        // valid while the equipped weapon is being constructed.
-        RechargeComponent->Call<void>(
-            ClientStartedFunction,
-            ItemGuid,
-            static_cast<float>(ServerStartTime));
+        const auto Params = ClientStartedFunction->GetParamsNamed();
+        const size_t AllocationSize =
+            VersionInfo.FortniteVersion >= 32.00
+                ? 0x1000
+                : static_cast<size_t>(Params.Size);
+        if (AllocationSize < sizeof(FGuid) + sizeof(float) ||
+            AllocationSize > 0x4000)
+        {
+            return false;
+        }
+
+        uint32 GuidOffset = uint32(-1);
+        uint32 StartTimeOffset = uint32(-1);
+        for (const auto& Param : Params.NameOffsetMap)
+        {
+            if (Param.Name == "ItemGuid")
+            {
+                if (GuidOffset != uint32(-1))
+                    return false;
+                GuidOffset = Param.Offset;
+            }
+            else if (Param.Name == "InServerStartTime" ||
+                Param.Name == "ServerStartTime")
+            {
+                if (StartTimeOffset != uint32(-1))
+                    return false;
+                StartTimeOffset = Param.Offset;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        if (GuidOffset == uint32(-1) ||
+            StartTimeOffset == uint32(-1) ||
+            GuidOffset + sizeof(ItemGuid) > AllocationSize ||
+            StartTimeOffset + sizeof(float) > AllocationSize)
+        {
+            return false;
+        }
+
+		// The RPC lived on the player controller before the dedicated recharge
+		// component was introduced (for example, the Shockwave Hammer build).
+		// Dispatch on whichever reflected owner exposes it so every generation
+		// receives the authored client cooldown/countdown presentation.
+        auto Memory = FMemory::Malloc(AllocationSize);
+        if (!Memory)
+            return false;
+        memset(Memory, 0, AllocationSize);
+        const float StartTime = static_cast<float>(ServerStartTime);
+        memcpy(
+            static_cast<uint8*>(Memory) + GuidOffset,
+            &ItemGuid,
+            sizeof(ItemGuid));
+        memcpy(
+            static_cast<uint8*>(Memory) + StartTimeOffset,
+            &StartTime,
+            sizeof(StartTime));
+		NotificationTarget->ProcessEvent(ClientStartedFunction, Memory);
+        FMemory::Free(Memory);
         return true;
     }
 
@@ -1966,6 +2033,31 @@ namespace
         return Weapon;
     }
 
+    bool IsLiveRechargeObject(const UObject* Object)
+    {
+        if (!Object ||
+            !SDK::MemReadable(Object, sizeof(UObject)))
+        {
+            return false;
+        }
+
+        const int32 ObjectIndex = Object->Index;
+        if (ObjectIndex < 0 ||
+            ObjectIndex >= TUObjectArray::Num())
+        {
+            return false;
+        }
+
+        auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+        const int32 InvalidObjectFlags =
+            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        return Item &&
+            Item->GetObject() == Object &&
+            !(Item->GetFlags() & InvalidObjectFlags) &&
+            Object->Class &&
+            SDK::MemReadable(Object->Class, sizeof(UClass));
+    }
+
     bool SyncWeaponAmmo(
         AFortWeapon* Weapon,
         int32 NewLoadedAmmo)
@@ -2000,75 +2092,264 @@ namespace
         return true;
     }
 
-    bool SyncEquippedWeaponAmmo(
+    int32 SyncKnownWeaponAmmo(
         AFortPlayerControllerAthena* Owner,
         UFortWeaponItemDefinition* WeaponDefinition,
         const FGuid& ItemGuid,
         int32 NewLoadedAmmo)
     {
-        return SyncWeaponAmmo(
-            ResolveEquippedWeaponForItem(
-                Owner, WeaponDefinition, ItemGuid),
-            NewLoadedAmmo);
+        if (!Owner || !WeaponDefinition ||
+            !Owner->HasMyFortPawn() ||
+            !IsLiveRechargeObject(Owner->MyFortPawn))
+        {
+            return 0;
+        }
+
+        auto Pawn = Owner->MyFortPawn;
+        std::unordered_set<AFortWeapon*> Seen;
+        int32 SyncedCount = 0;
+        auto SyncCandidate = [&](AActor* Candidate)
+        {
+            if (!IsLiveRechargeObject(Candidate))
+                return;
+
+            auto Weapon = Candidate->Cast<AFortWeapon>();
+            if (!Weapon || !Seen.insert(Weapon).second ||
+                !Weapon->HasItemEntryGuid() ||
+                !AreGuidsEqual(Weapon->ItemEntryGuid, ItemGuid) ||
+                (Weapon->HasWeaponData() &&
+                    Weapon->WeaponData != WeaponDefinition) ||
+                !Weapon->HasAmmoCount())
+            {
+                return;
+            }
+
+            if (SyncWeaponAmmo(Weapon, NewLoadedAmmo))
+                ++SyncedCount;
+        };
+
+        if (Pawn->HasCurrentWeapon())
+            SyncCandidate(Pawn->CurrentWeapon);
+        if (Pawn->HasPreviousWeapon())
+            SyncCandidate(Pawn->PreviousWeapon);
+
+        if (Pawn->HasCurrentWeaponList())
+        {
+            const auto& Weapons = Pawn->CurrentWeaponList;
+            const int32 WeaponCount = Weapons.Num();
+            if (WeaponCount >= 0 && WeaponCount <= 64 &&
+                Weapons.Max() >= WeaponCount &&
+                Weapons.Max() <= 128 &&
+                (WeaponCount == 0 ||
+                    (Weapons.Data &&
+                        SDK::MemReadable(
+                            Weapons.Data,
+                            static_cast<size_t>(WeaponCount) *
+                                sizeof(AActor*)))))
+            {
+                for (int32 Index = 0;
+                    Index < WeaponCount;
+                    ++Index)
+                {
+                    SyncCandidate(Weapons.Get(Index));
+                }
+            }
+        }
+
+        return SyncedCount;
     }
 
-    bool ResolveNitroFistsRechargeSettings(
+    bool TryEvaluateWeaponRechargeGetter(
+        UFortWeaponItemDefinition* WeaponDefinition,
+        const char* FunctionName,
+        int32 ItemLevel,
+        float& OutValue)
+    {
+        OutValue = 0.0f;
+        if (!WeaponDefinition || !FunctionName)
+            return false;
+
+        auto Function = WeaponDefinition->GetFunction(FunctionName);
+        if (!Function)
+            return false;
+
+        const auto Params = Function->GetParamsNamed();
+        const size_t AllocationSize =
+            VersionInfo.FortniteVersion >= 32.00
+                ? 0x1000
+                : static_cast<size_t>(Params.Size);
+        if (AllocationSize < sizeof(float) ||
+            AllocationSize > 0x4000)
+        {
+            return false;
+        }
+
+        uint32 LevelOffset = uint32(-1);
+        uint32 ReturnOffset = uint32(-1);
+        for (const auto& Param : Params.NameOffsetMap)
+        {
+            if (Param.Name == "InLevel" || Param.Name == "Level")
+            {
+                if (LevelOffset != uint32(-1))
+                    return false;
+                LevelOffset = Param.Offset;
+            }
+            else if (Param.Name == "ReturnValue")
+            {
+                if (ReturnOffset != uint32(-1))
+                    return false;
+                ReturnOffset = Param.Offset;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        if (LevelOffset == uint32(-1) ||
+            ReturnOffset == uint32(-1) ||
+            LevelOffset + sizeof(ItemLevel) > AllocationSize ||
+            ReturnOffset + sizeof(OutValue) > AllocationSize)
+        {
+            return false;
+        }
+
+        auto Memory = FMemory::Malloc(AllocationSize);
+        if (!Memory)
+            return false;
+        memset(Memory, 0, AllocationSize);
+        memcpy(
+            static_cast<uint8*>(Memory) + LevelOffset,
+            &ItemLevel,
+            sizeof(ItemLevel));
+        WeaponDefinition->ProcessEvent(Function, Memory);
+        memcpy(
+            &OutValue,
+            static_cast<uint8*>(Memory) + ReturnOffset,
+            sizeof(OutValue));
+        FMemory::Free(Memory);
+        return std::isfinite(OutValue);
+    }
+
+    bool ResolveWeaponRechargeSettings(
         UFortWeaponItemDefinition* WeaponDefinition,
         int32 ItemLevel,
         int32& MaxLoadedAmmo,
         int32& RechargeAmount,
         double& RechargeIntervalSeconds)
     {
-        if (!IsNitroFistsDefinition(WeaponDefinition))
+        if (!WeaponDefinition)
             return false;
 
-        const auto DefinitionName =
-            WeaponDefinition->Name.ToString();
-        // Do not reinterpret a gauntlet stat row as ranged-weapon stats.
-        // FN30 defines four charges on the regular fists and five on the
-        // mythic variant.
-        MaxLoadedAmmo =
-            DefinitionName.find("_Mythic") !=
-                std::string::npos
-            ? 5
-            : 4;
+        const bool bNitroFists =
+            IsNitroFistsDefinition(WeaponDefinition);
+        const auto DefinitionName = WeaponDefinition->Name.ToString();
+
+        // Modern weapon definitions distinguish clip-charge recharge (Hammer,
+        // Blade and Nitro Fists) from reserve-ammo recharge.  This watchdog
+        // owns ReplicatedEntry.LoadedAmmo, so never register a definition
+        // which explicitly says its authored recharge belongs to the reserve
+        // stack.  The latter continues through Fortnite's native component.
+        // Legacy builds do not expose this flag and retain the data-driven
+        // loaded-ammo behavior used by their recharge fields.
+        if (!bNitroFists &&
+            WeaponDefinition->HasbRechargeAmmoToClip() &&
+            !WeaponDefinition->bRechargeAmmoToClip)
+        {
+            return false;
+        }
+
+        auto Stats = AFortInventory::GetStats(WeaponDefinition);
+        MaxLoadedAmmo = Stats ? Stats->ClipSize : 0;
 
         float RechargeQuantityValue = 0.0f;
-        if (WeaponDefinition->HasWeaponRechargeAmmoQuantity())
+        const bool bHasRechargeQuantityProperty =
+            WeaponDefinition->HasWeaponRechargeAmmoQuantity();
+        if (bHasRechargeQuantityProperty)
         {
-            RechargeQuantityValue =
-                WeaponDefinition->WeaponRechargeAmmoQuantity.Evaluate(
+            auto Quantity =
+                WeaponDefinition->WeaponRechargeAmmoQuantity;
+            // A zero scalable-float multiplier can never opt a weapon into
+            // recharge, even when it carries an inherited/default curve row.
+            // Avoid a curve-table call for every ordinary firearm grant.
+            if (std::isfinite(Quantity.Value) && Quantity.Value > 0.0f)
+            {
+                RechargeQuantityValue = Quantity.Evaluate(
                     static_cast<float>(max(ItemLevel, 1)));
+            }
         }
+        else
+        {
+            TryEvaluateWeaponRechargeGetter(
+                WeaponDefinition,
+                "GetWeaponRechargeAmmoQuantity",
+                max(ItemLevel, 1),
+                RechargeQuantityValue);
+        }
+        // Curve tables are cooked data, but validate their result before the
+        // float-to-int conversion.  NaN or an out-of-range value would make
+        // that conversion undefined and must not opt an item into tracking.
         RechargeAmount =
-            static_cast<int32>(std::round(RechargeQuantityValue));
+            std::isfinite(RechargeQuantityValue) &&
+                RechargeQuantityValue > 0.0f &&
+                RechargeQuantityValue <= 10000.0f
+            ? static_cast<int32>(
+                  std::round(RechargeQuantityValue))
+            : 0;
 
         float RechargeRateValue = 0.0f;
-        if (WeaponDefinition->HasWeaponRechargeAmmoRate())
+        const bool bHasRechargeRateProperty =
+            WeaponDefinition->HasWeaponRechargeAmmoRate();
+        if (bHasRechargeRateProperty)
         {
-            RechargeRateValue =
-                WeaponDefinition->WeaponRechargeAmmoRate.Evaluate(
+            auto Rate =
+                WeaponDefinition->WeaponRechargeAmmoRate;
+            if (std::isfinite(Rate.Value) && Rate.Value > 0.0f)
+            {
+                RechargeRateValue = Rate.Evaluate(
                     static_cast<float>(max(ItemLevel, 1)));
+            }
+        }
+        else
+        {
+            TryEvaluateWeaponRechargeGetter(
+                WeaponDefinition,
+                "GetWeaponRechargeAmmoRate",
+                max(ItemLevel, 1),
+                RechargeRateValue);
         }
         RechargeIntervalSeconds =
             static_cast<double>(RechargeRateValue);
 
-        // These are the authoritative FN30 curve-table defaults:
-        // Moonflax.NitroGauntlets.RechargeQuantity = 1 and both
-        // RechargeRate rows = 8. The fallback is limited to the exact
-        // Nitro Fists definitions in case a server-only asset load cannot
-        // evaluate the scalable-float curve.
-        if (RechargeAmount <= 0 || RechargeAmount > MaxLoadedAmmo)
-            RechargeAmount = 1;
-        if (!std::isfinite(RechargeIntervalSeconds) ||
-            RechargeIntervalSeconds <= 0.0 ||
-            RechargeIntervalSeconds > 300.0)
+        // Nitro Fists use a gauntlet stat row on FN30, so ClipSize is not
+        // reliable there. Keep the known authored fallback narrowly scoped
+        // to those definitions; every other weapon must opt in through its
+        // reflected recharge data and weapon stats.
+        if (bNitroFists)
         {
-            RechargeIntervalSeconds = 8.0;
+            MaxLoadedAmmo =
+                DefinitionName.find("_Mythic") != std::string::npos
+                    ? 5
+                    : 4;
+            if (RechargeAmount <= 0 ||
+                RechargeAmount > MaxLoadedAmmo)
+            {
+                RechargeAmount = 1;
+            }
+            if (!std::isfinite(RechargeIntervalSeconds) ||
+                RechargeIntervalSeconds <= 0.0 ||
+                RechargeIntervalSeconds > 300.0)
+            {
+                RechargeIntervalSeconds = 8.0;
+            }
         }
 
-        return MaxLoadedAmmo > 0 &&
-            RechargeAmount > 0;
+        return MaxLoadedAmmo > 0 && MaxLoadedAmmo <= 10000 &&
+            RechargeAmount > 0 &&
+            RechargeAmount <= MaxLoadedAmmo &&
+            std::isfinite(RechargeIntervalSeconds) &&
+            RechargeIntervalSeconds > 0.0 &&
+            RechargeIntervalSeconds <= 3600.0;
     }
 
     void ObserveRechargingWeaponAmmo(
@@ -2081,19 +2362,6 @@ namespace
     {
         if (!Owner || !Owner->WorldInventory ||
             !WeaponDefinition)
-        {
-            return;
-        }
-
-        int32 MaxLoadedAmmo = 0;
-        int32 RechargeAmount = 0;
-        double RechargeIntervalSeconds = 0.0;
-        if (!ResolveNitroFistsRechargeSettings(
-                WeaponDefinition,
-                ItemLevel,
-                MaxLoadedAmmo,
-                RechargeAmount,
-                RechargeIntervalSeconds))
         {
             return;
         }
@@ -2118,20 +2386,24 @@ namespace
             State.WeaponDefinition =
                 TWeakObjectPtr<UFortWeaponItemDefinition>(
                     WeaponDefinition);
-            State.MaxLoadedAmmo = MaxLoadedAmmo;
-            State.RechargeAmount = RechargeAmount;
-            State.RechargeIntervalSeconds =
-                RechargeIntervalSeconds;
+            // EquipWeaponDefinition can transiently publish the cached
+            // actor's old magazine through the loaded-ammo setter. The
+            // pre/post equip transaction restores the durable value, so do
+            // not reinterpret that temporary write as charge consumption or
+            // restart the authored deadline.
+            if (State.bEquipInProgress)
+                return;
+
             State.LastObservedLoadedAmmo =
                 std::clamp(
-                    NewLoadedAmmo, 0, MaxLoadedAmmo);
+                    NewLoadedAmmo, 0, State.MaxLoadedAmmo);
             bool bStartedRechargeCycle = false;
 
             // A native recharge is an increase. Give its controller
             // component a complete interval before the watchdog can add
             // another charge. Further consumption does not reset an
             // already-running interval.
-            if (NewLoadedAmmo >= MaxLoadedAmmo)
+            if (NewLoadedAmmo >= State.MaxLoadedAmmo)
             {
                 State.NextRefillTime = 0.0;
             }
@@ -2139,7 +2411,7 @@ namespace
             {
                 State.NextRefillTime =
                     NowSeconds +
-                    RechargeIntervalSeconds +
+                    State.RechargeIntervalSeconds +
                     NativeRechargeGraceSeconds;
                 bStartedRechargeCycle = true;
             }
@@ -2148,16 +2420,49 @@ namespace
             {
                 State.NextRefillTime =
                     NowSeconds +
-                    RechargeIntervalSeconds +
+                    State.RechargeIntervalSeconds +
                     NativeRechargeGraceSeconds;
                 bStartedRechargeCycle = true;
             }
             if (bStartedRechargeCycle)
             {
-                NotifyNitroFistsRechargeStarted(
+                NotifyWeaponRechargeStarted(
                     Owner, ItemGuid, NowSeconds);
             }
             return;
+        }
+
+        // Only grant-time registration reaches reflected getters and scalable
+        // floats. Loaded-ammo updates reuse the validated settings cached in
+        // the existing state above, keeping charge use out of that hot path.
+        int32 MaxLoadedAmmo = 0;
+        int32 RechargeAmount = 0;
+        double RechargeIntervalSeconds = 0.0;
+        if (!ResolveWeaponRechargeSettings(
+                WeaponDefinition,
+                ItemLevel,
+                MaxLoadedAmmo,
+                RechargeAmount,
+                RechargeIntervalSeconds))
+        {
+            return;
+        }
+
+        if (RechargingWeaponAmmo.size() >=
+                MaxTrackedRechargingWeapons)
+        {
+            // Registration happens off the tick hot path, so reclaim expired
+            // weak entries here before enforcing the defensive global cap.
+            RechargingWeaponAmmo.erase(
+                std::remove_if(
+                    RechargingWeaponAmmo.begin(),
+                    RechargingWeaponAmmo.end(),
+                    [](const FRechargingWeaponAmmo& State)
+                    {
+                        return !State.Owner.Get() ||
+                            !State.WeaponDefinition.Get();
+                    }),
+                RechargingWeaponAmmo.end());
         }
 
         if (RechargingWeaponAmmo.size() >=
@@ -2191,7 +2496,7 @@ namespace
 
         const bool bClientTimerStarted =
             NewLoadedAmmo < MaxLoadedAmmo &&
-            NotifyNitroFistsRechargeStarted(
+            NotifyWeaponRechargeStarted(
                 Owner, ItemGuid, NowSeconds);
 
         auto RechargeComponentClass =
@@ -2219,6 +2524,20 @@ namespace
                 bClientTimerStarted ? 1 : 0,
                 NowSeconds);
         }
+    }
+
+    bool IsTrackedRechargingWeaponAmmo(
+        const AFortPlayerControllerAthena* Owner,
+        const FGuid& ItemGuid)
+    {
+        return std::any_of(
+            RechargingWeaponAmmo.begin(),
+            RechargingWeaponAmmo.end(),
+            [&](const FRechargingWeaponAmmo& State)
+            {
+                return State.Owner.Get() == Owner &&
+                    AreGuidsEqual(State.ItemGuid, ItemGuid);
+            });
     }
 
     void BroadcastWorldItemAmmoChanged(UFortWorldItem* Item)
@@ -2950,12 +3269,11 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
             ? Item->ItemEntry.ItemDefinition->Cast<
                 UFortWeaponItemDefinition>()
             : nullptr;
-    if (PlayerController &&
-        IsNitroFistsDefinition(RechargingWeaponDefinition))
+    if (PlayerController && RechargingWeaponDefinition)
     {
-        // Register at grant time as well as at the loaded-ammo setter.
-        // This keeps the repair event-bound and still detects FN30 paths
-        // that mutate the replicated entry without calling that setter.
+        // Resolve the weapon's authored recharge capability once at grant
+        // time. Ordinary firearms never enter the tracked list, keeping the
+        // loaded-ammo hot path free of curve evaluation and asset lookups.
         ObserveRechargingWeaponAmmo(
             PlayerController,
             RechargingWeaponDefinition,
@@ -4269,12 +4587,38 @@ void AFortInventory::TickRegeneratingItems()
                 ReplicatedEntry->LoadedAmmo,
                 0,
                 State.MaxLoadedAmmo);
+
+        // A rechargeable weapon cannot legitimately spend a charge while a
+        // different item is equipped. Some native equip/unequip paths write
+        // a cached holstered actor's old AmmoCount back into the item row.
+        // Preserve the last server-observed charge in that case instead of
+        // making the player wait through the same interval twice.
+        if (CurrentLoadedAmmo < State.LastObservedLoadedAmmo &&
+            !ResolveEquippedWeaponForItem(
+                Owner,
+                WeaponDefinition,
+                State.ItemGuid))
+        {
+            CurrentLoadedAmmo = State.LastObservedLoadedAmmo;
+            ReplicatedEntry->LoadedAmmo = CurrentLoadedAmmo;
+            (*ItemInstance)->ItemEntry.LoadedAmmo =
+                CurrentLoadedAmmo;
+            (*ItemInstance)->ItemEntry.bIsDirty = true;
+            Inventory->UpdateEntry(*ReplicatedEntry);
+            BroadcastWorldItemAmmoChanged(*ItemInstance);
+            SyncKnownWeaponAmmo(
+                Owner,
+                WeaponDefinition,
+                State.ItemGuid,
+                CurrentLoadedAmmo);
+        }
+
         if (CurrentLoadedAmmo >= State.MaxLoadedAmmo)
         {
             if (State.LastObservedLoadedAmmo !=
                 State.MaxLoadedAmmo)
             {
-                SyncEquippedWeaponAmmo(
+                SyncKnownWeaponAmmo(
                     Owner,
                     WeaponDefinition,
                     State.ItemGuid,
@@ -4293,7 +4637,7 @@ void AFortInventory::TickRegeneratingItems()
         if (CurrentLoadedAmmo >
             State.LastObservedLoadedAmmo)
         {
-            SyncEquippedWeaponAmmo(
+            SyncKnownWeaponAmmo(
                 Owner,
                 WeaponDefinition,
                 State.ItemGuid,
@@ -4304,7 +4648,7 @@ void AFortInventory::TickRegeneratingItems()
                 NowSeconds +
                 State.RechargeIntervalSeconds +
                 NativeRechargeGraceSeconds;
-            NotifyNitroFistsRechargeStarted(
+            NotifyWeaponRechargeStarted(
                 Owner, State.ItemGuid, NowSeconds);
             ++Index;
             continue;
@@ -4334,7 +4678,7 @@ void AFortInventory::TickRegeneratingItems()
         }
         if (bStartedRechargeCycle)
         {
-            NotifyNitroFistsRechargeStarted(
+            NotifyWeaponRechargeStarted(
                 Owner, State.ItemGuid, NowSeconds);
         }
 
@@ -4372,26 +4716,242 @@ void AFortInventory::TickRegeneratingItems()
                 NowSeconds +
                 State.RechargeIntervalSeconds +
                 NativeRechargeGraceSeconds;
-            NotifyNitroFistsRechargeStarted(
+            NotifyWeaponRechargeStarted(
                 Owner, State.ItemGuid, NowSeconds);
             ++Index;
         }
 
         Inventory->UpdateEntry(*ReplicatedEntry);
         BroadcastWorldItemAmmoChanged(WorldItem);
-        const bool bEquippedWeaponSynced =
-            SyncEquippedWeaponAmmo(
+        const int32 SyncedWeaponActors =
+            SyncKnownWeaponAmmo(
                 Owner,
                 WeaponDefinition,
                 State.ItemGuid,
                 NewLoadedAmmo);
         SDK::DbgLog(
             "[WeaponRecharge] fallback-refilled "
-            "definition=%s ammo=%d/%d equipped-sync=%d\n",
+            "definition=%s ammo=%d/%d actor-sync-count=%d\n",
             DefinitionName.c_str(),
             NewLoadedAmmo,
             MaximumLoadedAmmo,
-            bEquippedWeaponSynced ? 1 : 0);
+            SyncedWeaponActors);
+    }
+}
+
+bool AFortInventory::BeginTrackedRechargeEquip(
+    AFortPlayerControllerAthena* PlayerController,
+    const FGuid& ItemGuid)
+{
+    if (!PlayerController || !PlayerController->WorldInventory ||
+        !FFortItemEntry::HasLoadedAmmo() ||
+        !FFortItemEntry::HasItemGuid() ||
+        !FFortItemEntry::HasItemDefinition())
+    {
+        return false;
+    }
+
+    for (auto& State : RechargingWeaponAmmo)
+    {
+        if (State.Owner.Get() != PlayerController ||
+            !AreGuidsEqual(State.ItemGuid, ItemGuid))
+        {
+            continue;
+        }
+
+        auto WeaponDefinition = State.WeaponDefinition.Get();
+        if (!WeaponDefinition)
+            return false;
+
+        auto Inventory = PlayerController->WorldInventory;
+        auto ReplicatedEntry =
+            Inventory->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(
+                            Candidate.ItemGuid,
+                            ItemGuid) &&
+                        Candidate.ItemDefinition ==
+                            WeaponDefinition;
+                },
+                FFortItemEntry::Size());
+        if (!ReplicatedEntry)
+            return false;
+
+        int32 SnapshotLoadedAmmo = std::clamp(
+            ReplicatedEntry->LoadedAmmo,
+            0,
+            State.MaxLoadedAmmo);
+        if (!ResolveEquippedWeaponForItem(
+                PlayerController,
+                WeaponDefinition,
+                ItemGuid))
+        {
+            // While offhand, only a native recharge can legitimately raise
+            // the value. A lower value is a stale cached-actor write.
+            SnapshotLoadedAmmo = max(
+                SnapshotLoadedAmmo,
+                State.LastObservedLoadedAmmo);
+        }
+
+        State.EquipSnapshotLoadedAmmo =
+            std::clamp(
+                SnapshotLoadedAmmo,
+                0,
+                State.MaxLoadedAmmo);
+        State.EquipSnapshotNextRefillTime =
+            State.NextRefillTime;
+        State.bEquipInProgress = true;
+        return true;
+    }
+
+    return false;
+}
+
+void AFortInventory::FinishTrackedRechargeEquip(
+    AFortPlayerControllerAthena* PlayerController,
+    const FGuid& ItemGuid,
+    AFortWeapon* EquippedWeapon)
+{
+    if (!PlayerController)
+        return;
+
+    for (auto& State : RechargingWeaponAmmo)
+    {
+        if (State.Owner.Get() != PlayerController ||
+            !AreGuidsEqual(State.ItemGuid, ItemGuid) ||
+            !State.bEquipInProgress)
+        {
+            continue;
+        }
+
+        const int32 SnapshotLoadedAmmo = std::clamp(
+            State.EquipSnapshotLoadedAmmo,
+            0,
+            State.MaxLoadedAmmo);
+        const double SnapshotNextRefillTime =
+            State.EquipSnapshotNextRefillTime;
+        State.bEquipInProgress = false;
+        State.LastObservedLoadedAmmo = SnapshotLoadedAmmo;
+        State.NextRefillTime =
+            SnapshotLoadedAmmo >= State.MaxLoadedAmmo
+                ? 0.0
+                : SnapshotNextRefillTime;
+
+        auto WeaponDefinition = State.WeaponDefinition.Get();
+        auto Inventory = PlayerController->WorldInventory;
+        if (!WeaponDefinition || !Inventory)
+            return;
+
+        auto ReplicatedEntry =
+            Inventory->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(
+                            Candidate.ItemGuid,
+                            ItemGuid) &&
+                        Candidate.ItemDefinition ==
+                            WeaponDefinition;
+                },
+                FFortItemEntry::Size());
+        auto ItemInstance =
+            Inventory->Inventory.ItemInstances.Search(
+                [&](UFortWorldItem* Candidate)
+                {
+                    return Candidate &&
+                        AreGuidsEqual(
+                            Candidate->ItemEntry.ItemGuid,
+                            ItemGuid) &&
+                        Candidate->ItemEntry.ItemDefinition ==
+                            WeaponDefinition;
+                });
+
+        bool bInventoryChanged = false;
+        if (ReplicatedEntry &&
+            ReplicatedEntry->LoadedAmmo != SnapshotLoadedAmmo)
+        {
+            ReplicatedEntry->GetLoadedAmmo() =
+                SnapshotLoadedAmmo;
+            bInventoryChanged = true;
+        }
+        if (ItemInstance && *ItemInstance &&
+            (*ItemInstance)->ItemEntry.LoadedAmmo !=
+                SnapshotLoadedAmmo)
+        {
+            (*ItemInstance)->ItemEntry.GetLoadedAmmo() =
+                SnapshotLoadedAmmo;
+            (*ItemInstance)->ItemEntry.bIsDirty = true;
+            bInventoryChanged = true;
+        }
+        if (bInventoryChanged && ReplicatedEntry)
+            Inventory->UpdateEntry(*ReplicatedEntry);
+        if (bInventoryChanged && ItemInstance && *ItemInstance)
+            BroadcastWorldItemAmmoChanged(*ItemInstance);
+
+        bool bReturnedWeaponSynced = false;
+        if (EquippedWeapon &&
+            IsLiveRechargeObject(EquippedWeapon) &&
+            EquippedWeapon->HasItemEntryGuid() &&
+            AreGuidsEqual(
+                EquippedWeapon->ItemEntryGuid,
+                ItemGuid) &&
+            (!EquippedWeapon->HasWeaponData() ||
+                EquippedWeapon->WeaponData ==
+                    WeaponDefinition))
+        {
+            bReturnedWeaponSynced = SyncWeaponAmmo(
+                EquippedWeapon,
+                SnapshotLoadedAmmo);
+        }
+
+        const int32 SyncedKnownActors =
+            bReturnedWeaponSynced
+                ? 1
+                : SyncKnownWeaponAmmo(
+                    PlayerController,
+                    WeaponDefinition,
+                    ItemGuid,
+                    SnapshotLoadedAmmo);
+
+        if (SnapshotLoadedAmmo < State.MaxLoadedAmmo)
+        {
+            auto World = UWorld::GetWorld();
+            const double NowSeconds = World
+                ? UGameplayStatics::GetTimeSeconds(World)
+                : 0.0;
+            if (State.NextRefillTime <= 0.0 && World)
+            {
+                State.NextRefillTime =
+                    NowSeconds +
+                    State.RechargeIntervalSeconds +
+                    NativeRechargeGraceSeconds;
+            }
+
+            if (State.NextRefillTime > 0.0)
+            {
+                const double OriginalStartTime = max(
+                    0.0,
+                    State.NextRefillTime -
+                        State.RechargeIntervalSeconds -
+                        NativeRechargeGraceSeconds);
+                NotifyWeaponRechargeStarted(
+                    PlayerController,
+                    ItemGuid,
+                    OriginalStartTime);
+            }
+        }
+
+        SDK::DbgLog(
+            "[WeaponRecharge] equip-reconciled "
+            "definition=%s ammo=%d/%d inventory-restored=%d "
+            "returned-sync=%d actor-sync-count=%d\n",
+            WeaponDefinition->Name.ToString().c_str(),
+            SnapshotLoadedAmmo,
+            State.MaxLoadedAmmo,
+            bInventoryChanged ? 1 : 0,
+            bReturnedWeaponSynced ? 1 : 0,
+            SyncedKnownActors);
+        return;
     }
 }
 
@@ -4979,10 +5539,13 @@ void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
     PlayerController->WorldInventory->UpdateEntry(*repEnt);
     BroadcastWorldItemAmmoChanged(Item);
 
-    if (IsNitroFistsDefinition(WeaponDefinition))
+    if (WeaponDefinition &&
+        IsTrackedRechargingWeaponAmmo(
+            PlayerController,
+            Item->ItemEntry.ItemGuid))
     {
-        // The common item-change broadcast above preserves the signal used
-        // by FN30's FortControllerComponent_RechargeWeapons.
+        // The grant-time capability check keeps this per-shot path limited
+        // to weapons that actually advertise rechargeable loaded ammo.
         ObserveRechargingWeaponAmmo(
             PlayerController,
             WeaponDefinition,

@@ -13,11 +13,13 @@
 #include "../../Public/Configuration.h"
 #include "../../Public/Finders.h"
 #include "../../Public/GUI.h"
+#include "../../Public/PlayerLoadout.h"
 #include "../../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../../FortniteGame/Public/FortKismetLibrary.h"
 #include "../../../FortniteGame/Public/FortPlayerControllerAthena.h"
 #include "../../../FortniteGame/Public/FortWeapon.h"
 #include <cstdarg>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <string>
@@ -363,22 +365,33 @@ float VersionFeatureAdapter::GetTimeSeconds()
 }
 
 static float PlayerAILastServerTickTime = -1.f;
+static ULONGLONG PlayerAILastBudgetWallTickMs = 0;
 static constexpr int PlayerAIGroundTraceBudgetPerTick = 4;
 static int PlayerAIGroundTraceBudgetRemaining =
     PlayerAIGroundTraceBudgetPerTick;
 static bool PlayerAIPhaseScanBudgetAvailable = true;
+static bool PlayerAIVisualProofBudgetAvailable = true;
 
 void VersionFeatureAdapter::BeginServerTick(float TimeSeconds)
 {
     // TickFlush can reach the integration through more than one version
-    // hook. Do not reopen the budget while world time is unchanged.
-    if (TimeSeconds == PlayerAILastServerTickTime)
+    // hook. Do not reopen a frozen/loading-time budget merely because two
+    // callbacks straddle a millisecond boundary. Eight milliseconds is a
+    // conservative fallback frame quantum when gameplay time is not moving;
+    // cosmetic work may run slightly slower on an unusually fast server, but
+    // it can never burst hundreds of native rebuilds during an FN30 hitch.
+    const ULONGLONG WallTickMs = GetTickCount64();
+    if (TimeSeconds == PlayerAILastServerTickTime &&
+        PlayerAILastBudgetWallTickMs &&
+        WallTickMs - PlayerAILastBudgetWallTickMs < 8ULL)
         return;
 
     PlayerAILastServerTickTime = TimeSeconds;
+    PlayerAILastBudgetWallTickMs = WallTickMs;
     PlayerAIGroundTraceBudgetRemaining =
         PlayerAIGroundTraceBudgetPerTick;
     PlayerAIPhaseScanBudgetAvailable = true;
+    PlayerAIVisualProofBudgetAvailable = true;
 }
 
 static bool PlayerAIIsLiveSupportObject(const UObject* Object)
@@ -398,6 +411,169 @@ static bool PlayerAIIsLiveSupportObject(const UObject* Object)
     return Item && Item->GetObject() == Object &&
         !(Item->GetFlags() & InvalidObjectFlags) &&
         Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
+}
+
+static bool PlayerAISetReflectedReadyBool(
+    UObject* Object,
+    const char* PropertyName,
+    bool Value)
+{
+    if (!PlayerAIIsLiveSupportObject(Object) ||
+        !PropertyName ||
+        Offsets::ElementSize < sizeof(int32))
+    {
+        return false;
+    }
+
+    auto Property = Object->GetProperty(
+        PropertyName, 0x20000);
+    if (!Property)
+        return false;
+
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(
+            Property, RequiredMetadataBytes) ||
+        Offsets::FieldMask == 0 ||
+        !SDK::MemReadable(
+            Property,
+            static_cast<size_t>(Offsets::FieldMask) +
+                sizeof(uint8)))
+    {
+        return false;
+    }
+
+    const int32 PropertyOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            Property, Offsets::Offset_Internal)));
+    const uint32 ElementSize = GetFromOffset<uint32>(
+        Property, Offsets::ElementSize);
+    const int32 ArrayDimension = GetFromOffset<int32>(
+        Property,
+        Offsets::ElementSize - sizeof(int32));
+    const int32 OwnerSize = Object->Class->GetPropertiesSize();
+    const uint8 FieldMask = Property->GetFieldMask();
+
+    if (PropertyOffset < 0 || ElementSize != sizeof(uint8) ||
+        ArrayDimension != 1 || !FieldMask ||
+        OwnerSize <= PropertyOffset)
+    {
+        return false;
+    }
+
+    auto Address = reinterpret_cast<uint8*>(Object) +
+        PropertyOffset;
+    if (!SDK::MemReadable(Address, sizeof(uint8)))
+        return false;
+
+    Value ? *Address |= FieldMask : *Address &= ~FieldMask;
+    return true;
+}
+
+static bool PlayerAITryReadReflectedBool(
+    UObject* Object,
+    const char* PropertyName,
+    bool& OutValue)
+{
+    OutValue = false;
+    if (!PlayerAIIsLiveSupportObject(Object) ||
+        !PropertyName ||
+        Offsets::ElementSize < sizeof(int32))
+    {
+        return false;
+    }
+
+    auto Property = Object->GetProperty(
+        PropertyName, 0x20000);
+    if (!Property)
+        return false;
+
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(Property, RequiredMetadataBytes) ||
+        Offsets::FieldMask == 0 ||
+        !SDK::MemReadable(
+            Property,
+            static_cast<size_t>(Offsets::FieldMask) +
+                sizeof(uint8)))
+    {
+        return false;
+    }
+
+    const int32 PropertyOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            Property, Offsets::Offset_Internal)));
+    const uint32 ElementSize = GetFromOffset<uint32>(
+        Property, Offsets::ElementSize);
+    const int32 ArrayDimension = GetFromOffset<int32>(
+        Property,
+        Offsets::ElementSize - sizeof(int32));
+    const int32 OwnerSize = Object->Class->GetPropertiesSize();
+    const uint8 FieldMask = Property->GetFieldMask();
+    if (PropertyOffset < 0 || ElementSize != sizeof(uint8) ||
+        ArrayDimension != 1 || !FieldMask ||
+        OwnerSize <= PropertyOffset)
+    {
+        return false;
+    }
+
+    auto Address = reinterpret_cast<const uint8*>(Object) +
+        PropertyOffset;
+    if (!SDK::MemReadable(Address, sizeof(uint8)))
+        return false;
+
+    OutValue = (*Address & FieldMask) != 0;
+    return true;
+}
+
+void VersionFeatureAdapter::MarkSyntheticParticipantReady(
+    AFortPlayerControllerAthena* PC,
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (!PC)
+        return;
+
+    PlayerAISetReflectedReadyBool(
+        PC, "bHasClientFinishedLoading", true);
+    PlayerAISetReflectedReadyBool(
+        PC, "bHasServerFinishedLoading", true);
+    PlayerAISetReflectedReadyBool(
+        PC, "bHasFinishedLoading", true);
+    PlayerAISetReflectedReadyBool(
+        PC, "bReadyToStartMatch", true);
+    PlayerAISetReflectedReadyBool(
+        PC, "bAssignedStartSpawn", true);
+
+    if (Pawn)
+    {
+        PlayerAISetReflectedReadyBool(
+            PC, "bHasInitiallySpawned", true);
+        PlayerAISetReflectedReadyBool(
+            PC, "bClientPawnIsLoaded", true);
+    }
+
+    PlayerAISetReflectedReadyBool(
+        PC, "bMarkedAlive", true);
+
+    if (PlayerState)
+    {
+        PlayerAISetReflectedReadyBool(
+            PlayerState, "bIsSpectator", false);
+        PlayerAISetReflectedReadyBool(
+            PlayerState, "bHasFinishedLoading", true);
+        PlayerAISetReflectedReadyBool(
+            PlayerState, "bHasStartedPlaying", true);
+        MarkReplicatedPropertyDirty(
+            PlayerState, L"bHasStartedPlaying");
+        PlayerState->ForceNetUpdate();
+    }
+
+    PC->ForceNetUpdate();
 }
 
 static bool PlayerAIIsLiveSupportActor(const AActor* Actor)
@@ -421,6 +597,8 @@ static FPlayerAIClassLookupCache PlayerAIControllerClassCache;
 static FPlayerAIClassLookupCache PlayerAIMovementComponentClassCache;
 static FPlayerAIClassLookupCache PlayerAISafeZoneIndicatorClassCache;
 static FPlayerAIClassLookupCache PlayerAINetPushModelHelpersClassCache;
+static FPlayerAIClassLookupCache PlayerAISkeletalMeshClassCache;
+static const UStruct* PlayerAIFortAthenaLoadoutStructCache = nullptr;
 
 static const UClass* PlayerAIResolveCachedClass(
     FPlayerAIClassLookupCache& Cache, const char* ClassName)
@@ -624,6 +802,7 @@ PlayerAIResolvePhaseLogic()
 
 static UObject* PlayerAIPushModelHelpers = nullptr;
 static UFunction* PlayerAIMarkPropertyDirtyFunction = nullptr;
+static int32 PlayerAIMarkPropertyDirtyFunctionIndex = -1;
 static ULONGLONG PlayerAINextPushModelHelpersResolveTime = 0;
 static bool PlayerAIPlayersLeftDirtyPending = false;
 
@@ -633,6 +812,9 @@ static bool PlayerAIValidateMarkPropertyDirty(UFunction* Function)
         return false;
 
     auto Params = Function->GetParamsNamed();
+
+    if (Params.NameOffsetMap.size() != 2)
+        return false;
 
     if (VersionInfo.FortniteVersion < 32.0 &&
         Params.Size != 0x10)
@@ -673,11 +855,14 @@ bool VersionFeatureAdapter::MarkReplicatedPropertyDirty(
     }
 
     if (!PlayerAIIsLiveSupportObject(PlayerAIPushModelHelpers) ||
-        !PlayerAIValidateMarkPropertyDirty(
-            PlayerAIMarkPropertyDirtyFunction))
+        !PlayerAIIsLiveSupportObject(
+            PlayerAIMarkPropertyDirtyFunction) ||
+        PlayerAIMarkPropertyDirtyFunction->Index !=
+            PlayerAIMarkPropertyDirtyFunctionIndex)
     {
         PlayerAIPushModelHelpers = nullptr;
         PlayerAIMarkPropertyDirtyFunction = nullptr;
+        PlayerAIMarkPropertyDirtyFunctionIndex = -1;
 
         const ULONGLONG Now = GetTickCount64();
 
@@ -717,9 +902,12 @@ bool VersionFeatureAdapter::MarkReplicatedPropertyDirty(
         {
             PlayerAIPushModelHelpers = nullptr;
             PlayerAIMarkPropertyDirtyFunction = nullptr;
+            PlayerAIMarkPropertyDirtyFunctionIndex = -1;
             return false;
         }
 
+        PlayerAIMarkPropertyDirtyFunctionIndex =
+            PlayerAIMarkPropertyDirtyFunction->Index;
         PlayerAINextPushModelHelpersResolveTime = 0;
     }
 
@@ -728,17 +916,27 @@ bool VersionFeatureAdapter::MarkReplicatedPropertyDirty(
 
     __try
     {
+        alignas(16) uint8 Params[0x20]{};
+        UObject* MutableObject = (UObject*)Object;
         FName ReplicatedPropertyName(PropertyName);
-        PlayerAIPushModelHelpers->Call<void>(
+        memcpy(Params, &MutableObject,
+            sizeof(MutableObject));
+        memcpy(
+            Params + 0x8,
+            &ReplicatedPropertyName,
+            VersionInfo.FortniteVersion >= 20.0
+                ? sizeof(int32)
+                : sizeof(FName));
+        PlayerAIPushModelHelpers->ProcessEvent(
             PlayerAIMarkPropertyDirtyFunction,
-            (UObject*)Object,
-            ReplicatedPropertyName);
+            Params);
         bSucceeded = true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         PlayerAIPushModelHelpers = nullptr;
         PlayerAIMarkPropertyDirtyFunction = nullptr;
+        PlayerAIMarkPropertyDirtyFunctionIndex = -1;
         PlayerAINextPushModelHelpersResolveTime =
             GetTickCount64() + 2000ULL;
     }
@@ -2761,12 +2959,209 @@ bool VersionFeatureAdapter::KillPawn(AFortPlayerPawnAthena* Pawn, AFortPlayerCon
 
 // ---- Cosmetics ----------------------------------------------------------------------------
 
+// Chapter 1 replicated six cosmetic slots. Modern builds extend the same
+// layout with Gameplay and ExtraPart, so keep the resolved composition at the
+// largest known width and clamp each reflected destination to its own array
+// dimension when reading or writing it.
+static constexpr int32 PlayerAILegacyCharacterPartSlotCount = 6;
+static constexpr int32 PlayerAICharacterPartSlotCount = 8;
+
 static int SkinCacheAttempts = 0;
 static std::vector<UAthenaCharacterItemDefinition*> CachedSkins;
+static std::unordered_set<UAthenaCharacterItemDefinition*>
+    CachedSkinObjects;
+static std::unordered_map<
+    std::string, UAthenaCharacterItemDefinition*>
+    CachedSkinsByLowerName;
+struct FPlayerAIResolvedSkinParts
+{
+    int32 CharacterObjectIndex = -1;
+    // Null optional slots are meaningful only after every authored source
+    // reference has been visited. A head/body-only resident scan must never
+    // become the permanent fast path for this CID.
+    bool bAllAuthoredPartsResolved = false;
+    const UObject* Parts[PlayerAICharacterPartSlotCount]{};
+    int32 PartObjectIndices[PlayerAICharacterPartSlotCount]
+    {
+        -1, -1, -1, -1, -1, -1, -1, -1,
+    };
+};
+static std::unordered_map<
+    UAthenaCharacterItemDefinition*,
+    FPlayerAIResolvedSkinParts>
+    CachedResolvedSkinParts;
+static std::vector<UAthenaCharacterItemDefinition*>
+    CachedResolvedSkinPool;
+struct FPlayerAISkinCatalogEntry
+{
+    uint8 RawPrimaryAssetId[0x10]{};
+    int32 PrimaryAssetIdSize = 0;
+    std::string Name;
+};
+static std::vector<FPlayerAISkinCatalogEntry> CachedSkinCatalog;
+static std::unordered_map<std::string, size_t>
+    CachedSkinCatalogByLowerName;
+enum class EPlayerAIPendingRandomSkinPhase : uint8
+{
+    ResolveCharacter,
+    BaseParts,
+    Specializations,
+    SpecializationParts,
+    Ready,
+};
+struct FPlayerAIPendingRandomSkin
+{
+    TWeakObjectPtr<UWorld> World;
+    TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+    TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
+    TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+    AFortPlayerPawnAthena* PawnIdentity = nullptr;
+    FPlayerAISkinCatalogEntry CatalogEntry;
+    TWeakObjectPtr<UObject> Character;
+    TWeakObjectPtr<UObject> Specialization;
+    TWeakObjectPtr<UObject>
+        ResolvedParts[PlayerAICharacterPartSlotCount];
+    ULONGLONG QueuedAt = 0;
+    ULONGLONG WorkStartedAt = 0;
+    ULONGLONG CandidateStartedAt = 0;
+    ULONGLONG RetryAt = 0;
+    int CandidateAttempts = 0;
+    int BasePartCursor = 0;
+    int SpecializationCursor = 0;
+    int SpecializationPartCursor = 0;
+    int PartReferencesVisited = 0;
+    size_t ResidentSelectionStart = 0;
+    size_t ResidentSelectionCursor = 0;
+    bool bHasBaseParts = false;
+    uint8 ResolvedPartMask = 0;
+    bool bHasHead = false;
+    bool bHasBody = false;
+    bool bUseResidentFallback = false;
+    bool bResidentSelectionInitialized = false;
+    EPlayerAIPendingRandomSkinPhase Phase =
+        EPlayerAIPendingRandomSkinPhase::ResolveCharacter;
+};
+static std::vector<FPlayerAIPendingRandomSkin>
+    PendingRandomBotSkins;
+struct FPlayerAIPendingRequestedSkinCommit
+{
+    TWeakObjectPtr<UWorld> World;
+    TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+    TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
+    TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+    AFortPlayerPawnAthena* PawnIdentity = nullptr;
+    TWeakObjectPtr<UObject> Character;
+    ULONGLONG QueuedAt = 0;
+    ULONGLONG WorkStartedAt = 0;
+    ULONGLONG RetryAt = 0;
+    bool bUseDefault = false;
+};
+static std::vector<FPlayerAIPendingRequestedSkinCommit>
+    PendingRequestedBotSkinCommits;
+static std::unordered_map<AFortPlayerPawnAthena*, size_t>
+    PendingBotSkinCommitPawnCounts;
+static std::unordered_set<AFortPlayerPawnAthena*>
+    PendingBotSkinActivePawns;
+static uint64 PlayerAIBotSkinProgressGeneration = 1;
+static void PlayerAINoteBotSkinProgress()
+{
+    PlayerAIBotSkinProgressGeneration++;
+    if (!PlayerAIBotSkinProgressGeneration)
+        PlayerAIBotSkinProgressGeneration = 1;
+}
+struct FPlayerAIBotSkinSettle
+{
+    TWeakObjectPtr<UWorld> World;
+    TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+    ULONGLONG Until = 0;
+};
+static std::unordered_map<
+    AFortPlayerPawnAthena*, FPlayerAIBotSkinSettle>
+    PendingBotSkinSettles;
+static void PlayerAICancelPendingCheatBotVisualCommit(
+    AFortPlayerPawnAthena* Pawn);
+static void PlayerAITrackPendingSkinCommit(
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (Pawn)
+    {
+        // A new exact transaction supersedes any rollback quiet period left
+        // by an older request for this same live pawn.
+        PendingBotSkinSettles.erase(Pawn);
+        PendingBotSkinCommitPawnCounts[Pawn]++;
+    }
+}
+
+static void PlayerAIMarkPendingSkinCommitActive(
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (Pawn && PendingBotSkinActivePawns.insert(Pawn).second)
+        PlayerAINoteBotSkinProgress();
+}
+
+static void PlayerAIReleasePendingSkinCommit(
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (!Pawn)
+        return;
+
+    auto Existing = PendingBotSkinCommitPawnCounts.find(Pawn);
+    if (Existing == PendingBotSkinCommitPawnCounts.end())
+        return;
+    if (Existing->second > 1)
+        Existing->second--;
+    else
+    {
+        PendingBotSkinCommitPawnCounts.erase(Existing);
+        PendingBotSkinActivePawns.erase(Pawn);
+        PlayerAICancelPendingCheatBotVisualCommit(Pawn);
+    }
+    PlayerAINoteBotSkinProgress();
+}
+
+static size_t RandomSkinCatalogShuffleStart = 0;
+static size_t RandomSkinCatalogShuffleCursor = 0;
+static size_t RandomSkinCatalogShuffleSize = 0;
+static std::string LastQueuedRandomSkinName;
+static size_t PendingRandomBotSkinCursor = 0;
+static constexpr size_t PlayerAIMaxPendingRandomBotSkins = 256;
+static constexpr int PlayerAIRandomSkinRecordsPerTick = 2;
+static constexpr int PlayerAIRandomSkinSoftResolvesPerRecordTick = 1;
+// Keep malformed or unusually broad specialization graphs from occupying a
+// bot's cosmetic record for the entire match. Normal outfits use only a
+// handful of authored parts; 256 still leaves generous cross-version room.
+static constexpr int PlayerAIRandomSkinMaxPartReferences = 256;
+static constexpr int PlayerAIRandomSkinCandidatesPerBot = 8;
+// PlayerLoadout's validated latent request owns a 12-second timeout. Keep the
+// candidate alive beyond that window so a queued/active load is never thrown
+// away while it still occupies one of the two global loader slots.
+static constexpr ULONGLONG PlayerAIRandomSkinCandidateLifetimeMs = 15000ULL;
+// Start this clock only after the catalog is decoded. Slow FN30 startup frames
+// must not consume a bot's entire opportunity before selection begins.
+static constexpr ULONGLONG PlayerAIRandomSkinLifetimeMs = 30000ULL;
+static constexpr ULONGLONG PlayerAIRandomSkinCatalogWaitMs = 5000ULL;
+static uint8* PendingSkinCatalogData = nullptr;
+static int32 PendingSkinCatalogCount = 0;
+static int32 PendingSkinCatalogIdSize = 0;
+static int32 PendingSkinCatalogNameSize = 0;
+static int32 PendingSkinCatalogCursor = 0;
+static std::vector<FPlayerAISkinCatalogEntry>
+    PendingSkinCatalogEntries;
+static std::unordered_set<std::string>
+    PendingSkinCatalogSeenNames;
+static std::unordered_map<std::string, size_t>
+    PendingSkinCatalogByLowerName;
 static bool bCosmeticPathLoadDisabled = false;
+static bool bCosmeticPackageLoadDisabled = false;
 static bool bSoftCosmeticResolveDisabled = false;
+static bool bSoftCosmeticLoadDisabled = false;
+static bool bPrimaryAssetCosmeticFunctionsDisabled = false;
 static bool bKnownSkinsLoaded = false;
 static bool bLoadedSkinScanCompleted = false;
+static bool bSkinCatalogReady = false;
+static int SkinCatalogAttempts = 0;
+static int SkinCatalogRetryTicks = 0;
+static float LastSkinCatalogAttemptServerTime = -1.f;
 static int KnownSkinScanCursor = 0;
 static int LoadedSkinScanCursor = 0;
 static int LoadedSkinScanLimit = 0;
@@ -2776,6 +3171,28 @@ static bool bDefaultPartsResolved = false;
 static const UObject* PlayerAIDefaultHead = nullptr;
 static const UObject* PlayerAIDefaultBody = nullptr;
 static const UObject* PlayerAIDefaultBackpack = nullptr;
+static const UObject*
+    PlayerAIResidentPlaceholderParts[PlayerAICharacterPartSlotCount]{};
+static int32 PlayerAIResidentPlaceholderPartIndices[
+    PlayerAICharacterPartSlotCount]
+{
+    -1, -1, -1, -1, -1, -1, -1, -1,
+};
+static const UObject* PlayerAIResidentPlaceholderHero = nullptr;
+static int32 PlayerAIResidentPlaceholderHeroIndex = -1;
+static size_t PlayerAIResidentPlaceholderDonorCursor = 0;
+static ULONGLONG PlayerAIResidentPlaceholderRetryAt = 0;
+static bool bPlayerAIServerChoosePartDisabled = false;
+static bool bPlayerAIServerSetCosmeticLoadoutDisabled = false;
+static bool bPlayerAIApplyCharacterCosmeticsDisabled = false;
+static bool bPlayerAIRequestedDefaultSynchronousAttempted = false;
+
+static void PlayerAICacheResolvedSkin(
+    UAthenaCharacterItemDefinition* Character);
+static UAthenaCharacterItemDefinition*
+PlayerAIValidateCharacterDefinition(const UObject* Object);
+static void PlayerAITickPendingRandomBotSkins();
+static bool PlayerAITickPendingRequestedBotSkinCommits();
 
 // Resident-only cosmetic lookup. FindObject normally falls through to
 // StaticLoadObject, which can block TickFlush on package IO. Optional AI
@@ -2813,13 +3230,14 @@ static const UObject* PlayerAITryFindLoadedCosmetic(
     return Result;
 }
 
-// Resolve only an already-loaded weak object. InternalGet falls through to
-// synchronous package loading for unresolved soft paths, which is unsafe in
-// a server tick and was the main first-AI freeze.
-static const UObject* PlayerAITryResolveLoadedSoftObject(
-    FSoftObjectPtr& SoftObject, const UClass* Class)
+// Synchronous package loading is reserved for the explicit cheat-bot command.
+// Keep it behind its own fault latch so a bad optional asset can never take the
+// resident-only PlayerAI path down with it.
+static const UObject* PlayerAITryLoadCosmetic(
+    const wchar_t* Path, const UClass* Class)
 {
-    if (bSoftCosmeticResolveDisabled || !Class)
+    if (bCosmeticPackageLoadDisabled || !Path || !Class ||
+        !Offsets::StaticLoadObject)
         return nullptr;
 
     GPlayerAIGuardedNativeCallDepth++;
@@ -2828,7 +3246,7 @@ static const UObject* PlayerAITryResolveLoadedSoftObject(
 
     __try
     {
-        Result = SoftObject.Get();
+        Result = SDK::StaticLoadObject(Path, Class);
 
         if (Result &&
             (!PlayerAIIsLiveSupportObject(Result) ||
@@ -2847,10 +3265,375 @@ static const UObject* PlayerAITryResolveLoadedSoftObject(
 
     if (bFaulted)
     {
+        bCosmeticPackageLoadDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "SynchronousCosmeticLoading",
+            "the requested cheat-bot skin faulted and default cosmetics will be used");
+    }
+
+    return Result;
+}
+
+// The fallback must remain usable after either optional lookup path has been
+// disabled. Prefer a resident object, then allow package IO only for the
+// user-triggered cheat-bot command.
+static const UObject* PlayerAIResolveDefaultCosmetic(
+    const wchar_t* Path, const UClass* Class,
+    bool bAllowSynchronousLoad)
+{
+    auto Result = PlayerAITryFindLoadedCosmetic(Path, Class);
+
+    if (!Result && bAllowSynchronousLoad)
+        Result = PlayerAITryLoadCosmetic(Path, Class);
+
+    return Result;
+}
+
+// Resolve only an already-loaded weak object. InternalGet falls through to
+// synchronous package loading for unresolved soft paths, which is unsafe in
+// a server tick and was the main first-AI freeze.
+static bool PlayerAITryWriteSoftObjectPath(
+    const FSoftObjectPtr* SoftObject,
+    wchar_t* Output, size_t OutputSize);
+
+static const UObject* PlayerAITryResolveLoadedSoftObject(
+    FSoftObjectPtr& SoftObject, const UClass* Class)
+{
+    if (bSoftCosmeticResolveDisabled || !Class)
+        return nullptr;
+
+    GPlayerAIGuardedNativeCallDepth++;
+    const UObject* Result = nullptr;
+    bool bFaulted = false;
+
+    __try
+    {
+        // FSoftObjectPtr::Get()/InternalGet falls through to FindObject, whose
+        // implementation may call StaticLoadObject. Read the resident weak
+        // pointer directly; the exact-path StaticFindObject fallback below is
+        // also resident-only.
+        Result = SoftObject.WeakPtr.Get();
+
+        if (Result &&
+            (!PlayerAIIsLiveSupportObject(Result) ||
+             !Result->IsA(Class)))
+        {
+            Result = nullptr;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Result = nullptr;
+        bFaulted = true;
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+
+    // A latent package load does not necessarily refresh the weak-object
+    // cache stored in every copy of a TSoftObjectPtr. Resolve its exact path
+    // against the resident object table before declaring the part missing.
+    if (!Result && !bFaulted)
+    {
+        wchar_t Path[2048]{};
+        if (PlayerAITryWriteSoftObjectPath(
+                &SoftObject, Path,
+                sizeof(Path) / sizeof(Path[0])))
+        {
+            Result = PlayerAITryFindLoadedCosmetic(Path, Class);
+        }
+    }
+
+    if (bFaulted)
+    {
         bSoftCosmeticResolveDisabled = true;
         AIDebugLogger::MissingFeature(
             "SoftCosmeticResolution",
             "resident soft cosmetic lookup faulted and was disabled");
+    }
+
+    return Result;
+}
+
+static const UObject* PlayerAITryResolveSoftObjectForCommand(
+    FSoftObjectPtr& SoftObject, const UClass* Class)
+{
+    if (bSoftCosmeticLoadDisabled || !Class)
+        return nullptr;
+
+    // This command path has its own explicit, bounded load below. Avoid doing
+    // an unaccounted synchronous load before that budget is reached.
+    auto WeakObject = SoftObject.WeakPtr.Get();
+    if (PlayerAIIsLiveSupportObject(WeakObject) &&
+        WeakObject->IsA(Class))
+    {
+        return WeakObject;
+    }
+
+    wchar_t Path[2048]{};
+    if (!PlayerAITryWriteSoftObjectPath(
+            &SoftObject, Path,
+            sizeof(Path) / sizeof(Path[0])))
+    {
+        return nullptr;
+    }
+
+    auto Result = PlayerAITryFindLoadedCosmetic(Path, Class);
+    return Result
+        ? Result
+        : PlayerAITryLoadCosmetic(Path, Class);
+}
+
+static bool PlayerAIIsSafeReturnedSoftPath(
+    const FString& Path)
+{
+    if (Path.NumElements < 0 ||
+        Path.MaxElements < Path.NumElements ||
+        Path.MaxElements > 2048)
+    {
+        return false;
+    }
+
+    if (!Path.Data)
+        return Path.NumElements == 0 && Path.MaxElements == 0;
+
+    const size_t ReadSize = Path.NumElements > 0
+        ? static_cast<size_t>(Path.NumElements) * sizeof(wchar_t)
+        : sizeof(wchar_t);
+
+    if (!SDK::MemReadable(Path.Data, ReadSize))
+        return false;
+
+    return Path.NumElements == 0 ||
+        Path.Data[Path.NumElements - 1] == L'\0';
+}
+
+static void PlayerAIWriteSoftObjectPathUnsafe(
+    const FSoftObjectPtr* SoftObject,
+    wchar_t* Output, size_t OutputSize)
+{
+    if (!SoftObject || !Output || OutputSize == 0)
+        return;
+
+    UEAllocatedWString Path;
+
+    if (VersionInfo.EngineVersion <= 4.16)
+    {
+        const auto& LegacyPath =
+            *reinterpret_cast<const FString*>(
+                reinterpret_cast<const uint8*>(SoftObject) +
+                offsetof(FSoftObjectPtr, ObjectID));
+        if (!PlayerAIIsSafeReturnedSoftPath(LegacyPath) ||
+            LegacyPath.NumElements <= 1)
+        {
+            return;
+        }
+
+        Path.assign(
+            LegacyPath.Data,
+            LegacyPath.Data + LegacyPath.NumElements - 1);
+    }
+    else if (VersionInfo.FortniteVersion >= 23.00)
+    {
+        const uint8* Value =
+            reinterpret_cast<const uint8*>(SoftObject);
+        const uint32 PackageOffset =
+            VersionInfo.EngineVersion < 5.3 ? 0x10 : 0x08;
+        const uint32 AssetOffset =
+            VersionInfo.EngineVersion < 5.3 ? 0x14 : 0x0C;
+        const uint32 SubPathOffset =
+            VersionInfo.EngineVersion < 5.3 ? 0x18 : 0x10;
+        const auto& PackageName =
+            *reinterpret_cast<const FName*>(
+                Value + PackageOffset);
+        const auto& AssetName =
+            *reinterpret_cast<const FName*>(
+                Value + AssetOffset);
+        const auto& SubPath =
+            *reinterpret_cast<const FString*>(
+                Value + SubPathOffset);
+
+        if (!PackageName.IsValid() ||
+            !PlayerAIIsSafeReturnedSoftPath(SubPath))
+        {
+            return;
+        }
+
+        Path = PackageName.ToWString();
+        if (AssetName.IsValid())
+        {
+            Path += L".";
+            Path += AssetName.ToWString();
+        }
+        if (SubPath.NumElements > 1)
+        {
+            Path += L":";
+            Path.append(
+                SubPath.Data,
+                SubPath.Data + SubPath.NumElements - 1);
+        }
+    }
+    else
+    {
+        const auto& ObjectPath = SoftObject->ObjectID;
+        if (!ObjectPath.AssetPathName.IsValid() ||
+            !PlayerAIIsSafeReturnedSoftPath(
+                ObjectPath.SubPathString))
+        {
+            return;
+        }
+
+        Path = ObjectPath.AssetPathName.ToWString();
+        if (ObjectPath.SubPathString.NumElements > 1)
+        {
+            Path += L":";
+            Path.append(
+                ObjectPath.SubPathString.Data,
+                ObjectPath.SubPathString.Data +
+                    ObjectPath.SubPathString.NumElements - 1);
+        }
+    }
+
+    if (Path.empty() || Path[0] != L'/' ||
+        Path.size() >= OutputSize)
+    {
+        return;
+    }
+
+    wcsncpy_s(
+        Output, OutputSize,
+        Path.c_str(), _TRUNCATE);
+}
+
+static bool PlayerAITryWriteSoftObjectPath(
+    const FSoftObjectPtr* SoftObject,
+    wchar_t* Output, size_t OutputSize)
+{
+    if (bSoftCosmeticLoadDisabled || !SoftObject ||
+        !Output || OutputSize == 0)
+    {
+        return false;
+    }
+
+    Output[0] = L'\0';
+    bool bFaulted = false;
+    GPlayerAIGuardedNativeCallDepth++;
+
+    __try
+    {
+        PlayerAIWriteSoftObjectPathUnsafe(
+            SoftObject, Output, OutputSize);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        bFaulted = true;
+        Output[0] = L'\0';
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+
+    if (bFaulted)
+    {
+        bSoftCosmeticLoadDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "SynchronousSoftCosmeticLoading",
+            "the requested outfit's soft path could not be decoded safely");
+    }
+
+    return Output[0] != L'\0';
+}
+
+enum class EPlayerAISoftReferencePathState : uint8
+{
+    Empty,
+    Authored,
+    Unsafe,
+};
+
+// A terminal load miss is harmless only for a genuinely empty array entry.
+// A non-empty authored reference would otherwise turn a hat/face into a
+// permanent null cache slot. Unsafe means path decoding itself was disabled
+// and is therefore never treated as proof that an entry was empty.
+static EPlayerAISoftReferencePathState
+PlayerAIGetSoftReferencePathState(
+    const FSoftObjectPtr& SoftObject)
+{
+    if (bSoftCosmeticLoadDisabled)
+        return EPlayerAISoftReferencePathState::Unsafe;
+
+    wchar_t Path[2048]{};
+    if (PlayerAITryWriteSoftObjectPath(
+            &SoftObject, Path,
+            sizeof(Path) / sizeof(Path[0])))
+    {
+        return EPlayerAISoftReferencePathState::Authored;
+    }
+
+    return bSoftCosmeticLoadDisabled
+        ? EPlayerAISoftReferencePathState::Unsafe
+        : EPlayerAISoftReferencePathState::Empty;
+}
+
+// ProcessEvent constructs the returned soft path in our parameter buffer, so
+// its nested FString is caller-owned. Release it before freeing that buffer.
+static void PlayerAIFreeReturnedSoftReferencePath(
+    FSoftObjectPtr* SoftObject)
+{
+    if (!SoftObject)
+        return;
+
+    FString* OwnedPath = nullptr;
+
+    if (VersionInfo.EngineVersion <= 4.16)
+    {
+        OwnedPath = reinterpret_cast<FString*>(
+            reinterpret_cast<uint8*>(SoftObject) +
+            offsetof(FSoftObjectPtr, ObjectID));
+    }
+    else if (VersionInfo.FortniteVersion >= 23.00)
+    {
+        OwnedPath = reinterpret_cast<FString*>(
+            reinterpret_cast<uint8*>(SoftObject) +
+            (VersionInfo.EngineVersion < 5.3
+                ? 0x18
+                : 0x10));
+    }
+    else
+    {
+        OwnedPath = &SoftObject->ObjectID.SubPathString;
+    }
+
+    __try
+    {
+        if (OwnedPath && OwnedPath->Data &&
+            PlayerAIIsSafeReturnedSoftPath(*OwnedPath))
+        {
+            OwnedPath->Free();
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        // An optional catalog getter returning a malformed path must degrade
+        // to the normal default cosmetic instead of taking down the server.
+    }
+}
+
+static const UObject*
+PlayerAITryResolveReturnedSoftObjectForCommand(
+    FSoftObjectPtr* SoftObject, const UClass* Class)
+{
+    if (!SoftObject)
+        return nullptr;
+
+    const UObject* Result = nullptr;
+
+    __try
+    {
+        Result = PlayerAITryResolveSoftObjectForCommand(
+            *SoftObject, Class);
+    }
+    __finally
+    {
+        PlayerAIFreeReturnedSoftReferencePath(SoftObject);
     }
 
     return Result;
@@ -2907,87 +3690,699 @@ static bool PlayerAITryUpdateCharacterPartsVisualization(
         UpdatePlayerCustomCharacterPartsVisualization__Ptr != nullptr;
 }
 
-// Writes character part pointers (indexed by EFortCustomPartType) into the
-// player state, clearing unused slots so a replacement skin cannot retain
-// pieces of the previous one. Handles both the struct based
-// CharacterParts layout of newer versions and the flat array of older ones.
-static bool PlayerAIWriteCharacterParts(AFortPlayerStateAthena* PlayerState, const UObject* Parts[6])
+// Character customization changed shape several times. In particular,
+// Chapter 1 through modern builds keep the replicated source in
+// CharacterData.Parts while LocalCharacterParts is only a transient mirror.
+// Validate the reflected metadata before treating any similarly named field
+// as a fixed UObject pointer array.
+static bool PlayerAIResolveFixedCharacterPartArray(
+    UObject* Owner, const char* PropertyName,
+    UObject**& OutParts,
+    int32* OutPartArrayDimension = nullptr)
 {
-    static auto NewStyleCharacterPartsOffset = PlayerState->GetOffset("CharacterParts", 0x100000);
+    OutParts = nullptr;
+    if (OutPartArrayDimension)
+        *OutPartArrayDimension = 0;
 
-    const UObject** Target = nullptr;
-    const wchar_t* DirtyProperty = L"CharacterParts";
-
-    if (NewStyleCharacterPartsOffset == -1)
+    if (!Owner || !Owner->Class || !PropertyName ||
+        Offsets::ElementSize < sizeof(int32))
     {
-        static auto CharacterPartsOff =
-            PlayerState->GetOffset("CharacterParts");
-        static auto LocalCharacterPartsOff =
-            PlayerState->GetOffset("LocalCharacterParts");
-        const auto PartsOff = CharacterPartsOff != -1
-            ? CharacterPartsOff
-            : LocalCharacterPartsOff;
-
-        if (PartsOff == -1)
-        {
-            AIDebugLogger::MissingFeature("CharacterParts", "PlayerAI keeps engine default appearance");
-            return false;
-        }
-
-        DirtyProperty = CharacterPartsOff != -1
-            ? L"CharacterParts"
-            : L"LocalCharacterParts";
-        Target = GetFromOffset<const UObject* [0x6]>(
-            PlayerState, PartsOff);
-    }
-    else
-    {
-        static auto PartsStruct = FindStruct("CustomCharacterParts");
-
-        if (!PartsStruct)
-        {
-            AIDebugLogger::MissingFeature("CustomCharacterParts", "PlayerAI keeps engine default appearance");
-            return false;
-        }
-
-        static auto PartsOffset = PartsStruct->GetOffset("Parts");
-        static auto CharacterPartsOff = PlayerState->GetOffset("CharacterParts");
-
-        if (PartsOffset == -1 || CharacterPartsOff == -1)
-        {
-            AIDebugLogger::MissingFeature("CustomCharacterParts.Parts", "PlayerAI keeps engine default appearance");
-            return false;
-        }
-
-        auto CharacterPartsPtr = (PBYTE)PlayerState + CharacterPartsOff;
-        Target = GetFromOffset<const UObject* [0x6]>(CharacterPartsPtr, PartsOffset);
+        return false;
     }
 
-    for (int i = 0; i < 6; i++)
-        Target[i] = Parts[i];
+    auto Property = Owner->GetProperty(PropertyName);
+    if (!Property)
+        return false;
 
-    VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-        PlayerState, DirtyProperty);
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(
+            Property, RequiredMetadataBytes))
+    {
+        return false;
+    }
+
+    const int32 PropertyOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            Property, Offsets::Offset_Internal)));
+    const uint32 ElementSize = GetFromOffset<uint32>(
+        Property, Offsets::ElementSize);
+    const int32 ArrayDimension = GetFromOffset<int32>(
+        Property, Offsets::ElementSize - sizeof(int32));
+    const int32 OwnerSize = Owner->Class->GetPropertiesSize();
+
+    if (PropertyOffset < 0 ||
+        ElementSize != sizeof(UObject*) ||
+        ArrayDimension < PlayerAILegacyCharacterPartSlotCount ||
+        ArrayDimension > 16 ||
+        OwnerSize <= PropertyOffset ||
+        static_cast<size_t>(ElementSize) * ArrayDimension >
+            static_cast<size_t>(OwnerSize - PropertyOffset))
+    {
+        return false;
+    }
+
+    auto Parts = reinterpret_cast<UObject**>(
+        reinterpret_cast<uint8*>(Owner) + PropertyOffset);
+    if (!SDK::MemReadable(
+            Parts,
+            static_cast<size_t>(ElementSize) *
+                ArrayDimension))
+    {
+        return false;
+    }
+
+    OutParts = Parts;
+    if (OutPartArrayDimension)
+        *OutPartArrayDimension = ArrayDimension;
     return true;
+}
+
+static bool PlayerAIResolveStructCharacterPartArray(
+    UObject* Owner, const char* PropertyName,
+    const char* StructName, const wchar_t* StructPath,
+    UObject**& OutParts,
+    uint8** OutStructData = nullptr,
+    const UStruct** OutStruct = nullptr,
+    uint32* OutStructStorageSize = nullptr,
+    int32* OutPartArrayDimension = nullptr)
+{
+    OutParts = nullptr;
+    if (OutStructData)
+        *OutStructData = nullptr;
+    if (OutStruct)
+        *OutStruct = nullptr;
+    if (OutStructStorageSize)
+        *OutStructStorageSize = 0;
+    if (OutPartArrayDimension)
+        *OutPartArrayDimension = 0;
+
+    if (!Owner || !Owner->Class || !PropertyName ||
+        !StructName || !StructPath ||
+        Offsets::ElementSize < sizeof(int32))
+    {
+        return false;
+    }
+
+    auto OuterProperty = Owner->GetProperty(
+        PropertyName, 0x100000);
+    const UStruct* PartsStruct = nullptr;
+
+    // An exact script path avoids the short-name/type-filter ambiguity on
+    // encrypted 32.x object arrays. Retain FindStruct as a compatibility
+    // fallback for builds whose StaticFindObject is unavailable this early.
+    if (Offsets::StaticFindObject)
+    {
+        PartsStruct = reinterpret_cast<const UStruct*>(
+            SDK::StaticFindObject(
+                StructPath, UObject::StaticClass()));
+    }
+
+    if (!PlayerAIIsLiveSupportObject(
+            reinterpret_cast<const UObject*>(PartsStruct)))
+    {
+        PartsStruct = FindStruct(StructName);
+    }
+
+    auto PartsStructObject =
+        reinterpret_cast<const UObject*>(PartsStruct);
+    if (!PlayerAIIsLiveSupportObject(PartsStructObject) ||
+        !PartsStructObject->Class ||
+        PartsStructObject->Class->Name.ToUtf8() !=
+            "ScriptStruct")
+    {
+        return false;
+    }
+
+    auto PartsProperty = PartsStruct
+        ? PartsStruct->GetProperty("Parts")
+        : nullptr;
+    if (!OuterProperty || !PartsStruct || !PartsProperty)
+        return false;
+
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(
+            OuterProperty, RequiredMetadataBytes) ||
+        !SDK::MemReadable(
+            PartsProperty, RequiredMetadataBytes))
+    {
+        return false;
+    }
+
+    const int32 OuterOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            OuterProperty, Offsets::Offset_Internal)));
+    const uint32 OuterSize = GetFromOffset<uint32>(
+        OuterProperty, Offsets::ElementSize);
+    const int32 OuterArrayDimension = GetFromOffset<int32>(
+        OuterProperty,
+        Offsets::ElementSize - sizeof(int32));
+    const int32 PartsOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            PartsProperty, Offsets::Offset_Internal)));
+    const uint32 PartElementSize = GetFromOffset<uint32>(
+        PartsProperty, Offsets::ElementSize);
+    const int32 PartArrayDimension = GetFromOffset<int32>(
+        PartsProperty,
+        Offsets::ElementSize - sizeof(int32));
+    const int32 PartsStructSize =
+        PartsStruct->GetPropertiesSize();
+    const int32 OwnerSize = Owner->Class->GetPropertiesSize();
+    const size_t RequiredPartsBytes =
+        static_cast<size_t>(PartElementSize) *
+        PartArrayDimension;
+
+    if (OuterOffset < 0 || PartsOffset < 0 ||
+        OuterArrayDimension != 1 ||
+        PartElementSize != sizeof(UObject*) ||
+        PartArrayDimension < PlayerAILegacyCharacterPartSlotCount ||
+        PartArrayDimension > 16 ||
+        PartsStructSize <= PartsOffset ||
+        RequiredPartsBytes > static_cast<size_t>(
+            PartsStructSize - PartsOffset) ||
+        OuterSize < static_cast<uint32>(PartsOffset) ||
+        RequiredPartsBytes >
+            static_cast<size_t>(OuterSize - PartsOffset) ||
+        OwnerSize <= OuterOffset ||
+        OuterSize > static_cast<uint32>(
+            OwnerSize - OuterOffset))
+    {
+        return false;
+    }
+
+    auto Parts = reinterpret_cast<UObject**>(
+        reinterpret_cast<uint8*>(Owner) +
+        OuterOffset + PartsOffset);
+    if (!SDK::MemReadable(Parts, RequiredPartsBytes))
+        return false;
+
+    OutParts = Parts;
+    if (OutStructData)
+    {
+        *OutStructData = reinterpret_cast<uint8*>(Owner) +
+            OuterOffset;
+    }
+    if (OutStruct)
+        *OutStruct = PartsStruct;
+    if (OutStructStorageSize)
+        *OutStructStorageSize = OuterSize;
+    if (OutPartArrayDimension)
+        *OutPartArrayDimension = PartArrayDimension;
+    return true;
+}
+
+static bool PlayerAIResolveStructField(
+    uint8* StructData,
+    const UStruct* Struct,
+    uint32 StructStorageSize,
+    const char* FieldName,
+    uint64 CastFlags,
+    uint32 ExpectedElementSize,
+    uint8*& OutAddress,
+    const UField** OutProperty = nullptr)
+{
+    OutAddress = nullptr;
+    if (OutProperty)
+        *OutProperty = nullptr;
+
+    if (!StructData || !Struct || !FieldName ||
+        ExpectedElementSize == 0 ||
+        Offsets::ElementSize < sizeof(int32))
+    {
+        return false;
+    }
+
+    auto Property = Struct->GetProperty(
+        FieldName, CastFlags);
+    if (!Property)
+        return false;
+
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(
+            Property, RequiredMetadataBytes))
+    {
+        return false;
+    }
+
+    const int32 FieldOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            Property, Offsets::Offset_Internal)));
+    const uint32 FieldElementSize =
+        GetFromOffset<uint32>(
+            Property, Offsets::ElementSize);
+    const int32 FieldArrayDimension =
+        GetFromOffset<int32>(
+            Property,
+            Offsets::ElementSize - sizeof(int32));
+    const int32 StructSize = Struct->GetPropertiesSize();
+
+    if (FieldOffset < 0 ||
+        FieldElementSize != ExpectedElementSize ||
+        FieldArrayDimension != 1 ||
+        StructSize <= FieldOffset ||
+        ExpectedElementSize > static_cast<uint32>(
+            StructSize - FieldOffset) ||
+        StructStorageSize <= static_cast<uint32>(
+            FieldOffset) ||
+        ExpectedElementSize >
+            StructStorageSize - FieldOffset)
+    {
+        return false;
+    }
+
+    auto Address = StructData + FieldOffset;
+    if (!SDK::MemReadable(
+            Address, ExpectedElementSize))
+    {
+        return false;
+    }
+
+    OutAddress = Address;
+    if (OutProperty)
+        *OutProperty = Property;
+    return true;
+}
+
+static bool PlayerAIWriteStructBool(
+    uint8* StructData,
+    const UStruct* Struct,
+    uint32 StructStorageSize,
+    const char* FieldName,
+    bool Value)
+{
+    uint8* Address = nullptr;
+    const UField* Property = nullptr;
+    if (!PlayerAIResolveStructField(
+            StructData, Struct, StructStorageSize,
+            FieldName, 0x20000, sizeof(uint8),
+            Address, &Property))
+    {
+        return false;
+    }
+
+    uint8 FieldMask = 0;
+    if (Offsets::FieldMask > 0 &&
+        SDK::MemReadable(
+            Property,
+            static_cast<size_t>(Offsets::FieldMask) +
+                sizeof(uint8)))
+    {
+        FieldMask = Property->GetFieldMask();
+    }
+
+    if (!FieldMask)
+        return false;
+
+    Value ? *Address |= FieldMask : *Address &= ~FieldMask;
+
+    return true;
+}
+
+static bool PlayerAIReadStructBool(
+    uint8* StructData,
+    const UStruct* Struct,
+    uint32 StructStorageSize,
+    const char* FieldName,
+    bool& OutValue)
+{
+    OutValue = false;
+    uint8* Address = nullptr;
+    const UField* Property = nullptr;
+    if (!PlayerAIResolveStructField(
+            StructData, Struct, StructStorageSize,
+            FieldName, 0x20000, sizeof(uint8),
+            Address, &Property))
+    {
+        return false;
+    }
+
+    uint8 FieldMask = 0;
+    if (Offsets::FieldMask > 0 &&
+        SDK::MemReadable(
+            Property,
+            static_cast<size_t>(Offsets::FieldMask) +
+                sizeof(uint8)))
+    {
+        FieldMask = Property->GetFieldMask();
+    }
+    if (!FieldMask)
+        return false;
+
+    OutValue = (*Address & FieldMask) != 0;
+    return true;
+}
+
+static void PlayerAIInitializeCharacterPartReplicationState(
+    uint8* StructData,
+    const UStruct* Struct,
+    uint32 StructStorageSize,
+    int32 PartArrayDimension,
+    const UObject* Parts[PlayerAICharacterPartSlotCount])
+{
+    // CustomCharacterParts (7.40) and CustomCharacterData (10.40+) use
+    // different names for the server-valid-part mask. It is not an array-width
+    // mask: setting a bit for an empty optional slot makes modern clients
+    // report that the part failed to replicate and reject the entire outfit.
+    // Rebuild it from the exact authored composition on every write so a
+    // placeholder cannot leave stale Hat/Misc/Gameplay validity bits behind.
+    const char* FlagNames[] =
+    {
+        "WasReplicatedFlags",
+        "WasPartReplicatedFlags",
+    };
+
+    const int32 ReplicatedSlotCount = (std::min)(
+        (std::max)(PartArrayDimension, 0),
+        PlayerAICharacterPartSlotCount);
+    uint8 ReplicatedPartMask = 0;
+    if (Parts)
+    {
+        for (int32 Index = 0;
+             Index < ReplicatedSlotCount; Index++)
+        {
+            if (Parts[Index])
+            {
+                ReplicatedPartMask |= static_cast<uint8>(
+                    1u << Index);
+            }
+        }
+    }
+
+    for (auto FlagName : FlagNames)
+    {
+        uint8* Flags = nullptr;
+        if (PlayerAIResolveStructField(
+                StructData, Struct, StructStorageSize,
+                FlagName, 0, sizeof(uint8), Flags))
+        {
+            *Flags = ReplicatedPartMask;
+        }
+    }
+
+    PlayerAIWriteStructBool(
+        StructData, Struct, StructStorageSize,
+        "bReplicationFailed", false);
+}
+
+static void PlayerAIWriteCharacterPartArray(
+    UObject** Target,
+    int32 TargetSlotCount,
+    const UObject* Parts[PlayerAICharacterPartSlotCount])
+{
+    if (!Target || TargetSlotCount <= 0)
+        return;
+
+    const int32 SlotCount = (std::min)(
+        TargetSlotCount, PlayerAICharacterPartSlotCount);
+    for (int32 Index = 0;
+         Index < SlotCount; Index++)
+    {
+        Target[Index] = const_cast<UObject*>(Parts[Index]);
+    }
+}
+
+static bool PlayerAIWritePawnCharacterParts(
+    AFortPlayerPawnAthena* Pawn,
+    const UObject* Parts[PlayerAICharacterPartSlotCount])
+{
+    UObject** Target = nullptr;
+    int32 TargetSlotCount = 0;
+
+    if (!Pawn || !PlayerAIResolveFixedCharacterPartArray(
+            Pawn, "CharacterParts", Target,
+            &TargetSlotCount))
+    {
+        return false;
+    }
+
+    PlayerAIWriteCharacterPartArray(
+        Target, TargetSlotCount, Parts);
+    return true;
+}
+
+static bool PlayerAIWriteLocalCharacterParts(
+    AFortPlayerStateAthena* PlayerState,
+    const UObject* Parts[PlayerAICharacterPartSlotCount])
+{
+    UObject** Target = nullptr;
+    int32 TargetSlotCount = 0;
+
+    if (!PlayerState ||
+        !PlayerAIResolveFixedCharacterPartArray(
+            PlayerState, "LocalCharacterParts", Target,
+            &TargetSlotCount))
+    {
+        return false;
+    }
+
+    PlayerAIWriteCharacterPartArray(
+        Target, TargetSlotCount, Parts);
+    return true;
+}
+
+enum class EPlayerAICharacterPartMirrorState : uint8
+{
+    Unavailable,
+    Matched,
+    Mismatched,
+};
+
+static EPlayerAICharacterPartMirrorState
+PlayerAIGetCharacterPartMirrorState(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    const UObject* Parts[PlayerAICharacterPartSlotCount])
+{
+    if (!Parts || !Parts[0] || !Parts[1])
+        return EPlayerAICharacterPartMirrorState::Unavailable;
+
+    bool bFoundMirror = false;
+    auto MatchesRequestedParts =
+        [&](UObject** Candidate,
+            int32 CandidateSlotCount) -> bool
+        {
+            if (!Candidate || CandidateSlotCount <= 0)
+                return false;
+
+            bFoundMirror = true;
+            for (int32 Index = 0;
+                 Index < PlayerAICharacterPartSlotCount; Index++)
+            {
+                // Compare the whole authored composition. Null optional slots
+                // must clear pieces left by the resident placeholder just as
+                // non-null Hat/Face/Gameplay slots must survive.
+                if (Index >= CandidateSlotCount)
+                {
+                    if (Parts[Index])
+                        return false;
+                    continue;
+                }
+                if (Candidate[Index] != Parts[Index])
+                    return false;
+            }
+            return true;
+        };
+
+    UObject** Candidate = nullptr;
+    int32 CandidateSlotCount = 0;
+    if (Pawn && PlayerAIResolveFixedCharacterPartArray(
+            Pawn, "CharacterParts", Candidate,
+            &CandidateSlotCount) &&
+        MatchesRequestedParts(Candidate, CandidateSlotCount))
+    {
+        return EPlayerAICharacterPartMirrorState::Matched;
+    }
+
+    Candidate = nullptr;
+    CandidateSlotCount = 0;
+    if (PlayerState &&
+        PlayerAIResolveFixedCharacterPartArray(
+            PlayerState, "LocalCharacterParts", Candidate,
+            &CandidateSlotCount) &&
+        MatchesRequestedParts(Candidate, CandidateSlotCount))
+    {
+        return EPlayerAICharacterPartMirrorState::Matched;
+    }
+
+    return bFoundMirror
+        ? EPlayerAICharacterPartMirrorState::Mismatched
+        : EPlayerAICharacterPartMirrorState::Unavailable;
+}
+
+// Write every compatible PlayerState store. CharacterData and CharacterParts
+// are authoritative replicated sources; LocalCharacterParts is only a mirror
+// used by native visualization. The pawn's own CharacterParts array is
+// intentionally committed later: pre-filling it makes several Chapter 1
+// customization functions conclude that nothing changed and skip rebuilding
+// the rendered mesh.
+static bool PlayerAIWriteReplicatedCharacterParts(
+    AFortPlayerStateAthena* PlayerState,
+    const UObject* Parts[PlayerAICharacterPartSlotCount])
+{
+    if (!PlayerState)
+        return false;
+
+    bool bWroteAuthoritativeState = false;
+    UObject** Target = nullptr;
+    uint8* StructData = nullptr;
+    const UStruct* CharacterPartsStruct = nullptr;
+    uint32 StructStorageSize = 0;
+    int32 TargetSlotCount = 0;
+
+    if (PlayerAIResolveStructCharacterPartArray(
+            PlayerState, "CharacterData",
+            "CustomCharacterData",
+            L"/Script/FortniteGame.CustomCharacterData",
+            Target, &StructData, &CharacterPartsStruct,
+            &StructStorageSize, &TargetSlotCount))
+    {
+        PlayerAIWriteCharacterPartArray(
+            Target, TargetSlotCount, Parts);
+        PlayerAIInitializeCharacterPartReplicationState(
+            StructData, CharacterPartsStruct,
+            StructStorageSize, TargetSlotCount, Parts);
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"CharacterData");
+        bWroteAuthoritativeState = true;
+    }
+
+    TargetSlotCount = 0;
+    if (PlayerAIResolveFixedCharacterPartArray(
+            PlayerState, "CharacterParts", Target,
+            &TargetSlotCount))
+    {
+        PlayerAIWriteCharacterPartArray(
+            Target, TargetSlotCount, Parts);
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"CharacterParts");
+        bWroteAuthoritativeState = true;
+    }
+    else if (PlayerAIResolveStructCharacterPartArray(
+                 PlayerState, "CharacterParts",
+                 "CustomCharacterParts",
+                 L"/Script/FortniteGame.CustomCharacterParts",
+                 Target, &StructData,
+                 &CharacterPartsStruct,
+                 &StructStorageSize, &TargetSlotCount))
+    {
+        PlayerAIWriteCharacterPartArray(
+            Target, TargetSlotCount, Parts);
+        PlayerAIInitializeCharacterPartReplicationState(
+            StructData, CharacterPartsStruct,
+            StructStorageSize, TargetSlotCount, Parts);
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"CharacterParts");
+        bWroteAuthoritativeState = true;
+    }
+
+    if (!bWroteAuthoritativeState)
+    {
+        AIDebugLogger::MissingFeature(
+            "ReplicatedCharacterParts",
+            "PlayerAI keeps its engine default appearance");
+    }
+
+    return bWroteAuthoritativeState;
 }
 
 static void PlayerAIWriteHeroType(
     AFortPlayerStateAthena* PlayerState,
-    const UObject* HeroType)
+    const UObject* HeroType,
+    bool bMarkDirty = true)
 {
     if (!PlayerState || !PlayerState->HasHeroType())
         return;
 
     PlayerState->HeroType = HeroType;
-    VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-        PlayerState, L"HeroType");
+    if (bMarkDirty)
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"HeroType");
+    }
+}
+
+static bool PlayerAITryResolveEnumByteOffset(
+    const UObject* Object,
+    const char* PropertyName,
+    uint32& OutOffset)
+{
+    OutOffset = (uint32)-1;
+    if (!PlayerAIIsLiveSupportObject(Object) ||
+        !PropertyName || !Object->Class ||
+        Offsets::ElementSize < sizeof(int32))
+    {
+        return false;
+    }
+
+    auto Property = const_cast<UObject*>(Object)->GetProperty(
+        PropertyName);
+    if (!Property)
+        return false;
+
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(Property, RequiredMetadataBytes))
+        return false;
+
+    const uint32 Offset = static_cast<uint32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            Property, Offsets::Offset_Internal)));
+    const uint32 ElementSize = GetFromOffset<uint32>(
+        Property, Offsets::ElementSize);
+    const int32 ArrayDimension = GetFromOffset<int32>(
+        Property, Offsets::ElementSize - sizeof(int32));
+    const int32 ObjectSize = Object->Class->GetPropertiesSize();
+    if (Offset == (uint32)-1 || Offset >= 0x10000 ||
+        ElementSize != sizeof(uint8) || ArrayDimension != 1 ||
+        ObjectSize <= 0 || Offset >= static_cast<uint32>(ObjectSize))
+    {
+        return false;
+    }
+
+    auto Address = reinterpret_cast<const uint8*>(Object) + Offset;
+    if (!SDK::MemReadable(Address, sizeof(uint8)))
+        return false;
+
+    OutOffset = Offset;
+    return true;
+}
+
+static bool PlayerAITryReadEnumByte(
+    const UObject* Object,
+    const char* PropertyName,
+    uint8& OutValue,
+    uint32* OutOffset = nullptr)
+{
+    uint32 Offset = (uint32)-1;
+    if (!PlayerAITryResolveEnumByteOffset(
+            Object, PropertyName, Offset))
+    {
+        return false;
+    }
+
+    OutValue = GetFromOffset<uint8>(Object, Offset);
+    if (OutOffset)
+        *OutOffset = Offset;
+    return true;
 }
 
 static void PlayerAIWriteGender(
     AFortPlayerStateAthena* PlayerState,
-    EFortCustomGender Gender)
+    EFortCustomGender Gender,
+    bool bMarkDirty = true)
 {
-    if (!PlayerState)
+    const uint8 RawGender = static_cast<uint8>(Gender);
+    if (!PlayerState || (RawGender != 1 && RawGender != 2))
         return;
 
     auto GenderOffset = PlayerState->GetOffset("Gender");
@@ -3008,39 +4403,2974 @@ static void PlayerAIWriteGender(
 
     GetFromOffset<EFortCustomGender>(
         PlayerState, GenderOffset) = Gender;
-    VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-        PlayerState, DirtyProperty);
+    if (bMarkDirty)
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, DirtyProperty);
+    }
+
+    uint32 LocalGenderOffset = (uint32)-1;
+    if (PlayerAITryResolveEnumByteOffset(
+            PlayerState, "LocalCharacterGender",
+            LocalGenderOffset))
+    {
+        GetFromOffset<EFortCustomGender>(
+            PlayerState, LocalGenderOffset) = Gender;
+    }
 }
 
-// Applies parts through the pawn's own native part selection when a pawn
-// exists - the most reliable application path across versions (native
-// replication + pawn visuals), used on top of the player state write.
-static void PlayerAIChoosePartsOnPawn(AFortPlayerPawnAthena* Pawn, const UObject* Parts[6])
+static bool PlayerAIResolveConcreteGender(
+    AFortPlayerStateAthena* PlayerState,
+    UAthenaCharacterItemDefinition* Character,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    EFortCustomGender& OutGender)
+{
+    if (Character && Character->HasGender())
+    {
+        const uint8 RawGender =
+            static_cast<uint8>(Character->Gender);
+        if (RawGender == 1 || RawGender == 2)
+        {
+            OutGender = Character->Gender;
+            return true;
+        }
+    }
+
+    const int CorePartOrder[] = { 1, 0 };
+    for (int PartIndex : CorePartOrder)
+    {
+        uint8 PermittedGender = 0;
+        if (Parts && Parts[PartIndex] &&
+            PlayerAITryReadEnumByte(
+                Parts[PartIndex], "GenderPermitted",
+                PermittedGender) &&
+            (PermittedGender == 1 || PermittedGender == 2))
+        {
+            OutGender = static_cast<EFortCustomGender>(
+                PermittedGender);
+            return true;
+        }
+    }
+
+    uint8 ExistingGender = 0;
+    if (PlayerState &&
+        ((PlayerAITryReadEnumByte(
+              PlayerState, "CharacterGender",
+              ExistingGender) ||
+          PlayerAITryReadEnumByte(
+              PlayerState, "Gender", ExistingGender))) &&
+        (ExistingGender == 1 || ExistingGender == 2))
+    {
+        OutGender = static_cast<EFortCustomGender>(ExistingGender);
+        return true;
+    }
+
+    return false;
+}
+
+static bool PlayerAIResolveConcreteBodyType(
+    AFortPlayerStateAthena* PlayerState,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    uint8& OutBodyType)
+{
+    uint8 AllowedMask = 0x7;
+    bool bFoundConstraint = false;
+    const int CorePartOrder[] = { 1, 0 };
+    for (int PartIndex : CorePartOrder)
+    {
+        uint8 PermittedBodyTypes = 0;
+        if (!Parts || !Parts[PartIndex] ||
+            !PlayerAITryReadEnumByte(
+                Parts[PartIndex], "BodyTypesPermitted",
+                PermittedBodyTypes) ||
+            PermittedBodyTypes > 6)
+        {
+            continue;
+        }
+
+        AllowedMask &= static_cast<uint8>(
+            PermittedBodyTypes + 1);
+        bFoundConstraint = true;
+    }
+
+    if (!bFoundConstraint || AllowedMask == 0)
+        return false;
+
+    if (AllowedMask == 0x1)
+        OutBodyType = 0; // Small
+    else if (AllowedMask == 0x2)
+        OutBodyType = 1; // Medium
+    else if (AllowedMask == 0x4)
+        OutBodyType = 3; // Large
+    else
+    {
+        uint8 ExistingBodyType = 0xff;
+        if (!PlayerAITryReadEnumByte(
+                PlayerState, "CharacterBodyType",
+                ExistingBodyType))
+        {
+            PlayerAITryReadEnumByte(
+                PlayerState, "LocalCharacterBodyType",
+                ExistingBodyType);
+        }
+
+        uint8 ExistingMask = 0;
+        if (ExistingBodyType == 0)
+            ExistingMask = 0x1;
+        else if (ExistingBodyType == 1)
+            ExistingMask = 0x2;
+        else if (ExistingBodyType == 3)
+            ExistingMask = 0x4;
+        if (!ExistingMask || !(AllowedMask & ExistingMask))
+            return false;
+
+        OutBodyType = ExistingBodyType;
+    }
+
+    return true;
+}
+
+static void PlayerAIWriteBodyType(
+    AFortPlayerStateAthena* PlayerState,
+    uint8 BodyType,
+    bool bMarkDirty = true)
+{
+    if (!PlayerState ||
+        (BodyType != 0 && BodyType != 1 && BodyType != 3))
+    {
+        return;
+    }
+
+    uint32 BodyTypeOffset = (uint32)-1;
+    const wchar_t* DirtyProperty = L"CharacterBodyType";
+    if (!PlayerAITryResolveEnumByteOffset(
+            PlayerState, "CharacterBodyType", BodyTypeOffset))
+    {
+        DirtyProperty = L"BodyType";
+        if (!PlayerAITryResolveEnumByteOffset(
+                PlayerState, "BodyType", BodyTypeOffset))
+        {
+            BodyTypeOffset = (uint32)-1;
+        }
+    }
+    if (BodyTypeOffset != (uint32)-1)
+    {
+        GetFromOffset<uint8>(PlayerState, BodyTypeOffset) = BodyType;
+        if (bMarkDirty)
+        {
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                PlayerState, DirtyProperty);
+        }
+    }
+
+    uint32 LocalBodyTypeOffset = (uint32)-1;
+    if (PlayerAITryResolveEnumByteOffset(
+            PlayerState, "LocalCharacterBodyType",
+            LocalBodyTypeOffset))
+    {
+        GetFromOffset<uint8>(
+            PlayerState, LocalBodyTypeOffset) = BodyType;
+    }
+}
+
+// Several Chapter 1 pawn implementations rebuild their character parts when
+// gender changes. Publish the selection through the native entry point too;
+// the final direct parts commit below still wins if a connectionless bot makes
+// the RPC a no-op.
+static void PlayerAIChooseGenderOnPawn(
+    AFortPlayerPawnAthena* Pawn,
+    EFortCustomGender Gender)
 {
     if (!Pawn)
         return;
 
-    for (int i = 0; i < 6; i++)
+    auto Function = Pawn->GetFunction("ServerChooseGender");
+    if (!Function)
+        return;
+
+    uint8 Params = static_cast<uint8>(Gender);
+    PlayerAIGuardedProcessEvent(Pawn, Function, &Params);
+}
+
+// Applies parts through the pawn's native RPC entry point as a supplementary
+// path. Synthetic controllers do not have an owning connection, so the direct
+// state/pawn writes above remain authoritative.
+static bool PlayerAIChoosePartsOnPawn(
+    AFortPlayerPawnAthena* Pawn,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    int* InOutPartCursor = nullptr,
+    bool* OutAllPartsDispatched = nullptr)
+{
+    if (OutAllPartsDispatched)
+        *OutAllPartsDispatched = false;
+    if (!Pawn || !Parts || bPlayerAIServerChoosePartDisabled)
+        return false;
+
+    auto Function = Pawn->GetFunction("ServerChoosePart");
+    if (!PlayerAIIsLiveSupportObject(Function))
+        return false;
+
+    const uint32 PartOffset = Function->GetOffset("Part");
+    const uint32 ChosenPartOffset =
+        Function->GetOffset("ChosenCharacterPart");
+    if (PartOffset != 0 || ChosenPartOffset != 8)
     {
-        if (Parts[i])
-            Pawn->ServerChoosePart((uint8)i, Parts[i]);
+        bPlayerAIServerChoosePartDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "ServerChoosePartForPlayerAI",
+            "the reflected parameter layout was unsupported; replicated character parts remain authoritative");
+        return false;
+    }
+
+    if (VersionInfo.FortniteVersion < 32.0)
+    {
+        const int32 ParamsSize = Function->GetPropertiesSize();
+        if (ParamsSize < 0x10 || ParamsSize > 0x1000)
+        {
+            bPlayerAIServerChoosePartDisabled = true;
+            AIDebugLogger::MissingFeature(
+                "ServerChoosePartForPlayerAI",
+                "the parameter buffer size was unsupported; replicated character parts remain authoritative");
+            return false;
+        }
+    }
+
+    alignas(16) uint8 Params[0x1000]{};
+    bool bInvoked = false;
+    const bool bCommitEmptyModernSlots =
+        VersionInfo.FortniteVersion >= 19.0 &&
+        VersionInfo.FortniteVersion < 32.0;
+    const int SlotsToCommit = bCommitEmptyModernSlots
+        ? (std::min)(PlayerAICharacterPartSlotCount, 6)
+        : PlayerAICharacterPartSlotCount;
+    int StartSlot = InOutPartCursor
+        ? (std::max)(0, *InOutPartCursor)
+        : 0;
+    const int EndSlot = InOutPartCursor
+        ? (std::min)(SlotsToCommit, StartSlot + 1)
+        : SlotsToCommit;
+    for (int i = StartSlot; i < EndSlot; i++)
+    {
+        auto Part = Parts[i];
+        if (!Part && !bCommitEmptyModernSlots)
+            continue;
+        if (Part && !PlayerAIIsLiveSupportObject(Part))
+            return false;
+
+        memset(Params, 0, 0x10);
+        Params[PartOffset] = static_cast<uint8>(i);
+        auto MutablePart = const_cast<UObject*>(Part);
+        memcpy(
+            Params + ChosenPartOffset,
+            &MutablePart, sizeof(MutablePart));
+
+        if (!PlayerAIGuardedProcessEvent(
+                Pawn, Function, Params))
+        {
+            bPlayerAIServerChoosePartDisabled = true;
+            AIDebugLogger::MissingFeature(
+                "ServerChoosePartForPlayerAI",
+                "the native part commit faulted and was disabled; reflected mirrors remain authoritative");
+            return false;
+        }
+        bInvoked = true;
+        if (InOutPartCursor)
+            *InOutPartCursor = i + 1;
+    }
+    if (OutAllPartsDispatched)
+    {
+        *OutAllPartsDispatched = !InOutPartCursor ||
+            *InOutPartCursor >= SlotsToCommit;
+    }
+    return bInvoked;
+}
+
+// FortAthenaLoadout has moved its Character field across versions (0x40 in
+// 10.40 and 0x48 in current layouts). Resolve both the owner property and the
+// inner pointer from live reflection so the same bot path works without an
+// offset table for every supported build.
+static bool PlayerAIWriteLoadoutCharacter(
+    UObject* Owner,
+    const char* PropertyName,
+    const wchar_t* DirtyPropertyName,
+    UAthenaCharacterItemDefinition* Character,
+    uint8** OutLoadoutData = nullptr,
+    uint32* OutLoadoutSize = nullptr,
+    const UStruct** OutLoadoutStruct = nullptr,
+    uint32* OutCharacterOffset = nullptr,
+    bool bWriteCharacter = true,
+    bool bMarkDirty = true)
+{
+    if (OutLoadoutData)
+        *OutLoadoutData = nullptr;
+    if (OutLoadoutSize)
+        *OutLoadoutSize = 0;
+    if (OutLoadoutStruct)
+        *OutLoadoutStruct = nullptr;
+    if (OutCharacterOffset)
+        *OutCharacterOffset = 0;
+
+    if (!Owner || !Owner->Class || !PropertyName ||
+        !DirtyPropertyName ||
+        Offsets::ElementSize < sizeof(int32))
+    {
+        return false;
+    }
+
+    auto OuterProperty = Owner->GetProperty(
+        PropertyName, 0x100000);
+    const UStruct* LoadoutStruct =
+        PlayerAIIsLiveSupportObject(
+            reinterpret_cast<const UObject*>(
+                PlayerAIFortAthenaLoadoutStructCache))
+        ? PlayerAIFortAthenaLoadoutStructCache
+        : nullptr;
+
+    if (!LoadoutStruct && Offsets::StaticFindObject)
+    {
+        LoadoutStruct = reinterpret_cast<const UStruct*>(
+            SDK::StaticFindObject(
+                L"/Script/FortniteGame.FortAthenaLoadout",
+                UObject::StaticClass()));
+    }
+
+    if (!PlayerAIIsLiveSupportObject(
+            reinterpret_cast<const UObject*>(LoadoutStruct)))
+    {
+        LoadoutStruct = FindStruct("FortAthenaLoadout");
+    }
+    if (PlayerAIIsLiveSupportObject(
+            reinterpret_cast<const UObject*>(LoadoutStruct)))
+    {
+        PlayerAIFortAthenaLoadoutStructCache = LoadoutStruct;
+    }
+
+    auto LoadoutStructObject =
+        reinterpret_cast<const UObject*>(LoadoutStruct);
+    if (!PlayerAIIsLiveSupportObject(LoadoutStructObject) ||
+        !LoadoutStructObject->Class ||
+        LoadoutStructObject->Class->Name.ToUtf8() !=
+            "ScriptStruct")
+    {
+        return false;
+    }
+
+    auto CharacterProperty = LoadoutStruct
+        ? LoadoutStruct->GetProperty("Character", 0x10000)
+        : nullptr;
+    if (!OuterProperty || !CharacterProperty)
+        return false;
+
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(
+            OuterProperty, RequiredMetadataBytes) ||
+        !SDK::MemReadable(
+            CharacterProperty, RequiredMetadataBytes))
+    {
+        return false;
+    }
+
+    const int32 OuterOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            OuterProperty, Offsets::Offset_Internal)));
+    const uint32 OuterSize = GetFromOffset<uint32>(
+        OuterProperty, Offsets::ElementSize);
+    const int32 OuterArrayDimension = GetFromOffset<int32>(
+        OuterProperty,
+        Offsets::ElementSize - sizeof(int32));
+    const int32 CharacterOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            CharacterProperty, Offsets::Offset_Internal)));
+    const uint32 CharacterSize = GetFromOffset<uint32>(
+        CharacterProperty, Offsets::ElementSize);
+    const int32 CharacterArrayDimension =
+        GetFromOffset<int32>(
+            CharacterProperty,
+            Offsets::ElementSize - sizeof(int32));
+    const int32 LoadoutStructSize =
+        LoadoutStruct->GetPropertiesSize();
+    const int32 OwnerSize = Owner->Class->GetPropertiesSize();
+
+    if (OuterOffset < 0 || CharacterOffset < 0 ||
+        OuterArrayDimension != 1 ||
+        CharacterArrayDimension != 1 ||
+        CharacterSize != sizeof(UObject*) ||
+        LoadoutStructSize <= CharacterOffset ||
+        sizeof(UObject*) > static_cast<size_t>(
+            LoadoutStructSize - CharacterOffset) ||
+        OuterSize < static_cast<uint32>(CharacterOffset) ||
+        sizeof(UObject*) > static_cast<size_t>(
+            OuterSize - CharacterOffset) ||
+        OwnerSize <= OuterOffset ||
+        OuterSize > static_cast<uint32>(
+            OwnerSize - OuterOffset))
+    {
+        return false;
+    }
+
+    auto LoadoutData = reinterpret_cast<uint8*>(Owner) +
+        OuterOffset;
+    auto Target = reinterpret_cast<UObject**>(
+        LoadoutData + CharacterOffset);
+    if (!SDK::MemReadable(Target, sizeof(UObject*)))
+        return false;
+
+    if (bWriteCharacter)
+    {
+        *Target = Character;
+        PlayerAIWriteStructBool(
+            LoadoutData, LoadoutStruct, OuterSize,
+            "bIsDefaultCharacter", Character == nullptr);
+        PlayerAIWriteStructBool(
+            LoadoutData, LoadoutStruct, OuterSize,
+            "bForceUpdateVariants", true);
+        if (bMarkDirty)
+        {
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                Owner, DirtyPropertyName);
+        }
+    }
+    if (OutLoadoutData)
+        *OutLoadoutData = LoadoutData;
+    if (OutLoadoutSize)
+        *OutLoadoutSize = OuterSize;
+    if (OutLoadoutStruct)
+        *OutLoadoutStruct = LoadoutStruct;
+    if (OutCharacterOffset)
+        *OutCharacterOffset =
+            static_cast<uint32>(CharacterOffset);
+    return true;
+}
+
+struct FPlayerAICharacterLoadoutSnapshot
+{
+    TWeakObjectPtr<UObject> Owner;
+    const char* PropertyName = nullptr;
+    const wchar_t* DirtyPropertyName = nullptr;
+    TWeakObjectPtr<UObject> Character;
+    bool bHadCharacter = false;
+    bool bIsDefaultCharacter = false;
+    bool bForceUpdateVariants = false;
+    bool bHasIsDefaultCharacter = false;
+    bool bHasForceUpdateVariants = false;
+    bool bValid = false;
+};
+
+static FPlayerAICharacterLoadoutSnapshot
+PlayerAICaptureCharacterLoadout(
+    UObject* Owner,
+    const char* PropertyName,
+    const wchar_t* DirtyPropertyName)
+{
+    FPlayerAICharacterLoadoutSnapshot Snapshot;
+    Snapshot.Owner = TWeakObjectPtr<UObject>(Owner);
+    Snapshot.PropertyName = PropertyName;
+    Snapshot.DirtyPropertyName = DirtyPropertyName;
+
+    uint8* LoadoutData = nullptr;
+    uint32 LoadoutSize = 0;
+    const UStruct* LoadoutStruct = nullptr;
+    uint32 CharacterOffset = 0;
+    if (!PlayerAIWriteLoadoutCharacter(
+            Owner, PropertyName, DirtyPropertyName, nullptr,
+            &LoadoutData, &LoadoutSize,
+            &LoadoutStruct, &CharacterOffset, false) ||
+        !LoadoutData || CharacterOffset > LoadoutSize ||
+        sizeof(UObject*) > LoadoutSize - CharacterOffset)
+    {
+        return Snapshot;
+    }
+
+    auto CharacterSlot = reinterpret_cast<UObject**>(
+        LoadoutData + CharacterOffset);
+    if (!SDK::MemReadable(CharacterSlot, sizeof(UObject*)))
+        return Snapshot;
+
+    auto Character = PlayerAIValidateCharacterDefinition(
+        *CharacterSlot);
+    if (*CharacterSlot && !Character)
+        return Snapshot;
+
+    Snapshot.Character = TWeakObjectPtr<UObject>(Character);
+    Snapshot.bHadCharacter = Character != nullptr;
+    Snapshot.bHasIsDefaultCharacter =
+        PlayerAIReadStructBool(
+            LoadoutData, LoadoutStruct, LoadoutSize,
+            "bIsDefaultCharacter",
+            Snapshot.bIsDefaultCharacter);
+    Snapshot.bHasForceUpdateVariants =
+        PlayerAIReadStructBool(
+            LoadoutData, LoadoutStruct, LoadoutSize,
+            "bForceUpdateVariants",
+            Snapshot.bForceUpdateVariants);
+    Snapshot.bValid = true;
+    return Snapshot;
+}
+
+static void PlayerAIRestoreCharacterLoadout(
+    const FPlayerAICharacterLoadoutSnapshot& Snapshot)
+{
+    auto Owner = Snapshot.Owner.Get();
+    auto Character = PlayerAIValidateCharacterDefinition(
+        Snapshot.Character.Get());
+    if (!Snapshot.bValid ||
+        !PlayerAIIsLiveSupportObject(Owner) ||
+        (Snapshot.bHadCharacter && !Character))
+    {
+        return;
+    }
+
+    uint8* LoadoutData = nullptr;
+    uint32 LoadoutSize = 0;
+    const UStruct* LoadoutStruct = nullptr;
+    if (!PlayerAIWriteLoadoutCharacter(
+        Owner,
+        Snapshot.PropertyName,
+        Snapshot.DirtyPropertyName,
+        Character,
+        &LoadoutData, &LoadoutSize,
+        &LoadoutStruct, nullptr, true))
+    {
+        return;
+    }
+
+    if (Snapshot.bHasIsDefaultCharacter)
+    {
+        PlayerAIWriteStructBool(
+            LoadoutData, LoadoutStruct, LoadoutSize,
+            "bIsDefaultCharacter",
+            Snapshot.bIsDefaultCharacter);
+    }
+    if (Snapshot.bHasForceUpdateVariants)
+    {
+        PlayerAIWriteStructBool(
+            LoadoutData, LoadoutStruct, LoadoutSize,
+            "bForceUpdateVariants",
+            Snapshot.bForceUpdateVariants);
+    }
+    VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+        Owner, Snapshot.DirtyPropertyName);
+}
+
+struct FPlayerAIReflectedBoolSnapshot
+{
+    TWeakObjectPtr<UObject> Owner;
+    const char* PropertyName = nullptr;
+    const wchar_t* DirtyPropertyName = nullptr;
+    bool Value = false;
+    bool bValid = false;
+};
+
+static FPlayerAIReflectedBoolSnapshot
+PlayerAICaptureReflectedBool(
+    UObject* Owner,
+    const char* PropertyName,
+    const wchar_t* DirtyPropertyName)
+{
+    FPlayerAIReflectedBoolSnapshot Snapshot;
+    Snapshot.Owner = TWeakObjectPtr<UObject>(Owner);
+    Snapshot.PropertyName = PropertyName;
+    Snapshot.DirtyPropertyName = DirtyPropertyName;
+    Snapshot.bValid = PlayerAITryReadReflectedBool(
+        Owner, PropertyName, Snapshot.Value);
+    return Snapshot;
+}
+
+static void PlayerAIRestoreReflectedBool(
+    const FPlayerAIReflectedBoolSnapshot& Snapshot)
+{
+    auto Owner = Snapshot.Owner.Get();
+    if (!Snapshot.bValid ||
+        !PlayerAIIsLiveSupportObject(Owner) ||
+        !PlayerAISetReflectedReadyBool(
+            Owner,
+            Snapshot.PropertyName,
+            Snapshot.Value))
+    {
+        return;
+    }
+
+    if (Snapshot.DirtyPropertyName)
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            Owner,
+            Snapshot.DirtyPropertyName);
     }
 }
 
-// Shared cosmetics finish: replicate the parts and run the native
-// customization polish (fault guarded, disabled after the first fault).
-static void PlayerAIFinishCosmetics(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn)
+struct FPlayerAIEnumByteSnapshot
 {
-    const char* Notifications[] =
+    uint32 Offset = (uint32)-1;
+    uint8 Value = 0;
+    const wchar_t* DirtyProperty = nullptr;
+    bool bValid = false;
+};
+
+static FPlayerAIEnumByteSnapshot PlayerAICaptureEnumByte(
+    UObject* Owner,
+    const char* PropertyName,
+    const wchar_t* DirtyProperty)
+{
+    FPlayerAIEnumByteSnapshot Snapshot;
+    Snapshot.DirtyProperty = DirtyProperty;
+    Snapshot.bValid = PlayerAITryReadEnumByte(
+        Owner, PropertyName, Snapshot.Value, &Snapshot.Offset);
+    return Snapshot;
+}
+
+static void PlayerAIRestoreEnumByte(
+    UObject* Owner,
+    const FPlayerAIEnumByteSnapshot& Snapshot)
+{
+    if (!Snapshot.bValid ||
+        !PlayerAIIsLiveSupportObject(Owner) ||
+        !Owner->Class ||
+        Snapshot.Offset >= static_cast<uint32>(
+            Owner->Class->GetPropertiesSize()))
+    {
+        return;
+    }
+
+    GetFromOffset<uint8>(Owner, Snapshot.Offset) = Snapshot.Value;
+    if (Snapshot.DirtyProperty)
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            Owner, Snapshot.DirtyProperty);
+    }
+}
+
+struct FPlayerAICosmeticMetadataSnapshot
+{
+    TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
+    TWeakObjectPtr<UObject> HeroType;
+    bool bHadHeroTypeProperty = false;
+    bool bHadHeroTypeValue = false;
+    FPlayerAIEnumByteSnapshot ReplicatedGender;
+    FPlayerAIEnumByteSnapshot LocalGender;
+    FPlayerAIEnumByteSnapshot ReplicatedBodyType;
+    FPlayerAIEnumByteSnapshot LocalBodyType;
+};
+
+static void PlayerAIRestoreCosmeticMetadata(
+    const FPlayerAICosmeticMetadataSnapshot& Snapshot)
+{
+    auto PlayerState = Snapshot.PlayerState.Get();
+    if (!PlayerAIIsLiveSupportObject(PlayerState))
+        return;
+
+    if (Snapshot.bHadHeroTypeProperty)
+    {
+        PlayerAIWriteHeroType(
+            PlayerState, Snapshot.HeroType.Get());
+    }
+    PlayerAIRestoreEnumByte(
+        PlayerState, Snapshot.ReplicatedGender);
+    PlayerAIRestoreEnumByte(
+        PlayerState, Snapshot.LocalGender);
+    PlayerAIRestoreEnumByte(
+        PlayerState, Snapshot.ReplicatedBodyType);
+    PlayerAIRestoreEnumByte(
+        PlayerState, Snapshot.LocalBodyType);
+    PlayerState->ForceNetUpdate();
+}
+
+enum class EPlayerAICheatBotVisualCommitPhase : uint8
+{
+    AwaitNativeRefresh,
+    DispatchExactParts,
+    AwaitExactParts,
+};
+
+struct FPlayerAICharacterPartStoreSnapshot
+{
+    TWeakObjectPtr<UObject>
+        Parts[PlayerAICharacterPartSlotCount];
+    uint8 NonNullMask = 0;
+    int32 SlotCount = 0;
+    bool bPresent = false;
+};
+
+struct FPlayerAICharacterPartsSnapshot
+{
+    FPlayerAICharacterPartStoreSnapshot Pawn;
+    FPlayerAICharacterPartStoreSnapshot Local;
+    FPlayerAICharacterPartStoreSnapshot CharacterData;
+    FPlayerAICharacterPartStoreSnapshot CharacterParts;
+    bool bCharacterPartsIsStruct = false;
+    bool bValid = false;
+};
+
+static bool PlayerAICaptureCharacterPartStore(
+    UObject** Source,
+    int32 SourceSlotCount,
+    FPlayerAICharacterPartStoreSnapshot& Snapshot)
+{
+    if (!Source ||
+        SourceSlotCount < PlayerAILegacyCharacterPartSlotCount ||
+        SourceSlotCount > 16)
+    {
+        return false;
+    }
+
+    auto PartClass = UCustomCharacterPart::StaticClass();
+    if (!PlayerAIIsLiveSupportObject(PartClass))
+        return false;
+
+    Snapshot.SlotCount = (std::min)(
+        SourceSlotCount, PlayerAICharacterPartSlotCount);
+    Snapshot.bPresent = true;
+    for (int32 Index = 0; Index < Snapshot.SlotCount; Index++)
+    {
+        auto PartObject = Source[Index];
+        if (!PartObject)
+            continue;
+        if (!PlayerAIIsLiveSupportObject(PartObject) ||
+            !PartObject->IsA(PartClass))
+        {
+            return false;
+        }
+
+        auto Part = reinterpret_cast<UCustomCharacterPart*>(
+            PartObject);
+        if (!Part->HasCharacterPartType() ||
+            Part->CharacterPartType != Index)
+        {
+            return false;
+        }
+
+        Snapshot.Parts[Index] =
+            TWeakObjectPtr<UObject>(PartObject);
+        Snapshot.NonNullMask |= static_cast<uint8>(1u << Index);
+    }
+    return true;
+}
+
+static FPlayerAICharacterPartsSnapshot
+PlayerAICaptureCharacterParts(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn)
+{
+    FPlayerAICharacterPartsSnapshot Snapshot;
+    if (!PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportActor(Pawn))
+    {
+        return Snapshot;
+    }
+
+    UObject** Source = nullptr;
+    int32 SourceSlotCount = 0;
+    if (PlayerAIResolveFixedCharacterPartArray(
+            Pawn, "CharacterParts", Source,
+            &SourceSlotCount) &&
+        !PlayerAICaptureCharacterPartStore(
+            Source, SourceSlotCount, Snapshot.Pawn))
+    {
+        return FPlayerAICharacterPartsSnapshot{};
+    }
+
+    Source = nullptr;
+    SourceSlotCount = 0;
+    if (PlayerAIResolveFixedCharacterPartArray(
+            PlayerState, "LocalCharacterParts", Source,
+            &SourceSlotCount) &&
+        !PlayerAICaptureCharacterPartStore(
+            Source, SourceSlotCount, Snapshot.Local))
+    {
+        return FPlayerAICharacterPartsSnapshot{};
+    }
+
+    uint8* StructData = nullptr;
+    const UStruct* PartsStruct = nullptr;
+    uint32 StructStorageSize = 0;
+    Source = nullptr;
+    SourceSlotCount = 0;
+    if (PlayerAIResolveStructCharacterPartArray(
+            PlayerState, "CharacterData",
+            "CustomCharacterData",
+            L"/Script/FortniteGame.CustomCharacterData",
+            Source, &StructData, &PartsStruct,
+            &StructStorageSize, &SourceSlotCount) &&
+        !PlayerAICaptureCharacterPartStore(
+            Source, SourceSlotCount, Snapshot.CharacterData))
+    {
+        return FPlayerAICharacterPartsSnapshot{};
+    }
+
+    Source = nullptr;
+    SourceSlotCount = 0;
+    if (PlayerAIResolveFixedCharacterPartArray(
+            PlayerState, "CharacterParts", Source,
+            &SourceSlotCount))
+    {
+        if (!PlayerAICaptureCharacterPartStore(
+                Source, SourceSlotCount,
+                Snapshot.CharacterParts))
+        {
+            return FPlayerAICharacterPartsSnapshot{};
+        }
+    }
+    else
+    {
+        StructData = nullptr;
+        PartsStruct = nullptr;
+        StructStorageSize = 0;
+        if (PlayerAIResolveStructCharacterPartArray(
+                PlayerState, "CharacterParts",
+                "CustomCharacterParts",
+                L"/Script/FortniteGame.CustomCharacterParts",
+                Source, &StructData, &PartsStruct,
+                &StructStorageSize, &SourceSlotCount))
+        {
+            if (!PlayerAICaptureCharacterPartStore(
+                    Source, SourceSlotCount,
+                    Snapshot.CharacterParts))
+            {
+                return FPlayerAICharacterPartsSnapshot{};
+            }
+            Snapshot.bCharacterPartsIsStruct = true;
+        }
+    }
+
+    // Staging can only mutate stores which reflection resolved above. At
+    // least one authoritative PlayerState source must be captured so a failed
+    // native rebuild can never leave the selected CID behind with restored
+    // default metadata. Empty stores are valid snapshots for newly spawned
+    // bots and are restored exactly as empty rather than silently skipped.
+    Snapshot.bValid = Snapshot.CharacterData.bPresent ||
+        Snapshot.CharacterParts.bPresent;
+    return Snapshot;
+}
+
+static bool PlayerAIResolveCharacterPartStoreSnapshot(
+    const FPlayerAICharacterPartStoreSnapshot& Snapshot,
+    const UObject* OutParts[PlayerAICharacterPartSlotCount])
+{
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        OutParts[Index] = nullptr;
+        if (!(Snapshot.NonNullMask &
+              static_cast<uint8>(1u << Index)))
+        {
+            continue;
+        }
+
+        OutParts[Index] = Snapshot.Parts[Index].Get();
+        if (!PlayerAIIsLiveSupportObject(OutParts[Index]))
+            return false;
+    }
+    return true;
+}
+
+static bool PlayerAIRestoreCharacterParts(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    const FPlayerAICharacterPartsSnapshot& Snapshot)
+{
+    if (!Snapshot.bValid ||
+        !PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportActor(Pawn))
+    {
+        return false;
+    }
+
+    UObject** PawnTarget = nullptr;
+    int32 PawnTargetCount = 0;
+    UObject** LocalTarget = nullptr;
+    int32 LocalTargetCount = 0;
+    UObject** CharacterDataTarget = nullptr;
+    int32 CharacterDataTargetCount = 0;
+    uint8* CharacterData = nullptr;
+    const UStruct* CharacterDataStruct = nullptr;
+    uint32 CharacterDataSize = 0;
+    UObject** CharacterPartsTarget = nullptr;
+    int32 CharacterPartsTargetCount = 0;
+    uint8* CharacterPartsData = nullptr;
+    const UStruct* CharacterPartsStruct = nullptr;
+    uint32 CharacterPartsDataSize = 0;
+
+    // Resolve every destination before changing any of them. Reflection is
+    // stable for a live class, but this preflight keeps rollback all-or-none
+    // if a pawn is concurrently leaving its world lifecycle.
+    if (Snapshot.Pawn.bPresent &&
+        !PlayerAIResolveFixedCharacterPartArray(
+            Pawn, "CharacterParts", PawnTarget,
+            &PawnTargetCount))
+    {
+        return false;
+    }
+    if (Snapshot.Local.bPresent &&
+        !PlayerAIResolveFixedCharacterPartArray(
+            PlayerState, "LocalCharacterParts", LocalTarget,
+            &LocalTargetCount))
+    {
+        return false;
+    }
+    if (Snapshot.CharacterData.bPresent &&
+        !PlayerAIResolveStructCharacterPartArray(
+            PlayerState, "CharacterData",
+            "CustomCharacterData",
+            L"/Script/FortniteGame.CustomCharacterData",
+            CharacterDataTarget, &CharacterData,
+            &CharacterDataStruct, &CharacterDataSize,
+            &CharacterDataTargetCount))
+    {
+        return false;
+    }
+    if (Snapshot.CharacterParts.bPresent)
+    {
+        const bool bResolvedCharacterParts =
+            Snapshot.bCharacterPartsIsStruct
+            ? PlayerAIResolveStructCharacterPartArray(
+                PlayerState, "CharacterParts",
+                "CustomCharacterParts",
+                L"/Script/FortniteGame.CustomCharacterParts",
+                CharacterPartsTarget, &CharacterPartsData,
+                &CharacterPartsStruct,
+                &CharacterPartsDataSize,
+                &CharacterPartsTargetCount)
+            : PlayerAIResolveFixedCharacterPartArray(
+                PlayerState, "CharacterParts",
+                CharacterPartsTarget,
+                &CharacterPartsTargetCount);
+        if (!bResolvedCharacterParts)
+            return false;
+    }
+
+    const UObject* PawnParts[PlayerAICharacterPartSlotCount]{};
+    const UObject* LocalParts[PlayerAICharacterPartSlotCount]{};
+    const UObject* CharacterDataParts[
+        PlayerAICharacterPartSlotCount]{};
+    const UObject* CharacterParts[
+        PlayerAICharacterPartSlotCount]{};
+    if ((Snapshot.Pawn.bPresent &&
+         !PlayerAIResolveCharacterPartStoreSnapshot(
+             Snapshot.Pawn, PawnParts)) ||
+        (Snapshot.Local.bPresent &&
+         !PlayerAIResolveCharacterPartStoreSnapshot(
+             Snapshot.Local, LocalParts)) ||
+        (Snapshot.CharacterData.bPresent &&
+         !PlayerAIResolveCharacterPartStoreSnapshot(
+             Snapshot.CharacterData, CharacterDataParts)) ||
+        (Snapshot.CharacterParts.bPresent &&
+         !PlayerAIResolveCharacterPartStoreSnapshot(
+             Snapshot.CharacterParts, CharacterParts)))
+    {
+        return false;
+    }
+
+    if (Snapshot.CharacterData.bPresent)
+    {
+        PlayerAIWriteCharacterPartArray(
+            CharacterDataTarget, CharacterDataTargetCount,
+            CharacterDataParts);
+        PlayerAIInitializeCharacterPartReplicationState(
+            CharacterData, CharacterDataStruct,
+            CharacterDataSize, CharacterDataTargetCount,
+            CharacterDataParts);
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"CharacterData");
+    }
+    if (Snapshot.CharacterParts.bPresent)
+    {
+        PlayerAIWriteCharacterPartArray(
+            CharacterPartsTarget, CharacterPartsTargetCount,
+            CharacterParts);
+        if (Snapshot.bCharacterPartsIsStruct)
+        {
+            PlayerAIInitializeCharacterPartReplicationState(
+                CharacterPartsData, CharacterPartsStruct,
+                CharacterPartsDataSize,
+                CharacterPartsTargetCount, CharacterParts);
+        }
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"CharacterParts");
+    }
+    if (Snapshot.Local.bPresent)
+    {
+        PlayerAIWriteCharacterPartArray(
+            LocalTarget, LocalTargetCount, LocalParts);
+    }
+    if (Snapshot.Pawn.bPresent)
+    {
+        PlayerAIWriteCharacterPartArray(
+            PawnTarget, PawnTargetCount, PawnParts);
+    }
+
+    // Identity/loadout snapshots are restored by the caller before it fires
+    // OnCharacterPartsReinitialized. Returning success here lets that caller
+    // avoid a split rollback if any weak prior part expired during GC.
+    return true;
+}
+
+struct FPlayerAIPendingCheatBotVisualCommit
+{
+    TWeakObjectPtr<UWorld> World;
+    TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+    TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
+    TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+    TWeakObjectPtr<UObject> Character;
+    TWeakObjectPtr<UObject>
+        Parts[PlayerAICharacterPartSlotCount];
+    uint8 NonNullPartMask = 0;
+    FPlayerAICharacterLoadoutSnapshot PreviousLoadouts[6];
+    FPlayerAIReflectedBoolSnapshot PreviousHeadAccessoryPreference;
+    FPlayerAIReflectedBoolSnapshot PreviousBackpackPreference;
+    FPlayerAICosmeticMetadataSnapshot PreviousMetadata;
+    FPlayerAICharacterPartsSnapshot PreviousParts;
+    ULONGLONG QueuedAt = 0;
+    ULONGLONG NativeRefreshStartedAt = 0;
+    ULONGLONG RetryAt = 0;
+    ULONGLONG MirrorMatchedAt = 0;
+    int ExactPartCursor = 0;
+    bool bNativeLoadoutSetterAttempted = false;
+    bool bApplyCosmeticsRejected = false;
+    EPlayerAICheatBotVisualCommitPhase Phase =
+        EPlayerAICheatBotVisualCommitPhase::AwaitNativeRefresh;
+};
+
+static std::unordered_map<
+    AFortPlayerPawnAthena*,
+    FPlayerAIPendingCheatBotVisualCommit>
+    PendingCheatBotVisualCommits;
+// Queue schedulers use this to distinguish a native mesh-rebuild frame from a
+// cheap status poll, so one slow bot cannot starve every other cosmetic record.
+static bool bPlayerAILastCheatBotVisualCallPerformedNativeWork = false;
+
+static bool PlayerAIRepublishPendingCheatBotVisualCommit(
+    FPlayerAIPendingCheatBotVisualCommit& Pending);
+
+static bool PlayerAIIsCheatBotVisualCommitPending(
+    AFortPlayerPawnAthena* Pawn,
+    UAthenaCharacterItemDefinition* Character)
+{
+    auto Existing = PendingCheatBotVisualCommits.find(Pawn);
+    return Existing != PendingCheatBotVisualCommits.end() &&
+        Existing->second.Pawn.Get() == Pawn &&
+        Existing->second.Character.Get() == Character;
+}
+
+static bool PlayerAICanRestorePendingCheatBotIdentity(
+    const FPlayerAIPendingCheatBotVisualCommit& Pending)
+{
+    auto PlayerState = Pending.PlayerState.Get();
+    auto Pawn = Pending.Pawn.Get();
+    if (!PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportActor(Pawn))
+    {
+        return false;
+    }
+
+    for (const auto& Loadout : Pending.PreviousLoadouts)
+    {
+        if (!Loadout.bValid)
+            continue;
+        if (!PlayerAIIsLiveSupportObject(Loadout.Owner.Get()))
+            return false;
+        if (Loadout.bHadCharacter &&
+            !PlayerAIValidateCharacterDefinition(
+                Loadout.Character.Get()))
+        {
+            return false;
+        }
+    }
+
+    const auto& Metadata = Pending.PreviousMetadata;
+    if (Metadata.PlayerState.Get() != PlayerState ||
+        (Metadata.bHadHeroTypeValue &&
+         !PlayerAIIsLiveSupportObject(Metadata.HeroType.Get())))
+    {
+        return false;
+    }
+    if ((Pending.PreviousHeadAccessoryPreference.bValid &&
+         !PlayerAIIsLiveSupportObject(
+             Pending.PreviousHeadAccessoryPreference.Owner.Get())) ||
+        (Pending.PreviousBackpackPreference.bValid &&
+         !PlayerAIIsLiveSupportObject(
+             Pending.PreviousBackpackPreference.Owner.Get())))
+    {
+        return false;
+    }
+    return true;
+}
+
+enum class EPlayerAICosmeticRecoveryResult : uint8
+{
+    PriorRestored,
+    TargetRetained,
+    Failed,
+};
+
+static EPlayerAICosmeticRecoveryResult
+PlayerAIRestorePendingCheatBotVisualCommit(
+    FPlayerAIPendingCheatBotVisualCommit& Pending)
+{
+    auto Pawn = Pending.Pawn.Get();
+    EPlayerAICosmeticRecoveryResult Recovery =
+        EPlayerAICosmeticRecoveryResult::Failed;
+    const bool bRestoredPriorParts =
+        PlayerAICanRestorePendingCheatBotIdentity(Pending) &&
+        PlayerAIRestoreCharacterParts(
+            Pending.PlayerState.Get(), Pending.Pawn.Get(),
+            Pending.PreviousParts);
+    if (bRestoredPriorParts)
+    {
+        Recovery = EPlayerAICosmeticRecoveryResult::PriorRestored;
+        for (const auto& Loadout : Pending.PreviousLoadouts)
+            PlayerAIRestoreCharacterLoadout(Loadout);
+        // Restore identity inputs before firing the part reinitializer. Older
+        // renderers consult HeroType/body metadata and accessory preferences
+        // while rebuilding their components.
+        PlayerAIRestoreCosmeticMetadata(
+            Pending.PreviousMetadata);
+        PlayerAIRestoreReflectedBool(
+            Pending.PreviousHeadAccessoryPreference);
+        PlayerAIRestoreReflectedBool(
+            Pending.PreviousBackpackPreference);
+        if (Pawn)
+        {
+            if (auto Reinitialized = Pawn->GetFunction(
+                    "OnCharacterPartsReinitialized"))
+            {
+                VersionFeatureAdapter::SafeCallNoArgs(
+                    Pawn, Reinitialized);
+            }
+        }
+    }
+    else
+    {
+        // Native customization can replace the final reflected references to
+        // the old parts before a GC pass. If a weak prior object expired, do
+        // not restore only loadout/metadata and recreate a map-only/default-
+        // body split. Keep the already staged selected CID and publish all of
+        // its mirrors as one atomic fallback instead.
+        const bool bRetainedSelectedState =
+            PlayerAIRepublishPendingCheatBotVisualCommit(Pending);
+        if (bRetainedSelectedState)
+        {
+            Recovery =
+                EPlayerAICosmeticRecoveryResult::TargetRetained;
+        }
+        AIDebugLogger::MissingFeature(
+            "CheatBotCosmeticRollbackExpired",
+            bRetainedSelectedState
+                ? "a prior outfit object expired during the visual transaction; the selected CID was retained consistently"
+                : "a prior outfit object expired and neither cosmetic state could be republished safely");
+    }
+
+    // OnCharacterPartsReinitialized may finish asynchronously. Keep spawned-
+    // bot equipment blocked through a short quiet period so a late rollback
+    // cannot detach a harvesting-tool actor after it has been equipped.
+    auto World = Pending.World.Get();
+    if (Recovery != EPlayerAICosmeticRecoveryResult::Failed &&
+        Pawn && World && World == UWorld::GetWorld() &&
+        PlayerAIIsLiveSupportActor(Pawn))
+    {
+        FPlayerAIBotSkinSettle Settle{};
+        Settle.World = TWeakObjectPtr<UWorld>(World);
+        Settle.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+        Settle.Until = GetTickCount64() + 3000ULL;
+        PendingBotSkinSettles[Pawn] = Settle;
+    }
+
+    if (auto PlayerState = Pending.PlayerState.Get())
+        PlayerState->ForceNetUpdate();
+    if (Pawn)
+        Pawn->ForceNetUpdate();
+    if (auto Controller = Pending.Controller.Get())
+        Controller->ForceNetUpdate();
+    return Recovery;
+}
+
+static void PlayerAICancelPendingCheatBotVisualCommit(
+    AFortPlayerPawnAthena* Pawn)
+{
+    auto Existing = PendingCheatBotVisualCommits.find(Pawn);
+    if (Existing == PendingCheatBotVisualCommits.end())
+        return;
+
+    PlayerAIRestorePendingCheatBotVisualCommit(
+        Existing->second);
+    PendingCheatBotVisualCommits.erase(Existing);
+}
+
+static void PlayerAIWriteCharacterLoadout(
+    AFortPlayerPawnAthena* Pawn,
+    UAthenaCharacterItemDefinition* Character,
+    bool bWriteControllerLoadouts = true,
+    bool bMarkDirty = true)
+{
+    if (!Pawn || !Character)
+        return;
+
+    bool bWrotePawnLoadout =
+        PlayerAIWriteLoadoutCharacter(
+            Pawn, "CosmeticLoadout",
+            L"CosmeticLoadout", Character,
+            nullptr, nullptr, nullptr, nullptr,
+            true, bMarkDirty);
+    // UE5 keeps the replicated/default and currently-applied snapshots in
+    // separate FortAthenaLoadout fields. Populate every reflected layout the
+    // pawn exposes; older builds simply do not have these properties.
+    bWrotePawnLoadout |= PlayerAIWriteLoadoutCharacter(
+        Pawn, "BaseCosmeticLoadout",
+        L"BaseCosmeticLoadout", Character,
+        nullptr, nullptr, nullptr, nullptr,
+        true, bMarkDirty);
+    bWrotePawnLoadout |= PlayerAIWriteLoadoutCharacter(
+        Pawn, "AppliedCosmeticLoadout",
+        L"AppliedCosmeticLoadout", Character,
+        nullptr, nullptr, nullptr, nullptr,
+        true, bMarkDirty);
+
+    if (!bWrotePawnLoadout)
+    {
+        AIDebugLogger::MissingFeature(
+            "PawnCosmeticLoadoutForPlayerAI",
+            "CID still applies through replicated character parts");
+    }
+
+    if (!bWriteControllerLoadouts ||
+        !Pawn->HasController() || !Pawn->Controller)
+        return;
+
+    // Native Athena bot controllers inherit AAIController rather than
+    // AFortPlayerControllerAthena on 10.40/13.40, but still expose
+    // CosmeticLoadoutBC. Keep this reflection-only so both controller
+    // families receive whichever loadout properties they actually own.
+    auto Controller = Pawn->Controller;
+    if (!PlayerAIIsLiveSupportObject(Controller))
+        return;
+
+    PlayerAIWriteLoadoutCharacter(
+        Controller, "CosmeticLoadoutPC",
+        L"CosmeticLoadoutPC", Character,
+        nullptr, nullptr, nullptr, nullptr,
+        true, bMarkDirty);
+    PlayerAIWriteLoadoutCharacter(
+        Controller, "CustomizationLoadout",
+        L"CustomizationLoadout", Character,
+        nullptr, nullptr, nullptr, nullptr,
+        true, bMarkDirty);
+    PlayerAIWriteLoadoutCharacter(
+        Controller, "CosmeticLoadoutBC",
+        L"CosmeticLoadoutBC", Character,
+        nullptr, nullptr, nullptr, nullptr,
+        true, bMarkDirty);
+}
+
+static bool PlayerAIRepublishPendingCheatBotVisualCommit(
+    FPlayerAIPendingCheatBotVisualCommit& Pending)
+{
+    auto World = Pending.World.Get();
+    auto PlayerState = Pending.PlayerState.Get();
+    auto Pawn = Pending.Pawn.Get();
+    auto Controller = Pending.Controller.Get();
+    auto Character = PlayerAIValidateCharacterDefinition(
+        Pending.Character.Get());
+    auto PartClass = UCustomCharacterPart::StaticClass();
+    if (!World || World != UWorld::GetWorld() ||
+        !PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportActor(Pawn) ||
+        !PlayerAIIsLiveSupportObject(Controller) ||
+        !Character || !PlayerAIIsLiveSupportObject(PartClass) ||
+        Controller->PlayerState != PlayerState ||
+        Controller->Pawn != Pawn ||
+        (Controller->HasMyFortPawn() &&
+         Controller->MyFortPawn != Pawn) ||
+        Pawn->PlayerState != PlayerState ||
+        !Pawn->HasController() ||
+        Pawn->Controller != Controller ||
+        (Pawn->HasbActorIsBeingDestroyed() &&
+         Pawn->bActorIsBeingDestroyed) ||
+        (Pawn->HasbIsDying() && Pawn->bIsDying) ||
+        (Pawn->HasbIsDBNO() && Pawn->bIsDBNO) ||
+        !AFortPlayerControllerAthena::
+            IsCheatSpawnedBotController(Controller))
+    {
+        return false;
+    }
+
+    const uint8 RequiredMask = static_cast<uint8>((1u << 0) | (1u << 1));
+    if ((Pending.NonNullPartMask & RequiredMask) != RequiredMask)
+        return false;
+
+    const UObject* Parts[PlayerAICharacterPartSlotCount]{};
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        const bool bExpectedPart =
+            (Pending.NonNullPartMask &
+             static_cast<uint8>(1u << Index)) != 0;
+        auto PartObject = Pending.Parts[Index].Get();
+        if (!bExpectedPart)
+        {
+            if (PartObject)
+                return false;
+            continue;
+        }
+        if (!PlayerAIIsLiveSupportObject(PartObject) ||
+            !PartObject->IsA(PartClass))
+        {
+            return false;
+        }
+        auto Part = reinterpret_cast<UCustomCharacterPart*>(
+            PartObject);
+        if (!Part->HasCharacterPartType() ||
+            Part->CharacterPartType != Index)
+        {
+            return false;
+        }
+        Parts[Index] = PartObject;
+    }
+
+    PlayerAIWriteCharacterLoadout(
+        Pawn, Character, true, true);
+    if (!PlayerAIWriteReplicatedCharacterParts(
+            PlayerState, Parts))
+    {
+        return false;
+    }
+    PlayerAIWriteLocalCharacterParts(PlayerState, Parts);
+    PlayerAIWritePawnCharacterParts(Pawn, Parts);
+
+    if (Character->HasHeroDefinition() &&
+        PlayerAIIsLiveSupportObject(
+            reinterpret_cast<const UObject*>(
+                Character->HeroDefinition)))
+    {
+        PlayerAIWriteHeroType(
+            PlayerState,
+            reinterpret_cast<const UObject*>(
+                Character->HeroDefinition));
+    }
+    EFortCustomGender Gender = EFortCustomGender::Invalid;
+    if (PlayerAIResolveConcreteGender(
+            PlayerState, Character, Parts, Gender))
+    {
+        PlayerAIWriteGender(PlayerState, Gender, true);
+    }
+    uint8 BodyType = 0;
+    if (PlayerAIResolveConcreteBodyType(
+            PlayerState, Parts, BodyType))
+    {
+        PlayerAIWriteBodyType(PlayerState, BodyType, true);
+    }
+    if (PlayerAISetReflectedReadyBool(
+            PlayerState, "bShowHeroHeadAccessories", true))
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"bShowHeroHeadAccessories");
+    }
+    if (PlayerAISetReflectedReadyBool(
+            PlayerState, "bShowHeroBackpack", true))
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"bShowHeroBackpack");
+    }
+
+    if (auto Reinitialized = Pawn->GetFunction(
+            "OnCharacterPartsReinitialized"))
+    {
+        VersionFeatureAdapter::SafeCallNoArgs(
+            Pawn, Reinitialized);
+    }
+    PlayerState->FlushNetDormancy();
+    PlayerState->ForceNetUpdate();
+    Pawn->FlushNetDormancy();
+    Pawn->ForceNetUpdate();
+    Controller->FlushNetDormancy();
+    Controller->ForceNetUpdate();
+    return true;
+}
+
+// Reads an exact reflected UObject pointer without assuming a version-specific
+// class layout. This is used only to decide whether a connectionless pawn is
+// missing the CustomPRI binding normally established during possession.
+static bool PlayerAITryReadObjectProperty(
+    UObject* Owner, const char* PropertyName,
+    UObject*& OutValue,
+    UObject*** OutSlot = nullptr)
+{
+    OutValue = nullptr;
+    if (OutSlot)
+        *OutSlot = nullptr;
+    if (!Owner || !Owner->Class || !PropertyName ||
+        Offsets::ElementSize < sizeof(int32))
+    {
+        return false;
+    }
+
+    auto Property = Owner->GetProperty(PropertyName);
+    if (!Property)
+        return false;
+
+    const size_t RequiredMetadataBytes =
+        static_cast<size_t>((std::max)(
+            Offsets::Offset_Internal,
+            Offsets::ElementSize)) + sizeof(uint32);
+    if (!SDK::MemReadable(Property, RequiredMetadataBytes))
+        return false;
+
+    const int32 PropertyOffset = static_cast<int32>(
+        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            Property, Offsets::Offset_Internal)));
+    const uint32 ElementSize = GetFromOffset<uint32>(
+        Property, Offsets::ElementSize);
+    const int32 ArrayDimension = GetFromOffset<int32>(
+        Property, Offsets::ElementSize - sizeof(int32));
+    const int32 OwnerSize = Owner->Class->GetPropertiesSize();
+    if (PropertyOffset < 0 ||
+        ElementSize != sizeof(UObject*) ||
+        ArrayDimension != 1 ||
+        OwnerSize <= PropertyOffset ||
+        sizeof(UObject*) > static_cast<size_t>(
+            OwnerSize - PropertyOffset))
+    {
+        return false;
+    }
+
+    auto Slot = reinterpret_cast<UObject**>(
+        reinterpret_cast<uint8*>(Owner) + PropertyOffset);
+    if (!SDK::MemReadable(Slot, sizeof(UObject*)))
+        return false;
+
+    OutValue = *Slot;
+    if (OutSlot)
+        *OutSlot = Slot;
+    return true;
+}
+
+static bool PlayerAITryCallNoArgBool(
+    UObject* Object,
+    const char* FunctionName,
+    bool& OutValue)
+{
+    OutValue = false;
+    if (!PlayerAIIsLiveSupportObject(Object) || !FunctionName)
+        return false;
+
+    auto Function = Object->GetFunction(FunctionName);
+    if (!PlayerAIIsLiveSupportObject(Function))
+        return false;
+
+    const auto Params = Function->GetParamsNamed();
+    if (Params.Size == 0 || Params.Size > 0x100)
+        return false;
+
+    constexpr uint64 CPF_Parm = 0x80;
+    constexpr uint64 CPF_ReturnParm = 0x400;
+    const UFunction::ParamNamed* ReturnParam = nullptr;
+    for (const auto& Param : Params.NameOffsetMap)
+    {
+        if (Param.Name == "ReturnValue")
+        {
+            if (Param.ElementSize != sizeof(bool) ||
+                !(Param.PropertyFlags & CPF_Parm) ||
+                !(Param.PropertyFlags & CPF_ReturnParm) ||
+                Param.Offset >= Params.Size)
+            {
+                return false;
+            }
+            ReturnParam = &Param;
+        }
+        else if (Param.PropertyFlags & CPF_Parm)
+        {
+            return false;
+        }
+    }
+    if (!ReturnParam)
+        return false;
+
+    alignas(16) uint8 Buffer[0x100]{};
+    if (!PlayerAIGuardedProcessEvent(
+            Object, Function, Buffer))
+    {
+        return false;
+    }
+
+    OutValue = Buffer[ReturnParam->Offset] != 0;
+    return true;
+}
+
+static UObject* PlayerAITryCallNoArgObject(
+    UObject* Object,
+    const char* FunctionName,
+    const UClass* ExpectedClass,
+    bool& OutFunctionAvailable)
+{
+    OutFunctionAvailable = false;
+    if (!PlayerAIIsLiveSupportObject(Object) || !FunctionName)
+        return nullptr;
+
+    auto Function = Object->GetFunction(FunctionName);
+    if (!PlayerAIIsLiveSupportObject(Function))
+        return nullptr;
+
+    const auto Params = Function->GetParamsNamed();
+    if (Params.Size == 0 || Params.Size > 0x100)
+        return nullptr;
+
+    constexpr uint64 CPF_Parm = 0x80;
+    constexpr uint64 CPF_ReturnParm = 0x400;
+    const UFunction::ParamNamed* ReturnParam = nullptr;
+    for (const auto& Param : Params.NameOffsetMap)
+    {
+        if (Param.Name == "ReturnValue")
+        {
+            if (Param.ElementSize != sizeof(UObject*) ||
+                !(Param.PropertyFlags & CPF_Parm) ||
+                !(Param.PropertyFlags & CPF_ReturnParm) ||
+                Param.Offset > Params.Size ||
+                sizeof(UObject*) > Params.Size - Param.Offset)
+            {
+                return nullptr;
+            }
+            ReturnParam = &Param;
+        }
+        else if (Param.PropertyFlags & CPF_Parm)
+        {
+            return nullptr;
+        }
+    }
+    if (!ReturnParam)
+        return nullptr;
+
+    alignas(16) uint8 Buffer[0x100]{};
+    if (!PlayerAIGuardedProcessEvent(
+            Object, Function, Buffer))
+    {
+        return nullptr;
+    }
+
+    OutFunctionAvailable = true;
+    UObject* Result = nullptr;
+    memcpy(
+        &Result,
+        Buffer + ReturnParam->Offset,
+        sizeof(Result));
+    if (!PlayerAIIsLiveSupportObject(Result) ||
+        (ExpectedClass && !Result->IsA(ExpectedClass)))
+    {
+        return nullptr;
+    }
+    return Result;
+}
+
+static UObject* PlayerAITryGetCharacterPartMeshComponent(
+    AFortPlayerPawnAthena* Pawn,
+    uint8 PartType,
+    bool& OutFunctionAvailable)
+{
+    OutFunctionAvailable = false;
+    if (!PlayerAIIsLiveSupportActor(Pawn))
+        return nullptr;
+
+    auto Function = Pawn->GetFunction(
+        "GetSkeletalMeshForPartType");
+    if (!PlayerAIIsLiveSupportObject(Function))
+        return nullptr;
+
+    const auto Params = Function->GetParamsNamed();
+    if (Params.Size == 0 || Params.Size > 0x100)
+        return nullptr;
+
+    constexpr uint64 CPF_Parm = 0x80;
+    constexpr uint64 CPF_ReturnParm = 0x400;
+    const UFunction::ParamNamed* PartParam = nullptr;
+    const UFunction::ParamNamed* ReturnParam = nullptr;
+    for (const auto& Param : Params.NameOffsetMap)
+    {
+        if (Param.Name == "ReturnValue")
+            ReturnParam = &Param;
+        else if (Param.Name == "PartType" ||
+                 Param.Name == "CharacterPartType")
+            PartParam = &Param;
+        else if (Param.PropertyFlags & CPF_Parm)
+            return nullptr;
+    }
+
+    if (!PartParam || !ReturnParam ||
+        PartParam->ElementSize != sizeof(uint8) ||
+        ReturnParam->ElementSize != sizeof(UObject*) ||
+        !(PartParam->PropertyFlags & CPF_Parm) ||
+        (PartParam->PropertyFlags & CPF_ReturnParm) ||
+        !(ReturnParam->PropertyFlags & CPF_Parm) ||
+        !(ReturnParam->PropertyFlags & CPF_ReturnParm) ||
+        PartParam->Offset >= Params.Size ||
+        ReturnParam->Offset > Params.Size ||
+        sizeof(UObject*) > Params.Size - ReturnParam->Offset)
+    {
+        return nullptr;
+    }
+    OutFunctionAvailable = true;
+
+    alignas(16) uint8 Buffer[0x100]{};
+    Buffer[PartParam->Offset] = PartType;
+    if (!PlayerAIGuardedProcessEvent(
+            Pawn, Function, Buffer))
+    {
+        return nullptr;
+    }
+
+    UObject* Component = nullptr;
+    memcpy(
+        &Component,
+        Buffer + ReturnParam->Offset,
+        sizeof(Component));
+    return PlayerAIIsLiveSupportObject(Component)
+        ? Component
+        : nullptr;
+}
+
+enum class EPlayerAICharacterPartMeshMatch : uint8
+{
+    Unavailable,
+    Empty,
+    Matched,
+    Mismatched,
+};
+
+static EPlayerAICharacterPartMeshMatch
+PlayerAIMatchRenderedCharacterPartMesh(
+    const UObject* Part,
+    const UObject* RenderedMesh,
+    const UClass* MeshClass)
+{
+    if (!PlayerAIIsLiveSupportObject(Part) || !Part->Class ||
+        !PlayerAIIsLiveSupportObject(MeshClass))
+    {
+        return EPlayerAICharacterPartMeshMatch::Unavailable;
+    }
+
+    bool bHasAuthoredMeshIdentity = false;
+    bool bInspectedMeshSource = false;
+    bool bUnsafeMeshSource = false;
+    auto TestCandidate = [&] (const UObject* Candidate) -> bool
+        {
+            if (!PlayerAIIsLiveSupportObject(Candidate) ||
+                !Candidate->IsA(MeshClass))
+            {
+                return false;
+            }
+            bHasAuthoredMeshIdentity = true;
+            return Candidate == RenderedMesh;
+        };
+
+    bool bGetterAvailable = false;
+    auto GetterMesh = PlayerAITryCallNoArgObject(
+        const_cast<UObject*>(Part), "GetSkeletalMesh",
+        MeshClass, bGetterAvailable);
+    bInspectedMeshSource |= bGetterAvailable;
+    if (TestCandidate(GetterMesh))
+        return EPlayerAICharacterPartMeshMatch::Matched;
+
+    const char* MeshProperties[] =
+    {
+        "SkeletalMesh",
+        "SkeletalMeshOverride",
+        "SkeletalMeshAsset",
+        "Mesh",
+    };
+    for (const auto PropertyName : MeshProperties)
+    {
+        UObject* DirectMesh = nullptr;
+        const bool bDirectPropertyAvailable =
+            PlayerAITryReadObjectProperty(
+                const_cast<UObject*>(Part),
+                PropertyName, DirectMesh);
+        bInspectedMeshSource |= bDirectPropertyAvailable;
+        if (bDirectPropertyAvailable && DirectMesh &&
+            (!PlayerAIIsLiveSupportObject(DirectMesh) ||
+             !DirectMesh->IsA(MeshClass)))
+        {
+            bUnsafeMeshSource = true;
+        }
+        if (bDirectPropertyAvailable &&
+            TestCandidate(DirectMesh))
+        {
+            return EPlayerAICharacterPartMeshMatch::Matched;
+        }
+
+        auto Property = Part->GetProperty(
+            PropertyName, 0x20000000);
+        if (!Property ||
+            Offsets::ElementSize < sizeof(int32))
+        {
+            continue;
+        }
+
+        const size_t RequiredMetadataBytes =
+            static_cast<size_t>((std::max)(
+                Offsets::Offset_Internal,
+                Offsets::ElementSize)) + sizeof(uint32);
+        if (!SDK::MemReadable(
+                Property, RequiredMetadataBytes))
+        {
+            continue;
+        }
+
+        const int32 PropertyOffset = static_cast<int32>(
+            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                Property, Offsets::Offset_Internal)));
+        const uint32 PropertySize = GetFromOffset<uint32>(
+            Property, Offsets::ElementSize);
+        const int32 ArrayDimension = GetFromOffset<int32>(
+            Property,
+            Offsets::ElementSize - sizeof(int32));
+        const int32 OwnerSize = Part->Class->GetPropertiesSize();
+        if (PropertyOffset < 0 ||
+            PropertySize != FSoftObjectPtr::Size() ||
+            ArrayDimension != 1 ||
+            OwnerSize <= PropertyOffset ||
+            PropertySize > static_cast<uint32>(
+                OwnerSize - PropertyOffset))
+        {
+            continue;
+        }
+
+        auto SoftMesh = reinterpret_cast<FSoftObjectPtr*>(
+            reinterpret_cast<uint8*>(
+                const_cast<UObject*>(Part)) + PropertyOffset);
+        if (!SDK::MemReadable(SoftMesh, PropertySize))
+            continue;
+
+        bInspectedMeshSource = true;
+        const auto PathState =
+            PlayerAIGetSoftReferencePathState(*SoftMesh);
+        if (PathState == EPlayerAISoftReferencePathState::Empty)
+        {
+            continue;
+        }
+        if (PathState == EPlayerAISoftReferencePathState::Unsafe)
+        {
+            bUnsafeMeshSource = true;
+            continue;
+        }
+        bHasAuthoredMeshIdentity = true;
+        auto Resolved = PlayerAITryResolveLoadedSoftObject(
+            *SoftMesh, MeshClass);
+        if (TestCandidate(Resolved))
+            return EPlayerAICharacterPartMeshMatch::Matched;
+    }
+
+    // A few outfit pieces use a platform/LOD master list instead of the
+    // singular SkeletalMesh field. Compare against every resident authored
+    // mesh without loading any package from this polling path.
+    if (auto Property = Part->GetProperty(
+            "MasterSkeletalMeshes"))
+    {
+        const size_t RequiredMetadataBytes =
+            static_cast<size_t>((std::max)(
+                Offsets::Offset_Internal,
+                Offsets::ElementSize)) + sizeof(uint32);
+        if (Offsets::ElementSize >= sizeof(int32) &&
+            SDK::MemReadable(Property, RequiredMetadataBytes))
+        {
+            const int32 PropertyOffset = static_cast<int32>(
+                SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                    Property, Offsets::Offset_Internal)));
+            const uint32 PropertySize = GetFromOffset<uint32>(
+                Property, Offsets::ElementSize);
+            const int32 ArrayDimension = GetFromOffset<int32>(
+                Property,
+                Offsets::ElementSize - sizeof(int32));
+            const int32 OwnerSize = Part->Class->GetPropertiesSize();
+            if (PropertyOffset >= 0 &&
+                PropertySize == sizeof(TArray<FSoftObjectPtr>) &&
+                ArrayDimension == 1 &&
+                OwnerSize > PropertyOffset &&
+                PropertySize <= static_cast<uint32>(
+                    OwnerSize - PropertyOffset))
+            {
+                auto Meshes = reinterpret_cast<
+                    TArray<FSoftObjectPtr>*>(
+                        reinterpret_cast<uint8*>(
+                            const_cast<UObject*>(Part)) +
+                        PropertyOffset);
+                const int Count = Meshes->Num();
+                const uint32 Stride = FSoftObjectPtr::Size();
+                if (Count == 0 && Meshes->Max() >= 0)
+                {
+                    bInspectedMeshSource = true;
+                }
+                else if (Count > 0 && Count <= 16 &&
+                    Meshes->Max() >= Count && Meshes->Data &&
+                    Stride >= 0x10 && Stride <= 0x80 &&
+                    SDK::MemReadable(
+                        Meshes->Data,
+                        static_cast<size_t>(Count) * Stride))
+                {
+                    bInspectedMeshSource = true;
+                    for (int Index = 0; Index < Count; Index++)
+                    {
+                        auto& SoftMesh = Meshes->Get(Index, Stride);
+                        const auto PathState =
+                            PlayerAIGetSoftReferencePathState(SoftMesh);
+                        if (PathState ==
+                            EPlayerAISoftReferencePathState::Empty)
+                        {
+                            continue;
+                        }
+                        if (PathState ==
+                            EPlayerAISoftReferencePathState::Unsafe)
+                        {
+                            bUnsafeMeshSource = true;
+                            continue;
+                        }
+                        bHasAuthoredMeshIdentity = true;
+                        auto Resolved =
+                            PlayerAITryResolveLoadedSoftObject(
+                                SoftMesh, MeshClass);
+                        if (TestCandidate(Resolved))
+                        {
+                            return EPlayerAICharacterPartMeshMatch::
+                                Matched;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return bHasAuthoredMeshIdentity
+        ? EPlayerAICharacterPartMeshMatch::Mismatched
+        : (bInspectedMeshSource && !bUnsafeMeshSource
+            ? EPlayerAICharacterPartMeshMatch::Empty
+            : EPlayerAICharacterPartMeshMatch::Unavailable);
+}
+
+static const UObject* PlayerAITryReadRenderedComponentMesh(
+    UObject* Component,
+    const UClass* MeshClass)
+{
+    if (!PlayerAIIsLiveSupportObject(Component) ||
+        !PlayerAIIsLiveSupportObject(MeshClass))
+    {
+        return nullptr;
+    }
+
+    const char* GetterFunctions[] =
+    {
+        "GetSkeletalMeshAsset",
+        "GetSkinnedAsset",
+    };
+    for (const auto FunctionName : GetterFunctions)
+    {
+        bool bFunctionAvailable = false;
+        auto Mesh = PlayerAITryCallNoArgObject(
+            Component, FunctionName, MeshClass,
+            bFunctionAvailable);
+        if (Mesh)
+            return Mesh;
+    }
+
+    const char* MeshProperties[] =
+    {
+        "SkeletalMesh",
+        "SkinnedAsset",
+        "SkeletalMeshAsset",
+    };
+    for (const auto PropertyName : MeshProperties)
+    {
+        UObject* Mesh = nullptr;
+        if (PlayerAITryReadObjectProperty(
+                Component, PropertyName, Mesh) &&
+            PlayerAIIsLiveSupportObject(Mesh) &&
+            Mesh->IsA(MeshClass))
+        {
+            return Mesh;
+        }
+    }
+    return nullptr;
+}
+
+static bool PlayerAITryGetCheatBotCustomizationReadiness(
+    AFortPlayerPawnAthena* Pawn,
+    bool& OutReady)
+{
+    OutReady = false;
+    // Core readiness excludes optional hat/face pieces. All targeted modern
+    // builds expose the full transaction query; fail closed if it is absent.
+    return PlayerAITryCallNoArgBool(
+        Pawn, "IsCharacterCustomizationLoadingCompleted",
+        OutReady);
+}
+
+static bool PlayerAIHasCompletedCheatBotVisualCommit(
+    AFortPlayerPawnAthena* Pawn,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    bool bRequireNativeReadiness)
+{
+    const auto MirrorState =
+        PlayerAIGetCharacterPartMirrorState(
+            nullptr, Pawn, Parts);
+    if (bRequireNativeReadiness &&
+        MirrorState !=
+            EPlayerAICharacterPartMirrorState::Matched)
+    {
+        return false;
+    }
+
+    bool bCustomizationReady = false;
+    const bool bReadinessAvailable =
+        PlayerAITryGetCheatBotCustomizationReadiness(
+            Pawn, bCustomizationReady);
+    if (bRequireNativeReadiness &&
+        (!bReadinessAvailable || !bCustomizationReady))
+        return false;
+
+    auto MeshClass = PlayerAIResolveCachedClass(
+        PlayerAISkeletalMeshClassCache, "SkeletalMesh");
+    if (!PlayerAIIsLiveSupportObject(MeshClass))
+        return false;
+
+    bool bVerifiedHeadMesh = false;
+    bool bVerifiedBodyMesh = false;
+    bool bHeadVisibilityAvailable = false;
+    bool bHeadVisible = false;
+    const int SlotsToVerify =
+        (std::min)(PlayerAICharacterPartSlotCount, 6);
+    for (int Index = 0; Index < SlotsToVerify; Index++)
+    {
+        bool bGetterAvailable = false;
+        auto Component =
+            PlayerAITryGetCharacterPartMeshComponent(
+                Pawn, static_cast<uint8>(Index),
+                bGetterAvailable);
+        auto RenderedMesh =
+            PlayerAITryReadRenderedComponentMesh(
+                Component, MeshClass);
+
+        if (!Parts[Index])
+        {
+            if (Index < 2)
+                return false;
+
+            // Reusable optional components can remain allocated. They are a
+            // valid cleared slot only when no mesh is resident or the engine
+            // can prove that the stale component is hidden.
+            if (RenderedMesh)
+            {
+                bool bVisible = true;
+                if (!PlayerAITryCallNoArgBool(
+                        Component, "IsVisible", bVisible) ||
+                    bVisible)
+                {
+                    return false;
+                }
+            }
+            continue;
+        }
+
+        const auto MeshMatch =
+            PlayerAIMatchRenderedCharacterPartMesh(
+                Parts[Index], RenderedMesh, MeshClass);
+        if (MeshMatch ==
+            EPlayerAICharacterPartMeshMatch::Empty)
+        {
+            // Fortnite authors explicit empty UCustomCharacterPart assets for
+            // optional slots (NoBackpack, Empty_None, FaceAcc_Empty). They are
+            // complete only when the live component likewise has no mesh, or
+            // a reusable stale component is provably hidden.
+            if (Index < 2)
+                return false;
+            if (RenderedMesh)
+            {
+                bool bVisible = true;
+                if (!PlayerAITryCallNoArgBool(
+                        Component, "IsVisible", bVisible) ||
+                    bVisible)
+                {
+                    return false;
+                }
+            }
+            continue;
+        }
+        // Each authored slot must be tied to its requested target mesh. A
+        // readiness bit plus one matching body is not evidence that head/hat
+        // reconstruction completed.
+        if (MeshMatch !=
+            EPlayerAICharacterPartMeshMatch::Matched)
+        {
+            return false;
+        }
+
+        if (!bGetterAvailable || !Component || !RenderedMesh)
+            return false;
+
+        // Every exact authored component must be visible. Helmet cosmetics
+        // normally mask head sections rather than hiding the whole component;
+        // accepting any visible cap as a substitute for a hidden head is what
+        // allowed the bald/incomplete bot appearance to pass verification.
+        if (Index == 0)
+        {
+            bHeadVisibilityAvailable =
+                PlayerAITryCallNoArgBool(
+                    Component, "IsVisible", bHeadVisible);
+        }
+        else
+        {
+            bool bVisible = false;
+            if (!PlayerAITryCallNoArgBool(
+                    Component, "IsVisible", bVisible) ||
+                !bVisible)
+            {
+                return false;
+            }
+        }
+        if (Index == 0)
+            bVerifiedHeadMesh = true;
+        else if (Index == 1)
+            bVerifiedBodyMesh = true;
+    }
+
+    // Never accept replicated/map metadata or a readiness flag by itself: it
+    // can already be true for the engine default. Exact-parts fallback may
+    // outrank a stale mirror/readiness bit, but only with target-derived mesh
+    // identity from the actual pawn component.
+    return bVerifiedHeadMesh && bVerifiedBodyMesh &&
+        bHeadVisibilityAvailable &&
+        bHeadVisible &&
+        (!bRequireNativeReadiness ||
+         MirrorState == EPlayerAICharacterPartMirrorState::Matched);
+}
+
+static bool PlayerAITryRepairPawnPlayerStateBinding(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn)
+{
+    UObject* PawnComponent = nullptr;
+    UObject* PlayerStateComponent = nullptr;
+    UObject** PawnComponentSlot = nullptr;
+    if (!PlayerAITryReadObjectProperty(
+            Pawn, "HACK_CustomPRIComponent",
+            PawnComponent, &PawnComponentSlot) ||
+        PlayerAIIsLiveSupportObject(PawnComponent) ||
+        !PawnComponentSlot ||
+        !PlayerAITryReadObjectProperty(
+            PlayerState, "CustomPRIComponent",
+            PlayerStateComponent) ||
+        !PlayerAIIsLiveSupportObject(PlayerStateComponent))
+    {
+        return false;
+    }
+
+    // Both properties are UCustomPlayerComponent* in the supported layouts.
+    // This pawn field is a transient cache, not replicated state. Binding the
+    // existing PlayerState component directly avoids replaying the broad
+    // OnRep_PlayerState path and therefore avoids a second mesh/profile
+    // initialization in this cosmetic tick.
+    *PawnComponentSlot = PlayerStateComponent;
+    return true;
+}
+
+void VersionFeatureAdapter::InitializeSyntheticPawnCosmeticLifecycle(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (VersionInfo.FortniteVersion < 19.0 ||
+        VersionInfo.FortniteVersion >= 32.0 ||
+        !PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportObject(Pawn) ||
+        Pawn->PlayerState != PlayerState)
+    {
+        return;
+    }
+
+    UObject* PawnComponent = nullptr;
+    const bool bHasComponentProperty =
+        PlayerAITryReadObjectProperty(
+            Pawn, "HACK_CustomPRIComponent", PawnComponent);
+    if (bHasComponentProperty &&
+        PlayerAIIsLiveSupportObject(PawnComponent))
+    {
+        return;
+    }
+
+    // Possess assigns PlayerState directly on these synthetic controllers, so
+    // the equality guard in the spawn path used to skip the repnotify entirely.
+    // The empty controller loadout intentionally produces the engine default;
+    // the queued CID performs the sole later cosmetic rebuild.
+    if (auto OnRepPlayerState =
+            Pawn->GetFunction("OnRep_PlayerState"))
+    {
+        VersionFeatureAdapter::SafeCallNoArgs(
+            Pawn, OnRepPlayerState);
+    }
+    PlayerAITryRepairPawnPlayerStateBinding(
+        PlayerState, Pawn);
+
+    UObject* BoundComponent = nullptr;
+    if (bHasComponentProperty &&
+        (!PlayerAITryReadObjectProperty(
+             Pawn, "HACK_CustomPRIComponent", BoundComponent) ||
+         !PlayerAIIsLiveSupportObject(BoundComponent)))
+    {
+        AIDebugLogger::MissingFeature(
+            "SyntheticPawnCosmeticLifecycle",
+            "the modern pawn cosmetic component remained unavailable; exact native part selection will be used");
+    }
+}
+
+// FN19-FN31 expose the same native controller entry point used when a real
+// player selects an outfit. Calling it is materially different from writing
+// CharacterData: it initializes the controller/pawn cosmetic loadout. FN30
+// otherwise logs that
+// GetCosmeticLoadout() was used before initialization and chooses its fallback
+// body even though the requested CID already appears in replicated/map data.
+static bool PlayerAITryServerSetCosmeticLoadout(
+    AFortPlayerControllerAthena* Controller,
+    UAthenaCharacterItemDefinition* Character,
+    bool bRefreshPawn)
+{
+    if (VersionInfo.FortniteVersion < 19.0 ||
+        VersionInfo.FortniteVersion >= 32.0 ||
+        bPlayerAIServerSetCosmeticLoadoutDisabled ||
+        !PlayerAIIsLiveSupportObject(Controller) ||
+        !PlayerAIIsLiveSupportObject(Character))
+    {
+        return false;
+    }
+
+    uint8* LoadoutData = nullptr;
+    uint32 LoadoutSize = 0;
+    const UStruct* LoadoutStruct = nullptr;
+    uint32 CharacterOffset = 0;
+    struct FLoadoutSource
+    {
+        const char* Name;
+        const wchar_t* DirtyName;
+    };
+    const FLoadoutSource Sources[] =
+    {
+        { "CosmeticLoadoutBC", L"CosmeticLoadoutBC" },
+        { "CustomizationLoadout", L"CustomizationLoadout" },
+        { "CosmeticLoadoutPC", L"CosmeticLoadoutPC" },
+    };
+
+    int BestSourceScore = -1;
+    for (const auto& Source : Sources)
+    {
+        uint8* CandidateData = nullptr;
+        uint32 CandidateSize = 0;
+        const UStruct* CandidateStruct = nullptr;
+        uint32 CandidateCharacterOffset = 0;
+        if (PlayerAIWriteLoadoutCharacter(
+                Controller, Source.Name, Source.DirtyName,
+                Character, &CandidateData, &CandidateSize,
+                &CandidateStruct, &CandidateCharacterOffset,
+                false))
+        {
+            int CandidateScore = 0;
+            const char* ImportantSlots[] =
+            {
+                "Pickaxe", "Backpack", "Glider",
+                "SkyDiveContrail", "CharmOverride",
+            };
+            for (const auto PropertyName : ImportantSlots)
+            {
+                auto Property = CandidateStruct->GetProperty(
+                    PropertyName, 0x10000);
+                if (!Property ||
+                    Offsets::ElementSize < sizeof(int32))
+                {
+                    continue;
+                }
+
+                const int32 Offset = static_cast<int32>(
+                    SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                        Property, Offsets::Offset_Internal)));
+                const uint32 Size = GetFromOffset<uint32>(
+                    Property, Offsets::ElementSize);
+                if (Offset < 0 || Size != sizeof(UObject*) ||
+                    static_cast<uint32>(Offset) > CandidateSize ||
+                    sizeof(UObject*) >
+                        CandidateSize - static_cast<uint32>(Offset))
+                {
+                    continue;
+                }
+
+                UObject* Value = nullptr;
+                memcpy(
+                    &Value, CandidateData + Offset,
+                    sizeof(Value));
+                if (PlayerAIIsLiveSupportObject(Value))
+                {
+                    CandidateScore +=
+                        strcmp(PropertyName, "Pickaxe") == 0
+                        ? 100 : 1;
+                }
+            }
+
+            if (CandidateScore > BestSourceScore)
+            {
+                BestSourceScore = CandidateScore;
+                LoadoutData = CandidateData;
+                LoadoutSize = CandidateSize;
+                LoadoutStruct = CandidateStruct;
+                CharacterOffset = CandidateCharacterOffset;
+            }
+        }
+    }
+
+    auto Function = Controller->GetFunction(
+        "ServerSetCosmeticLoadout");
+    if (!LoadoutData || LoadoutSize == 0 ||
+        LoadoutSize > 0x1000 ||
+        !PlayerAIIsLiveSupportObject(Function))
+    {
+        if (LoadoutData && LoadoutSize > 0 &&
+            !PlayerAIIsLiveSupportObject(Function))
+        {
+            bPlayerAIServerSetCosmeticLoadoutDisabled = true;
+        }
+        return false;
+    }
+
+    const auto Params = Function->GetParamsNamed();
+    if (Params.Size == 0 || Params.Size > 0x1000)
+    {
+        bPlayerAIServerSetCosmeticLoadoutDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "ServerSetCosmeticLoadoutForPlayerAI",
+            "the native loadout parameter buffer was invalid; exact character parts remain authoritative");
+        return false;
+    }
+
+    const UFunction::ParamNamed* LoadoutParam = nullptr;
+    const UFunction::ParamNamed* RefreshParam = nullptr;
+    for (const auto& Param : Params.NameOffsetMap)
+    {
+        if (Param.Name == "Loadout")
+            LoadoutParam = &Param;
+        else if (Param.Name == "bRefreshPawn")
+            RefreshParam = &Param;
+    }
+
+    constexpr uint64 CPF_Parm = 0x80;
+    constexpr uint64 CPF_OutParm = 0x100;
+    constexpr uint64 CPF_ReturnParm = 0x400;
+    constexpr uint64 CPF_ReferenceParm = 0x8000000;
+    auto IsInput = [=](const UFunction::ParamNamed* Param,
+                       uint32 ExpectedSize)
+        {
+            return Param &&
+                Param->ElementSize == ExpectedSize &&
+                (Param->PropertyFlags & CPF_Parm) &&
+                !(Param->PropertyFlags &
+                    (CPF_OutParm | CPF_ReturnParm));
+        };
+    auto IsLoadoutReference = [=](
+        const UFunction::ParamNamed* Param,
+        uint32 ExpectedSize)
+        {
+            return Param &&
+                Param->ElementSize == ExpectedSize &&
+                (Param->PropertyFlags & CPF_Parm) &&
+                (Param->PropertyFlags & CPF_OutParm) &&
+                (Param->PropertyFlags & CPF_ReferenceParm) &&
+                !(Param->PropertyFlags & CPF_ReturnParm);
+        };
+    auto RangesOverlap = [](
+        uint32 FirstOffset, uint32 FirstSize,
+        uint32 SecondOffset, uint32 SecondSize)
+        {
+            return FirstOffset < SecondOffset + SecondSize &&
+                SecondOffset < FirstOffset + FirstSize;
+        };
+    const bool bValidLayout =
+        LoadoutParam && RefreshParam &&
+        Params.NameOffsetMap.size() == 2 &&
+        Function->GetPropertiesSize() == Params.Size &&
+        IsLoadoutReference(LoadoutParam, LoadoutSize) &&
+        IsInput(RefreshParam, sizeof(bool)) &&
+        CharacterOffset <= LoadoutSize &&
+        sizeof(Character) <= LoadoutSize - CharacterOffset &&
+        LoadoutParam->Offset <= Params.Size &&
+        LoadoutSize <= Params.Size - LoadoutParam->Offset &&
+        RefreshParam->Offset < Params.Size &&
+        !RangesOverlap(
+            LoadoutParam->Offset, LoadoutSize,
+            RefreshParam->Offset, sizeof(bool));
+    if (!bValidLayout)
+    {
+        bPlayerAIServerSetCosmeticLoadoutDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "ServerSetCosmeticLoadoutForPlayerAI",
+            "the reflected loadout layout did not match this build; exact character parts remain authoritative");
+        return false;
+    }
+
+    std::vector<uint8> Buffer(Params.Size, 0);
+    auto ParamLoadout = Buffer.data() + LoadoutParam->Offset;
+    // A raw copy of FortAthenaLoadout is unsafe: several versions contain
+    // owning arrays/strings and this SDK has no UScriptStruct deep-copy API.
+    // Preserve the live loadout by copying only reflected UObject pointer
+    // slots into the clean RPC parameter. In particular this keeps the bot's
+    // pickaxe/backpack while deliberately leaving owning containers empty.
+    const char* PreservedObjectProperties[] =
+    {
+        "Backpack",
+        "Pickaxe",
+        "Glider",
+        "SkyDiveContrail",
+        "Contrail",
+        "LoadingScreen",
+        "MusicPack",
+        "VictoryPose",
+        "PetSkin",
+        "Hat",
+        "BattleBus",
+        "VehicleDecoration",
+        "CallingCard",
+        "MapMarker",
+        "ItemWrapOverride",
+        "CharmOverride",
+        "Charm",
+    };
+    for (const auto PropertyName : PreservedObjectProperties)
+    {
+        auto Property = LoadoutStruct->GetProperty(
+            PropertyName, 0x10000);
+        if (!Property)
+            continue;
+
+        const size_t RequiredMetadataBytes =
+            static_cast<size_t>((std::max)(
+                Offsets::Offset_Internal,
+                Offsets::ElementSize)) + sizeof(uint32);
+        if (!SDK::MemReadable(
+                Property, RequiredMetadataBytes))
+        {
+            continue;
+        }
+
+        const int32 PropertyOffset = static_cast<int32>(
+            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                Property, Offsets::Offset_Internal)));
+        const uint32 PropertySize = GetFromOffset<uint32>(
+            Property, Offsets::ElementSize);
+        const int32 ArrayDimension = GetFromOffset<int32>(
+            Property,
+            Offsets::ElementSize - sizeof(int32));
+        if (PropertyOffset < 0 ||
+            PropertySize != sizeof(UObject*) ||
+            ArrayDimension != 1 ||
+            static_cast<uint32>(PropertyOffset) > LoadoutSize ||
+            sizeof(UObject*) >
+                LoadoutSize - static_cast<uint32>(PropertyOffset))
+        {
+            continue;
+        }
+
+        UObject* Value = nullptr;
+        auto Source = LoadoutData + PropertyOffset;
+        if (!SDK::MemReadable(Source, sizeof(Value)))
+            continue;
+        memcpy(&Value, Source, sizeof(Value));
+        if (Value && !PlayerAIIsLiveSupportObject(Value))
+            continue;
+        memcpy(
+            ParamLoadout + PropertyOffset,
+            &Value, sizeof(Value));
+    }
+
+    memcpy(
+        ParamLoadout + CharacterOffset,
+        &Character, sizeof(Character));
+    PlayerAIWriteStructBool(
+        ParamLoadout, LoadoutStruct, LoadoutSize,
+        "bIsDefaultCharacter", false);
+    PlayerAIWriteStructBool(
+        ParamLoadout, LoadoutStruct, LoadoutSize,
+        "bForceUpdateVariants", true);
+    Buffer[RefreshParam->Offset] = bRefreshPawn ? 1 : 0;
+
+    if (!PlayerAIGuardedProcessEvent(
+            Controller, Function, Buffer.data()))
+    {
+        bPlayerAIServerSetCosmeticLoadoutDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "ServerSetCosmeticLoadoutForPlayerAI",
+            "the guarded native loadout initialization faulted; exact character parts remain authoritative");
+        return false;
+    }
+
+    static bool bReportedNativeLoadoutCommit[2]{};
+    const int RefreshIndex = bRefreshPawn ? 1 : 0;
+    if (!bReportedNativeLoadoutCommit[RefreshIndex])
+    {
+        bReportedNativeLoadoutCommit[RefreshIndex] = true;
+        AIDebugLogger::Log(
+            "Cosmetics",
+            bRefreshPawn
+                ? "cheat-bot native loadout setter invoked with one pawn refresh"
+                : "cheat-bot native loadout setter invoked for initialization without a pawn refresh");
+    }
+    return true;
+}
+
+// Some modern builds omit or reshape ServerSetCosmeticLoadout while retaining
+// FortKismetLibrary.ApplyCharacterCosmetics. It has an observed success output,
+// so it is a safer one-shot fallback than treating a void visualizer call as
+// proof that the connectionless bot acquired a mesh.
+static bool PlayerAITryApplyCharacterCosmetics(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    bool* OutInvoked)
+{
+    if (OutInvoked)
+        *OutInvoked = false;
+
+    if (VersionInfo.FortniteVersion < 19.0 ||
+        VersionInfo.FortniteVersion >= 32.0 ||
+        bPlayerAIApplyCharacterCosmeticsDisabled ||
+        !PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportActor(Pawn) || !Parts)
+    {
+        return false;
+    }
+
+    auto Library = UFortKismetLibrary::GetDefaultObj();
+    auto Function = Library
+        ? Library->GetFunction("ApplyCharacterCosmetics")
+        : nullptr;
+    if (!PlayerAIIsLiveSupportObject(Library) ||
+        !PlayerAIIsLiveSupportObject(Function))
+    {
+        return false;
+    }
+
+    const auto Params = Function->GetParamsNamed();
+    if (Params.Size == 0 || Params.Size > 0x1000)
+    {
+        bPlayerAIApplyCharacterCosmeticsDisabled = true;
+        return false;
+    }
+
+    const UFunction::ParamNamed* WorldParam = nullptr;
+    const UFunction::ParamNamed* PartsParam = nullptr;
+    const UFunction::ParamNamed* PlayerStateParam = nullptr;
+    const UFunction::ParamNamed* SuccessParam = nullptr;
+    for (const auto& Param : Params.NameOffsetMap)
+    {
+        if (Param.Name == "WorldContextObject")
+            WorldParam = &Param;
+        else if (Param.Name == "CharacterParts")
+            PartsParam = &Param;
+        else if (Param.Name == "PlayerState")
+            PlayerStateParam = &Param;
+        else if (Param.Name == "bSuccess")
+            SuccessParam = &Param;
+    }
+
+    constexpr uint64 CPF_Parm = 0x80;
+    constexpr uint64 CPF_OutParm = 0x100;
+    constexpr uint64 CPF_ReturnParm = 0x400;
+    auto IsInput = [=](
+        const UFunction::ParamNamed* Param,
+        uint32 ExpectedSize,
+        bool bAllowOutFlag = false)
+        {
+            return Param &&
+                Param->ElementSize == ExpectedSize &&
+                (Param->PropertyFlags & CPF_Parm) &&
+                !(Param->PropertyFlags & CPF_ReturnParm) &&
+                (bAllowOutFlag ||
+                 !(Param->PropertyFlags & CPF_OutParm));
+        };
+    auto IsOutput = [=](
+        const UFunction::ParamNamed* Param,
+        uint32 ExpectedSize)
+        {
+            return Param &&
+                Param->ElementSize == ExpectedSize &&
+                (Param->PropertyFlags & CPF_Parm) &&
+                (Param->PropertyFlags & CPF_OutParm) &&
+                !(Param->PropertyFlags & CPF_ReturnParm);
+        };
+    auto RangesOverlap = [](
+        uint32 FirstOffset, uint32 FirstSize,
+        uint32 SecondOffset, uint32 SecondSize)
+        {
+            return FirstOffset < SecondOffset + SecondSize &&
+                SecondOffset < FirstOffset + FirstSize;
+        };
+    const bool bValidLayout =
+        WorldParam && PartsParam && PlayerStateParam && SuccessParam &&
+        Params.NameOffsetMap.size() == 4 &&
+        Function->GetPropertiesSize() == Params.Size &&
+        IsInput(WorldParam, sizeof(UObject*)) &&
+        IsInput(PartsParam, sizeof(TArray<UObject*>)) &&
+        IsInput(PlayerStateParam, sizeof(UObject*)) &&
+        IsOutput(SuccessParam, sizeof(bool)) &&
+        WorldParam->Offset <= Params.Size &&
+        sizeof(UObject*) <= Params.Size - WorldParam->Offset &&
+        PartsParam->Offset <= Params.Size &&
+        sizeof(TArray<UObject*>) <= Params.Size - PartsParam->Offset &&
+        PlayerStateParam->Offset <= Params.Size &&
+        sizeof(UObject*) <= Params.Size - PlayerStateParam->Offset &&
+        SuccessParam->Offset < Params.Size &&
+        !RangesOverlap(
+            WorldParam->Offset, sizeof(UObject*),
+            PartsParam->Offset, sizeof(TArray<UObject*>)) &&
+        !RangesOverlap(
+            WorldParam->Offset, sizeof(UObject*),
+            PlayerStateParam->Offset, sizeof(UObject*)) &&
+        !RangesOverlap(
+            WorldParam->Offset, sizeof(UObject*),
+            SuccessParam->Offset, sizeof(bool)) &&
+        !RangesOverlap(
+            PartsParam->Offset, sizeof(TArray<UObject*>),
+            PlayerStateParam->Offset, sizeof(UObject*)) &&
+        !RangesOverlap(
+            PartsParam->Offset, sizeof(TArray<UObject*>),
+            SuccessParam->Offset, sizeof(bool)) &&
+        !RangesOverlap(
+            PlayerStateParam->Offset, sizeof(UObject*),
+            SuccessParam->Offset, sizeof(bool));
+    if (!bValidLayout)
+    {
+        bPlayerAIApplyCharacterCosmeticsDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "ApplyCharacterCosmeticsForPlayerAI",
+            "the reflected Kismet cosmetic layout did not match this build");
+        return false;
+    }
+
+    UObject* CompactParts[PlayerAICharacterPartSlotCount]{};
+    int32 CompactPartCount = 0;
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        if (PlayerAIIsLiveSupportObject(Parts[Index]))
+        {
+            CompactParts[CompactPartCount++] =
+                const_cast<UObject*>(Parts[Index]);
+        }
+    }
+    if (CompactPartCount == 0)
+        return false;
+
+    TArray<UObject*> CharacterParts;
+    CharacterParts.Data = CompactParts;
+    CharacterParts.NumElements = CompactPartCount;
+    CharacterParts.MaxElements = CompactPartCount;
+
+    std::vector<uint8> Buffer(Params.Size, 0);
+    UObject* WorldContext = UWorld::GetWorld();
+    UObject* MutablePlayerState = PlayerState;
+    memcpy(
+        Buffer.data() + WorldParam->Offset,
+        &WorldContext, sizeof(WorldContext));
+    memcpy(
+        Buffer.data() + PartsParam->Offset,
+        &CharacterParts, sizeof(CharacterParts));
+    memcpy(
+        Buffer.data() + PlayerStateParam->Offset,
+        &MutablePlayerState, sizeof(MutablePlayerState));
+
+    if (OutInvoked)
+        *OutInvoked = true;
+    if (!PlayerAIGuardedProcessEvent(
+            Library, Function, Buffer.data()))
+    {
+        bPlayerAIApplyCharacterCosmeticsDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "ApplyCharacterCosmeticsForPlayerAI",
+            "the guarded Kismet cosmetic commit faulted");
+        return false;
+    }
+
+    return Buffer[SuccessParam->Offset] != 0;
+}
+
+// Shared cosmetics finish. Hero/loadout initialization is allowed to run
+// first, then the exact resolved parts are reasserted so native defaults can
+// never overwrite a cheat bot's selected CID.
+static bool PlayerAIFinishCosmetics(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    UAthenaCharacterItemDefinition* Character = nullptr)
+{
+    // Synthetic PlayerStates begin zeroed. On Chapter 1 that leaves the
+    // player's head-accessory preference disabled even when slot 2 contains
+    // the CID's authored hat or hair. The actual slot still decides whether
+    // anything is shown, so hatless outfits remain hatless.
+    const bool bWroteHeadAccessoryPreference =
+        PlayerAISetReflectedReadyBool(
+            PlayerState, "bShowHeroHeadAccessories", true);
+    if (bWroteHeadAccessoryPreference)
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"bShowHeroHeadAccessories");
+    }
+    const bool bWroteBackpackPreference =
+        PlayerAISetReflectedReadyBool(
+            PlayerState, "bShowHeroBackpack", true);
+    if (bWroteBackpackPreference)
+    {
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+            PlayerState, L"bShowHeroBackpack");
+    }
+
+    AFortPlayerControllerAthena* CheatBotController = nullptr;
+    if (Pawn && Pawn->HasController() &&
+        PlayerAIIsLiveSupportObject(Pawn->Controller))
+    {
+        CheatBotController =
+            Pawn->Controller->Cast<
+                AFortPlayerControllerAthena>();
+        if (!AFortPlayerControllerAthena::
+                IsCheatSpawnedBotController(
+                    CheatBotController))
+        {
+            CheatBotController = nullptr;
+        }
+    }
+
+    const bool bUseConfirmedCheatBotPath =
+        VersionInfo.FortniteVersion >= 19.0 &&
+        VersionInfo.FortniteVersion < 32.0 &&
+        CheatBotController;
+    if (Character && !bUseConfirmedCheatBotPath)
+        PlayerAIWriteCharacterLoadout(Pawn, Character);
+
+    // FN19-FN31 share the loadout-initialization failure observed in the
+    // 19.10 and 30.00 logs. Initialize the native loadout without asking its
+    // void RPC to rebuild anything, then use ApplyCharacterCosmetics' real
+    // success output as this tick's sole explicit visual commit. This is
+    // intentionally limited to tracked cheat bots; normal players and native
+    // AI keep their engine-owned cosmetic lifecycle.
+    if (bUseConfirmedCheatBotPath)
+    {
+        // If possession left only the transient pawn-side CustomPRI cache
+        // empty, bind it directly to PlayerState's existing component. The
+        // broad OnRep_PlayerState path can run profile/default customization
+        // and cause a second mesh reconstruction in this same tick.
+        PlayerAITryRepairPawnPlayerStateBinding(
+            PlayerState, Pawn);
+
+        const FPlayerAICharacterLoadoutSnapshot
+            PreviousLoadouts[] =
+            {
+                PlayerAICaptureCharacterLoadout(
+                    Pawn, "CosmeticLoadout", L"CosmeticLoadout"),
+                PlayerAICaptureCharacterLoadout(
+                    Pawn, "BaseCosmeticLoadout", L"BaseCosmeticLoadout"),
+                PlayerAICaptureCharacterLoadout(
+                    Pawn, "AppliedCosmeticLoadout", L"AppliedCosmeticLoadout"),
+                PlayerAICaptureCharacterLoadout(
+                    CheatBotController, "CosmeticLoadoutPC", L"CosmeticLoadoutPC"),
+                PlayerAICaptureCharacterLoadout(
+                    CheatBotController, "CustomizationLoadout", L"CustomizationLoadout"),
+                PlayerAICaptureCharacterLoadout(
+                    CheatBotController, "CosmeticLoadoutBC", L"CosmeticLoadoutBC"),
+            };
+
+        // This initializes the clean CID-bearing native loadout. A void RPC
+        // on a connectionless controller is not evidence that a mesh changed,
+        // so its return value deliberately does not control the fast path.
+        const bool bSetterInvoked = Character &&
+            PlayerAITryServerSetCosmeticLoadout(
+                CheatBotController, Character, false);
+
+        bool bApplyInvoked = false;
+        const bool bApplySucceeded =
+            PlayerAITryApplyCharacterCosmetics(
+                PlayerState, Pawn, Parts,
+                &bApplyInvoked);
+        bool bRefreshInvoked = false;
+        bool bExactPartsInvoked = false;
+        bool bVisualCommitSucceeded = bApplySucceeded;
+        if (!bVisualCommitSucceeded && Character)
+        {
+            // FN30 can reject the Kismet path when its synthetic pawn has no
+            // CustomPlayerComponent. The controller loadout setter exposes a
+            // native refresh flag specifically for this lifecycle; invoke it
+            // once and do not stack manual reinitializers in the same frame.
+            bRefreshInvoked =
+                PlayerAITryServerSetCosmeticLoadout(
+                    CheatBotController, Character, true);
+            if (bRefreshInvoked)
+            {
+                const auto NativeMirrorState =
+                    PlayerAIGetCharacterPartMirrorState(
+                        nullptr, Pawn, Parts);
+                bVisualCommitSucceeded =
+                    NativeMirrorState ==
+                        EPlayerAICharacterPartMirrorState::Matched;
+            }
+        }
+
+        if (!bVisualCommitSucceeded && !bRefreshInvoked)
+        {
+            // Builds without the loadout refresh ABI retain their established
+            // exact native part path. This is mutually exclusive with refresh
+            // above, preventing two reconstruction strategies in one frame.
+            bExactPartsInvoked =
+                PlayerAIChoosePartsOnPawn(Pawn, Parts);
+            if (bExactPartsInvoked)
+            {
+                const auto NativeMirrorState =
+                    PlayerAIGetCharacterPartMirrorState(
+                        nullptr, Pawn, Parts);
+                bVisualCommitSucceeded =
+                    NativeMirrorState ==
+                        EPlayerAICharacterPartMirrorState::Matched;
+            }
+        }
+
+        if (!bVisualCommitSucceeded)
+        {
+            for (const auto& PreviousLoadout : PreviousLoadouts)
+                PlayerAIRestoreCharacterLoadout(PreviousLoadout);
+            AIDebugLogger::MissingFeature(
+                "BoundedCheatBotCosmeticFallback",
+                bApplyInvoked
+                    ? "the native cosmetic call rejected the synthetic bot and its one-shot loadout refresh did not update the pawn"
+                    : "no validated one-shot visual commit path was available for the synthetic bot");
+            return false;
+        }
+
+        // Publish mirrors only after one native path accepted the complete
+        // outfit. This keeps portrait metadata, replication, and the body in
+        // one transaction and prevents a false map-only skin.
+        if (Character)
+            PlayerAIWriteCharacterLoadout(Pawn, Character);
+        if (!PlayerAIWriteReplicatedCharacterParts(
+                PlayerState, Parts))
+        {
+            return false;
+        }
+        PlayerAIWriteLocalCharacterParts(PlayerState, Parts);
+        PlayerAIWritePawnCharacterParts(Pawn, Parts);
+
+        PlayerState->FlushNetDormancy();
+        PlayerState->ForceNetUpdate();
+        Pawn->FlushNetDormancy();
+        Pawn->ForceNetUpdate();
+        CheatBotController->FlushNetDormancy();
+        CheatBotController->ForceNetUpdate();
+
+        static bool bReportedConfirmedCheatBotCommit = false;
+        if (!bReportedConfirmedCheatBotCommit)
+        {
+            bReportedConfirmedCheatBotCommit = true;
+            AIDebugLogger::Log(
+                "Cosmetics",
+                bApplySucceeded
+                    ? (bSetterInvoked
+                        ? "cheat-bot outfit applied after initializing its native loadout"
+                        : "cheat-bot outfit applied through the native cosmetic path")
+                    : (bRefreshInvoked
+                        ? "cheat-bot outfit applied through one native loadout refresh"
+                        : "cheat-bot outfit applied through exact native character parts"));
+        }
+        return true;
+    }
+
+    if (VersionInfo.FortniteVersion >= 23.0)
+    {
+        // Publish the authoritative source before asking the modern loadout
+        // and visualization hooks to initialize any components they do have.
+        if (!PlayerAIWriteReplicatedCharacterParts(
+                PlayerState, Parts))
+        {
+            return false;
+        }
+
+        if (Character && Pawn)
+        {
+            const char* LoadoutNotifications[] =
+            {
+                "OnRep_BaseCosmeticLoadout",
+                "OnRep_CosmeticLoadout",
+            };
+            for (auto Name : LoadoutNotifications)
+            {
+                if (auto Notification = Pawn->GetFunction(Name))
+                {
+                    VersionFeatureAdapter::SafeCallNoArgs(
+                        Pawn, Notification);
+                    break;
+                }
+            }
+        }
+
+        // FN30's synthetic pawn can lack the CustomPlayerComponent used by the
+        // normal visualizer. A void ProcessEvent is not proof that it applied
+        // anything, so make the already-resident native part selection the
+        // last initializer and then reassert every exact reflected mirror.
+        PlayerAITryUpdateCharacterPartsVisualization(PlayerState);
+        PlayerAIChoosePartsOnPawn(Pawn, Parts);
+        PlayerAIWriteReplicatedCharacterParts(PlayerState, Parts);
+        PlayerAIWriteLocalCharacterParts(PlayerState, Parts);
+        PlayerAIWritePawnCharacterParts(Pawn, Parts);
+
+        if (Pawn)
+        {
+            if (auto PartsReinitialized =
+                    Pawn->GetFunction(
+                        "OnCharacterPartsReinitialized"))
+            {
+                VersionFeatureAdapter::SafeCallNoArgs(
+                    Pawn, PartsReinitialized);
+            }
+        }
+
+        PlayerState->FlushNetDormancy();
+        PlayerState->ForceNetUpdate();
+        if (Pawn)
+        {
+            Pawn->FlushNetDormancy();
+            Pawn->ForceNetUpdate();
+        }
+        return true;
+    }
+
+    // Older versions retain their established native/repnotify ordering.
+    PlayerAIChoosePartsOnPawn(Pawn, Parts);
+    if (!PlayerAIWriteReplicatedCharacterParts(
+            PlayerState, Parts))
+    {
+        return false;
+    }
+
+    // Builds with the Kismet visualizer use the same fast path as normal
+    // player possession. Do not mistake a void ProcessEvent that merely did
+    // not fault for proof that the synthetic state was accepted: when a
+    // reflected mirror is available, require it to contain the requested
+    // core parts before declaring success.
+    const bool bVisualizerInvoked =
+        PlayerAITryUpdateCharacterPartsVisualization(
+            PlayerState);
+    if (bVisualizerInvoked)
+    {
+        auto MirrorState =
+            PlayerAIGetCharacterPartMirrorState(
+                PlayerState, Pawn, Parts);
+
+        // 19.x can expose CharacterData and the visualizer without exposing
+        // either comparison mirror. A successful void ProcessEvent therefore
+        // cannot prove that its profile-driven initialization kept our parts.
+        // Use the same bounded fallback as a measured mismatch on that newer
+        // layout; Chapter 1 builds keep their established behavior when no
+        // mirror exists at all.
+        const bool bNeedsBoundedVisualizerFallback =
+            MirrorState ==
+                EPlayerAICharacterPartMirrorState::Mismatched ||
+            (VersionInfo.FortniteVersion >= 19.0 &&
+             MirrorState ==
+                EPlayerAICharacterPartMirrorState::Unavailable);
+        if (bNeedsBoundedVisualizerFallback)
+        {
+            static bool bReportedVisualizerFallback = false;
+            if (!bReportedVisualizerFallback)
+            {
+                bReportedVisualizerFallback = true;
+                AIDebugLogger::Log(
+                    "Cosmetics",
+                    "the modern visualizer did not commit the requested parts; using the bounded repnotify fallback");
+            }
+
+            // This fallback is intentionally much smaller than the legacy
+            // cascade: at most one loadout repnotify, one PlayerState
+            // repnotify, and one direct mirror reinitialization. In
+            // particular, do not call profile-driven native customization on
+            // FN30.
+            if (Character && Pawn)
+            {
+                if (auto LoadoutNotification =
+                        Pawn->GetFunction(
+                            "OnRep_CosmeticLoadout"))
+                {
+                    VersionFeatureAdapter::SafeCallNoArgs(
+                        Pawn, LoadoutNotification);
+                }
+            }
+
+            const char* PartNotifications[] =
+            {
+                "OnRep_CharacterData",
+                "OnRep_CharacterParts",
+            };
+            for (auto Name : PartNotifications)
+            {
+                if (auto Notification =
+                        PlayerState->GetFunction(Name))
+                {
+                    VersionFeatureAdapter::SafeCallNoArgs(
+                        PlayerState, Notification);
+                    break;
+                }
+            }
+
+            MirrorState =
+                PlayerAIGetCharacterPartMirrorState(
+                    PlayerState, Pawn, Parts);
+            if (MirrorState ==
+                    EPlayerAICharacterPartMirrorState::Mismatched ||
+                (VersionInfo.FortniteVersion >= 19.0 &&
+                 MirrorState ==
+                    EPlayerAICharacterPartMirrorState::Unavailable))
+            {
+                PlayerAIWriteReplicatedCharacterParts(
+                    PlayerState, Parts);
+                PlayerAIWriteLocalCharacterParts(
+                    PlayerState, Parts);
+                PlayerAIWritePawnCharacterParts(
+                    Pawn, Parts);
+
+                if (Pawn)
+                {
+                    if (auto Reinitialized =
+                            Pawn->GetFunction(
+                                "OnCharacterPartsReinitialized"))
+                    {
+                        VersionFeatureAdapter::SafeCallNoArgs(
+                            Pawn, Reinitialized);
+                    }
+                }
+            }
+        }
+
+        PlayerState->FlushNetDormancy();
+        PlayerState->ForceNetUpdate();
+
+        if (Pawn)
+        {
+            Pawn->FlushNetDormancy();
+            Pawn->ForceNetUpdate();
+        }
+
+        return true;
+    }
+
+    // Older builds do not expose the Kismet visualizer. Retain their native
+    // initialization/repnotify sequence, including the 7.40 readiness and
+    // replicated-part receipt state handled by the writes around this call.
+    PlayerAIChooseGenderOnPawn(
+        Pawn,
+        Character && Character->HasGender()
+            ? Character->Gender
+            : EFortCustomGender::Female);
+
+    const char* InitializationNotifications[] =
     {
         "OnRep_HeroType",
-        "OnRep_CharacterParts",
-        "OnRep_CharacterData",
         "OnRep_CharacterGender",
+        "OnRep_CharacterBodyType",
         "OnRep_Gender",
     };
 
-    for (auto Name : Notifications)
+    for (auto Name : InitializationNotifications)
     {
         if (auto Notification = PlayerState->GetFunction(Name))
             VersionFeatureAdapter::SafeCallNoArgs(
@@ -3048,12 +7378,6 @@ static void PlayerAIFinishCosmetics(AFortPlayerStateAthena* PlayerState, AFortPl
     }
 
     static bool bNativeCustomizationDisabled = false;
-    const bool bVisualizationUpdated =
-        PlayerAITryUpdateCharacterPartsVisualization(PlayerState);
-
-    // Match the normal player customization path: the reflected Kismet
-    // visualizer is authoritative when it exists. Only use the raw native
-    // fallback when that API is absent or rejected.
     const bool bFortnite250 =
         VersionInfo.FortniteVersion >= 2.49 &&
         VersionInfo.FortniteVersion < 2.51;
@@ -3069,8 +7393,7 @@ static void PlayerAIFinishCosmetics(AFortPlayerStateAthena* PlayerState, AFortPl
                 Pawn, OnRepPlayerState);
         }
     }
-    else if (!bVisualizationUpdated &&
-        ApplyCharacterCustomization &&
+    else if (ApplyCharacterCustomization &&
         Pawn && !bNativeCustomizationDisabled)
     {
         if (!PlayerAITryNativeCustomization(ApplyCharacterCustomization, PlayerState, Pawn))
@@ -3078,6 +7401,98 @@ static void PlayerAIFinishCosmetics(AFortPlayerStateAthena* PlayerState, AFortPl
             bNativeCustomizationDisabled = true;
             AIDebugLogger::MissingFeature("NativeCharacterCustomizationForPlayerAI",
                 "native customization call faulted and was disabled - parts replicate via the player state");
+        }
+    }
+
+    // ApplyCharacterCustomization, the Hero repnotify, and the RPC may
+    // regenerate defaults from the synthetic controller. Make the requested
+    // pieces the final authoritative state before notifying/visualizing them.
+    PlayerAIWriteReplicatedCharacterParts(
+        PlayerState, Parts);
+
+    // Working Chapter 1 bot implementations publish the CID on the pawn as
+    // well as its parts on PlayerState. Reassert it after native
+    // initialization, then run the pawn repnotify before CharacterData's
+    // repnotify so it cannot continue treating this as the default loadout.
+    if (Character)
+    {
+        PlayerAIWriteCharacterLoadout(Pawn, Character);
+
+        if (Pawn)
+        {
+            if (auto LoadoutNotification =
+                    Pawn->GetFunction(
+                        "OnRep_CosmeticLoadout"))
+            {
+                VersionFeatureAdapter::SafeCallNoArgs(
+                    Pawn, LoadoutNotification);
+            }
+        }
+    }
+
+    if (Pawn && VersionInfo.FortniteVersion < 9.0)
+    {
+        // Chapter 1 normally reaches this notification only after the remote
+        // client reports that its pawn is loaded. Synthetic cheat bots have
+        // no such connection, so replay it after publishing readiness and
+        // cosmetics, then restore the requested source before its repnotify.
+        if (auto PlayerStateNotification =
+                Pawn->GetFunction("OnRep_PlayerState"))
+        {
+            VersionFeatureAdapter::SafeCallNoArgs(
+                Pawn, PlayerStateNotification);
+            PlayerAIWriteReplicatedCharacterParts(
+                PlayerState, Parts);
+        }
+    }
+
+    const char* PartNotifications[] =
+    {
+        "OnRep_CharacterData",
+        "OnRep_CharacterParts",
+    };
+
+    for (auto Name : PartNotifications)
+    {
+        if (auto Notification = PlayerState->GetFunction(Name))
+            VersionFeatureAdapter::SafeCallNoArgs(
+                PlayerState, Notification);
+    }
+
+    if (bWroteHeadAccessoryPreference)
+    {
+        if (auto Notification = PlayerState->GetFunction(
+                "OnRep_ShowHeroHeadAccessories"))
+        {
+            VersionFeatureAdapter::SafeCallNoArgs(
+                PlayerState, Notification);
+        }
+    }
+    if (bWroteBackpackPreference)
+    {
+        if (auto Notification = PlayerState->GetFunction(
+                "OnRep_ShowHeroBackpack"))
+        {
+            VersionFeatureAdapter::SafeCallNoArgs(
+                PlayerState, Notification);
+        }
+    }
+
+    // LocalCharacterParts and the pawn array are comparison/mirror state on
+    // the sampled builds. Updating either before the native calls above can
+    // suppress the actual mesh rebuild as an apparent no-op. Commit both only
+    // after the visualizer has consumed the authoritative replicated source.
+    PlayerAIWriteLocalCharacterParts(PlayerState, Parts);
+    PlayerAIWritePawnCharacterParts(Pawn, Parts);
+
+    if (Pawn)
+    {
+        if (auto PartsReinitialized =
+                Pawn->GetFunction(
+                    "OnCharacterPartsReinitialized"))
+        {
+            VersionFeatureAdapter::SafeCallNoArgs(
+                Pawn, PartsReinitialized);
         }
     }
 
@@ -3089,12 +7504,757 @@ static void PlayerAIFinishCosmetics(AFortPlayerStateAthena* PlayerState, AFortPl
         Pawn->FlushNetDormancy();
         Pawn->ForceNetUpdate();
     }
+    return true;
 }
 
-void VersionFeatureAdapter::ApplyDefaultCosmetics(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn)
+// FN19-FN31 can finish a loadout refresh on a later game-thread tick. Keep the
+// exact CID transaction alive until the pawn proves that its body is ready;
+// this prevents the old immediate rollback/retry loop from rebuilding meshes
+// throughout FN30 startup and from detaching a newly equipped harvesting tool.
+static bool PlayerAIFinishRequestedCheatBotCosmetics(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    UAthenaCharacterItemDefinition* Character,
+    const FPlayerAICosmeticMetadataSnapshot*
+        PreviousMetadata = nullptr,
+    bool* OutTargetRetained = nullptr)
+{
+    if (OutTargetRetained)
+        *OutTargetRetained = false;
+    const bool bNeedsDeferredCheatBotPath =
+        VersionInfo.FortniteVersion >= 19.0 &&
+        VersionInfo.FortniteVersion < 32.0 &&
+        Character && Pawn &&
+        PendingBotSkinCommitPawnCounts.contains(Pawn);
+    if (!bNeedsDeferredCheatBotPath)
+    {
+        return PlayerAIFinishCosmetics(
+            PlayerState, Pawn, Parts, Character);
+    }
+
+    AFortPlayerControllerAthena* Controller = nullptr;
+    if (Pawn->HasController() &&
+        PlayerAIIsLiveSupportObject(Pawn->Controller))
+    {
+        Controller = Pawn->Controller->Cast<
+            AFortPlayerControllerAthena>();
+    }
+    if (!Controller ||
+        !AFortPlayerControllerAthena::
+            IsCheatSpawnedBotController(Controller))
+    {
+        // A queued cheat bot may reach this point one tick before possession
+        // publishes Pawn->Controller. Do not let it escape into the generic
+        // >=23 mirror-only path and report a skin that was never rendered.
+        if (PendingBotSkinCommitPawnCounts.contains(Pawn))
+            return false;
+        return PlayerAIFinishCosmetics(
+            PlayerState, Pawn, Parts, Character);
+    }
+
+    constexpr ULONGLONG NativeRefreshWaitMs = 750ULL;
+    constexpr ULONGLONG NativeRefreshHardWaitMs = 3000ULL;
+    constexpr ULONGLONG ExactPartsWaitMs = 500ULL;
+    constexpr ULONGLONG StableVisualEvidenceMs = 50ULL;
+    constexpr ULONGLONG MaximumVisualCommitMs = 15000ULL;
+    const ULONGLONG Now = GetTickCount64();
+
+    auto RecoverPendingState =
+        [&](FPlayerAIPendingCheatBotVisualCommit& Pending)
+            -> EPlayerAICosmeticRecoveryResult
+        {
+            const auto Recovery =
+                PlayerAIRestorePendingCheatBotVisualCommit(Pending);
+            if (Recovery ==
+                    EPlayerAICosmeticRecoveryResult::TargetRetained &&
+                OutTargetRetained)
+            {
+                *OutTargetRetained = true;
+            }
+            return Recovery;
+        };
+
+    auto PublishAuthoritativeInputs =
+        [&](bool bWriteControllerLoadouts) -> bool
+        {
+            if (!PlayerAIWriteReplicatedCharacterParts(
+                    PlayerState, Parts))
+            {
+                return false;
+            }
+
+            // FN30 will not begin character customization while HeroType or
+            // its replicated loadout is empty. Publish these authoritative
+            // inputs before the single native rebuild call; local/pawn mirror
+            // arrays remain untouched until the visualizer has consumed them.
+            PlayerAIWriteCharacterLoadout(
+                Pawn, Character, bWriteControllerLoadouts);
+
+            if (Character->HasHeroDefinition() &&
+                PlayerAIIsLiveSupportObject(
+                    reinterpret_cast<const UObject*>(
+                        Character->HeroDefinition)))
+            {
+                PlayerAIWriteHeroType(
+                    PlayerState,
+                    reinterpret_cast<const UObject*>(
+                        Character->HeroDefinition));
+            }
+            EFortCustomGender ConfirmedGender =
+                EFortCustomGender::Invalid;
+            if (PlayerAIResolveConcreteGender(
+                    PlayerState, Character, Parts,
+                    ConfirmedGender))
+            {
+                PlayerAIWriteGender(
+                    PlayerState, ConfirmedGender, true);
+            }
+            uint8 ConfirmedBodyType = 0;
+            if (PlayerAIResolveConcreteBodyType(
+                    PlayerState, Parts, ConfirmedBodyType))
+            {
+                PlayerAIWriteBodyType(
+                    PlayerState, ConfirmedBodyType, true);
+            }
+            if (PlayerAISetReflectedReadyBool(
+                    PlayerState,
+                    "bShowHeroHeadAccessories", true))
+            {
+                VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                    PlayerState, L"bShowHeroHeadAccessories");
+            }
+            if (PlayerAISetReflectedReadyBool(
+                    PlayerState, "bShowHeroBackpack", true))
+            {
+                VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                    PlayerState, L"bShowHeroBackpack");
+            }
+
+            PlayerState->FlushNetDormancy();
+            PlayerState->ForceNetUpdate();
+            Pawn->FlushNetDormancy();
+            Pawn->ForceNetUpdate();
+            Controller->FlushNetDormancy();
+            Controller->ForceNetUpdate();
+            return true;
+        };
+
+    auto PublishConfirmedParts = [&]() -> bool
+        {
+            if (!PublishAuthoritativeInputs(true))
+                return false;
+
+            PlayerAIWriteLocalCharacterParts(PlayerState, Parts);
+            PlayerAIWritePawnCharacterParts(Pawn, Parts);
+            PlayerState->ForceNetUpdate();
+            Pawn->ForceNetUpdate();
+            return true;
+        };
+
+    auto Existing = PendingCheatBotVisualCommits.find(Pawn);
+    if (Existing != PendingCheatBotVisualCommits.end())
+    {
+        auto& Pending = Existing->second;
+        bool bExpectedParts = true;
+        for (int Index = 0;
+             Index < PlayerAICharacterPartSlotCount; Index++)
+        {
+            if (Pending.Parts[Index].Get() != Parts[Index])
+            {
+                bExpectedParts = false;
+                break;
+            }
+        }
+
+        const bool bValidPending =
+            Pending.World.Get() == UWorld::GetWorld() &&
+            Pending.Controller.Get() == Controller &&
+            Pending.PlayerState.Get() == PlayerState &&
+            Pending.Pawn.Get() == Pawn &&
+            Pending.Character.Get() == Character &&
+            Controller->Pawn == Pawn &&
+            Controller->PlayerState == PlayerState &&
+            Pawn->HasController() &&
+            Pawn->Controller == Controller &&
+            bExpectedParts &&
+            Now - Pending.QueuedAt < MaximumVisualCommitMs;
+        if (!bValidPending)
+        {
+            RecoverPendingState(Pending);
+            PendingCheatBotVisualCommits.erase(Existing);
+            return false;
+        }
+
+        // Even if CharacterParts changes immediately, keep the full native
+        // refresh grace period. FN30 can publish metadata before its skeletal
+        // mesh rebuild completes.
+        if (Now < Pending.RetryAt)
+            return false;
+
+        if (Pending.Phase ==
+            EPlayerAICheatBotVisualCommitPhase::DispatchExactParts)
+        {
+            // A visual proof cannot succeed until every exact slot has been
+            // dispatched. Spend this frame's one native budget directly on
+            // one slot instead of first reflecting across all six components.
+            if (!PlayerAIVisualProofBudgetAvailable)
+            {
+                Pending.RetryAt = Now + 1ULL;
+                return false;
+            }
+            PlayerAIVisualProofBudgetAvailable = false;
+
+            bool bAllPartsDispatched = false;
+            if (PlayerAIChoosePartsOnPawn(
+                    Pawn, Parts, &Pending.ExactPartCursor,
+                    &bAllPartsDispatched))
+            {
+                bPlayerAILastCheatBotVisualCallPerformedNativeWork = true;
+                if (bAllPartsDispatched)
+                {
+                    Pending.Phase =
+                        EPlayerAICheatBotVisualCommitPhase::AwaitExactParts;
+                    Pending.RetryAt = Now + ExactPartsWaitMs;
+                }
+                else
+                {
+                    Pending.RetryAt = Now + 1ULL;
+                }
+                return false;
+            }
+
+            // If this build has no compatible exact RPC, keep ownership and
+            // continue observing the original native refresh until the hard
+            // transaction bound. Never release equipment at the 3s fallback.
+            Pending.Phase =
+                EPlayerAICheatBotVisualCommitPhase::AwaitNativeRefresh;
+            Pending.RetryAt = Now + 100ULL;
+            return false;
+        }
+
+        // Render proof walks live pawn components and invokes reflected mesh
+        // accessors. Bound that work to one bot per server frame regardless of
+        // how many requested/random records are waiting during FN30 startup.
+        if (!PlayerAIVisualProofBudgetAvailable)
+        {
+            Pending.RetryAt = Now + 1ULL;
+            return false;
+        }
+        PlayerAIVisualProofBudgetAvailable = false;
+
+        const bool bStrongVisualEvidence =
+            PlayerAIHasCompletedCheatBotVisualCommit(
+                Pawn, Parts,
+                Pending.Phase ==
+                    EPlayerAICheatBotVisualCommitPhase::
+                        AwaitNativeRefresh);
+        if (bStrongVisualEvidence)
+        {
+            if (!Pending.MirrorMatchedAt)
+            {
+                Pending.MirrorMatchedAt = Now;
+                Pending.RetryAt =
+                    Now + StableVisualEvidenceMs;
+                return false;
+            }
+            if (Now - Pending.MirrorMatchedAt <
+                    StableVisualEvidenceMs)
+            {
+                Pending.RetryAt = Pending.MirrorMatchedAt +
+                    StableVisualEvidenceMs;
+                return false;
+            }
+
+            auto CompletedTransaction = Pending;
+            const bool bUsedRefresh =
+                Pending.Phase ==
+                    EPlayerAICheatBotVisualCommitPhase::AwaitNativeRefresh;
+            PendingCheatBotVisualCommits.erase(Existing);
+            if (!PublishConfirmedParts())
+            {
+                RecoverPendingState(CompletedTransaction);
+                return false;
+            }
+
+            static bool bReportedDeferredCommit[2]{};
+            const int CommitIndex = bUsedRefresh ? 0 : 1;
+            if (!bReportedDeferredCommit[CommitIndex])
+            {
+                bReportedDeferredCommit[CommitIndex] = true;
+                AIDebugLogger::Log(
+                    "Cosmetics",
+                    bUsedRefresh
+                        ? "cheat-bot outfit verified after one deferred native loadout refresh"
+                        : "cheat-bot outfit verified after one exact-part fallback");
+            }
+            return true;
+        }
+
+        Pending.MirrorMatchedAt = 0;
+        if (Pending.Phase ==
+            EPlayerAICheatBotVisualCommitPhase::AwaitNativeRefresh)
+        {
+            // Give the one native reconstruction a fixed quiet window. A
+            // stale-true readiness bit is no reason to stack exact part RPCs
+            // on top of work which is still streaming meshes on FN30.
+            const ULONGLONG NativeStartedAt =
+                Pending.NativeRefreshStartedAt
+                ? Pending.NativeRefreshStartedAt
+                : Pending.QueuedAt;
+            const ULONGLONG NativeQuietWindowMs =
+                Pending.bApplyCosmeticsRejected &&
+                    !Pending.bNativeLoadoutSetterAttempted
+                ? NativeRefreshWaitMs
+                : NativeRefreshHardWaitMs;
+            if (Now - NativeStartedAt <
+                    NativeQuietWindowMs)
+            {
+                Pending.RetryAt = Now + 100ULL;
+                return false;
+            }
+
+            // Kismet can accept/reject a connectionless pawn while the
+            // controller-native loadout setter remains the working FN30 path.
+            // Sequence that fallback after the quiet window, once only.
+            if (!Pending.bNativeLoadoutSetterAttempted)
+            {
+                Pending.bNativeLoadoutSetterAttempted = true;
+                if (PlayerAITryServerSetCosmeticLoadout(
+                        Controller, Character, true))
+                {
+                    bPlayerAILastCheatBotVisualCallPerformedNativeWork =
+                        true;
+                    Pending.bApplyCosmeticsRejected = false;
+                    Pending.NativeRefreshStartedAt = Now;
+                    Pending.RetryAt = Now + NativeRefreshWaitMs;
+                    return false;
+                }
+
+                Pending.Phase =
+                    EPlayerAICheatBotVisualCommitPhase::DispatchExactParts;
+                Pending.ExactPartCursor = 0;
+                Pending.RetryAt = Now + 100ULL;
+                return false;
+            }
+
+            Pending.Phase =
+                EPlayerAICheatBotVisualCommitPhase::DispatchExactParts;
+            Pending.ExactPartCursor = 0;
+            Pending.RetryAt = Now + 1ULL;
+            return false;
+        }
+
+        // Exact ServerChoosePart can also complete asynchronously. Continue
+        // proving the rendered components for the remainder of the bounded
+        // transaction instead of abandoning them after one 500 ms sample.
+        if (Pending.Phase ==
+                EPlayerAICheatBotVisualCommitPhase::AwaitExactParts &&
+            Now - Pending.QueuedAt < MaximumVisualCommitMs)
+        {
+            Pending.RetryAt = Now + 100ULL;
+            return false;
+        }
+
+        RecoverPendingState(Pending);
+        PendingCheatBotVisualCommits.erase(Existing);
+        AIDebugLogger::MissingFeature(
+            "BoundedCheatBotCosmeticFallback",
+            "the deferred native refresh and exact-part fallback did not produce a complete pawn mesh");
+        return false;
+    }
+
+    FPlayerAIPendingCheatBotVisualCommit Transaction{};
+    Transaction.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
+    Transaction.Controller =
+        TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
+    Transaction.PlayerState =
+        TWeakObjectPtr<AFortPlayerStateAthena>(PlayerState);
+    Transaction.Pawn =
+        TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+    Transaction.Character = TWeakObjectPtr<UObject>(Character);
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        Transaction.Parts[Index] = TWeakObjectPtr<UObject>(
+            const_cast<UObject*>(Parts[Index]));
+        if (Parts[Index])
+        {
+            Transaction.NonNullPartMask |= static_cast<uint8>(
+                1u << Index);
+        }
+    }
+    Transaction.PreviousLoadouts[0] =
+        PlayerAICaptureCharacterLoadout(
+            Pawn, "CosmeticLoadout", L"CosmeticLoadout");
+    Transaction.PreviousLoadouts[1] =
+        PlayerAICaptureCharacterLoadout(
+            Pawn, "BaseCosmeticLoadout", L"BaseCosmeticLoadout");
+    Transaction.PreviousLoadouts[2] =
+        PlayerAICaptureCharacterLoadout(
+            Pawn, "AppliedCosmeticLoadout", L"AppliedCosmeticLoadout");
+    Transaction.PreviousLoadouts[3] =
+        PlayerAICaptureCharacterLoadout(
+            Controller, "CosmeticLoadoutPC", L"CosmeticLoadoutPC");
+    Transaction.PreviousLoadouts[4] =
+        PlayerAICaptureCharacterLoadout(
+            Controller, "CustomizationLoadout", L"CustomizationLoadout");
+    Transaction.PreviousLoadouts[5] =
+        PlayerAICaptureCharacterLoadout(
+            Controller, "CosmeticLoadoutBC", L"CosmeticLoadoutBC");
+    Transaction.PreviousHeadAccessoryPreference =
+        PlayerAICaptureReflectedBool(
+            PlayerState, "bShowHeroHeadAccessories",
+            L"bShowHeroHeadAccessories");
+    Transaction.PreviousBackpackPreference =
+        PlayerAICaptureReflectedBool(
+            PlayerState, "bShowHeroBackpack",
+            L"bShowHeroBackpack");
+    if (PreviousMetadata)
+        Transaction.PreviousMetadata = *PreviousMetadata;
+    Transaction.PreviousParts = PlayerAICaptureCharacterParts(
+        PlayerState, Pawn);
+    Transaction.QueuedAt = Now;
+
+    if (!Transaction.PreviousParts.bValid)
+    {
+        // Never stage a CID unless every reflected part store which can be
+        // touched has a safe rollback image. This is especially important on
+        // newly spawned FN30 pawns, whose pawn mirror may still be empty even
+        // though CharacterData is already present on PlayerState.
+        AIDebugLogger::MissingFeature(
+            "CheatBotCosmeticRollbackSnapshot",
+            "the bot keeps its engine appearance because its prior character-part state could not be captured safely");
+        return false;
+    }
+
+    // Bind only the existing component; avoid the broad profile-driven
+    // OnRep_PlayerState reinitializer that can flash the spawning player's CID.
+    PlayerAITryRepairPawnPlayerStateBinding(PlayerState, Pawn);
+
+    // FN19-FN31, and FN30 specifically, require the replicated HeroType,
+    // CharacterData, and loadout before ApplyCharacterCosmetics can ever
+    // report completion. The transaction snapshots above still make this
+    // staging fully reversible if the native path genuinely rejects it.
+    if (!PublishAuthoritativeInputs(true))
+    {
+        RecoverPendingState(Transaction);
+        return false;
+    }
+
+    bool bApplyInvoked = false;
+    const bool bApplyAccepted =
+        PlayerAITryApplyCharacterCosmetics(
+            PlayerState, Pawn, Parts, &bApplyInvoked);
+    if (bApplyInvoked)
+    {
+        // Even a false success output can have scheduled component work. Own
+        // that single call and observe it before any fallback; never stack the
+        // loadout setter in the same FN30 frame.
+        bPlayerAILastCheatBotVisualCallPerformedNativeWork = true;
+        Transaction.Phase =
+            EPlayerAICheatBotVisualCommitPhase::AwaitNativeRefresh;
+        Transaction.NativeRefreshStartedAt = Now;
+        Transaction.bApplyCosmeticsRejected = !bApplyAccepted;
+        Transaction.RetryAt = Now + NativeRefreshWaitMs;
+        PlayerAINoteBotSkinProgress();
+        PendingCheatBotVisualCommits[Pawn] =
+            std::move(Transaction);
+        return false;
+    }
+
+    // The clean setter parameter preserves reflected UObject cosmetics and is
+    // used only once as a fallback. Its refresh is verified asynchronously.
+    if (PlayerAITryServerSetCosmeticLoadout(
+            Controller, Character, true))
+    {
+        bPlayerAILastCheatBotVisualCallPerformedNativeWork = true;
+        Transaction.Phase =
+            EPlayerAICheatBotVisualCommitPhase::AwaitNativeRefresh;
+        Transaction.NativeRefreshStartedAt = Now;
+        Transaction.bNativeLoadoutSetterAttempted = true;
+        Transaction.RetryAt = Now + NativeRefreshWaitMs;
+        PlayerAINoteBotSkinProgress();
+        PendingCheatBotVisualCommits[Pawn] =
+            std::move(Transaction);
+        return false;
+    }
+
+    // No broad native path was available. Queue the exact composition and let
+    // the bounded one-slot-per-frame dispatcher own it from the next tick.
+    Transaction.Phase =
+        EPlayerAICheatBotVisualCommitPhase::DispatchExactParts;
+    Transaction.RetryAt = Now + 1ULL;
+    PlayerAINoteBotSkinProgress();
+    PendingCheatBotVisualCommits[Pawn] =
+        std::move(Transaction);
+    return false;
+}
+
+// Modern builds do not always keep the old Chapter 1 fallback HID/parts
+// resident. Universal PlayerAI may borrow an already-rendered real player's
+// exact resident parts as its last nonblocking fallback. Cheat-command bots do
+// not call this donor path: they keep a neutral engine/default appearance until
+// their selected CID is ready. The small cache makes universal fallback lookups
+// O(8), while a bounded cursor/cooldown keeps the no-donor case inexpensive.
+static bool PlayerAITryGetResidentPlaceholderParts(
+    AFortPlayerStateAthena* TargetPlayerState,
+    const UObject* OutParts[PlayerAICharacterPartSlotCount],
+    const UObject*& OutHero)
+{
+    OutHero = nullptr;
+    if (!TargetPlayerState || !OutParts)
+        return false;
+
+    auto PartClass = UCustomCharacterPart::StaticClass();
+    auto HeroClass = UFortHeroType::StaticClass();
+    if (!PartClass)
+        return false;
+
+    auto ClearCache = []()
+        {
+            for (int Index = 0;
+                 Index < PlayerAICharacterPartSlotCount; Index++)
+            {
+                PlayerAIResidentPlaceholderParts[Index] = nullptr;
+                PlayerAIResidentPlaceholderPartIndices[Index] = -1;
+            }
+            PlayerAIResidentPlaceholderHero = nullptr;
+            PlayerAIResidentPlaceholderHeroIndex = -1;
+        };
+
+    auto CopyCached = [&]() -> bool
+        {
+            if (!PlayerAIResidentPlaceholderParts[0] ||
+                !PlayerAIResidentPlaceholderParts[1])
+            {
+                return false;
+            }
+
+            for (int Index = 0;
+                 Index < PlayerAICharacterPartSlotCount; Index++)
+            {
+                auto Part = PlayerAIResidentPlaceholderParts[Index];
+                if (!Part)
+                    continue;
+
+                if (!PlayerAIIsLiveSupportObject(Part) ||
+                    !Part->IsA(PartClass) ||
+                    Part->Index !=
+                        PlayerAIResidentPlaceholderPartIndices[Index])
+                {
+                    ClearCache();
+                    return false;
+                }
+
+                auto CharacterPart =
+                    static_cast<const UCustomCharacterPart*>(Part);
+                if (!CharacterPart->HasCharacterPartType() ||
+                    CharacterPart->CharacterPartType != Index)
+                {
+                    ClearCache();
+                    return false;
+                }
+            }
+
+            if (PlayerAIResidentPlaceholderHero &&
+                (!HeroClass ||
+                 !PlayerAIIsLiveSupportObject(
+                    PlayerAIResidentPlaceholderHero) ||
+                 !PlayerAIResidentPlaceholderHero->IsA(HeroClass) ||
+                 PlayerAIResidentPlaceholderHero->Index !=
+                    PlayerAIResidentPlaceholderHeroIndex))
+            {
+                PlayerAIResidentPlaceholderHero = nullptr;
+                PlayerAIResidentPlaceholderHeroIndex = -1;
+            }
+
+            memcpy(OutParts, PlayerAIResidentPlaceholderParts,
+                sizeof(PlayerAIResidentPlaceholderParts));
+            OutHero = PlayerAIResidentPlaceholderHero;
+            return true;
+        };
+
+    if (CopyCached())
+        return true;
+
+    const ULONGLONG Now = GetTickCount64();
+    if (PlayerAIResidentPlaceholderRetryAt > Now)
+        return false;
+
+    auto GameState = VersionFeatureAdapter::GetGameState();
+    if (!GameState)
+        return false;
+
+    auto TryPartArray = [&](
+        UObject** Candidate,
+        int32 CandidateSlotCount) -> bool
+        {
+            if (!Candidate ||
+                CandidateSlotCount <
+                    PlayerAILegacyCharacterPartSlotCount)
+            {
+                return false;
+            }
+
+            const int32 SlotCount = (std::min)(
+                CandidateSlotCount,
+                PlayerAICharacterPartSlotCount);
+            if (!SDK::MemReadable(
+                    Candidate,
+                    sizeof(UObject*) * SlotCount))
+            {
+                return false;
+            }
+
+            const UObject*
+                Validated[PlayerAICharacterPartSlotCount]{};
+            for (int Index = 0; Index < SlotCount; Index++)
+            {
+                auto Part = Candidate[Index];
+                if (!Part)
+                    continue;
+
+                if (!PlayerAIIsLiveSupportObject(Part) ||
+                    !Part->IsA(PartClass))
+                {
+                    return false;
+                }
+
+                auto CharacterPart =
+                    static_cast<const UCustomCharacterPart*>(Part);
+                if (!CharacterPart->HasCharacterPartType() ||
+                    CharacterPart->CharacterPartType != Index)
+                {
+                    return false;
+                }
+                Validated[Index] = Part;
+            }
+
+            if (!Validated[0] || !Validated[1])
+                return false;
+
+            memcpy(PlayerAIResidentPlaceholderParts, Validated,
+                sizeof(Validated));
+            for (int Index = 0;
+                 Index < PlayerAICharacterPartSlotCount; Index++)
+            {
+                PlayerAIResidentPlaceholderPartIndices[Index] =
+                    Validated[Index] ? Validated[Index]->Index : -1;
+            }
+            return true;
+        };
+
+    const int32 DonorCount = GameState->PlayerArray.Num();
+    if (DonorCount <= 0)
+        return false;
+
+    // One call does a small amount of reflection work; repeated calls in the
+    // same bot command share the cooldown. The cursor resumes on a later tick
+    // if the human player's replicated cosmetic mirror is not ready yet.
+    static constexpr int32 PlayerAIPlaceholderDonorsPerAttempt = 8;
+    const int32 InspectCount = (std::min)(
+        DonorCount, PlayerAIPlaceholderDonorsPerAttempt);
+    const size_t Start =
+        PlayerAIResidentPlaceholderDonorCursor %
+        static_cast<size_t>(DonorCount);
+    PlayerAIResidentPlaceholderRetryAt = Now + 250ULL;
+
+    for (int32 Step = 0; Step < InspectCount; Step++)
+    {
+        const size_t DonorIndex =
+            (Start + static_cast<size_t>(Step)) %
+            static_cast<size_t>(DonorCount);
+        PlayerAIResidentPlaceholderDonorCursor =
+            (DonorIndex + 1) % static_cast<size_t>(DonorCount);
+        auto DonorPlayerState =
+            GameState->PlayerArray[static_cast<int32>(DonorIndex)];
+        if (!DonorPlayerState ||
+            DonorPlayerState == TargetPlayerState ||
+            !PlayerAIIsLiveSupportObject(DonorPlayerState) ||
+            (DonorPlayerState->HasbIsABot() &&
+             DonorPlayerState->bIsABot))
+        {
+            continue;
+        }
+
+        UObject** Candidate = nullptr;
+        int32 CandidateSlotCount = 0;
+        bool bFoundParts =
+            PlayerAIResolveStructCharacterPartArray(
+                DonorPlayerState, "CharacterData",
+                "CustomCharacterData",
+                L"/Script/FortniteGame.CustomCharacterData",
+                Candidate, nullptr, nullptr, nullptr,
+                &CandidateSlotCount) &&
+            TryPartArray(Candidate, CandidateSlotCount);
+        if (!bFoundParts)
+        {
+            Candidate = nullptr;
+            CandidateSlotCount = 0;
+            bFoundParts =
+                PlayerAIResolveFixedCharacterPartArray(
+                    DonorPlayerState, "CharacterParts", Candidate,
+                    &CandidateSlotCount) &&
+                TryPartArray(Candidate, CandidateSlotCount);
+        }
+        if (!bFoundParts)
+        {
+            Candidate = nullptr;
+            CandidateSlotCount = 0;
+            bFoundParts =
+                PlayerAIResolveStructCharacterPartArray(
+                    DonorPlayerState, "CharacterParts",
+                    "CustomCharacterParts",
+                    L"/Script/FortniteGame.CustomCharacterParts",
+                    Candidate, nullptr, nullptr, nullptr,
+                    &CandidateSlotCount) &&
+                TryPartArray(Candidate, CandidateSlotCount);
+        }
+        if (!bFoundParts)
+        {
+            Candidate = nullptr;
+            CandidateSlotCount = 0;
+            bFoundParts =
+                PlayerAIResolveFixedCharacterPartArray(
+                    DonorPlayerState, "LocalCharacterParts", Candidate,
+                    &CandidateSlotCount) &&
+                TryPartArray(Candidate, CandidateSlotCount);
+        }
+        if (!bFoundParts)
+            continue;
+
+        auto Hero = DonorPlayerState->HasHeroType()
+            ? DonorPlayerState->HeroType
+            : nullptr;
+        if (HeroClass && PlayerAIIsLiveSupportObject(Hero) &&
+            Hero->IsA(HeroClass))
+        {
+            PlayerAIResidentPlaceholderHero = Hero;
+            PlayerAIResidentPlaceholderHeroIndex = Hero->Index;
+        }
+
+        PlayerAIResidentPlaceholderRetryAt = 0;
+        return CopyCached();
+    }
+
+    ClearCache();
+    return false;
+}
+
+static bool PlayerAIApplyDefaultCosmeticsInternal(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    EPlayerAICosmeticLoadPolicy LoadPolicy,
+    bool bAllowResidentDonorFallback,
+    bool bReportUnavailable)
 {
     if (!PlayerState)
-        return;
+        return false;
+
+    const bool bAllowSynchronousLoad =
+        LoadPolicy ==
+        EPlayerAICosmeticLoadPolicy::AllowSynchronousLoad;
 
     if (bDefaultCommandoResolved &&
         PlayerAIDefaultCommando &&
@@ -3102,22 +8262,28 @@ void VersionFeatureAdapter::ApplyDefaultCosmetics(AFortPlayerStateAthena* Player
     {
         bDefaultCommandoResolved = false;
         PlayerAIDefaultCommando = nullptr;
+        bPlayerAIRequestedDefaultSynchronousAttempted = false;
     }
 
-    if (!bDefaultCommandoResolved)
+    if (!bDefaultCommandoResolved ||
+        (bAllowSynchronousLoad && !PlayerAIDefaultCommando))
     {
         bDefaultCommandoResolved = true;
-        PlayerAIDefaultCommando = PlayerAITryFindLoadedCosmetic(
-            L"/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F",
-            UFortHeroType::StaticClass());
+        PlayerAIDefaultCommando =
+            PlayerAIResolveDefaultCosmetic(
+                L"/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F",
+                UFortHeroType::StaticClass(),
+                bAllowSynchronousLoad);
 
         // This fallback is absent on 2.50. Resolve it only when the original
         // HID is unavailable so old builds never load a known-missing path.
         if (!PlayerAIDefaultCommando)
         {
-            PlayerAIDefaultCommando = PlayerAITryFindLoadedCosmetic(
+            PlayerAIDefaultCommando =
+                PlayerAIResolveDefaultCosmetic(
                 L"/Game/Athena/Heroes/HID_Commando_Athena_01.HID_Commando_Athena_01",
-                UFortHeroType::StaticClass());
+                UFortHeroType::StaticClass(),
+                bAllowSynchronousLoad);
         }
     }
 
@@ -3133,20 +8299,27 @@ void VersionFeatureAdapter::ApplyDefaultCosmetics(AFortPlayerStateAthena* Player
         PlayerAIDefaultHead = nullptr;
         PlayerAIDefaultBody = nullptr;
         PlayerAIDefaultBackpack = nullptr;
+        bPlayerAIRequestedDefaultSynchronousAttempted = false;
     }
 
-    if (!bDefaultPartsResolved)
+    if (!bDefaultPartsResolved ||
+        (bAllowSynchronousLoad &&
+         (!PlayerAIDefaultHead || !PlayerAIDefaultBody)))
     {
         bDefaultPartsResolved = true;
-        PlayerAIDefaultHead = PlayerAITryFindLoadedCosmetic(
+        PlayerAIDefaultHead = PlayerAIResolveDefaultCosmetic(
             L"/Game/Characters/CharacterParts/Female/Medium/Heads/F_Med_Head1.F_Med_Head1",
-            UCustomCharacterPart::StaticClass());
-        PlayerAIDefaultBody = PlayerAITryFindLoadedCosmetic(
+            UCustomCharacterPart::StaticClass(),
+            bAllowSynchronousLoad);
+        PlayerAIDefaultBody = PlayerAIResolveDefaultCosmetic(
             L"/Game/Characters/CharacterParts/Female/Medium/Bodies/F_Med_Soldier_01.F_Med_Soldier_01",
-            UCustomCharacterPart::StaticClass());
-        PlayerAIDefaultBackpack = PlayerAITryFindLoadedCosmetic(
+            UCustomCharacterPart::StaticClass(),
+            bAllowSynchronousLoad);
+        PlayerAIDefaultBackpack =
+            PlayerAIResolveDefaultCosmetic(
             L"/Game/Characters/CharacterParts/Backpacks/NoBackpack.NoBackpack",
-            UCustomCharacterPart::StaticClass());
+            UCustomCharacterPart::StaticClass(),
+            bAllowSynchronousLoad);
     }
 
     auto HeroClass = UFortHeroType::StaticClass();
@@ -3163,13 +8336,53 @@ void VersionFeatureAdapter::ApplyDefaultCosmetics(AFortPlayerStateAthena* Player
             PlayerAIDefaultBody) ||
         !PlayerAIDefaultBody->IsA(PartClass))
     {
-        AIDebugLogger::MissingFeature(
-            "DefaultCharacterParts",
-            "complete default cosmetics unavailable; PlayerAI keeps its engine appearance");
-        return;
+        if (bAllowResidentDonorFallback)
+        {
+            const UObject*
+                PlaceholderParts[PlayerAICharacterPartSlotCount]{};
+            const UObject* PlaceholderHero = nullptr;
+            if (Pawn && PlayerAITryGetResidentPlaceholderParts(
+                    PlayerState, PlaceholderParts, PlaceholderHero))
+            {
+                if (PlaceholderHero)
+                    PlayerAIWriteHeroType(PlayerState, PlaceholderHero);
+
+                EFortCustomGender PlaceholderGender =
+                    EFortCustomGender::Invalid;
+                if (PlayerAIResolveConcreteGender(
+                        PlayerState, nullptr,
+                        PlaceholderParts, PlaceholderGender))
+                {
+                    PlayerAIWriteGender(
+                        PlayerState, PlaceholderGender);
+                }
+                uint8 PlaceholderBodyType = 0;
+                if (PlayerAIResolveConcreteBodyType(
+                        PlayerState, PlaceholderParts,
+                        PlaceholderBodyType))
+                {
+                    PlayerAIWriteBodyType(
+                        PlayerState, PlaceholderBodyType);
+                }
+
+                if (PlayerAIFinishCosmetics(
+                        PlayerState, Pawn, PlaceholderParts))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if (bReportUnavailable)
+        {
+            AIDebugLogger::MissingFeature(
+                "DefaultCharacterParts",
+                "complete default cosmetics unavailable; PlayerAI keeps its engine appearance");
+        }
+        return false;
     }
 
-    const UObject* Parts[6] =
+    const UObject* Parts[PlayerAICharacterPartSlotCount] =
     {
         PlayerAIDefaultHead,
         PlayerAIDefaultBody,
@@ -3179,15 +8392,38 @@ void VersionFeatureAdapter::ApplyDefaultCosmetics(AFortPlayerStateAthena* Player
         nullptr,
     };
 
-    if (PlayerAIWriteCharacterParts(PlayerState, Parts))
+    PlayerAIWriteHeroType(
+        PlayerState, PlayerAIDefaultCommando);
+    PlayerAIWriteGender(
+        PlayerState, EFortCustomGender::Female);
+    uint8 DefaultBodyType = 0;
+    if (PlayerAIResolveConcreteBodyType(
+            PlayerState, Parts, DefaultBodyType))
     {
-        PlayerAIWriteHeroType(
-            PlayerState, PlayerAIDefaultCommando);
-        PlayerAIWriteGender(
-            PlayerState, EFortCustomGender::Female);
-        PlayerAIChoosePartsOnPawn(Pawn, Parts);
-        PlayerAIFinishCosmetics(PlayerState, Pawn);
+        PlayerAIWriteBodyType(
+            PlayerState, DefaultBodyType);
     }
+
+    return PlayerAIFinishCosmetics(
+        PlayerState, Pawn, Parts);
+}
+
+bool VersionFeatureAdapter::ApplyDefaultCosmetics(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    EPlayerAICosmeticLoadPolicy LoadPolicy)
+{
+    return PlayerAIApplyDefaultCosmeticsInternal(
+        PlayerState, Pawn, LoadPolicy, true, true);
+}
+
+bool VersionFeatureAdapter::ApplyFixedDefaultCosmetics(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    EPlayerAICosmeticLoadPolicy LoadPolicy)
+{
+    return PlayerAIApplyDefaultCosmeticsInternal(
+        PlayerState, Pawn, LoadPolicy, false, true);
 }
 
 // ---- Random skins from the hosted build ---------------------------------------------
@@ -3218,6 +8454,599 @@ static const wchar_t* PlayerAIKnownSkinNames[] =
     L"CID_051_Athena_Commando_M_HolidayElf", L"CID_052_Athena_Commando_F_PSBlue",
 };
 
+struct FPlayerAIRawScriptArray
+{
+    uint8* Data = nullptr;
+    int32 Num = 0;
+    int32 Max = 0;
+};
+
+static bool PlayerAIParameterRangeFits(
+    size_t ParamsSize, uint32 Offset, size_t ValueSize)
+{
+    return Offset != (uint32)-1 &&
+        ValueSize <= ParamsSize &&
+        static_cast<size_t>(Offset) <=
+            ParamsSize - ValueSize;
+}
+
+static bool PlayerAITryProcessCosmeticFunction(
+    const UObject* Object, UFunction* Function, void* Params)
+{
+    if (!Object || !Function || !Params)
+        return false;
+
+    GPlayerAIGuardedNativeCallDepth++;
+    bool bOk = false;
+
+    __try
+    {
+        Object->ProcessEvent(Function, Params);
+        bOk = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        bOk = false;
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+    return bOk;
+}
+
+static size_t PlayerAICosmeticFunctionParamSize(
+    const UFunction* Function)
+{
+    if (!Function)
+        return 0;
+
+    // 32.11 encrypts/reorders the reflected PropertiesSize field. A generous
+    // fixed buffer is safe because ProcessEvent uses the UFunction's own
+    // parameter size; named property offsets are still resolved independently.
+    size_t Size = VersionInfo.FortniteVersion >= 32.00
+        ? 0x1000
+        : Function->GetPropertiesSize();
+
+    if (Size < 0x20)
+        Size = 0x100;
+
+    return Size <= 0x10000 ? Size : 0;
+}
+
+static std::string PlayerAILowerASCII(std::string Value)
+{
+    for (auto& Character : Value)
+    {
+        if (Character >= 'A' && Character <= 'Z')
+            Character = static_cast<char>(
+                Character - 'A' + 'a');
+    }
+
+    return Value;
+}
+
+static bool PlayerAIIsPlayerSkinName(
+    const std::string& Name)
+{
+    const auto Lower = PlayerAILowerASCII(Name);
+
+    return Lower.rfind("cid_", 0) == 0 &&
+        Lower.find("cid_npc") == std::string::npos &&
+        Lower.find("cid_vip") == std::string::npos &&
+        Lower.find("cid_tbd") == std::string::npos;
+}
+
+static void PlayerAIWriteFNameStringUnsafe(
+    const FName* Name, char* Output, size_t OutputSize)
+{
+    auto Value = Name->ToString();
+    strncpy_s(Output, OutputSize, Value.c_str(), _TRUNCATE);
+}
+
+// Keep raw primary-asset FName decoding behind SEH. The catalog is optional;
+// a future engine layout change must disable it and fall back, never crash the
+// always-on server tick.
+static bool PlayerAITryWriteFNameString(
+    const FName* Name, char* Output, size_t OutputSize)
+{
+    if (!Name || !Output || OutputSize == 0)
+        return false;
+
+    Output[0] = '\0';
+    GPlayerAIGuardedNativeCallDepth++;
+    bool bOk = false;
+
+    __try
+    {
+        PlayerAIWriteFNameStringUnsafe(
+            Name, Output, OutputSize);
+        bOk = Output[0] != '\0';
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        bOk = false;
+    }
+
+    GPlayerAIGuardedNativeCallDepth--;
+    return bOk;
+}
+
+// Reads the engine-owned primary-asset catalog without baking any version's
+// FPrimaryAssetId layout into this DLL. Fortnite 20 compacted FName from eight
+// bytes to four, so the returned array is deliberately treated as raw bytes.
+static bool PlayerAIQueryCurrentBuildSkinCatalog()
+{
+    if (bPrimaryAssetCosmeticFunctionsDisabled)
+        return false;
+
+    auto SystemLibrary = UKismetSystemLibrary::GetDefaultObj();
+    auto Function = SystemLibrary
+        ? SystemLibrary->GetFunction("GetPrimaryAssetIdList")
+        : nullptr;
+
+    if (!SystemLibrary)
+        return false;
+    if (!Function)
+    {
+        // Reflection tables on a live Kismet CDO are complete. A missing
+        // function is a version capability result, not something worth
+        // retrying for two minutes while queued bots remain default.
+        bPrimaryAssetCosmeticFunctionsDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "CharacterPrimaryAssetCatalog",
+            "this build has no primary-asset catalog API; resident skins remain available");
+        return false;
+    }
+
+    const uint32 TypeOffset =
+        Function->GetOffset("PrimaryAssetType");
+    const uint32 OutputOffset =
+        Function->GetOffset("OutPrimaryAssetIdList");
+    const size_t ParamsSize =
+        PlayerAICosmeticFunctionParamSize(Function);
+    const int32 NameSize =
+        VersionInfo.FortniteVersion >= 20.00 ? 0x4 : 0x8;
+    const int32 IdSize = NameSize * 2;
+
+    // Reflection is reliable before the encrypted 32.x layout. Refuse the
+    // optional catalog if this build reports anything other than the two-FName
+    // PrimaryAssetId ABI sampled across supported releases.
+    if (VersionInfo.FortniteVersion < 32.00)
+    {
+        auto PrimaryAssetIdStruct =
+            FindStruct("PrimaryAssetId");
+        const auto ReflectedIdSize = PrimaryAssetIdStruct
+            ? PrimaryAssetIdStruct->GetPropertiesSize()
+            : 0;
+        const auto ReflectedNameOffset = PrimaryAssetIdStruct
+            ? PrimaryAssetIdStruct->GetOffset(
+                "PrimaryAssetName")
+            : (uint32)-1;
+
+        if (ReflectedIdSize != IdSize ||
+            ReflectedNameOffset != (uint32)NameSize)
+        {
+            bPrimaryAssetCosmeticFunctionsDisabled = true;
+            AIDebugLogger::MissingFeature(
+                "CharacterPrimaryAssetCatalogLayout",
+                "this build's asset-id layout is unknown; resident skins remain available");
+            return false;
+        }
+    }
+
+    // These two layouts are stable at both sampled ABI endpoints:
+    // 10.40 (8-byte names) and 32.11 (compact 4-byte names). Exact offsets
+    // prevent a corrupt reflected property from becoming an arbitrary free.
+    const bool bCatalogSchemaValid =
+        TypeOffset == 0 && OutputOffset == 0x8 &&
+        PlayerAIParameterRangeFits(
+            ParamsSize, TypeOffset, NameSize) &&
+        PlayerAIParameterRangeFits(
+            ParamsSize, OutputOffset,
+            sizeof(FPlayerAIRawScriptArray));
+
+    if (!bCatalogSchemaValid ||
+        IdSize > (int32)sizeof(
+            FPlayerAISkinCatalogEntry::RawPrimaryAssetId))
+    {
+        bPrimaryAssetCosmeticFunctionsDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "CharacterPrimaryAssetCatalogParameters",
+            "this build's catalog function layout is unknown; resident skins remain available");
+        return false;
+    }
+
+    auto Params = FMemory::Malloc(ParamsSize);
+    if (!Params)
+        return false;
+
+    memset(Params, 0, ParamsSize);
+    FName CharacterAssetType{};
+    CharacterAssetType = FName(L"AthenaCharacter");
+    memcpy(
+        (uint8*)Params + TypeOffset,
+        &CharacterAssetType,
+        NameSize);
+
+    LARGE_INTEGER CatalogCallFrequency{};
+    LARGE_INTEGER CatalogCallStartedAt{};
+    LARGE_INTEGER CatalogCallFinishedAt{};
+    const bool bCanMeasureCatalogCall =
+        QueryPerformanceFrequency(&CatalogCallFrequency) &&
+        CatalogCallFrequency.QuadPart > 0 &&
+        QueryPerformanceCounter(&CatalogCallStartedAt);
+    const bool bCalled = PlayerAITryProcessCosmeticFunction(
+        SystemLibrary, Function, Params);
+    const bool bMeasuredCatalogCall = bCanMeasureCatalogCall &&
+        QueryPerformanceCounter(&CatalogCallFinishedAt);
+    const double CatalogCallElapsedMs = bMeasuredCatalogCall
+        ? static_cast<double>(
+            CatalogCallFinishedAt.QuadPart -
+                CatalogCallStartedAt.QuadPart) * 1000.0 /
+            static_cast<double>(CatalogCallFrequency.QuadPart)
+        : 0.0;
+    if (CatalogCallElapsedMs >= 4.0)
+    {
+        AIDebugLogger::Log(
+            "Performance",
+            "GetPrimaryAssetIdList(AthenaCharacter) took %.2f ms",
+            CatalogCallElapsedMs);
+    }
+    FPlayerAIRawScriptArray Output{};
+
+    if (!bCalled)
+    {
+        bPrimaryAssetCosmeticFunctionsDisabled = true;
+        FMemory::Free(Params);
+        AIDebugLogger::MissingFeature(
+            "CharacterPrimaryAssetCatalog",
+            "the current build rejected catalog lookup; resident skins remain available");
+        return false;
+    }
+
+    memcpy(
+        &Output,
+        (uint8*)Params + OutputOffset,
+        sizeof(Output));
+
+    const bool bValidOutput = Output.Num > 0 &&
+        Output.Num <= 100000 &&
+        Output.Max >= Output.Num &&
+        Output.Max <= 100000 &&
+        Output.Data &&
+        SDK::MemReadable(
+            Output.Data,
+            static_cast<size_t>(Output.Num) * IdSize);
+
+    FMemory::Free(Params);
+
+    if (!bValidOutput)
+        return false;
+
+    // GetPrimaryAssetIdList can return thousands of entries on current
+    // seasons. Keep ownership of its one raw allocation and decode a small
+    // slice from TickCosmeticCache instead of converting every FName in the
+    // command/server tick that requested the catalog.
+    if (PendingSkinCatalogData)
+    {
+        FMemory::Free(Output.Data);
+        return true;
+    }
+
+    PendingSkinCatalogData = Output.Data;
+    PendingSkinCatalogCount = Output.Num;
+    PendingSkinCatalogIdSize = IdSize;
+    PendingSkinCatalogNameSize = NameSize;
+    PendingSkinCatalogCursor = 0;
+    PendingSkinCatalogEntries.clear();
+    PendingSkinCatalogSeenNames.clear();
+    PendingSkinCatalogByLowerName.clear();
+    return true;
+}
+
+static void PlayerAIClearPendingSkinCatalog()
+{
+    if (PendingSkinCatalogData)
+        FMemory::Free(PendingSkinCatalogData);
+
+    PendingSkinCatalogData = nullptr;
+    PendingSkinCatalogCount = 0;
+    PendingSkinCatalogIdSize = 0;
+    PendingSkinCatalogNameSize = 0;
+    PendingSkinCatalogCursor = 0;
+    PendingSkinCatalogEntries.clear();
+    PendingSkinCatalogSeenNames.clear();
+    PendingSkinCatalogByLowerName.clear();
+}
+
+static void PlayerAITickSkinCatalogDecode(int Budget)
+{
+    if (!PendingSkinCatalogData || Budget <= 0 ||
+        PendingSkinCatalogCount <= 0 ||
+        PendingSkinCatalogIdSize <= 0 ||
+        PendingSkinCatalogNameSize <= 0)
+    {
+        return;
+    }
+
+    const int32 End = (std::min)(
+        PendingSkinCatalogCursor + Budget,
+        PendingSkinCatalogCount);
+
+    for (int32 Index = PendingSkinCatalogCursor;
+         Index < End; Index++)
+    {
+        auto RawId = PendingSkinCatalogData +
+            static_cast<size_t>(Index) *
+                PendingSkinCatalogIdSize;
+        FName AssetName{};
+        memcpy(
+            &AssetName,
+            RawId + PendingSkinCatalogNameSize,
+            PendingSkinCatalogNameSize);
+        char NameBuffer[512]{};
+
+        if (!PlayerAITryWriteFNameString(
+                &AssetName, NameBuffer,
+                sizeof(NameBuffer)))
+        {
+            bPrimaryAssetCosmeticFunctionsDisabled = true;
+            PlayerAIClearPendingSkinCatalog();
+            AIDebugLogger::MissingFeature(
+                "CharacterPrimaryAssetCatalogDecode",
+                "a raw asset name could not be decoded; resident skins remain available");
+            return;
+        }
+
+        std::string Name(NameBuffer);
+        if (!PlayerAIIsPlayerSkinName(Name))
+            continue;
+
+        const auto LowerName = PlayerAILowerASCII(Name);
+        if (!PendingSkinCatalogSeenNames.insert(
+                LowerName).second)
+        {
+            continue;
+        }
+
+        FPlayerAISkinCatalogEntry Entry{};
+        memcpy(
+            Entry.RawPrimaryAssetId, RawId,
+            PendingSkinCatalogIdSize);
+        Entry.PrimaryAssetIdSize =
+            PendingSkinCatalogIdSize;
+        Entry.Name = Name;
+        PendingSkinCatalogByLowerName.emplace(
+            LowerName,
+            PendingSkinCatalogEntries.size());
+        PendingSkinCatalogEntries.push_back(
+            std::move(Entry));
+    }
+
+    if (End > PendingSkinCatalogCursor)
+    {
+        PendingSkinCatalogCursor = End;
+        PlayerAINoteBotSkinProgress();
+    }
+    if (PendingSkinCatalogCursor <
+        PendingSkinCatalogCount)
+    {
+        return;
+    }
+
+    auto CompletedCatalog =
+        std::move(PendingSkinCatalogEntries);
+    auto CompletedNameIndex =
+        std::move(PendingSkinCatalogByLowerName);
+    PlayerAIClearPendingSkinCatalog();
+
+    if (CompletedCatalog.empty())
+    {
+        SkinCatalogRetryTicks = 300;
+        return;
+    }
+
+    CachedSkinCatalog = std::move(CompletedCatalog);
+    CachedSkinCatalogByLowerName =
+        std::move(CompletedNameIndex);
+    bSkinCatalogReady = true;
+    AIDebugLogger::Log(
+        "Cosmetics",
+        "%d current-build character skins discovered through the primary-asset catalog",
+        (int)CachedSkinCatalog.size());
+}
+
+static void PlayerAITryBuildSkinCatalog(bool bForceNow)
+{
+    if (bSkinCatalogReady ||
+        bPrimaryAssetCosmeticFunctionsDisabled ||
+        PendingSkinCatalogData)
+    {
+        return;
+    }
+
+    if (!bForceNow)
+    {
+        if (SkinCatalogAttempts >= 20)
+            return;
+
+        if (SkinCatalogRetryTicks > 0)
+        {
+            SkinCatalogRetryTicks--;
+            return;
+        }
+    }
+    else if (SkinCatalogAttempts > 0 &&
+        LastSkinCatalogAttemptServerTime ==
+            PlayerAILastServerTickTime)
+    {
+        // More than one bot may be created by the same command. One forced
+        // catalog attempt is enough for the complete spawn loop.
+        return;
+    }
+
+    SkinCatalogAttempts++;
+    LastSkinCatalogAttemptServerTime =
+        PlayerAILastServerTickTime;
+    const bool bScheduled =
+        PlayerAIQueryCurrentBuildSkinCatalog();
+    SkinCatalogRetryTicks = bScheduled
+        ? 0
+        : 300;
+}
+
+static UAthenaCharacterItemDefinition*
+PlayerAITryResolveCatalogEntry(
+    const FPlayerAISkinCatalogEntry& Entry,
+    EPlayerAICosmeticLoadPolicy LoadPolicy)
+{
+    if (Entry.PrimaryAssetIdSize <= 0 ||
+        Entry.PrimaryAssetIdSize >
+            (int32)sizeof(Entry.RawPrimaryAssetId) ||
+        bPrimaryAssetCosmeticFunctionsDisabled)
+    {
+        return nullptr;
+    }
+
+    auto SystemLibrary = UKismetSystemLibrary::GetDefaultObj();
+    auto CharacterClass =
+        UAthenaCharacterItemDefinition::StaticClass();
+
+    if (!SystemLibrary || !CharacterClass)
+        return nullptr;
+
+    // Fast resident-object lookup first.
+    if (auto Function = SystemLibrary->GetFunction(
+            "GetObjectFromPrimaryAssetId"))
+    {
+        const uint32 InputOffset =
+            Function->GetOffset("PrimaryAssetId");
+        const uint32 ReturnOffset =
+            Function->GetOffset("ReturnValue");
+        const size_t ParamsSize =
+            PlayerAICosmeticFunctionParamSize(Function);
+
+        const size_t IdSize =
+            static_cast<size_t>(Entry.PrimaryAssetIdSize);
+        const bool bObjectGetterSchemaValid =
+            InputOffset == 0 && ReturnOffset == IdSize &&
+            PlayerAIParameterRangeFits(
+                ParamsSize, InputOffset, IdSize) &&
+            PlayerAIParameterRangeFits(
+                ParamsSize, ReturnOffset,
+                sizeof(UObject*));
+
+        if (bObjectGetterSchemaValid)
+        {
+            auto Params = FMemory::Malloc(ParamsSize);
+            if (Params)
+            {
+                memset(Params, 0, ParamsSize);
+                memcpy(
+                    (uint8*)Params + InputOffset,
+                    Entry.RawPrimaryAssetId,
+                    Entry.PrimaryAssetIdSize);
+
+                const bool bCalled =
+                    PlayerAITryProcessCosmeticFunction(
+                        SystemLibrary, Function, Params);
+                UObject* Result = nullptr;
+                memcpy(
+                    &Result,
+                    (uint8*)Params + ReturnOffset,
+                    sizeof(Result));
+                FMemory::Free(Params);
+
+                if (!bCalled)
+                    bPrimaryAssetCosmeticFunctionsDisabled =
+                        true;
+
+                if (PlayerAIIsLiveSupportObject(Result) &&
+                    Result->IsA(CharacterClass))
+                {
+                    return (UAthenaCharacterItemDefinition*)
+                        Result;
+                }
+            }
+        }
+    }
+
+    if (LoadPolicy !=
+            EPlayerAICosmeticLoadPolicy::AllowSynchronousLoad ||
+        bPrimaryAssetCosmeticFunctionsDisabled)
+    {
+        return nullptr;
+    }
+
+    // The primary-asset soft reference preserves GameFeature/plugin paths on
+    // modern builds, where assuming /Game/Athena/... is no longer complete.
+    if (auto Function = SystemLibrary->GetFunction(
+            "GetSoftObjectReferenceFromPrimaryAssetId"))
+    {
+        const uint32 InputOffset =
+            Function->GetOffset("PrimaryAssetId");
+        const uint32 ReturnOffset =
+            Function->GetOffset("ReturnValue");
+        const size_t ParamsSize =
+            PlayerAICosmeticFunctionParamSize(Function);
+        const size_t SoftObjectSize =
+            FSoftObjectPtr::Size();
+
+        const size_t IdSize =
+            static_cast<size_t>(Entry.PrimaryAssetIdSize);
+        const bool bSoftGetterSchemaValid =
+            InputOffset == 0 && ReturnOffset == IdSize &&
+            PlayerAIParameterRangeFits(
+                ParamsSize, InputOffset, IdSize) &&
+            PlayerAIParameterRangeFits(
+                ParamsSize, ReturnOffset,
+                SoftObjectSize);
+
+        if (bSoftGetterSchemaValid)
+        {
+            auto Params = FMemory::Malloc(ParamsSize);
+            if (Params)
+            {
+                memset(Params, 0, ParamsSize);
+                memcpy(
+                    (uint8*)Params + InputOffset,
+                    Entry.RawPrimaryAssetId,
+                    Entry.PrimaryAssetIdSize);
+
+                const bool bCalled =
+                    PlayerAITryProcessCosmeticFunction(
+                        SystemLibrary, Function, Params);
+                const UObject* Result = nullptr;
+
+                if (bCalled)
+                {
+                    auto SoftObject =
+                        (FSoftObjectPtr*)((uint8*)Params +
+                            ReturnOffset);
+                    Result =
+                        PlayerAITryResolveReturnedSoftObjectForCommand(
+                            SoftObject, CharacterClass);
+                }
+                else
+                {
+                    bPrimaryAssetCosmeticFunctionsDisabled =
+                        true;
+                }
+
+                FMemory::Free(Params);
+
+                if (PlayerAIIsLiveSupportObject(Result) &&
+                    Result->IsA(CharacterClass))
+                {
+                    return (UAthenaCharacterItemDefinition*)
+                        Result;
+                }
+            }
+        }
+    }
+
+    return nullptr;
+}
+
 static void PlayerAITickKnownSkinDiscovery(int Budget)
 {
     if (bKnownSkinsLoaded || Budget <= 0)
@@ -3228,11 +9057,7 @@ static void PlayerAITickKnownSkinDiscovery(int Budget)
             if (!CID || !CID->HasHeroDefinition() || !CID->HeroDefinition)
                 return;
 
-            for (auto Existing : CachedSkins)
-                if (Existing == CID)
-                    return;
-
-            CachedSkins.push_back(CID);
+            PlayerAICacheResolvedSkin(CID);
         };
 
     const int Count =
@@ -3320,22 +9145,14 @@ static void PlayerAITickLoadedSkinScan(int Budget)
         if (!bValid)
             continue;
 
-        bool bKnown = false;
-
-        for (auto Existing : CachedSkins)
-        {
-            if (Existing == CID)
-            {
-                bKnown = true;
-                break;
-            }
-        }
-
-        if (!bKnown)
-            CachedSkins.push_back(CID);
+        PlayerAICacheResolvedSkin(CID);
     }
 
-    LoadedSkinScanCursor = End;
+    if (End > LoadedSkinScanCursor)
+    {
+        LoadedSkinScanCursor = End;
+        PlayerAINoteBotSkinProgress();
+    }
 
     if (LoadedSkinScanCursor >= LoadedSkinScanLimit)
     {
@@ -3351,10 +9168,118 @@ static void PlayerAITickLoadedSkinScan(int Budget)
 
 void VersionFeatureAdapter::TickCosmeticCache()
 {
-    // A few indexed lookups and a small object-array slice per frame keep
-    // build-specific skin discovery invisible to TickFlush latency.
-    PlayerAITickKnownSkinDiscovery(4);
-    PlayerAITickLoadedSkinScan(256);
+    const bool bHasPendingCheatBotCosmetics =
+        !PendingRandomBotSkins.empty() ||
+        !PendingRequestedBotSkinCommits.empty();
+    // Modern builds have an authoritative primary-asset catalog, so there is
+    // no reason to walk the global UObject array before PlayerAI or a cheat-bot
+    // cosmetic request exists. This removes the FN30 startup scan that ran even
+    // with universal PlayerAI disabled. Pre-catalog builds retain their small
+    // resident warm-up so 1.x random bots still have candidates available.
+    if (VersionInfo.FortniteVersion >= 2.00 &&
+        !PlayerAIManager::bInitialized &&
+        !bHasPendingCheatBotCosmetics)
+    {
+        return;
+    }
+
+    if (VersionInfo.FortniteVersion >= 2.00)
+        PlayerAITryBuildSkinCatalog(false);
+    PlayerAITickSkinCatalogDecode(32);
+
+    // Once the catalog is being decoded (or has yielded entries), the global
+    // resident scan is redundant. Keep it solely as a fallback for builds
+    // where the primary-asset functions are unavailable or return no skins.
+    const bool bNeedsResidentFallback =
+        VersionInfo.FortniteVersion >= 32.0 ||
+        bPrimaryAssetCosmeticFunctionsDisabled ||
+        std::any_of(
+            PendingRandomBotSkins.begin(),
+            PendingRandomBotSkins.end(),
+            [](const FPlayerAIPendingRandomSkin& Pending)
+            {
+                return Pending.bUseResidentFallback;
+            });
+    const bool bCatalogCanServeRequests =
+        !bNeedsResidentFallback &&
+        (PendingSkinCatalogData ||
+         (bSkinCatalogReady && !CachedSkinCatalog.empty()));
+    if (!bCatalogCanServeRequests)
+    {
+        PlayerAITickKnownSkinDiscovery(4);
+        // The resident fallback is a one-pass compatibility scan. Keep its
+        // per-frame footprint small on UE5 instead of recreating FN30's old
+        // 256-object startup sweep.
+        PlayerAITickLoadedSkinScan(64);
+    }
+    if (!PlayerAITickPendingRequestedBotSkinCommits())
+        PlayerAITickPendingRandomBotSkins();
+}
+
+bool VersionFeatureAdapter::IsSkinCommitPending(
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (!Pawn)
+        return false;
+    if (PendingBotSkinCommitPawnCounts.contains(Pawn))
+        return true;
+
+    auto Existing = PendingBotSkinSettles.find(Pawn);
+    if (Existing == PendingBotSkinSettles.end())
+        return false;
+
+    const ULONGLONG Now = GetTickCount64();
+    const bool bStillSettling =
+        Existing->second.Pawn.Get() == Pawn &&
+        Existing->second.World.Get() == UWorld::GetWorld() &&
+        PlayerAIIsLiveSupportActor(Pawn) &&
+        Now < Existing->second.Until;
+    if (!bStillSettling)
+        PendingBotSkinSettles.erase(Existing);
+    return bStillSettling;
+}
+
+uint64 VersionFeatureAdapter::GetSkinCommitProgressGeneration()
+{
+    return PlayerAIBotSkinProgressGeneration;
+}
+
+bool VersionFeatureAdapter::IsSkinCommitActivelyWorking(
+    AFortPlayerPawnAthena* Pawn)
+{
+    return Pawn && PendingBotSkinActivePawns.contains(Pawn);
+}
+
+void VersionFeatureAdapter::CancelSkinCommit(
+    AFortPlayerPawnAthena* Pawn)
+{
+    if (!Pawn)
+        return;
+
+    PlayerAICancelPendingCheatBotVisualCommit(Pawn);
+
+    PendingRequestedBotSkinCommits.erase(
+        std::remove_if(
+            PendingRequestedBotSkinCommits.begin(),
+            PendingRequestedBotSkinCommits.end(),
+            [Pawn](const FPlayerAIPendingRequestedSkinCommit& Pending)
+            {
+                return Pending.PawnIdentity == Pawn;
+            }),
+        PendingRequestedBotSkinCommits.end());
+    PendingRandomBotSkins.erase(
+        std::remove_if(
+            PendingRandomBotSkins.begin(),
+            PendingRandomBotSkins.end(),
+            [Pawn](const FPlayerAIPendingRandomSkin& Pending)
+            {
+                return Pending.PawnIdentity == Pawn;
+            }),
+        PendingRandomBotSkins.end());
+    PendingBotSkinCommitPawnCounts.erase(Pawn);
+    PendingBotSkinActivePawns.erase(Pawn);
+    if (PendingRandomBotSkinCursor >= PendingRandomBotSkins.size())
+        PendingRandomBotSkinCursor = 0;
 }
 
 template <typename SoftObjectType>
@@ -3373,54 +9298,444 @@ static bool PlayerAIHasSafeSoftObjectArray(
             Array.Data, (size_t)Count * Stride);
 }
 
-void VersionFeatureAdapter::ApplyRandomSkin(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn)
+static UAthenaCharacterItemDefinition*
+PlayerAIValidateCharacterDefinition(const UObject* Object)
 {
-    if (!PlayerState)
+    auto CharacterClass =
+        UAthenaCharacterItemDefinition::StaticClass();
+
+    if (!CharacterClass ||
+        !PlayerAIIsLiveSupportObject(Object) ||
+        Object->IsDefaultObject() ||
+        !Object->IsA(CharacterClass))
+    {
+        return nullptr;
+    }
+
+    auto Character =
+        (UAthenaCharacterItemDefinition*)Object;
+    return Character->HasHeroDefinition() &&
+        Character->HeroDefinition
+        ? Character
+        : nullptr;
+}
+
+static void PlayerAICacheResolvedSkin(
+    UAthenaCharacterItemDefinition* Character)
+{
+    if (!Character)
         return;
 
-    if (CachedSkins.empty())
+    if (CachedSkinObjects.insert(Character).second)
+        CachedSkins.push_back(Character);
+
+    auto RawName = Character->Name.ToString();
+    std::string Name(RawName.c_str());
+    if (!Name.empty())
     {
-        ApplyDefaultCosmetics(PlayerState, Pawn);
+        CachedSkinsByLowerName[
+            PlayerAILowerASCII(Name)] = Character;
+    }
+}
+
+static bool PlayerAITryGetCachedResolvedSkinParts(
+    UAthenaCharacterItemDefinition* Character,
+    const UClass* PartClass,
+    const UObject* OutParts[PlayerAICharacterPartSlotCount])
+{
+    if (!Character || !PartClass || !OutParts)
+        return false;
+
+    auto It = CachedResolvedSkinParts.find(Character);
+    if (It == CachedResolvedSkinParts.end())
+        return false;
+
+    if (!It->second.bAllAuthoredPartsResolved ||
+        !PlayerAIIsLiveSupportObject(Character) ||
+        Character->Index !=
+            It->second.CharacterObjectIndex)
+    {
+        CachedResolvedSkinParts.erase(It);
+        return false;
+    }
+
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        const UObject* Part = It->second.Parts[Index];
+        if (Part && (!PlayerAIIsLiveSupportObject(Part) ||
+            !Part->IsA(PartClass) ||
+            Part->Index !=
+                It->second.PartObjectIndices[Index]))
+        {
+            CachedResolvedSkinParts.erase(It);
+            return false;
+        }
+    }
+
+    if (!It->second.Parts[0] || !It->second.Parts[1])
+    {
+        CachedResolvedSkinParts.erase(It);
+        return false;
+    }
+
+    memcpy(OutParts, It->second.Parts,
+        sizeof(It->second.Parts));
+    return true;
+}
+
+static void PlayerAICacheResolvedSkinParts(
+    UAthenaCharacterItemDefinition* Character,
+    const UObject* Parts[PlayerAICharacterPartSlotCount],
+    bool bAllAuthoredPartsResolved)
+{
+    if (!Character || !Parts || !Parts[0] || !Parts[1] ||
+        !bAllAuthoredPartsResolved)
+    {
+        if (Character)
+            CachedResolvedSkinParts.erase(Character);
         return;
     }
 
-    // Some CIDs have unresolvable parts - try a few random picks before
-    // falling back to the default outfit.
-    for (int Attempt = 0; Attempt < 5; Attempt++)
-    {
-        auto CID = CachedSkins[rand() % CachedSkins.size()];
+    FPlayerAIResolvedSkinParts& Cached =
+        CachedResolvedSkinParts[Character];
+    Cached.CharacterObjectIndex = Character->Index;
+    Cached.bAllAuthoredPartsResolved = true;
+    memcpy(Cached.Parts, Parts, sizeof(Cached.Parts));
 
-        if (!PlayerAIIsLiveSupportObject(CID) ||
-            !CID->HasHeroDefinition())
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        Cached.PartObjectIndices[Index] = Parts[Index]
+            ? Parts[Index]->Index
+            : -1;
+    }
+}
+
+static void PlayerAIMarkResolvedSkinVisuallyProven(
+    UAthenaCharacterItemDefinition* Character)
+{
+    if (!Character ||
+        !CachedResolvedSkinParts.contains(Character) ||
+        std::find(
+            CachedResolvedSkinPool.begin(),
+            CachedResolvedSkinPool.end(), Character) !=
+                CachedResolvedSkinPool.end())
+    {
+        return;
+    }
+
+    // Parts resolution alone is not proof that a connectionless FN30 pawn can
+    // render this CID. Reuse only outfits that completed the live mesh proof;
+    // otherwise four incompatible CIDs can poison the shared random pool and
+    // leave every later bot on its default appearance.
+    CachedResolvedSkinPool.push_back(Character);
+}
+
+static std::string PlayerAIExtractCharacterName(
+    const char* IdOrPath)
+{
+    if (!IdOrPath)
+        return {};
+
+    std::string Input(IdOrPath);
+    const auto Lower = PlayerAILowerASCII(Input);
+    const auto Start = Lower.find("cid_");
+
+    if (Start == std::string::npos)
+        return {};
+
+    size_t End = Start;
+    while (End < Input.size())
+    {
+        const char Character = Input[End];
+        const bool bAllowed =
+            (Character >= 'a' && Character <= 'z') ||
+            (Character >= 'A' && Character <= 'Z') ||
+            (Character >= '0' && Character <= '9') ||
+            Character == '_' || Character == '-';
+
+        if (!bAllowed)
+            break;
+
+        End++;
+    }
+
+    const auto Name = Input.substr(Start, End - Start);
+    return PlayerAIIsPlayerSkinName(Name)
+        ? Name
+        : std::string();
+}
+
+UAthenaCharacterItemDefinition*
+VersionFeatureAdapter::ResolveCharacterSkin(
+    const char* IdOrPath,
+    EPlayerAICosmeticLoadPolicy LoadPolicy)
+{
+    const auto RequestedName =
+        PlayerAIExtractCharacterName(IdOrPath);
+
+    if (RequestedName.empty())
+        return nullptr;
+
+    const auto RequestedLower =
+        PlayerAILowerASCII(RequestedName);
+
+    auto CachedByName =
+        CachedSkinsByLowerName.find(RequestedLower);
+    if (CachedByName != CachedSkinsByLowerName.end())
+    {
+        if (auto Character =
+                PlayerAIValidateCharacterDefinition(
+                    CachedByName->second))
         {
-            continue;
+            return Character;
         }
 
-        auto Hero = CID->HeroDefinition;
-        auto HeroClass = UFortHeroType::StaticClass();
+        CachedSkinsByLowerName.erase(CachedByName);
+    }
 
-        if (!HeroClass ||
-            !PlayerAIIsLiveSupportObject(Hero) ||
-            !reinterpret_cast<const UObject*>(Hero)->
-                IsA(HeroClass))
-            continue;
-
-        // Resolve only already-loaded hero specializations and parts. Loading
-        // an unresolved soft path here can stall the entire gameserver.
-        const UObject* Parts[6] = {};
-
-        if (Hero->HasSpecializations() &&
-            PlayerAIHasSafeSoftObjectArray(
-                Hero->Specializations, 64))
+    if (LoadPolicy ==
+            EPlayerAICosmeticLoadPolicy::AllowSynchronousLoad &&
+        !CachedSkinCatalog.empty())
+    {
+        auto CatalogMatch =
+            CachedSkinCatalogByLowerName.find(
+                RequestedLower);
+        if (CatalogMatch !=
+                CachedSkinCatalogByLowerName.end() &&
+            CatalogMatch->second <
+                CachedSkinCatalog.size())
         {
-            for (int s = 0; s < Hero->Specializations.Num(); s++)
-            {
-                auto& SpecSoft = Hero->Specializations.Get(s, FSoftObjectPtr::Size());
-                auto Spec = const_cast<UFortHeroSpecialization*>(
-                    (const UFortHeroSpecialization*)
-                    PlayerAITryResolveLoadedSoftObject(
-                        SpecSoft, UFortHeroSpecialization::StaticClass()));
+            const auto& Entry = CachedSkinCatalog[
+                CatalogMatch->second];
 
+            if (auto Character =
+                    PlayerAIValidateCharacterDefinition(
+                        PlayerAITryResolveCatalogEntry(
+                            Entry, LoadPolicy)))
+            {
+                PlayerAICacheResolvedSkin(Character);
+                return Character;
+            }
+
+            // The primary-asset entry is authoritative for this name. If its
+            // soft path is temporarily unavailable, the historical canonical
+            // path below is still a useful compatibility fallback.
+        }
+    }
+
+    std::string RequestedPath(IdOrPath ? IdOrPath : "");
+    const auto RequestedPathLower =
+        PlayerAILowerASCII(RequestedPath);
+    if (RequestedPathLower.rfind("skin=", 0) == 0)
+        RequestedPath = RequestedPath.substr(5);
+
+    // An explicit GameFeature/plugin path may not use the historical Athena
+    // characters directory and may not be registered in a stripped catalog.
+    if (RequestedPath.find('/') != std::string::npos)
+    {
+        UEAllocatedWString WidePath(
+            RequestedPath.begin(), RequestedPath.end());
+        auto Character = PlayerAIValidateCharacterDefinition(
+            PlayerAITryFindLoadedCosmetic(
+                WidePath.c_str(),
+                UAthenaCharacterItemDefinition::StaticClass()));
+
+        if (!Character &&
+            LoadPolicy ==
+                EPlayerAICosmeticLoadPolicy::AllowSynchronousLoad)
+        {
+            Character = PlayerAIValidateCharacterDefinition(
+                PlayerAITryLoadCosmetic(
+                    WidePath.c_str(),
+                    UAthenaCharacterItemDefinition::StaticClass()));
+        }
+
+        if (Character)
+        {
+            PlayerAICacheResolvedSkin(Character);
+            return Character;
+        }
+    }
+
+    // Do not fall through to TUObjectArray::FindObject here. Its partial-name
+    // fallback walks the complete global object array and can stall a large
+    // modern server. Resident discovery maintains the exact-name map above;
+    // unloaded definitions use the catalog or the canonical path below.
+    UEAllocatedWString WideName(
+        RequestedName.begin(), RequestedName.end());
+    UEAllocatedWString CanonicalPath =
+        L"/Game/Athena/Items/Cosmetics/Characters/" +
+        WideName + L"." + WideName;
+    auto Character = PlayerAIValidateCharacterDefinition(
+        PlayerAITryFindLoadedCosmetic(
+            CanonicalPath.c_str(),
+            UAthenaCharacterItemDefinition::StaticClass()));
+
+    if (!Character &&
+        LoadPolicy ==
+            EPlayerAICosmeticLoadPolicy::AllowSynchronousLoad)
+    {
+        Character = PlayerAIValidateCharacterDefinition(
+            PlayerAITryLoadCosmetic(
+                CanonicalPath.c_str(),
+                UAthenaCharacterItemDefinition::StaticClass()));
+    }
+
+    if (Character)
+        PlayerAICacheResolvedSkin(Character);
+
+    return Character;
+}
+
+bool VersionFeatureAdapter::ApplyCharacterSkin(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    UAthenaCharacterItemDefinition* Character,
+    EPlayerAICosmeticLoadPolicy LoadPolicy,
+    bool* OutTargetRetained)
+{
+    bPlayerAILastCheatBotVisualCallPerformedNativeWork = false;
+    if (OutTargetRetained)
+        *OutTargetRetained = false;
+    if (!PlayerState ||
+        !PlayerAIValidateCharacterDefinition(Character))
+    {
+        return false;
+    }
+
+    auto Hero = Character->HeroDefinition;
+    auto HeroClass = UFortHeroType::StaticClass();
+    auto PartClass = UCustomCharacterPart::StaticClass();
+
+    if (!HeroClass || !PartClass ||
+        !PlayerAIIsLiveSupportObject(Hero) ||
+        !reinterpret_cast<const UObject*>(Hero)->
+            IsA(HeroClass))
+    {
+        return false;
+    }
+
+    const UObject* Parts[PlayerAICharacterPartSlotCount] = {};
+    const bool bResolvedFromCache =
+        PlayerAITryGetCachedResolvedSkinParts(
+            Character, PartClass, Parts);
+    bool bHasBaseParts = false;
+    bool bAllAuthoredPartsResolved = bResolvedFromCache;
+    int SynchronousResolveBudget = 8;
+
+    auto ResolveCosmeticSoftObject =
+        [&](FSoftObjectPtr& SoftObject,
+            const UClass* Class) -> const UObject*
+        {
+            if (auto Resident =
+                    PlayerAITryResolveLoadedSoftObject(
+                        SoftObject, Class))
+            {
+                return Resident;
+            }
+
+            if (LoadPolicy !=
+                    EPlayerAICosmeticLoadPolicy::
+                        AllowSynchronousLoad ||
+                SynchronousResolveBudget <= 0)
+            {
+                return nullptr;
+            }
+
+            SynchronousResolveBudget--;
+            return PlayerAITryResolveSoftObjectForCommand(
+                SoftObject, Class);
+        };
+
+    if (!bResolvedFromCache)
+    {
+        bAllAuthoredPartsResolved = true;
+
+        // UE5 outfits can author their parts directly on the CID. These are
+        // the authoritative base style; hero specializations below only fill
+        // slots that the CID did not provide.
+        const bool bHasDeclaredBaseParts =
+            Character->HasBaseCharacterParts() &&
+            Character->BaseCharacterParts.Num() > 0;
+        const bool bHasSafeBaseParts =
+            bHasDeclaredBaseParts &&
+            PlayerAIHasSafeSoftObjectArray(
+                Character->BaseCharacterParts, 16);
+        if (bHasDeclaredBaseParts && !bHasSafeBaseParts)
+            bAllAuthoredPartsResolved = false;
+
+        if (bHasSafeBaseParts)
+        {
+            for (int p = 0;
+                 p < Character->BaseCharacterParts.Num(); p++)
+            {
+                auto& PartSoft =
+                    Character->BaseCharacterParts.Get(
+                        p, FSoftObjectPtr::Size());
+                auto Part = (const UCustomCharacterPart*)
+                    ResolveCosmeticSoftObject(
+                        PartSoft, PartClass);
+
+                if (!PlayerAIIsLiveSupportObject(Part) ||
+                    !reinterpret_cast<const UObject*>(Part)->
+                        IsA(PartClass) ||
+                    !Part->HasCharacterPartType())
+                {
+                    if (Part ||
+                        PlayerAIGetSoftReferencePathState(
+                            PartSoft) !=
+                            EPlayerAISoftReferencePathState::Empty)
+                    {
+                        bAllAuthoredPartsResolved = false;
+                    }
+                    continue;
+                }
+
+                const int Index = Part->CharacterPartType;
+                if (Index >= 0 &&
+                    Index < PlayerAICharacterPartSlotCount)
+                {
+                    Parts[Index] = (const UObject*)Part;
+                    bHasBaseParts = true;
+                }
+                else
+                {
+                    bAllAuthoredPartsResolved = false;
+                }
+            }
+        }
+
+        // Head/body on the CID are not necessarily the whole outfit. Hero
+        // specializations can still author hats, hair, face accessories and
+        // gameplay pieces. Automatic random skins arrive here with a complete
+        // incremental cache, while explicit commands retain their small
+        // synchronous-load budget and retry queue.
+        const bool bHasDeclaredSpecializations =
+            Hero->HasSpecializations() &&
+            Hero->Specializations.Num() > 0;
+        const bool bHasSafeSpecializations =
+            bHasDeclaredSpecializations &&
+            PlayerAIHasSafeSoftObjectArray(
+                Hero->Specializations, 64);
+        if (bHasDeclaredSpecializations &&
+            !bHasSafeSpecializations)
+        {
+            bAllAuthoredPartsResolved = false;
+        }
+
+        if (bHasSafeSpecializations)
+        {
+            for (int s = 0;
+                 s < Hero->Specializations.Num(); s++)
+            {
+                auto& SpecSoft = Hero->Specializations.Get(
+                    s, FSoftObjectPtr::Size());
+                auto Spec = (const UFortHeroSpecialization*)
+                    ResolveCosmeticSoftObject(
+                        SpecSoft,
+                        UFortHeroSpecialization::StaticClass());
                 auto SpecObject =
                     reinterpret_cast<const UObject*>(Spec);
                 auto SpecClass =
@@ -3428,86 +9743,1898 @@ void VersionFeatureAdapter::ApplyRandomSkin(AFortPlayerStateAthena* PlayerState,
 
                 if (!SpecClass ||
                     !PlayerAIIsLiveSupportObject(SpecObject) ||
-                    !SpecObject->IsA(SpecClass) ||
-                    !Spec->HasCharacterParts() ||
-                    !PlayerAIHasSafeSoftObjectArray(
-                        Spec->CharacterParts, 16))
+                    !SpecObject->IsA(SpecClass))
+                {
+                    if (SpecObject ||
+                        PlayerAIGetSoftReferencePathState(
+                            SpecSoft) !=
+                            EPlayerAISoftReferencePathState::Empty)
+                    {
+                        bAllAuthoredPartsResolved = false;
+                    }
+                    continue;
+                }
+
+                const bool bHasDeclaredParts =
+                    Spec->HasCharacterParts() &&
+                    Spec->CharacterParts.Num() > 0;
+                const bool bHasSafeParts =
+                    bHasDeclaredParts &&
+                    PlayerAIHasSafeSoftObjectArray(
+                        Spec->CharacterParts, 16);
+                if (bHasDeclaredParts && !bHasSafeParts)
+                    bAllAuthoredPartsResolved = false;
+                if (!bHasSafeParts)
                     continue;
 
-                for (int p = 0; p < Spec->CharacterParts.Num(); p++)
+                for (int p = 0;
+                     p < Spec->CharacterParts.Num(); p++)
                 {
-                    auto& PartSoft = Spec->CharacterParts.Get(p, FSoftObjectPtr::Size());
-                    auto Part = const_cast<UCustomCharacterPart*>(
-                        (const UCustomCharacterPart*)
-                        PlayerAITryResolveLoadedSoftObject(
-                            PartSoft, UCustomCharacterPart::StaticClass()));
+                    auto& PartSoft = Spec->CharacterParts.Get(
+                        p, FSoftObjectPtr::Size());
+                    auto Part = (const UCustomCharacterPart*)
+                        ResolveCosmeticSoftObject(
+                            PartSoft, PartClass);
 
-                    auto PartObject =
-                        reinterpret_cast<const UObject*>(Part);
-                    auto PartClass =
-                        UCustomCharacterPart::StaticClass();
-
-                    if (!PartClass ||
-                        !PlayerAIIsLiveSupportObject(PartObject) ||
-                        !PartObject->IsA(PartClass) ||
+                    if (!PlayerAIIsLiveSupportObject(Part) ||
+                        !reinterpret_cast<const UObject*>(Part)->
+                            IsA(PartClass) ||
                         !Part->HasCharacterPartType())
+                    {
+                        if (Part ||
+                            PlayerAIGetSoftReferencePathState(
+                                PartSoft) !=
+                                EPlayerAISoftReferencePathState::Empty)
+                        {
+                            bAllAuthoredPartsResolved = false;
+                        }
                         continue;
+                    }
 
                     const int Index = Part->CharacterPartType;
-
-                    if (Index >= 0 && Index < 6)
+                    if (Index >= 0 &&
+                        Index < PlayerAICharacterPartSlotCount &&
+                        (!bHasBaseParts || !Parts[Index]))
+                    {
                         Parts[Index] = (const UObject*)Part;
+                    }
+                    else if (Index < 0 ||
+                        Index >= PlayerAICharacterPartSlotCount)
+                    {
+                        bAllAuthoredPartsResolved = false;
+                    }
                 }
             }
         }
+    }
 
-        // Head and body are mandatory. Committing a partially resolved CID
-        // while clearing stale slots makes the entire AI invisible on some
-        // modern builds.
-        if (!PlayerAIIsLiveSupportObject(Parts[0]) ||
-            !PlayerAIIsLiveSupportObject(Parts[1]))
-            continue;
+    // A valid authored optional reference is part of the outfit just as much
+    // as head/body. Never commit or cache a resident-only partial scan: the
+    // deferred queue will finish it without blocking and try again.
+    if (!bAllAuthoredPartsResolved ||
+        !PlayerAIIsLiveSupportObject(Parts[0]) ||
+        !PlayerAIIsLiveSupportObject(Parts[1]))
+    {
+        return false;
+    }
 
-        if (PlayerAIWriteCharacterParts(PlayerState, Parts))
+    if (!bResolvedFromCache)
+        PlayerAICacheResolvedSkinParts(
+            Character, Parts, bAllAuthoredPartsResolved);
+
+    // A deferred FN19-FN31 transaction already owns the desired metadata and
+    // native mesh work. Poll it directly; rewriting and rolling back these
+    // fields every 50 ms caused visible startup delay and could make FN30's
+    // async reconstruction observe the default metadata mid-commit.
+    if (PlayerAIIsCheatBotVisualCommitPending(Pawn, Character))
+    {
+        bool bTargetRetained = false;
+        if (!PlayerAIFinishRequestedCheatBotCosmetics(
+                PlayerState, Pawn, Parts, Character, nullptr,
+                &bTargetRetained))
         {
-            PlayerAIWriteHeroType(
-                PlayerState, (const UObject*)Hero);
+            if (OutTargetRetained)
+                *OutTargetRetained = bTargetRetained;
+            return false;
+        }
+        PlayerAICacheResolvedSkin(Character);
+        return true;
+    }
 
-            if (CID->HasGender())
-                PlayerAIWriteGender(
-                    PlayerState, CID->Gender);
+    FPlayerAICosmeticMetadataSnapshot PreviousMetadata;
+    PreviousMetadata.PlayerState =
+        TWeakObjectPtr<AFortPlayerStateAthena>(PlayerState);
+    PreviousMetadata.bHadHeroTypeProperty =
+        PlayerState->HasHeroType();
+    PreviousMetadata.bHadHeroTypeValue =
+        PreviousMetadata.bHadHeroTypeProperty &&
+        PlayerState->HeroType != nullptr;
+    if (PreviousMetadata.bHadHeroTypeProperty &&
+        PlayerState->HeroType)
+    {
+        PreviousMetadata.HeroType = TWeakObjectPtr<UObject>(
+            const_cast<UObject*>(
+                reinterpret_cast<const UObject*>(
+                    PlayerState->HeroType)));
+    }
 
-            PlayerAIChoosePartsOnPawn(Pawn, Parts);
-            PlayerAIFinishCosmetics(PlayerState, Pawn);
-            AIDebugLogger::Verbose("Cosmetics", "applied random skin %s", CID->Name.ToString().c_str());
-            return;
+    EFortCustomGender SelectedGender =
+        EFortCustomGender::Invalid;
+    const bool bWriteGender =
+        PlayerAIResolveConcreteGender(
+            PlayerState, Character, Parts, SelectedGender);
+    PreviousMetadata.ReplicatedGender =
+        PlayerAICaptureEnumByte(
+            PlayerState, "Gender", L"Gender");
+    if (!PreviousMetadata.ReplicatedGender.bValid)
+    {
+        PreviousMetadata.ReplicatedGender =
+            PlayerAICaptureEnumByte(
+                PlayerState,
+                "CharacterGender", L"CharacterGender");
+    }
+    PreviousMetadata.LocalGender = PlayerAICaptureEnumByte(
+        PlayerState, "LocalCharacterGender", nullptr);
+
+    uint8 SelectedBodyType = 0;
+    const bool bWriteBodyType =
+        PlayerAIResolveConcreteBodyType(
+            PlayerState, Parts, SelectedBodyType);
+    PreviousMetadata.ReplicatedBodyType =
+        PlayerAICaptureEnumByte(
+            PlayerState,
+            "CharacterBodyType", L"CharacterBodyType");
+    if (!PreviousMetadata.ReplicatedBodyType.bValid)
+    {
+        PreviousMetadata.ReplicatedBodyType =
+            PlayerAICaptureEnumByte(
+                PlayerState, "BodyType", L"BodyType");
+    }
+    PreviousMetadata.LocalBodyType = PlayerAICaptureEnumByte(
+        PlayerState, "LocalCharacterBodyType", nullptr);
+
+    const bool bStageCheatBotMetadata =
+        VersionInfo.FortniteVersion >= 19.0 &&
+        VersionInfo.FortniteVersion < 32.0 && Pawn &&
+        PendingBotSkinCommitPawnCounts.contains(Pawn);
+    if (!bStageCheatBotMetadata)
+    {
+        PlayerAIWriteHeroType(
+            PlayerState, (const UObject*)Hero, true);
+    }
+
+    if (bWriteGender && !bStageCheatBotMetadata)
+        PlayerAIWriteGender(
+            PlayerState, SelectedGender, true);
+    if (bWriteBodyType && !bStageCheatBotMetadata)
+        PlayerAIWriteBodyType(
+            PlayerState, SelectedBodyType, true);
+
+    bool bTargetRetained = false;
+    if (!PlayerAIFinishRequestedCheatBotCosmetics(
+            PlayerState, Pawn, Parts, Character,
+            &PreviousMetadata, &bTargetRetained))
+    {
+        // While queued, leave the desired metadata staged exactly once. The
+        // transaction owns the original snapshot and restores it on terminal
+        // failure/cancel. Generic/immediate failures have no pending owner.
+        if (!bTargetRetained &&
+            !PlayerAIIsCheatBotVisualCommitPending(
+                Pawn, Character))
+        {
+            PlayerAIRestoreCosmeticMetadata(PreviousMetadata);
+        }
+        if (OutTargetRetained)
+            *OutTargetRetained = bTargetRetained;
+        return false;
+    }
+
+    PlayerAICacheResolvedSkin(Character);
+    return true;
+}
+
+UAthenaCharacterItemDefinition*
+VersionFeatureAdapter::ApplyRandomSkin(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    EPlayerAICosmeticLoadPolicy LoadPolicy)
+{
+    if (!PlayerState)
+        return nullptr;
+
+    const bool bAllowSynchronousLoad =
+        LoadPolicy ==
+        EPlayerAICosmeticLoadPolicy::AllowSynchronousLoad;
+
+    // Prefer already-resolved outfits. This path never loads a package and
+    // remains bounded even when the current build has thousands of CIDs.
+    constexpr int MaxResidentCandidates = 5;
+    int Attempts = 0;
+    if (!CachedSkins.empty())
+    {
+        const int ResidentAttempts = (std::min)(
+            (int)CachedSkins.size(), MaxResidentCandidates);
+        const int Start = rand() % CachedSkins.size();
+
+        for (int Offset = 0;
+             Offset < ResidentAttempts; Offset++)
+        {
+            Attempts++;
+            auto Character = CachedSkins[
+                (Start + Offset) % CachedSkins.size()];
+
+            if (ApplyCharacterSkin(
+                    PlayerState, Pawn, Character,
+                    EPlayerAICosmeticLoadPolicy::ResidentOnly))
+            {
+                AIDebugLogger::Verbose(
+                    "Cosmetics",
+                    "applied resident skin %s",
+                    Character->Name.ToString().c_str());
+                return Character;
+            }
         }
     }
 
-    AIDebugLogger::Log("Cosmetics", "random skin resolution failed %d times - using the default outfit (check the 'known skins' count above)", 5);
-    ApplyDefaultCosmetics(PlayerState, Pawn);
+    // A random command may load one selected outfit, but never walk through
+    // multiple unloaded candidates in one game-thread frame. Catalog
+    // discovery itself is handled incrementally by TickCosmeticCache; the
+    // spawn command only consumes a completed catalog.
+    constexpr int MaxSynchronousCandidates = 1;
+    int SynchronousAttempts = 0;
+
+    if (bAllowSynchronousLoad &&
+        !CachedSkinCatalog.empty())
+    {
+        const int CatalogCount =
+            (int)CachedSkinCatalog.size();
+        const int CatalogAttempts =
+            (std::min)(CatalogCount,
+                MaxSynchronousCandidates);
+        const int Start = rand() % CatalogCount;
+
+        for (int Offset = 0;
+             Offset < CatalogAttempts; Offset++)
+        {
+            Attempts++;
+            SynchronousAttempts++;
+            const auto& Entry = CachedSkinCatalog[
+                (Start + Offset) % CatalogCount];
+            auto Character =
+                PlayerAIValidateCharacterDefinition(
+                    PlayerAITryResolveCatalogEntry(
+                        Entry, LoadPolicy));
+
+            if (Character && ApplyCharacterSkin(
+                    PlayerState, Pawn, Character,
+                    LoadPolicy))
+            {
+                PlayerAICacheResolvedSkin(Character);
+                AIDebugLogger::Verbose(
+                    "Cosmetics",
+                    "applied catalog skin %s",
+                    Entry.Name.c_str());
+                return Character;
+            }
+        }
+    }
+
+    // 1.7.2 predates the primary-asset Blueprint catalog. Probe the stable
+    // early CID set only for this user-triggered path, loading one candidate
+    // at a time and skipping definitions absent from the hosted build.
+    if (bAllowSynchronousLoad &&
+        SynchronousAttempts < MaxSynchronousCandidates)
+    {
+        const int KnownCount =
+            (int)(sizeof(PlayerAIKnownSkinNames) /
+                sizeof(PlayerAIKnownSkinNames[0]));
+        const int CandidateCount =
+            VersionInfo.FortniteVersion < 2.00
+            ? (std::min)(KnownCount, 8)
+            : KnownCount;
+        const int KnownAttempts = (std::min)(
+            CandidateCount,
+            MaxSynchronousCandidates -
+                SynchronousAttempts);
+        const int Start = rand() % CandidateCount;
+
+        for (int Offset = 0;
+             Offset < KnownAttempts; Offset++)
+        {
+            Attempts++;
+            SynchronousAttempts++;
+            auto WideName = PlayerAIKnownSkinNames[
+                (Start + Offset) % CandidateCount];
+            UEAllocatedWString Path =
+                UEAllocatedWString(
+                    L"/Game/Athena/Items/Cosmetics/Characters/") +
+                WideName + L"." + WideName;
+            auto Character =
+                PlayerAIValidateCharacterDefinition(
+                    PlayerAITryLoadCosmetic(
+                        Path.c_str(),
+                        UAthenaCharacterItemDefinition::
+                            StaticClass()));
+
+            if (Character && ApplyCharacterSkin(
+                    PlayerState, Pawn, Character,
+                    LoadPolicy))
+            {
+                return Character;
+            }
+        }
+    }
+
+    AIDebugLogger::Log(
+        "Cosmetics",
+        "random skin resolution failed after %d candidates - using the default outfit",
+        Attempts);
+    ApplyDefaultCosmetics(
+        PlayerState, Pawn,
+        SynchronousAttempts > 0
+            ? EPlayerAICosmeticLoadPolicy::ResidentOnly
+            : LoadPolicy);
+    return nullptr;
+}
+
+static bool PlayerAIChooseQueuedCatalogSkin(
+    FPlayerAISkinCatalogEntry& OutEntry)
+{
+    const size_t CatalogSize = CachedSkinCatalog.size();
+    if (!bSkinCatalogReady || CatalogSize == 0)
+        return false;
+
+    if (RandomSkinCatalogShuffleSize != CatalogSize ||
+        RandomSkinCatalogShuffleCursor >= CatalogSize)
+    {
+        // A random cyclic permutation gives every catalog entry exactly once
+        // without allocating or shuffling thousands of indices on one FN30
+        // server frame. Asset-registry order is not cosmetic/style order, so a
+        // random start still produces unrelated outfits across cycles.
+        RandomSkinCatalogShuffleStart =
+            static_cast<size_t>(rand()) % CatalogSize;
+
+        // Do not repeat the last CID at a cycle boundary. Within one cycle
+        // every catalog entry is selected without replacement.
+        if (CatalogSize > 1 && !LastQueuedRandomSkinName.empty() &&
+            CachedSkinCatalog[
+                RandomSkinCatalogShuffleStart].Name ==
+                    LastQueuedRandomSkinName)
+        {
+            RandomSkinCatalogShuffleStart =
+                (RandomSkinCatalogShuffleStart + 1) % CatalogSize;
+        }
+
+        RandomSkinCatalogShuffleCursor = 0;
+        RandomSkinCatalogShuffleSize = CatalogSize;
+    }
+
+    const size_t CatalogIndex =
+        (RandomSkinCatalogShuffleStart +
+         RandomSkinCatalogShuffleCursor++) % CatalogSize;
+    if (CatalogIndex >= CachedSkinCatalog.size())
+        return false;
+
+    OutEntry = CachedSkinCatalog[CatalogIndex];
+    LastQueuedRandomSkinName = OutEntry.Name;
+    return OutEntry.PrimaryAssetIdSize > 0;
+}
+
+static UAthenaCharacterItemDefinition*
+PlayerAIChooseQueuedResidentSkin(
+    FPlayerAIPendingRandomSkin& Pending)
+{
+    const size_t SkinCount = CachedSkins.size();
+    if (SkinCount == 0)
+        return nullptr;
+
+    if (!Pending.bResidentSelectionInitialized ||
+        Pending.ResidentSelectionStart >= SkinCount)
+    {
+        Pending.ResidentSelectionStart =
+            static_cast<size_t>(rand()) % SkinCount;
+        Pending.ResidentSelectionCursor = 0;
+        Pending.bResidentSelectionInitialized = true;
+    }
+
+    // Stale UObject entries are possible between GC and the next cache reset.
+    // Inspect only a few per record visit; later visits resume at the cursor.
+    const size_t ProbeCount = (std::min)(SkinCount, size_t(4));
+    for (size_t Probe = 0; Probe < ProbeCount; Probe++)
+    {
+        const size_t Index =
+            (Pending.ResidentSelectionStart +
+             Pending.ResidentSelectionCursor++) % SkinCount;
+        auto Character = PlayerAIValidateCharacterDefinition(
+            CachedSkins[Index]);
+        if (!Character)
+            continue;
+
+        auto RawName = Character->Name.ToString();
+        std::string Name(RawName.c_str());
+        if (SkinCount > 1 &&
+            Name == LastQueuedRandomSkinName)
+        {
+            continue;
+        }
+
+        LastQueuedRandomSkinName = Name;
+        return Character;
+    }
+
+    return nullptr;
+}
+
+static PlayerLoadout::FSoftObjectLoadResult
+PlayerAIResolveOrRequestQueuedCatalogSkin(
+    const FPlayerAISkinCatalogEntry& Entry,
+    AFortPlayerPawnAthena* Pawn)
+{
+    PlayerLoadout::FSoftObjectLoadResult Result{
+        nullptr,
+        PlayerLoadout::EPreviewTextureLoadState::Unavailable,
+        0,
+    };
+
+    if (!Pawn || Entry.PrimaryAssetIdSize <= 0 ||
+        Entry.PrimaryAssetIdSize >
+            (int32)sizeof(Entry.RawPrimaryAssetId) ||
+        bPrimaryAssetCosmeticFunctionsDisabled)
+    {
+        return Result;
+    }
+
+    if (auto Character = PlayerAITryResolveCatalogEntry(
+            Entry, EPlayerAICosmeticLoadPolicy::ResidentOnly))
+    {
+        Result.Object = Character;
+        Result.State =
+            PlayerLoadout::EPreviewTextureLoadState::Resident;
+        return Result;
+    }
+
+    auto SystemLibrary = UKismetSystemLibrary::GetDefaultObj();
+    auto CharacterClass =
+        UAthenaCharacterItemDefinition::StaticClass();
+    auto Function = SystemLibrary
+        ? SystemLibrary->GetFunction(
+            "GetSoftObjectReferenceFromPrimaryAssetId")
+        : nullptr;
+    if (!SystemLibrary || !CharacterClass || !Function)
+        return Result;
+
+    const uint32 InputOffset =
+        Function->GetOffset("PrimaryAssetId");
+    const uint32 ReturnOffset =
+        Function->GetOffset("ReturnValue");
+    const size_t ParamsSize =
+        PlayerAICosmeticFunctionParamSize(Function);
+    const size_t SoftObjectSize = FSoftObjectPtr::Size();
+    const size_t IdSize =
+        static_cast<size_t>(Entry.PrimaryAssetIdSize);
+    const bool bSchemaValid =
+        InputOffset == 0 && ReturnOffset == IdSize &&
+        PlayerAIParameterRangeFits(
+            ParamsSize, InputOffset, IdSize) &&
+        PlayerAIParameterRangeFits(
+            ParamsSize, ReturnOffset, SoftObjectSize);
+    if (!bSchemaValid)
+        return Result;
+
+    auto Params = FMemory::Malloc(ParamsSize);
+    if (!Params)
+        return Result;
+
+    memset(Params, 0, ParamsSize);
+    memcpy(
+        (uint8*)Params + InputOffset,
+        Entry.RawPrimaryAssetId,
+        Entry.PrimaryAssetIdSize);
+    const bool bCalled = PlayerAITryProcessCosmeticFunction(
+        SystemLibrary, Function, Params);
+
+    if (bCalled)
+    {
+        auto SoftObject = reinterpret_cast<FSoftObjectPtr*>(
+            (uint8*)Params + ReturnOffset);
+        Result = PlayerLoadout::ResolveOrRequestSoftObject(
+            Pawn, SoftObject,
+            static_cast<uint32>(SoftObjectSize),
+            CharacterClass);
+        PlayerAIFreeReturnedSoftReferencePath(SoftObject);
+    }
+    else
+    {
+        bPrimaryAssetCosmeticFunctionsDisabled = true;
+    }
+
+    FMemory::Free(Params);
+    if (Result.Object &&
+        !PlayerAIValidateCharacterDefinition(Result.Object))
+    {
+        Result.Object = nullptr;
+        Result.State =
+            PlayerLoadout::EPreviewTextureLoadState::Unavailable;
+    }
+
+    return Result;
+}
+
+static void PlayerAIResetPendingRandomSkinCandidate(
+    FPlayerAIPendingRandomSkin& Pending)
+{
+    Pending.CatalogEntry = {};
+    Pending.Character = {};
+    Pending.Specialization = {};
+    for (auto& Part : Pending.ResolvedParts)
+        Part = {};
+    Pending.BasePartCursor = 0;
+    Pending.SpecializationCursor = 0;
+    Pending.SpecializationPartCursor = 0;
+    Pending.PartReferencesVisited = 0;
+    Pending.CandidateStartedAt = 0;
+    Pending.bHasBaseParts = false;
+    Pending.ResolvedPartMask = 0;
+    Pending.bHasHead = false;
+    Pending.bHasBody = false;
+    Pending.Phase =
+        EPlayerAIPendingRandomSkinPhase::ResolveCharacter;
+}
+
+static bool PlayerAIObserveQueuedCharacterPart(
+    FPlayerAIPendingRandomSkin& Pending,
+    const UObject* Object,
+    const UClass* PartClass,
+    bool bFromBaseParts)
+{
+    if (!PartClass || !PlayerAIIsLiveSupportObject(Object) ||
+        !Object->IsA(PartClass))
+    {
+        return false;
+    }
+
+    auto Part = static_cast<const UCustomCharacterPart*>(Object);
+    if (!Part->HasCharacterPartType())
+        return false;
+
+    const int PartType = Part->CharacterPartType;
+    if (PartType < 0 ||
+        PartType >= PlayerAICharacterPartSlotCount)
+        return false;
+
+    // Match ApplyCharacterSkin's source precedence exactly: direct CID parts
+    // are authoritative and legacy specializations only fill their holes;
+    // without any direct parts, later specialization entries win.
+    if (bFromBaseParts)
+    {
+        Pending.bHasBaseParts = true;
+        Pending.ResolvedParts[PartType] =
+            TWeakObjectPtr<UObject>(const_cast<UObject*>(Object));
+    }
+    else if (!Pending.bHasBaseParts ||
+        (Pending.ResolvedPartMask &
+            static_cast<uint8>(1u << PartType)) == 0)
+    {
+        Pending.ResolvedParts[PartType] =
+            TWeakObjectPtr<UObject>(const_cast<UObject*>(Object));
+    }
+
+    Pending.bHasHead |= PartType == 0;
+    Pending.bHasBody |= PartType == 1;
+    Pending.ResolvedPartMask |= static_cast<uint8>(1u << PartType);
+    return true;
+}
+
+enum class EPlayerAIQueuedPartAdvanceResult : uint8
+{
+    Keep,
+    Ready,
+    RejectCandidate,
+};
+
+static EPlayerAIQueuedPartAdvanceResult
+PlayerAIAdvanceQueuedCharacterParts(
+    FPlayerAIPendingRandomSkin& Pending,
+    UAthenaCharacterItemDefinition* Character,
+    ULONGLONG Now)
+{
+    auto PartClass = UCustomCharacterPart::StaticClass();
+    auto SpecClass = UFortHeroSpecialization::StaticClass();
+    auto HeroClass = UFortHeroType::StaticClass();
+    auto Hero = Character ? Character->HeroDefinition : nullptr;
+    if (!PlayerAIValidateCharacterDefinition(Character) ||
+        !PartClass || !SpecClass || !HeroClass ||
+        !PlayerAIIsLiveSupportObject(Hero) ||
+        !reinterpret_cast<const UObject*>(Hero)->IsA(HeroClass))
+    {
+        return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+    }
+
+    int ResolveBudget =
+        PlayerAIRandomSkinSoftResolvesPerRecordTick;
+    while (ResolveBudget > 0)
+    {
+        if (Pending.Phase ==
+            EPlayerAIPendingRandomSkinPhase::BaseParts)
+        {
+            const bool bHasBasePartsProperty =
+                Character->HasBaseCharacterParts();
+            const int BasePartCount = bHasBasePartsProperty
+                ? Character->BaseCharacterParts.Num()
+                : 0;
+            if (!bHasBasePartsProperty || BasePartCount == 0)
+            {
+                Pending.Phase =
+                    EPlayerAIPendingRandomSkinPhase::Specializations;
+                continue;
+            }
+            if (BasePartCount < 0 ||
+                !PlayerAIHasSafeSoftObjectArray(
+                    Character->BaseCharacterParts, 16))
+            {
+                return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+            }
+            if (Pending.BasePartCursor >= BasePartCount)
+            {
+                // Head/body are only the minimum viable mesh. Hats, hair,
+                // face accessories and gameplay pieces can still be authored
+                // by the hero specializations, so visit them incrementally
+                // before treating this CID as a complete outfit.
+                Pending.Phase =
+                    EPlayerAIPendingRandomSkinPhase::Specializations;
+                continue;
+            }
+            if (Pending.PartReferencesVisited >=
+                PlayerAIRandomSkinMaxPartReferences)
+            {
+                return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+            }
+
+            auto& SoftPart = Character->BaseCharacterParts.Get(
+                Pending.BasePartCursor, FSoftObjectPtr::Size());
+            auto PartResult =
+                PlayerLoadout::ResolveOrRequestSoftObject(
+                    Character, &SoftPart, FSoftObjectPtr::Size(),
+                    PartClass);
+            ResolveBudget--;
+            if (PartResult.State ==
+                PlayerLoadout::EPreviewTextureLoadState::Pending)
+            {
+                Pending.RetryAt = Now + (std::max)(
+                    static_cast<ULONGLONG>(50),
+                    static_cast<ULONGLONG>(
+                        PartResult.RetryAfterMs));
+                return EPlayerAIQueuedPartAdvanceResult::Keep;
+            }
+
+            if (!PlayerAIObserveQueuedCharacterPart(
+                    Pending, PartResult.Object, PartClass, true))
+            {
+                if (PartResult.Object ||
+                    PlayerAIGetSoftReferencePathState(SoftPart) !=
+                    EPlayerAISoftReferencePathState::Empty)
+                {
+                    return EPlayerAIQueuedPartAdvanceResult::
+                        RejectCandidate;
+                }
+            }
+
+            Pending.BasePartCursor++;
+            Pending.PartReferencesVisited++;
+            Pending.CandidateStartedAt = Now;
+            continue;
+        }
+
+        if (Pending.Phase ==
+            EPlayerAIPendingRandomSkinPhase::Specializations)
+        {
+            const bool bHasSpecializationsProperty =
+                Hero->HasSpecializations();
+            const int SpecializationCount =
+                bHasSpecializationsProperty
+                    ? Hero->Specializations.Num()
+                    : 0;
+            if (!bHasSpecializationsProperty ||
+                SpecializationCount == 0)
+            {
+                return Pending.bHasHead && Pending.bHasBody
+                    ? EPlayerAIQueuedPartAdvanceResult::Ready
+                    : EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+            }
+            if (SpecializationCount < 0 ||
+                !PlayerAIHasSafeSoftObjectArray(
+                    Hero->Specializations, 64))
+            {
+                return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+            }
+            if (Pending.SpecializationCursor >=
+                SpecializationCount)
+            {
+                if (!Pending.bHasHead || !Pending.bHasBody)
+                    return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+
+                Pending.Phase =
+                    EPlayerAIPendingRandomSkinPhase::Ready;
+                continue;
+            }
+
+            auto& SoftSpec = Hero->Specializations.Get(
+                Pending.SpecializationCursor,
+                FSoftObjectPtr::Size());
+            auto SpecResult =
+                PlayerLoadout::ResolveOrRequestSoftObject(
+                    Hero, &SoftSpec, FSoftObjectPtr::Size(),
+                    SpecClass);
+            ResolveBudget--;
+            if (SpecResult.State ==
+                PlayerLoadout::EPreviewTextureLoadState::Pending)
+            {
+                Pending.RetryAt = Now + (std::max)(
+                    static_cast<ULONGLONG>(50),
+                    static_cast<ULONGLONG>(
+                        SpecResult.RetryAfterMs));
+                return EPlayerAIQueuedPartAdvanceResult::Keep;
+            }
+
+            auto SpecObject = SpecResult.Object;
+            if (!PlayerAIIsLiveSupportObject(SpecObject) ||
+                !SpecObject->IsA(SpecClass))
+            {
+                if (SpecObject ||
+                    PlayerAIGetSoftReferencePathState(SoftSpec) !=
+                        EPlayerAISoftReferencePathState::Empty)
+                {
+                    return EPlayerAIQueuedPartAdvanceResult::
+                        RejectCandidate;
+                }
+                Pending.SpecializationCursor++;
+                Pending.CandidateStartedAt = Now;
+                continue;
+            }
+
+            Pending.Specialization = TWeakObjectPtr<UObject>(
+                const_cast<UObject*>(SpecObject));
+            Pending.SpecializationPartCursor = 0;
+            Pending.CandidateStartedAt = Now;
+            Pending.Phase =
+                EPlayerAIPendingRandomSkinPhase::SpecializationParts;
+            continue;
+        }
+
+        if (Pending.Phase ==
+            EPlayerAIPendingRandomSkinPhase::SpecializationParts)
+        {
+            auto SpecObject = Pending.Specialization.Get();
+            if (!PlayerAIIsLiveSupportObject(SpecObject) ||
+                !SpecObject->IsA(SpecClass))
+            {
+                return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+            }
+
+            auto Spec = reinterpret_cast<
+                const UFortHeroSpecialization*>(SpecObject);
+            const bool bHasCharacterPartsProperty =
+                Spec->HasCharacterParts();
+            const int CharacterPartCount =
+                bHasCharacterPartsProperty
+                    ? Spec->CharacterParts.Num()
+                    : 0;
+            if (!bHasCharacterPartsProperty ||
+                CharacterPartCount == 0)
+            {
+                Pending.Specialization = {};
+                Pending.SpecializationCursor++;
+                Pending.SpecializationPartCursor = 0;
+                Pending.CandidateStartedAt = Now;
+                Pending.Phase =
+                    EPlayerAIPendingRandomSkinPhase::Specializations;
+                continue;
+            }
+            if (CharacterPartCount < 0 ||
+                !PlayerAIHasSafeSoftObjectArray(
+                    Spec->CharacterParts, 16))
+            {
+                return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+            }
+            if (Pending.SpecializationPartCursor >=
+                CharacterPartCount)
+            {
+                Pending.Specialization = {};
+                Pending.SpecializationCursor++;
+                Pending.SpecializationPartCursor = 0;
+                Pending.CandidateStartedAt = Now;
+                Pending.Phase =
+                    EPlayerAIPendingRandomSkinPhase::Specializations;
+                continue;
+            }
+            if (Pending.PartReferencesVisited >=
+                PlayerAIRandomSkinMaxPartReferences)
+            {
+                return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+            }
+
+            auto& SoftPart = Spec->CharacterParts.Get(
+                Pending.SpecializationPartCursor,
+                FSoftObjectPtr::Size());
+            auto PartResult =
+                PlayerLoadout::ResolveOrRequestSoftObject(
+                    Spec, &SoftPart, FSoftObjectPtr::Size(),
+                    PartClass);
+            ResolveBudget--;
+            if (PartResult.State ==
+                PlayerLoadout::EPreviewTextureLoadState::Pending)
+            {
+                Pending.RetryAt = Now + (std::max)(
+                    static_cast<ULONGLONG>(50),
+                    static_cast<ULONGLONG>(
+                        PartResult.RetryAfterMs));
+                return EPlayerAIQueuedPartAdvanceResult::Keep;
+            }
+
+            if (!PlayerAIObserveQueuedCharacterPart(
+                    Pending, PartResult.Object, PartClass, false))
+            {
+                if (PartResult.Object ||
+                    PlayerAIGetSoftReferencePathState(SoftPart) !=
+                        EPlayerAISoftReferencePathState::Empty)
+                {
+                    return EPlayerAIQueuedPartAdvanceResult::
+                        RejectCandidate;
+                }
+            }
+
+            Pending.SpecializationPartCursor++;
+            Pending.PartReferencesVisited++;
+            Pending.CandidateStartedAt = Now;
+            continue;
+        }
+
+        if (Pending.Phase ==
+            EPlayerAIPendingRandomSkinPhase::Ready)
+        {
+            return Pending.bHasHead && Pending.bHasBody
+                ? EPlayerAIQueuedPartAdvanceResult::Ready
+                : EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+        }
+
+        return EPlayerAIQueuedPartAdvanceResult::RejectCandidate;
+    }
+
+    // Continue at these exact cursors on this record's next round-robin turn.
+    Pending.RetryAt = Now + 1;
+    return Pending.Phase == EPlayerAIPendingRandomSkinPhase::Ready &&
+        Pending.bHasHead && Pending.bHasBody
+        ? EPlayerAIQueuedPartAdvanceResult::Ready
+        : EPlayerAIQueuedPartAdvanceResult::Keep;
+}
+
+static bool PlayerAICacheCompletedQueuedSkinParts(
+    FPlayerAIPendingRandomSkin& Pending,
+    UAthenaCharacterItemDefinition* Character)
+{
+    auto PartClass = UCustomCharacterPart::StaticClass();
+    if (!Character || !PartClass ||
+        !Pending.bHasHead || !Pending.bHasBody)
+    {
+        return false;
+    }
+
+    const UObject* Parts[PlayerAICharacterPartSlotCount]{};
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        const bool bWasResolved =
+            (Pending.ResolvedPartMask &
+                static_cast<uint8>(1u << Index)) != 0;
+        auto PartObject = Pending.ResolvedParts[Index].Get();
+        if (!bWasResolved)
+        {
+            if (PartObject)
+                return false;
+            continue;
+        }
+
+        if (!PlayerAIIsLiveSupportObject(PartObject) ||
+            !PartObject->IsA(PartClass))
+        {
+            return false;
+        }
+
+        auto Part = static_cast<const UCustomCharacterPart*>(
+            PartObject);
+        if (!Part->HasCharacterPartType() ||
+            Part->CharacterPartType != Index)
+        {
+            return false;
+        }
+
+        Parts[Index] = PartObject;
+    }
+
+    if (!Parts[0] || !Parts[1])
+        return false;
+
+    PlayerAICacheResolvedSkinParts(Character, Parts, true);
+    return true;
+}
+
+static UAthenaCharacterItemDefinition*
+PlayerAITryChooseCachedResolvedRandomSkin()
+{
+    auto PartClass = UCustomCharacterPart::StaticClass();
+    if (!PartClass || CachedResolvedSkinPool.empty())
+        return nullptr;
+
+    constexpr int MaxCandidates = 8;
+    const int Attempts = (std::min)(
+        static_cast<int>(CachedResolvedSkinPool.size()),
+        MaxCandidates);
+    const size_t Start = static_cast<size_t>(rand()) %
+        CachedResolvedSkinPool.size();
+    for (int Offset = 0; Offset < Attempts; Offset++)
+    {
+        auto Character = CachedResolvedSkinPool[
+            (Start + static_cast<size_t>(Offset)) %
+                CachedResolvedSkinPool.size()];
+        const UObject* Parts[PlayerAICharacterPartSlotCount]{};
+        if (!PlayerAIValidateCharacterDefinition(Character) ||
+            !PlayerAITryGetCachedResolvedSkinParts(
+                Character, PartClass, Parts))
+        {
+            continue;
+        }
+
+        auto RawName = Character->Name.ToString();
+        std::string Name(RawName.c_str());
+        if (CachedResolvedSkinPool.size() > 1 &&
+            Name == LastQueuedRandomSkinName)
+        {
+            continue;
+        }
+
+        LastQueuedRandomSkinName = Name;
+        return Character;
+    }
+
+    return nullptr;
+}
+
+static UAthenaCharacterItemDefinition*
+PlayerAITryApplyCachedResolvedRandomSkin(
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn)
+{
+    auto Character =
+        PlayerAITryChooseCachedResolvedRandomSkin();
+    return Character && PlayerState && Pawn &&
+        VersionFeatureAdapter::ApplyCharacterSkin(
+            PlayerState, Pawn, Character,
+            EPlayerAICosmeticLoadPolicy::ResidentOnly)
+        ? Character
+        : nullptr;
+}
+
+// Explicit CID/default commands are user-triggered and may resolve a small
+// synchronous batch per visit, but their mesh work is still amortized. One
+// record here prevents a counted CID command from rebuilding every pawn inside
+// the command frame; successful later records reuse the complete parts cache.
+static bool PlayerAITickPendingRequestedBotSkinCommits()
+{
+    constexpr int InvalidRecordsPerTick = 4;
+    const ULONGLONG Now = GetTickCount64();
+    int Inspected = 0;
+
+    while (!PendingRequestedBotSkinCommits.empty() &&
+        Inspected < InvalidRecordsPerTick)
+    {
+        auto& Pending = PendingRequestedBotSkinCommits.front();
+        auto World = Pending.World.Get();
+        auto Controller = Pending.Controller.Get();
+        auto PlayerState = Pending.PlayerState.Get();
+        auto Pawn = Pending.Pawn.Get();
+        auto RequestedCharacter = Pending.bUseDefault
+            ? nullptr
+            : PlayerAIValidateCharacterDefinition(
+                Pending.Character.Get());
+        const bool bVisualCommitOwnsRequest =
+            RequestedCharacter && Pawn &&
+            PlayerAIIsCheatBotVisualCommitPending(
+                Pawn, RequestedCharacter);
+        const bool bValid =
+            World && World == UWorld::GetWorld() &&
+            PlayerAIIsLiveSupportObject(Controller) &&
+            PlayerAIIsLiveSupportObject(PlayerState) &&
+            PlayerAIIsLiveSupportObject(Pawn) &&
+            Controller->PlayerState == PlayerState &&
+            Pawn->PlayerState == PlayerState &&
+            Controller->Pawn == Pawn &&
+            (!Controller->HasMyFortPawn() ||
+             Controller->MyFortPawn == Pawn) &&
+            (!Pawn->HasController() ||
+             Pawn->Controller == Controller) &&
+            (!Pawn->HasbActorIsBeingDestroyed() ||
+             !Pawn->bActorIsBeingDestroyed) &&
+            (!Pawn->HasbIsDying() || !Pawn->bIsDying) &&
+            (!Pawn->HasbIsDBNO() || !Pawn->bIsDBNO) &&
+            (bVisualCommitOwnsRequest ||
+             !Pending.WorkStartedAt ||
+             Now - Pending.WorkStartedAt <
+                PlayerAIRandomSkinLifetimeMs);
+        if (!bValid)
+        {
+            PlayerAIReleasePendingSkinCommit(
+                Pending.PawnIdentity);
+            PendingRequestedBotSkinCommits.erase(
+                PendingRequestedBotSkinCommits.begin());
+            Inspected++;
+            continue;
+        }
+        if (Pending.RetryAt > Now)
+        {
+            std::rotate(
+                PendingRequestedBotSkinCommits.begin(),
+                PendingRequestedBotSkinCommits.begin() + 1,
+                PendingRequestedBotSkinCommits.end());
+            Inspected++;
+            continue;
+        }
+
+        if (VersionInfo.FortniteVersion >= 19.0 &&
+            VersionInfo.FortniteVersion < 32.0 &&
+            (!Pawn->HasController() ||
+             Pawn->Controller != Controller ||
+             !AFortPlayerControllerAthena::
+                IsCheatSpawnedBotController(Controller)))
+        {
+            Pending.RetryAt = Now + 50ULL;
+            std::rotate(
+                PendingRequestedBotSkinCommits.begin(),
+                PendingRequestedBotSkinCommits.begin() + 1,
+                PendingRequestedBotSkinCommits.end());
+            Inspected++;
+            continue;
+        }
+
+        if (VersionInfo.FortniteVersion >= 19.0 &&
+            VersionInfo.FortniteVersion < 32.0)
+        {
+            const bool bAnotherVisualCommitActive =
+                std::any_of(
+                    PendingCheatBotVisualCommits.begin(),
+                    PendingCheatBotVisualCommits.end(),
+                    [Pawn](const auto& Pair)
+                    {
+                        return Pair.first != Pawn;
+                    });
+            if (bAnotherVisualCommitActive)
+            {
+                Pending.RetryAt = Now + 100ULL;
+                std::rotate(
+                    PendingRequestedBotSkinCommits.begin(),
+                    PendingRequestedBotSkinCommits.begin() + 1,
+                    PendingRequestedBotSkinCommits.end());
+                Inspected++;
+                continue;
+            }
+        }
+
+        auto Character = RequestedCharacter;
+        if (!Pending.WorkStartedAt)
+        {
+            Pending.WorkStartedAt = Now;
+            PlayerAIMarkPendingSkinCommitActive(Pawn);
+        }
+        bool bTargetRetained = false;
+        const bool bAppliedCharacter =
+            Character && VersionFeatureAdapter::ApplyCharacterSkin(
+                PlayerState, Pawn, Character,
+                EPlayerAICosmeticLoadPolicy::AllowSynchronousLoad,
+                &bTargetRetained);
+        bool bAppliedDefault = false;
+
+        if (bTargetRetained)
+        {
+            AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+                Controller, Pawn, Character);
+            PlayerAIReleasePendingSkinCommit(
+                Pending.PawnIdentity);
+            PendingRequestedBotSkinCommits.erase(
+                PendingRequestedBotSkinCommits.begin());
+            return true;
+        }
+
+        if (!bAppliedCharacter)
+        {
+            if (Character)
+            {
+                if (PlayerAIIsCheatBotVisualCommitPending(
+                        Pawn, Character))
+                {
+                    Pending.RetryAt = Now + 50ULL;
+                    std::rotate(
+                        PendingRequestedBotSkinCommits.begin(),
+                        PendingRequestedBotSkinCommits.begin() + 1,
+                        PendingRequestedBotSkinCommits.end());
+                    // A cheap verification poll should not suppress the
+                    // random queue. Only an actual mesh-rebuild invocation
+                    // owns the frame; equipment remains blocked either way.
+                    if (bPlayerAILastCheatBotVisualCallPerformedNativeWork)
+                        return true;
+                    Inspected++;
+                    continue;
+                }
+
+                const UObject*
+                    CachedParts[PlayerAICharacterPartSlotCount]{};
+                const bool bAllPartsResolved =
+                    PlayerAITryGetCachedResolvedSkinParts(
+                        Character,
+                        UCustomCharacterPart::StaticClass(),
+                        CachedParts);
+                if (!bAllPartsResolved)
+                {
+                    // ApplyCharacterSkin resolves at most eight unloaded soft
+                    // references per explicit-command tick. Retain this CID;
+                    // later passes reuse the now-resident references until its
+                    // complete hat/face/body composition is ready.
+                    Pending.RetryAt = Now + 100ULL;
+                    std::rotate(
+                        PendingRequestedBotSkinCommits.begin(),
+                        PendingRequestedBotSkinCommits.begin() + 1,
+                        PendingRequestedBotSkinCommits.end());
+                    return true;
+                }
+
+                // Complete parts plus a false result means the native visual
+                // commit itself rejected this pawn's lifecycle. Demote only
+                // this record: another bot using the same CID may already
+                // have the component binding this pawn lacked.
+                Pending.Character = {};
+                Pending.bUseDefault = true;
+                Pending.RetryAt = Now + 50ULL;
+                std::rotate(
+                    PendingRequestedBotSkinCommits.begin(),
+                    PendingRequestedBotSkinCommits.begin() + 1,
+                    PendingRequestedBotSkinCommits.end());
+                // The rejected native path may still have touched the mesh.
+                // Reserve this frame even though the neutral fallback is
+                // intentionally deferred to the next cosmetic tick.
+                return true;
+            }
+
+            // Cheat bots are born in the engine's neutral/default outfit.
+            // Rebuilding that same fallback here is both unnecessary and can
+            // detach an already-created harvesting-tool actor on FN30. Treat
+            // the untouched spawn appearance as the terminal safe fallback.
+            bAppliedDefault = true;
+        }
+
+        if (!bAppliedCharacter && !bAppliedDefault)
+        {
+            // Neutral/default is a one-shot terminal fallback. Rebuilding it
+            // every 250 ms for the rest of the 30-second queue lifetime was a
+            // direct source of FN30 hitching and late equipment detachment.
+            auto PawnIdentity = Pending.PawnIdentity;
+            PlayerAIReleasePendingSkinCommit(PawnIdentity);
+            PendingRequestedBotSkinCommits.erase(
+                PendingRequestedBotSkinCommits.begin());
+            return true;
+        }
+
+        AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+            Controller, Pawn,
+            bAppliedCharacter ? Character : nullptr);
+        PlayerAIReleasePendingSkinCommit(
+            Pending.PawnIdentity);
+        PendingRequestedBotSkinCommits.erase(
+            PendingRequestedBotSkinCommits.begin());
+        return true;
+    }
+
+    return false;
+}
+
+enum class EPlayerAIPendingRandomSkinResult : uint8
+{
+    Keep,
+    KeepAfterCosmeticAttempt,
+    Applied,
+    DropAfterCosmeticAttempt,
+    Drop,
+};
+
+static int PlayerAICountUnresolvedRandomSkinCandidates()
+{
+    int Count = 0;
+    for (const auto& Other : PendingRandomBotSkins)
+    {
+        auto Character =
+            PlayerAIValidateCharacterDefinition(
+                Other.Character.Get());
+        if (Character &&
+            PlayerAIIsCheatBotVisualCommitPending(
+                Other.Pawn.Get(), Character))
+        {
+            // A fully resolved CID still owns native mesh reconstruction. It
+            // must consume the same startup slot as soft resolution or FN30
+            // can start one visual rebuild per bot while the queue says zero.
+            Count++;
+            continue;
+        }
+        if (!Other.CandidateStartedAt ||
+            Other.Phase == EPlayerAIPendingRandomSkinPhase::Ready)
+        {
+            continue;
+        }
+        Count++;
+    }
+    // Explicit-CID bots share the same native reconstruction backend. Treat
+    // any of their live transactions as occupying the modern startup slot so
+    // a random request cannot begin another mesh rebuild beside it.
+    return (std::max)(
+        Count,
+        static_cast<int>(PendingCheatBotVisualCommits.size()));
+}
+
+static EPlayerAIPendingRandomSkinResult
+PlayerAITickPendingRandomBotSkin(
+    FPlayerAIPendingRandomSkin& Pending,
+    ULONGLONG Now)
+{
+    auto World = Pending.World.Get();
+    auto Controller = Pending.Controller.Get();
+    auto PlayerState = Pending.PlayerState.Get();
+    auto Pawn = Pending.Pawn.Get();
+    if (!World || World != UWorld::GetWorld() ||
+        !PlayerAIIsLiveSupportObject(Controller) ||
+        !PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportObject(Pawn) ||
+        Controller->PlayerState != PlayerState ||
+        Pawn->PlayerState != PlayerState ||
+        Controller->Pawn != Pawn ||
+        (Controller->HasMyFortPawn() &&
+         Controller->MyFortPawn != Pawn) ||
+        (Pawn->HasController() && Pawn->Controller != Controller) ||
+        (Pawn->HasbActorIsBeingDestroyed() &&
+         Pawn->bActorIsBeingDestroyed) ||
+        (Pawn->HasbIsDying() && Pawn->bIsDying) ||
+        (Pawn->HasbIsDBNO() && Pawn->bIsDBNO))
+    {
+        return EPlayerAIPendingRandomSkinResult::Drop;
+    }
+
+    if (VersionInfo.FortniteVersion >= 19.0 &&
+        VersionInfo.FortniteVersion < 32.0 &&
+        (!Pawn->HasController() ||
+         Pawn->Controller != Controller ||
+         !AFortPlayerControllerAthena::
+            IsCheatSpawnedBotController(Controller)))
+    {
+        Pending.RetryAt = Now + 50ULL;
+        return EPlayerAIPendingRandomSkinResult::Keep;
+    }
+
+    if (VersionInfo.FortniteVersion >= 32.0 ||
+        bPrimaryAssetCosmeticFunctionsDisabled)
+    {
+        Pending.bUseResidentFallback = true;
+    }
+
+    if (!Pending.bUseResidentFallback && !bSkinCatalogReady)
+    {
+        const bool bCatalogWaitExpired =
+            Now - Pending.QueuedAt >=
+                PlayerAIRandomSkinCatalogWaitMs &&
+            !PendingSkinCatalogData;
+        const bool bCatalogFailed =
+            SkinCatalogAttempts >= 20 &&
+            !PendingSkinCatalogData;
+        if (bCatalogWaitExpired || bCatalogFailed)
+        {
+            // FN32's latent loader ABI is intentionally unsupported, and a
+            // stripped build can expose no primary-asset function at all.
+            // Fall back to incrementally scanned resident CIDs rather than
+            // converting every bot to the same default outfit.
+            Pending.bUseResidentFallback = true;
+            Pending.RetryAt = 0;
+        }
+        else
+        {
+            Pending.RetryAt = Now + 50ULL;
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+    }
+
+    const bool bVisualCommitOwnsCandidate =
+        PlayerAIIsCheatBotVisualCommitPending(
+            Pawn,
+            PlayerAIValidateCharacterDefinition(
+                Pending.Character.Get()));
+    if (Pending.WorkStartedAt &&
+        !bVisualCommitOwnsCandidate &&
+        Now - Pending.WorkStartedAt >=
+            PlayerAIRandomSkinLifetimeMs)
+    {
+        AIDebugLogger::Log(
+            "Cosmetics",
+            "deferred random skin expired for pawn=%p after %d candidates; keeping the engine default",
+            (void*)Pawn, Pending.CandidateAttempts);
+        return EPlayerAIPendingRandomSkinResult::Drop;
+    }
+
+    if (Pending.CandidateStartedAt &&
+        !bVisualCommitOwnsCandidate &&
+        Now - Pending.CandidateStartedAt >=
+            PlayerAIRandomSkinCandidateLifetimeMs)
+    {
+        AIDebugLogger::Verbose(
+            "Cosmetics",
+            "abandoning stalled random skin candidate %s for pawn=%p",
+            Pending.CatalogEntry.Name.empty()
+                ? "resident CID"
+                : Pending.CatalogEntry.Name.c_str(),
+            (void*)Pawn);
+        PlayerAIResetPendingRandomSkinCandidate(Pending);
+        Pending.RetryAt = Now + 16ULL;
+        return EPlayerAIPendingRandomSkinResult::Keep;
+    }
+
+    if (Pending.RetryAt > Now)
+        return EPlayerAIPendingRandomSkinResult::Keep;
+
+    const bool bNeedsCandidate =
+        !Pending.Character.Get() &&
+        Pending.CatalogEntry.PrimaryAssetIdSize <= 0;
+    if (bNeedsCandidate)
+    {
+        const bool bModernStartup =
+            VersionInfo.FortniteVersion >= 19.0 &&
+            VersionInfo.FortniteVersion < 32.0;
+        const int MaxNovelCandidatesInFlight =
+            bModernStartup ? 1 : 4;
+        const int NovelCandidatesInFlight =
+            PlayerAICountUnresolvedRandomSkinCandidates();
+        if (bModernStartup &&
+            NovelCandidatesInFlight >=
+                MaxNovelCandidatesInFlight)
+        {
+            Pending.RetryAt = Now + 100ULL;
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+        const bool bPreferResolvedPool =
+            !CachedResolvedSkinPool.empty() &&
+            (bModernStartup
+                ? CachedResolvedSkinPool.size() >= 4
+                : (NovelCandidatesInFlight >=
+                        MaxNovelCandidatesInFlight ||
+                   (CachedResolvedSkinPool.size() >= 4 &&
+                    rand() % 4 != 0)));
+        if (bPreferResolvedPool)
+        {
+            if (auto PooledCharacter =
+                    PlayerAITryChooseCachedResolvedRandomSkin())
+            {
+                // Reusing a small randomized set of fully resolved outfits
+                // keeps a large cheat-bot command diverse without streaming a
+                // unique CID graph for every pawn during FN30 startup.
+                Pending.bUseResidentFallback = true;
+                Pending.Character =
+                    TWeakObjectPtr<UObject>(PooledCharacter);
+                Pending.CandidateAttempts++;
+                if (!Pending.WorkStartedAt)
+                {
+                    Pending.WorkStartedAt = Now;
+                    PlayerAIMarkPendingSkinCommitActive(Pawn);
+                }
+                Pending.CandidateStartedAt = Now;
+                Pending.Phase =
+                    EPlayerAIPendingRandomSkinPhase::BaseParts;
+            }
+        }
+
+        if (!Pending.Character.Get() &&
+            NovelCandidatesInFlight >=
+                MaxNovelCandidatesInFlight)
+        {
+            Pending.RetryAt = Now + 100ULL;
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+    }
+
+    if (Pending.bUseResidentFallback && !Pending.Character.Get())
+    {
+        if (Pending.CandidateAttempts >=
+            PlayerAIRandomSkinCandidatesPerBot)
+        {
+            return EPlayerAIPendingRandomSkinResult::Drop;
+        }
+
+        auto ResidentCharacter =
+            PlayerAIChooseQueuedResidentSkin(Pending);
+        if (!ResidentCharacter)
+        {
+            if (bLoadedSkinScanCompleted && CachedSkins.empty())
+                return EPlayerAIPendingRandomSkinResult::Drop;
+
+            Pending.RetryAt = Now + 50ULL;
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+
+        Pending.CandidateAttempts++;
+        if (!Pending.WorkStartedAt)
+        {
+            Pending.WorkStartedAt = Now;
+            PlayerAIMarkPendingSkinCommitActive(Pawn);
+        }
+        Pending.CandidateStartedAt = Now;
+        Pending.Character =
+            TWeakObjectPtr<UObject>(ResidentCharacter);
+        Pending.Phase =
+            EPlayerAIPendingRandomSkinPhase::BaseParts;
+    }
+    else if (!Pending.bUseResidentFallback &&
+        Pending.CatalogEntry.PrimaryAssetIdSize <= 0)
+    {
+        if (Pending.CandidateAttempts >=
+            PlayerAIRandomSkinCandidatesPerBot)
+        {
+            // A build can expose the primary-asset catalog while rejecting
+            // the version-specific latent LoadAsset schema. After the bounded
+            // catalog attempts, transition once to the resident scanner rather
+            // than leaving the bot permanently default.
+            Pending.bUseResidentFallback = true;
+            Pending.CandidateAttempts = 0;
+            Pending.bResidentSelectionInitialized = false;
+            PlayerAIResetPendingRandomSkinCandidate(Pending);
+            Pending.RetryAt = Now + 50ULL;
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+
+        if (!PlayerAIChooseQueuedCatalogSkin(
+                Pending.CatalogEntry))
+        {
+            return EPlayerAIPendingRandomSkinResult::Drop;
+        }
+
+        Pending.CandidateAttempts++;
+        if (!Pending.WorkStartedAt)
+        {
+            Pending.WorkStartedAt = Now;
+            PlayerAIMarkPendingSkinCommitActive(Pawn);
+        }
+        Pending.CandidateStartedAt = Now;
+        Pending.Phase =
+            EPlayerAIPendingRandomSkinPhase::ResolveCharacter;
+    }
+
+    // A previously completed copy of this exact CID is an O(8) fast path. New
+    // CIDs always enter the incremental resolver below; never walk a complete
+    // modern specialization graph in one server frame.
+    auto Character = Pending.bUseResidentFallback
+        ? PlayerAIValidateCharacterDefinition(
+            Pending.Character.Get())
+        : PlayerAIValidateCharacterDefinition(
+            PlayerAITryResolveCatalogEntry(
+                Pending.CatalogEntry,
+                EPlayerAICosmeticLoadPolicy::ResidentOnly));
+    const UObject* CachedParts[PlayerAICharacterPartSlotCount]{};
+    auto PartClass = UCustomCharacterPart::StaticClass();
+    if (Character && PartClass &&
+        PlayerAITryGetCachedResolvedSkinParts(
+            Character, PartClass, CachedParts))
+    {
+        bool bTargetRetained = false;
+        if (VersionFeatureAdapter::ApplyCharacterSkin(
+                PlayerState, Pawn, Character,
+                EPlayerAICosmeticLoadPolicy::ResidentOnly,
+                &bTargetRetained))
+        {
+            PlayerAIMarkResolvedSkinVisuallyProven(Character);
+            AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+                Controller, Pawn, Character);
+            return EPlayerAIPendingRandomSkinResult::Applied;
+        }
+
+        if (bTargetRetained)
+        {
+            AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+                Controller, Pawn, Character);
+            return EPlayerAIPendingRandomSkinResult::Applied;
+        }
+
+        if (PlayerAIIsCheatBotVisualCommitPending(
+                Pawn, Character))
+        {
+            Pending.RetryAt = Now + 50ULL;
+            return bPlayerAILastCheatBotVisualCallPerformedNativeWork
+                ? EPlayerAIPendingRandomSkinResult::
+                    KeepAfterCosmeticAttempt
+                : EPlayerAIPendingRandomSkinResult::Keep;
+        }
+
+        return EPlayerAIPendingRandomSkinResult::
+            DropAfterCosmeticAttempt;
+    }
+
+    if (!Pending.bUseResidentFallback && Pending.Phase ==
+        EPlayerAIPendingRandomSkinPhase::ResolveCharacter)
+    {
+        auto CharacterResult =
+            PlayerAIResolveOrRequestQueuedCatalogSkin(
+                Pending.CatalogEntry, Pawn);
+        if (bPrimaryAssetCosmeticFunctionsDisabled)
+        {
+            Pending.bUseResidentFallback = true;
+            PlayerAIResetPendingRandomSkinCandidate(Pending);
+            Pending.RetryAt = Now + 50ULL;
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+
+        if (CharacterResult.State ==
+            PlayerLoadout::EPreviewTextureLoadState::Pending)
+        {
+            Pending.RetryAt = Now + (std::max)(
+                static_cast<ULONGLONG>(50),
+                static_cast<ULONGLONG>(
+                    CharacterResult.RetryAfterMs));
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+
+        Character = PlayerAIValidateCharacterDefinition(
+            CharacterResult.Object);
+        if (!Character)
+        {
+            PlayerAIResetPendingRandomSkinCandidate(Pending);
+            Pending.RetryAt = Now + 50ULL;
+            return EPlayerAIPendingRandomSkinResult::Keep;
+        }
+
+        Pending.Character = TWeakObjectPtr<UObject>(Character);
+        Pending.CandidateStartedAt = Now;
+        Pending.Phase = EPlayerAIPendingRandomSkinPhase::BaseParts;
+    }
+
+    Character = PlayerAIValidateCharacterDefinition(
+        Pending.Character.Get());
+    if (!Character)
+    {
+        PlayerAIResetPendingRandomSkinCandidate(Pending);
+        Pending.RetryAt = Now + 50ULL;
+        return EPlayerAIPendingRandomSkinResult::Keep;
+    }
+
+    const auto AdvanceResult =
+        PlayerAIAdvanceQueuedCharacterParts(
+            Pending, Character, Now);
+    if (AdvanceResult == EPlayerAIQueuedPartAdvanceResult::Keep)
+        return EPlayerAIPendingRandomSkinResult::Keep;
+
+    if (AdvanceResult == EPlayerAIQueuedPartAdvanceResult::Ready &&
+        PlayerAICacheCompletedQueuedSkinParts(Pending, Character))
+    {
+        bool bTargetRetained = false;
+        if (VersionFeatureAdapter::ApplyCharacterSkin(
+                PlayerState, Pawn, Character,
+                EPlayerAICosmeticLoadPolicy::ResidentOnly,
+                &bTargetRetained))
+        {
+            PlayerAIMarkResolvedSkinVisuallyProven(Character);
+            AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+                Controller, Pawn, Character);
+            AIDebugLogger::Verbose(
+                "Cosmetics",
+                "applied deferred random skin %s to pawn=%p after %d candidates",
+                Character->Name.ToString().c_str(), (void*)Pawn,
+                Pending.CandidateAttempts);
+            return EPlayerAIPendingRandomSkinResult::Applied;
+        }
+
+        if (bTargetRetained)
+        {
+            AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+                Controller, Pawn, Character);
+            return EPlayerAIPendingRandomSkinResult::Applied;
+        }
+
+        if (PlayerAIIsCheatBotVisualCommitPending(
+                Pawn, Character))
+        {
+            Pending.RetryAt = Now + 50ULL;
+            return bPlayerAILastCheatBotVisualCallPerformedNativeWork
+                ? EPlayerAIPendingRandomSkinResult::
+                    KeepAfterCosmeticAttempt
+                : EPlayerAIPendingRandomSkinResult::Keep;
+        }
+
+        return EPlayerAIPendingRandomSkinResult::
+            DropAfterCosmeticAttempt;
+    }
+
+    PlayerAIResetPendingRandomSkinCandidate(Pending);
+    Pending.RetryAt = Now + 50ULL;
+    return EPlayerAIPendingRandomSkinResult::Keep;
+}
+
+static void PlayerAITickPendingRandomBotSkins()
+{
+    if (PendingRandomBotSkins.empty())
+        return;
+
+    const ULONGLONG Now = GetTickCount64();
+    int Inspected = 0;
+    while (!PendingRandomBotSkins.empty() &&
+        Inspected < PlayerAIRandomSkinRecordsPerTick)
+    {
+        if (PendingRandomBotSkinCursor >=
+            PendingRandomBotSkins.size())
+        {
+            PendingRandomBotSkinCursor = 0;
+        }
+
+        const size_t Index = PendingRandomBotSkinCursor;
+        const auto Result = PlayerAITickPendingRandomBotSkin(
+            PendingRandomBotSkins[Index], Now);
+        Inspected++;
+
+        if (Result == EPlayerAIPendingRandomSkinResult::
+                KeepAfterCosmeticAttempt)
+        {
+            PendingRandomBotSkinCursor++;
+            break;
+        }
+
+        if (Result != EPlayerAIPendingRandomSkinResult::Keep)
+        {
+            PlayerAIReleasePendingSkinCommit(
+                PendingRandomBotSkins[Index].PawnIdentity);
+            PendingRandomBotSkins.erase(
+                PendingRandomBotSkins.begin() + Index);
+            if (Result ==
+                    EPlayerAIPendingRandomSkinResult::Applied ||
+                Result == EPlayerAIPendingRandomSkinResult::
+                    DropAfterCosmeticAttempt)
+            {
+                // Successful and rejected native visual attempts can both
+                // reconstruct the mesh. Perform at most one per frame.
+                break;
+            }
+            continue;
+        }
+
+        PendingRandomBotSkinCursor++;
+    }
+
+    if (PendingRandomBotSkinCursor >=
+        PendingRandomBotSkins.size())
+    {
+        PendingRandomBotSkinCursor = 0;
+    }
+}
+
+bool VersionFeatureAdapter::QueueRequestedSkin(
+    AFortPlayerControllerAthena* PC,
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    UAthenaCharacterItemDefinition* Character)
+{
+    auto World = UWorld::GetWorld();
+    if (!World || !PC || !PlayerState || !Pawn ||
+        !PlayerAIIsLiveSupportObject(PC) ||
+        !PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportObject(Pawn) ||
+        PC->PlayerState != PlayerState ||
+        Pawn->PlayerState != PlayerState ||
+        (PC->Pawn != Pawn && PC->MyFortPawn != Pawn) ||
+        (Character &&
+         !PlayerAIValidateCharacterDefinition(Character)))
+    {
+        return false;
+    }
+
+    for (const auto& Pending : PendingRequestedBotSkinCommits)
+    {
+        if (Pending.Pawn.Get() == Pawn)
+            return true;
+    }
+    for (const auto& Pending : PendingRandomBotSkins)
+    {
+        if (Pending.Pawn.Get() == Pawn)
+            return true;
+    }
+
+    if (PendingRequestedBotSkinCommits.size() +
+            PendingRandomBotSkins.size() >=
+        PlayerAIMaxPendingRandomBotSkins)
+    {
+        AIDebugLogger::MissingFeature(
+            "DeferredBotSkinCommitCapacity",
+            "the cosmetic queue is full; this bot keeps its engine appearance");
+        return false;
+    }
+
+    FPlayerAIPendingRequestedSkinCommit Pending{};
+    Pending.World = TWeakObjectPtr<UWorld>(World);
+    Pending.Controller =
+        TWeakObjectPtr<AFortPlayerControllerAthena>(PC);
+    Pending.PlayerState =
+        TWeakObjectPtr<AFortPlayerStateAthena>(PlayerState);
+    Pending.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+    Pending.PawnIdentity = Pawn;
+    Pending.Character =
+        TWeakObjectPtr<UObject>(Character);
+    Pending.QueuedAt = GetTickCount64();
+    Pending.bUseDefault = Character == nullptr;
+    PendingRequestedBotSkinCommits.push_back(
+        std::move(Pending));
+    PlayerAITrackPendingSkinCommit(Pawn);
+    return true;
+}
+
+bool VersionFeatureAdapter::QueueRandomSkin(
+    AFortPlayerControllerAthena* PC,
+    AFortPlayerStateAthena* PlayerState,
+    AFortPlayerPawnAthena* Pawn,
+    UAthenaCharacterItemDefinition** AppliedImmediately)
+{
+    if (AppliedImmediately)
+        *AppliedImmediately = nullptr;
+
+    auto World = UWorld::GetWorld();
+    if (!World || !PC || !PlayerState || !Pawn ||
+        !PlayerAIIsLiveSupportObject(PC) ||
+        !PlayerAIIsLiveSupportObject(PlayerState) ||
+        !PlayerAIIsLiveSupportObject(Pawn) ||
+        PC->PlayerState != PlayerState ||
+        Pawn->PlayerState != PlayerState ||
+        (PC->Pawn != Pawn && PC->MyFortPawn != Pawn))
+    {
+        return false;
+    }
+
+    // 1.x predates primary-asset enumeration. Stage a proven resident outfit
+    // (or the safe default) through the shared commit queue there. Modern UE5
+    // builds can use the same reflected catalog because random selection no
+    // longer depends on their incompatible latent LoadAsset ABI.
+    if (VersionInfo.FortniteVersion < 2.00)
+    {
+        auto Character =
+            PlayerAITryChooseCachedResolvedRandomSkin();
+        if (!Character && !CachedSkins.empty())
+        {
+            const size_t Start =
+                static_cast<size_t>(rand()) % CachedSkins.size();
+            const size_t Attempts = (std::min)(
+                CachedSkins.size(), size_t(8));
+            for (size_t Offset = 0;
+                 Offset < Attempts; Offset++)
+            {
+                Character = PlayerAIValidateCharacterDefinition(
+                    CachedSkins[(Start + Offset) %
+                        CachedSkins.size()]);
+                if (Character)
+                    break;
+            }
+        }
+        return QueueRequestedSkin(
+            PC, PlayerState, Pawn, Character);
+    }
+
+    for (const auto& Pending : PendingRandomBotSkins)
+    {
+        if (Pending.Pawn.Get() == Pawn)
+            return true;
+    }
+    for (const auto& Pending : PendingRequestedBotSkinCommits)
+    {
+        if (Pending.Pawn.Get() == Pawn)
+            return true;
+    }
+
+    if (PendingRandomBotSkins.size() +
+            PendingRequestedBotSkinCommits.size() >=
+        PlayerAIMaxPendingRandomBotSkins)
+    {
+        AIDebugLogger::MissingFeature(
+            "DeferredRandomSkinQueueCapacity",
+            "the cosmetic queue is full; additional bots keep their safe default outfit");
+        return false;
+    }
+
+    FPlayerAIPendingRandomSkin Pending{};
+    Pending.World = TWeakObjectPtr<UWorld>(World);
+    Pending.Controller =
+        TWeakObjectPtr<AFortPlayerControllerAthena>(PC);
+    Pending.PlayerState =
+        TWeakObjectPtr<AFortPlayerStateAthena>(PlayerState);
+    Pending.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+    Pending.PawnIdentity = Pawn;
+    Pending.QueuedAt = GetTickCount64();
+    Pending.bUseResidentFallback =
+        VersionInfo.FortniteVersion >= 32.0 ||
+        bPrimaryAssetCosmeticFunctionsDisabled;
+    PendingRandomBotSkins.push_back(std::move(Pending));
+    PlayerAITrackPendingSkinCommit(Pawn);
+    return true;
 }
 
 void VersionFeatureAdapter::ResetCaches()
 {
+    // Initialize can be replayed in the same world. Do not drop an in-flight
+    // transaction's rollback state while a native cosmetic refresh still owns
+    // the pawn; restore its staged loadout/metadata before releasing queues.
+    for (auto& Pair : PendingCheatBotVisualCommits)
+        PlayerAIRestorePendingCheatBotVisualCommit(Pair.second);
+
     PlayerAILegacyAircraftExitLatchCache = {};
     bEmoteCacheBuilt = false;
     CachedEmoteAssets.clear();
     CachedSkins.clear();
+    CachedSkinObjects.clear();
+    CachedSkinsByLowerName.clear();
+    CachedResolvedSkinParts.clear();
+    CachedResolvedSkinPool.clear();
+    CachedSkinCatalog.clear();
+    CachedSkinCatalogByLowerName.clear();
+    PendingRandomBotSkins.clear();
+    PendingRequestedBotSkinCommits.clear();
+    PendingBotSkinCommitPawnCounts.clear();
+    PendingBotSkinActivePawns.clear();
+    PendingCheatBotVisualCommits.clear();
+    for (auto Settle = PendingBotSkinSettles.begin();
+         Settle != PendingBotSkinSettles.end();)
+    {
+        if (Settle->second.World.Get() != UWorld::GetWorld() ||
+            Settle->second.Pawn.Get() != Settle->first)
+        {
+            Settle = PendingBotSkinSettles.erase(Settle);
+        }
+        else
+        {
+            ++Settle;
+        }
+    }
+    RandomSkinCatalogShuffleStart = 0;
+    RandomSkinCatalogShuffleCursor = 0;
+    RandomSkinCatalogShuffleSize = 0;
+    LastQueuedRandomSkinName.clear();
+    PendingRandomBotSkinCursor = 0;
+    PlayerAINoteBotSkinProgress();
+    PlayerAIClearPendingSkinCatalog();
     SkinCacheAttempts = 0;
+    SkinCatalogAttempts = 0;
+    SkinCatalogRetryTicks = 0;
+    LastSkinCatalogAttemptServerTime = -1.f;
     bKnownSkinsLoaded = false;
     bLoadedSkinScanCompleted = false;
+    bSkinCatalogReady = false;
     KnownSkinScanCursor = 0;
     LoadedSkinScanCursor = 0;
     LoadedSkinScanLimit = 0;
     bCosmeticPathLoadDisabled = false;
+    bCosmeticPackageLoadDisabled = false;
     bSoftCosmeticResolveDisabled = false;
+    bSoftCosmeticLoadDisabled = false;
+    bPrimaryAssetCosmeticFunctionsDisabled = false;
     bDefaultCommandoResolved = false;
     PlayerAIDefaultCommando = nullptr;
     bDefaultPartsResolved = false;
     PlayerAIDefaultHead = nullptr;
     PlayerAIDefaultBody = nullptr;
     PlayerAIDefaultBackpack = nullptr;
+    for (int Index = 0;
+         Index < PlayerAICharacterPartSlotCount; Index++)
+    {
+        PlayerAIResidentPlaceholderParts[Index] = nullptr;
+        PlayerAIResidentPlaceholderPartIndices[Index] = -1;
+    }
+    PlayerAIResidentPlaceholderHero = nullptr;
+    PlayerAIResidentPlaceholderHeroIndex = -1;
+    PlayerAIResidentPlaceholderDonorCursor = 0;
+    PlayerAIResidentPlaceholderRetryAt = 0;
+    bPlayerAIServerChoosePartDisabled = false;
+    bPlayerAIServerSetCosmeticLoadoutDisabled = false;
+    bPlayerAIApplyCharacterCosmeticsDisabled = false;
+    bPlayerAIRequestedDefaultSynchronousAttempted = false;
     PlayerAIPhaseLogicWorld = nullptr;
     PlayerAIPhaseLogic = nullptr;
     PlayerAIPhaseLogicClass = nullptr;
@@ -3525,8 +11652,12 @@ void VersionFeatureAdapter::ResetCaches()
         PlayerAISafeZoneIndicatorClassCache);
     PlayerAIResetClassLookup(
         PlayerAINetPushModelHelpersClassCache);
+    PlayerAIResetClassLookup(
+        PlayerAISkeletalMeshClassCache);
+    PlayerAIFortAthenaLoadoutStructCache = nullptr;
     PlayerAIPushModelHelpers = nullptr;
     PlayerAIMarkPropertyDirtyFunction = nullptr;
+    PlayerAIMarkPropertyDirtyFunctionIndex = -1;
     PlayerAINextPushModelHelpersResolveTime = 0;
     PlayerAIPlayersLeftDirtyPending = false;
     bGroundTraceDisabled = false;
@@ -3534,7 +11665,9 @@ void VersionFeatureAdapter::ResetCaches()
     GroundTraceHits = 0;
     PlayerAILandingProbeCursor = 0;
     PlayerAILastServerTickTime = -1.f;
+    PlayerAILastBudgetWallTickMs = 0;
     PlayerAIGroundTraceBudgetRemaining =
         PlayerAIGroundTraceBudgetPerTick;
     PlayerAIPhaseScanBudgetAvailable = true;
+    PlayerAIVisualProofBudgetAvailable = true;
 }

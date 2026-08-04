@@ -10,6 +10,24 @@ struct FConfiguration
         return std::floor(VersionInfo.FortniteVersion) == 27;
     }
 
+    static inline bool IsGliderRedeploySupportedBuild()
+    {
+        return VersionInfo.FortniteVersion > 5.41 &&
+            VersionInfo.FortniteVersion <= 16.00;
+    }
+
+    static inline constexpr int FoodFightObjectiveHealthAuthored = -1;
+    static inline constexpr int FoodFightObjectiveHealthMinimum = 1000;
+
+    static inline int GetFoodFightObjectiveHealthMaximum()
+    {
+        // Food Fight launched with 200,000 health in 6.30. The later
+        // Chapter 1 variants, including both 10.40 modes, use 100,000.
+        return VersionInfo.FortniteVersion <= 6.301
+            ? 200000
+            : 100000;
+    }
+
     static inline std::atomic_bool bSnowMap{ false };
 
     // Calendar tab. The snow value is version shaped - a position along the
@@ -79,6 +97,10 @@ struct FConfiguration
     static inline std::atomic<float> CustomSafeZoneRadius{ 100000.f };
 
     static inline std::atomic_bool bGliderRedeploy{ false };
+    // -1 leaves the playlist/asset-authored maximum completely untouched.
+    static inline std::atomic_int FoodFightObjectiveHealth{
+        FoodFightObjectiveHealthAuthored
+    };
     static inline std::atomic_bool bEnableCheats{ true };
 	static inline std::atomic_bool bMovingBus{ true };
 	static inline std::atomic<float> BusStartDelay{ 90.f };

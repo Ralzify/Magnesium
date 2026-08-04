@@ -31,6 +31,7 @@ uint64 FindSetInventoryStateValue();
 uint64 FindOnRep_ZiplineState();
 uint64 FindGiveAbilityAndActivateOnce();
 uint64 FindGameSessionPatch();
+uint64 FindAddToAlivePlayers();
 uint64 FindRemoveFromAlivePlayers();
 uint64 FindStartAircraftPhase();
 uint64 FindSetPickupItems();

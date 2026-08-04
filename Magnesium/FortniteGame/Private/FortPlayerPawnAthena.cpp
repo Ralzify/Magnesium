@@ -9,6 +9,7 @@
 #include "../../Engine/Public/NetDriver.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/GUI.h"
+#include "../../Erbium/Public/PlayerLoadout.h"
 
 #include <array>
 
@@ -149,6 +150,8 @@ namespace
 			SDK::MemReadable(Object->Class, 0x40);
 	}
 
+	bool IsWritableObjectMemory(void* Address, size_t Size);
+
 	struct FPlayerMapIconLinearColor
 	{
 		float R;
@@ -158,6 +161,39 @@ namespace
 	};
 
 	constexpr float PlayerMapIconViewableDistance = 500000.f;
+	constexpr size_t MaxPendingPlayerMapIcons = 256;
+	constexpr ULONGLONG PlayerMapIconRetryLifetimeMs = 120000ULL;
+	constexpr uint64 PlayerMapIconSoftObjectPropertyCast = 0x20000000;
+
+	struct FPendingPlayerMapIcon
+	{
+		TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+		TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+		TWeakObjectPtr<UObject> PreferredCharacterDefinition;
+		ULONGLONG RetryAt = 0;
+		ULONGLONG ExpiresAt = 0;
+		uint32 Generation = 0;
+	};
+
+	struct FAppliedPlayerMapIcon
+	{
+		TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+		TWeakObjectPtr<UObject> Component;
+		TWeakObjectPtr<UObject> Texture;
+		TWeakObjectPtr<UObject> PreferredCharacterDefinition;
+		bool bPreferredTextureApplied = false;
+		bool bTemporaryFallbackApplied = false;
+	};
+
+	std::array<FPendingPlayerMapIcon, MaxPendingPlayerMapIcons>
+		GPendingPlayerMapIcons{};
+	std::array<FAppliedPlayerMapIcon, MaxPendingPlayerMapIcons>
+		GAppliedPlayerMapIcons{};
+	size_t GPendingPlayerMapIconCursor = 0;
+	size_t GPendingPlayerMapIconRetryCursor = 0;
+	size_t GAppliedPlayerMapIconCursor = 0;
+	ULONGLONG GNextPendingPlayerMapIconTickAt = 0;
+	TWeakObjectPtr<UWorld> GPendingPlayerMapIconWorld;
 	bool GWarnedMissingPlayerMapIconClass = false;
 	bool GWarnedMissingPlayerMapIconTexture = false;
 	bool GWarnedPlayerMapIconCreation = false;
@@ -165,24 +201,60 @@ namespace
 	bool GWarnedPlayerMapIconException = false;
 	bool GPlayerMapIconSetupDisabled = false;
 
+	uint32 GetPlayerMapIconSoftReferenceSize()
+	{
+		if (VersionInfo.EngineVersion <= 4.16)
+		{
+			return static_cast<uint32>(
+				offsetof(FSoftObjectPtr, ObjectID) +
+				sizeof(FString));
+		}
+		return FSoftObjectPtr::Size();
+	}
+
 	UObject* ResolvePlayerMapIconPreview(
 		const UObject* Definition,
-		const UClass* TextureClass)
+		const UClass* TextureClass,
+		bool& bPending,
+		ULONGLONG& RetryAfterMs)
 	{
 		if (!IsLiveHealthStateObject(Definition) || !TextureClass)
 			return nullptr;
 
 		constexpr const char* PreviewProperties[] = {
-			"LargePreviewImage",
-			"SmallPreviewImage"
+			"SmallPreviewImage",
+			"LargePreviewImage"
 		};
 
 		for (const char* PropertyName : PreviewProperties)
 		{
-			const uint32 PropertyOffset =
-				Definition->GetOffset(PropertyName);
+			auto Property = Definition->GetProperty(
+				PropertyName,
+				PlayerMapIconSoftObjectPropertyCast);
+			if (!Property)
+				continue;
+
+			const uint32 PropertyOffset = DecryptPropOffset(
+				GetFromOffset<uint32>(
+					Property,
+					Offsets::Offset_Internal));
 			if (PropertyOffset == UINT32_MAX ||
 				PropertyOffset > 0x10000)
+			{
+				continue;
+			}
+
+			const uint32 SoftReferenceSize =
+				GetPlayerMapIconSoftReferenceSize();
+			if (VersionInfo.FortniteVersion < 32.0 &&
+				Offsets::ElementSize &&
+				SDK::MemReadable(
+					reinterpret_cast<const uint8_t*>(Property) +
+						Offsets::ElementSize,
+					sizeof(uint32)) &&
+				GetFromOffset<uint32>(
+					Property,
+					Offsets::ElementSize) != SoftReferenceSize)
 			{
 				continue;
 			}
@@ -193,32 +265,286 @@ namespace
 				PropertyOffset);
 			if (!SDK::MemReadable(
 					SoftTexture,
-					FSoftObjectPtr::Size()))
+					SoftReferenceSize))
 			{
 				continue;
 			}
 
-			// A cosmetic preview is optional, so only reuse one that is already
-			// resident. InternalGet may synchronously load each bot's soft path
-			// during spawn and can stall the game thread on large bot fills.
-			auto Texture = const_cast<UObject*>(SoftTexture->Get());
-			if (IsLiveHealthStateObject(Texture) &&
-				Texture->IsA(TextureClass))
+			auto LoadResult =
+				PlayerLoadout::ResolveOrRequestPreviewTexture(
+					Definition,
+					SoftTexture,
+					SoftReferenceSize);
+			if (LoadResult.State ==
+					PlayerLoadout::EPreviewTextureLoadState::Resident)
 			{
-				return Texture;
+				auto Texture = const_cast<UObject*>(
+					reinterpret_cast<const UObject*>(
+						LoadResult.Texture));
+				if (IsLiveHealthStateObject(Texture) &&
+					Texture->IsA(TextureClass))
+				{
+					return Texture;
+				}
+			}
+			else if (LoadResult.State ==
+				PlayerLoadout::EPreviewTextureLoadState::Pending)
+			{
+				bPending = true;
+				RetryAfterMs = LoadResult.RetryAfterMs
+					? static_cast<ULONGLONG>(
+						LoadResult.RetryAfterMs)
+					: 100ULL;
+				return nullptr;
 			}
 		}
 
 		return nullptr;
 	}
 
-	UObject* ResolvePlayerMapIconTexture(
-		AFortPlayerControllerAthena* Controller,
-		AFortPlayerPawnAthena* Pawn)
+	struct FPlayerMapIconPawnBrushLayout
 	{
-		static const UClass* TextureClass = FindClass("Texture2D");
+		uint32 BrushOffset = UINT32_MAX;
+		uint32 ResourceOffset = UINT32_MAX;
+		uint32 BrushSize = 0;
+	};
+
+	bool ResolvePlayerMapIconPawnBrushLayout(
+		AFortPlayerPawnAthena* Pawn,
+		FPlayerMapIconPawnBrushLayout& OutLayout)
+	{
+		OutLayout = {};
+		// FN32 cannot enforce the FField cast filter, so the exact reflected
+		// element-size and owner/struct bounds below remain mandatory there.
+		if (!IsLiveHealthStateObject(Pawn) ||
+			!IsLiveHealthStateObject(Pawn->Class) ||
+			!Offsets::StaticFindObject ||
+			!Offsets::Offset_Internal ||
+			Offsets::Offset_Internal > 0x200 ||
+			Offsets::ElementSize < sizeof(int32) ||
+			Offsets::ElementSize > 0x200 ||
+			!Offsets::PropertiesSize ||
+			Offsets::PropertiesSize > 0x200)
+		{
+			return false;
+		}
+
+		static const UClass* ScriptStructClass = nullptr;
+		static const UStruct* SlateBrushStruct = nullptr;
+		if (!IsLiveHealthStateObject(ScriptStructClass))
+			ScriptStructClass = SDK::FindClass("ScriptStruct");
+		if (!IsLiveHealthStateObject(ScriptStructClass))
+			return false;
+
+		if (!IsLiveHealthStateObject(SlateBrushStruct) ||
+			!SlateBrushStruct->IsA(ScriptStructClass))
+		{
+			SlateBrushStruct = static_cast<const UStruct*>(
+					SDK::StaticFindObject(
+						L"/Script/SlateCore.SlateBrush",
+						ScriptStructClass));
+		}
+		if (!IsLiveHealthStateObject(SlateBrushStruct) ||
+			!SlateBrushStruct->IsA(ScriptStructClass) ||
+			!SDK::MemReadable(
+				Pawn->Class,
+				static_cast<size_t>(Offsets::PropertiesSize) +
+					sizeof(int32)) ||
+			!SDK::MemReadable(
+				SlateBrushStruct,
+				static_cast<size_t>(Offsets::PropertiesSize) +
+					sizeof(int32)))
+		{
+			return false;
+		}
+
+		auto BrushProperty =
+			Pawn->GetProperty("MiniMapIconBrush");
+		auto StructBrushProperty =
+			Pawn->GetProperty("MiniMapIconBrush", 0x100000);
+		auto ResourceProperty =
+			SlateBrushStruct->GetProperty("ResourceObject");
+		auto ObjectResourceProperty =
+			SlateBrushStruct->GetProperty("ResourceObject", 0x10000);
+		if (!BrushProperty ||
+			StructBrushProperty != BrushProperty ||
+			!ResourceProperty ||
+			ObjectResourceProperty != ResourceProperty)
+		{
+			return false;
+		}
+
+		const size_t RequiredPropertyMetadata =
+			static_cast<size_t>(max(
+				Offsets::Offset_Internal,
+				Offsets::ElementSize)) + sizeof(uint32);
+		if (!SDK::MemReadable(
+				BrushProperty, RequiredPropertyMetadata) ||
+			!SDK::MemReadable(
+				ResourceProperty, RequiredPropertyMetadata))
+		{
+			return false;
+		}
+
+		const int32 BrushOffset = static_cast<int32>(
+			SDK::DecryptPropOffset(GetFromOffset<uint32>(
+				BrushProperty, Offsets::Offset_Internal)));
+		const uint32 BrushElementSize = GetFromOffset<uint32>(
+			BrushProperty, Offsets::ElementSize);
+		const int32 BrushArrayDimension = GetFromOffset<int32>(
+			BrushProperty,
+			Offsets::ElementSize - sizeof(int32));
+		const int32 ResourceOffset = static_cast<int32>(
+			SDK::DecryptPropOffset(GetFromOffset<uint32>(
+				ResourceProperty, Offsets::Offset_Internal)));
+		const uint32 ResourceElementSize = GetFromOffset<uint32>(
+			ResourceProperty, Offsets::ElementSize);
+		const int32 ResourceArrayDimension = GetFromOffset<int32>(
+			ResourceProperty,
+			Offsets::ElementSize - sizeof(int32));
+		const int32 PawnSize = Pawn->Class->GetPropertiesSize();
+		const int32 BrushSize = SlateBrushStruct->GetPropertiesSize();
+
+		if (BrushOffset < 0 || ResourceOffset < 0 ||
+			BrushArrayDimension != 1 ||
+			ResourceArrayDimension != 1 ||
+			PawnSize <= 0 || PawnSize > 0x100000 ||
+			BrushSize <= 0 || BrushSize > 0x400 ||
+			BrushElementSize != static_cast<uint32>(BrushSize) ||
+			ResourceElementSize != sizeof(UObject*) ||
+			static_cast<uint32>(BrushOffset) >
+				static_cast<uint32>(PawnSize) ||
+			BrushElementSize >
+				static_cast<uint32>(PawnSize) -
+					static_cast<uint32>(BrushOffset) ||
+			static_cast<uint32>(ResourceOffset) >
+				static_cast<uint32>(BrushSize) ||
+			sizeof(UObject*) >
+				static_cast<uint32>(BrushSize) -
+					static_cast<uint32>(ResourceOffset))
+		{
+			return false;
+		}
+
+		auto BrushAddress =
+			reinterpret_cast<uint8_t*>(Pawn) + BrushOffset;
+		if (!SDK::MemReadable(BrushAddress, BrushElementSize))
+			return false;
+
+		OutLayout.BrushOffset = static_cast<uint32>(BrushOffset);
+		OutLayout.ResourceOffset = static_cast<uint32>(ResourceOffset);
+		OutLayout.BrushSize = BrushElementSize;
+		return true;
+	}
+
+	UObject* ResolvePlayerMapIconPawnBrushTexture(
+		AFortPlayerPawnAthena* Pawn,
+		const UClass* TextureClass)
+	{
 		if (!TextureClass)
 			return nullptr;
+
+		FPlayerMapIconPawnBrushLayout Layout{};
+		if (!ResolvePlayerMapIconPawnBrushLayout(Pawn, Layout))
+			return nullptr;
+
+		auto ResourceAddress =
+			reinterpret_cast<uint8_t*>(Pawn) +
+				Layout.BrushOffset + Layout.ResourceOffset;
+
+		UObject* Texture = nullptr;
+		memcpy(&Texture, ResourceAddress, sizeof(Texture));
+		return IsLiveHealthStateObject(Texture) &&
+			Texture->IsA(TextureClass)
+			? Texture
+			: nullptr;
+	}
+
+	UObject* ResolvePlayerMapIconTexture(
+		AFortPlayerControllerAthena* Controller,
+		AFortPlayerPawnAthena* Pawn,
+		const UObject* PreferredCharacterDefinition,
+		bool& bPreviewPending,
+		bool& bResolvedPreferredPreview,
+		bool& bTemporaryFallback,
+		ULONGLONG& RetryAfterMs)
+	{
+		bPreviewPending = false;
+		bResolvedPreferredPreview = false;
+		bTemporaryFallback = false;
+		RetryAfterMs = 0;
+		static const UClass* TextureClass = []
+		{
+			auto ClassClass = UClass::StaticClass();
+			if (Offsets::StaticFindObject && ClassClass)
+			{
+				auto Candidate = static_cast<const UClass*>(
+					SDK::StaticFindObject(
+						L"/Script/Engine.Texture2D",
+						ClassClass));
+				if (IsLiveHealthStateObject(Candidate) &&
+					Candidate->IsA(ClassClass))
+				{
+					return Candidate;
+				}
+			}
+
+			return Offsets::StaticFindObject
+				? nullptr
+				: FindClass("Texture2D");
+		}();
+		if (!TextureClass)
+			return nullptr;
+
+		auto ResolveCharacterPreview = [&bPreviewPending, &RetryAfterMs](
+			UAthenaCharacterItemDefinition* Character) -> UObject*
+		{
+			if (!IsLiveHealthStateObject(Character))
+				return nullptr;
+
+			// The CID owns the style-specific portrait on modern builds. Try it
+			// before the shared hero definition so variants do not inherit a
+			// generic portrait or start an unnecessary larger asset load.
+			if (auto Texture = ResolvePlayerMapIconPreview(
+					Character,
+					TextureClass,
+					bPreviewPending,
+					RetryAfterMs))
+			{
+				return Texture;
+			}
+			if (bPreviewPending)
+				return nullptr;
+
+			if (Character->HasHeroDefinition())
+			{
+				if (auto Texture = ResolvePlayerMapIconPreview(
+						Character->HeroDefinition,
+						TextureClass,
+						bPreviewPending,
+						RetryAfterMs))
+				{
+					return Texture;
+				}
+				if (bPreviewPending)
+					return nullptr;
+			}
+
+			return nullptr;
+		};
+
+		UAthenaCharacterItemDefinition* PreferredCharacter = nullptr;
+		if (IsLiveHealthStateObject(PreferredCharacterDefinition))
+		{
+			PreferredCharacter = const_cast<UObject*>(
+				PreferredCharacterDefinition)->
+				Cast<UAthenaCharacterItemDefinition>();
+		}
+		if (auto Texture = ResolveCharacterPreview(PreferredCharacter))
+		{
+			bResolvedPreferredPreview = true;
+			return Texture;
+		}
 
 		AFortPlayerStateAthena* PlayerState = nullptr;
 		if (Pawn && Pawn->HasPlayerState() && Pawn->PlayerState)
@@ -232,19 +558,22 @@ namespace
 			PlayerState = Controller->PlayerState;
 		}
 
-		if (IsLiveHealthStateObject(PlayerState) &&
+		if (!bPreviewPending &&
+			IsLiveHealthStateObject(PlayerState) &&
 			PlayerState->HasHeroType())
 		{
 			if (auto Texture = ResolvePlayerMapIconPreview(
 					PlayerState->HeroType,
-					TextureClass))
+					TextureClass,
+					bPreviewPending,
+					RetryAfterMs))
 			{
 				return Texture;
 			}
 		}
 
 		UAthenaCharacterItemDefinition* Character = nullptr;
-		if (IsLiveHealthStateObject(Controller))
+		if (!bPreviewPending && IsLiveHealthStateObject(Controller))
 		{
 			if (Controller->HasCosmeticLoadoutPC())
 				Character = Controller->CosmeticLoadoutPC.Character;
@@ -252,77 +581,104 @@ namespace
 				Character = Controller->CustomizationLoadout.Character;
 		}
 
-		if (IsLiveHealthStateObject(Character))
+		if (!bPreviewPending)
 		{
-			if (Character->HasHeroDefinition())
+			if (auto Texture = ResolveCharacterPreview(Character))
+				return Texture;
+		}
+
+		// Default cheat bots intentionally have no selected CID. Reuse the
+		// native pawn brush when it already owns a resident portrait so FN30 does
+		// not depend on the historical Commando texture being cooked.
+		if (auto Texture = ResolvePlayerMapIconPawnBrushTexture(
+				Pawn, TextureClass))
+		{
+			bool bTrackedAsTemporary = false;
+			for (const auto& Applied : GAppliedPlayerMapIcons)
 			{
-				if (auto Texture = ResolvePlayerMapIconPreview(
-						Character->HeroDefinition,
-						TextureClass))
+				if (Applied.Pawn.Get() == Pawn &&
+					Applied.Texture.Get() == Texture &&
+					Applied.bTemporaryFallbackApplied)
 				{
-					return Texture;
+					bTrackedAsTemporary = true;
+					break;
 				}
 			}
-
-			if (auto Texture = ResolvePlayerMapIconPreview(
-					Character,
-					TextureClass))
-			{
+			if (!bTrackedAsTemporary)
 				return Texture;
+		}
+
+		static UObject* GenericFallbackTexture = nullptr;
+		static ULONGLONG NextFallbackTextureLookupAt = 0;
+		if (!IsLiveHealthStateObject(GenericFallbackTexture) ||
+			!GenericFallbackTexture->IsA(TextureClass))
+		{
+			const ULONGLONG Now = GetTickCount64();
+			if (Now >= NextFallbackTextureLookupAt)
+			{
+				NextFallbackTextureLookupAt = Now + 1000ULL;
+
+				// A generic marker is optional. Find it only if it is resident;
+				// FindObject falls through to StaticLoadObject and could turn every
+				// first map-icon setup into a blocking package flush.
+				GenericFallbackTexture = Offsets::StaticFindObject
+					? const_cast<UObject*>(SDK::StaticFindObject(
+						L"/Game/UI/Foundation/Textures/Icons/Heroes/Athena/Soldier/"
+						L"T-Soldier-HID-001-Athena-Commando-F-L."
+						L"T-Soldier-HID-001-Athena-Commando-F-L",
+						TextureClass))
+					: nullptr;
+			}
+		}
+		if (IsLiveHealthStateObject(GenericFallbackTexture) &&
+			GenericFallbackTexture->IsA(TextureClass))
+		{
+			return GenericFallbackTexture;
+		}
+
+		// FN30 can keep the historical generic portrait uncooked while another
+		// live player's selected portrait is already resident and configured.
+		// Reuse that texture as a temporary marker without loading any package;
+		// keep the bounded retry alive until this pawn's native/default portrait
+		// becomes resident so the borrowed texture can never become permanent.
+		// Default cheat bots never borrow a real player's portrait at all.
+		if (AFortPlayerControllerAthena::
+				IsCheatSpawnedBotController(Controller))
+		{
+			return nullptr;
+		}
+		for (const auto& Applied : GAppliedPlayerMapIcons)
+		{
+			auto ResidentTexture = Applied.Texture.Get();
+			if (IsLiveHealthStateObject(ResidentTexture) &&
+				ResidentTexture->IsA(TextureClass))
+			{
+				bPreviewPending = true;
+				bTemporaryFallback = true;
+				if (RetryAfterMs < 1000ULL)
+					RetryAfterMs = 1000ULL;
+				return ResidentTexture;
 			}
 		}
 
-		static UObject* FallbackTexture = nullptr;
-		static bool bFallbackTextureResolved = false;
-		if (!bFallbackTextureResolved)
-		{
-			bFallbackTextureResolved = true;
-			FallbackTexture = const_cast<UObject*>(SDK::FindObject(
-				L"/Game/UI/Foundation/Textures/Icons/Heroes/Athena/Soldier/"
-				L"T-Soldier-HID-001-Athena-Commando-F-L."
-				L"T-Soldier-HID-001-Athena-Commando-F-L",
-				TextureClass));
-		}
-
-		return IsLiveHealthStateObject(FallbackTexture) &&
-			FallbackTexture->IsA(TextureClass)
-			? FallbackTexture
-			: nullptr;
+		return nullptr;
 	}
 
 	void ApplyPlayerMapIconPawnBrush(
 		AFortPlayerPawnAthena* Pawn,
 		UObject* IconTexture)
 	{
-		if (!Pawn || !IconTexture)
+		if (!IsLiveHealthStateObject(IconTexture))
 			return;
 
-		static const UStruct* SlateBrushStruct =
-			SDK::Offsets::StaticFindObject
-				? static_cast<const UStruct*>(
-					SDK::StaticFindObject(
-						L"/Script/SlateCore.SlateBrush",
-						nullptr))
-				: nullptr;
-		if (!SlateBrushStruct)
+		FPlayerMapIconPawnBrushLayout Layout{};
+		if (!ResolvePlayerMapIconPawnBrushLayout(Pawn, Layout))
 			return;
-
-		const uint32 BrushOffset =
-			Pawn->GetOffset("MiniMapIconBrush");
-		const uint32 ResourceOffset =
-			SlateBrushStruct->GetOffset("ResourceObject");
-		if (BrushOffset == UINT32_MAX ||
-			BrushOffset > 0x10000 ||
-			ResourceOffset == UINT32_MAX ||
-			ResourceOffset > 0x400)
-		{
-			return;
-		}
 
 		auto ResourceAddress =
 			reinterpret_cast<uint8_t*>(Pawn) +
-				BrushOffset + ResourceOffset;
-		if (!SDK::MemReadable(
+				Layout.BrushOffset + Layout.ResourceOffset;
+		if (!IsWritableObjectMemory(
 				ResourceAddress,
 				sizeof(IconTexture)))
 		{
@@ -563,6 +919,7 @@ namespace
 	struct FPlayerMapIconFunctions
 	{
 		UFunction* Setup = nullptr;
+		UFunction* SetIcon = nullptr;
 		UFunction* SetReplicated = nullptr;
 		UFunction* Activate = nullptr;
 		UFunction* SetViewableDistance = nullptr;
@@ -582,6 +939,7 @@ namespace
 				return Result;
 
 			Result.Setup = Component->GetFunction("SetupMiniMapComponent");
+			Result.SetIcon = Component->GetFunction("SetMiniMapIcon");
 			Result.SetReplicated = Component->GetFunction("SetIsReplicated");
 			Result.Activate = Component->GetFunction("Activate");
 			Result.SetViewableDistance =
@@ -857,15 +1215,222 @@ namespace
 		return Component;
 	}
 
+	void ResetPendingPlayerMapIconsForWorld(UWorld* World)
+	{
+		if (GPendingPlayerMapIconWorld.Get() == World)
+			return;
+
+		GPendingPlayerMapIcons = {};
+		GAppliedPlayerMapIcons = {};
+		GPendingPlayerMapIconCursor = 0;
+		GPendingPlayerMapIconRetryCursor = 0;
+		GAppliedPlayerMapIconCursor = 0;
+		GNextPendingPlayerMapIconTickAt = 0;
+		GPendingPlayerMapIconWorld = TWeakObjectPtr<UWorld>(World);
+	}
+
+	FAppliedPlayerMapIcon* FindAppliedPlayerMapIcon(
+		AFortPlayerPawnAthena* Pawn,
+		bool bAddIfMissing)
+	{
+		if (!Pawn)
+			return nullptr;
+
+		FAppliedPlayerMapIcon* EmptyEntry = nullptr;
+		for (auto& Entry : GAppliedPlayerMapIcons)
+		{
+			auto ExistingPawn = Entry.Pawn.Get();
+			if (ExistingPawn == Pawn)
+				return &Entry;
+			if (!ExistingPawn && !EmptyEntry)
+				EmptyEntry = &Entry;
+		}
+
+		if (!bAddIfMissing)
+			return nullptr;
+
+		auto Entry = EmptyEntry
+			? EmptyEntry
+			: &GAppliedPlayerMapIcons[
+				GAppliedPlayerMapIconCursor++ %
+				MaxPendingPlayerMapIcons];
+		*Entry = {};
+		Entry->Pawn =
+			TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+		return Entry;
+	}
+
+	void QueuePendingPlayerMapIcon(
+		AFortPlayerControllerAthena* Controller,
+		AFortPlayerPawnAthena* Pawn,
+		const UObject* PreferredCharacterDefinition,
+		ULONGLONG RetryAfterMs)
+	{
+		if (!IsLiveHealthStateObject(Pawn))
+			return;
+
+		auto World = UWorld::GetWorld();
+		ResetPendingPlayerMapIconsForWorld(World);
+		if (!World)
+			return;
+
+		const ULONGLONG Now = GetTickCount64();
+		ULONGLONG Delay = RetryAfterMs ? RetryAfterMs : 100ULL;
+		if (Delay < 50ULL)
+			Delay = 50ULL;
+		if (Delay > 1000ULL)
+			Delay = 1000ULL;
+
+		FPendingPlayerMapIcon* Entry = nullptr;
+		FPendingPlayerMapIcon* EmptyEntry = nullptr;
+		for (auto& Candidate : GPendingPlayerMapIcons)
+		{
+			auto CandidatePawn = Candidate.Pawn.Get();
+			if (CandidatePawn == Pawn)
+			{
+				Entry = &Candidate;
+				break;
+			}
+			if (!CandidatePawn && !EmptyEntry)
+				EmptyEntry = &Candidate;
+		}
+
+		if (!Entry)
+		{
+			Entry = EmptyEntry
+				? EmptyEntry
+				: &GPendingPlayerMapIcons[
+					GPendingPlayerMapIconCursor++ %
+					MaxPendingPlayerMapIcons];
+			*Entry = {};
+			Entry->ExpiresAt =
+				Now + PlayerMapIconRetryLifetimeMs;
+		}
+
+		Entry->Controller = TWeakObjectPtr<AFortPlayerControllerAthena>(
+			IsLiveHealthStateObject(Controller)
+				? Controller
+				: nullptr);
+		Entry->Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+		Entry->PreferredCharacterDefinition = TWeakObjectPtr<UObject>(
+			IsLiveHealthStateObject(PreferredCharacterDefinition)
+				? const_cast<UObject*>(PreferredCharacterDefinition)
+				: nullptr);
+		Entry->RetryAt = Now + Delay;
+		++Entry->Generation;
+	}
+
+	void TickPendingPlayerMapIconsUnsafe()
+	{
+		auto World = UWorld::GetWorld();
+		ResetPendingPlayerMapIconsForWorld(World);
+		if (!World ||
+			!FConfiguration::bPlayerMapIcons.load(
+				std::memory_order_acquire) ||
+			GPlayerMapIconSetupDisabled)
+		{
+			GPendingPlayerMapIcons = {};
+			GPendingPlayerMapIconCursor = 0;
+			GPendingPlayerMapIconRetryCursor = 0;
+			return;
+		}
+
+		const ULONGLONG Now = GetTickCount64();
+		if (Now < GNextPendingPlayerMapIconTickAt)
+			return;
+		GNextPendingPlayerMapIconTickAt = Now + 100ULL;
+
+		constexpr int MaximumRetriesPerTick = 2;
+		int Retried = 0;
+		for (size_t Examined = 0;
+			Examined < MaxPendingPlayerMapIcons &&
+			Retried < MaximumRetriesPerTick;
+			++Examined)
+		{
+			auto& Entry = GPendingPlayerMapIcons[
+				GPendingPlayerMapIconRetryCursor++ %
+				MaxPendingPlayerMapIcons];
+			auto Pawn = Entry.Pawn.Get();
+			if (!Pawn ||
+				!IsLiveHealthStateObject(Pawn) ||
+				(Entry.ExpiresAt && Now >= Entry.ExpiresAt))
+			{
+				Entry = {};
+				continue;
+			}
+			if (Retried >= MaximumRetriesPerTick ||
+				Now < Entry.RetryAt)
+			{
+				continue;
+			}
+
+			++Retried;
+			const uint32 PreviousGeneration = Entry.Generation;
+			// If the retry still has a pending preview, QueuePendingPlayerMapIcon
+			// advances this generation and replaces RetryAt. Otherwise the real
+			// portrait is resident and this entry can be retired.
+			Entry.RetryAt = Now + 1000ULL;
+			AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+				Entry.Controller.Get(),
+				Pawn,
+				Entry.PreferredCharacterDefinition.Get());
+			if (Entry.Pawn.Get() == Pawn &&
+				Entry.Generation == PreviousGeneration)
+			{
+				Entry = {};
+			}
+		}
+	}
+
 	bool EnsurePlayerMapIconUnsafe(
 		AFortPlayerControllerAthena* Controller,
-		AFortPlayerPawnAthena* Pawn)
+		AFortPlayerPawnAthena* Pawn,
+		const UObject* PreferredCharacterDefinition)
 	{
 		if (!IsLiveHealthStateObject(Pawn))
 			return false;
+		ResetPendingPlayerMapIconsForWorld(UWorld::GetWorld());
 
-		static const UClass* ComponentClass =
-			FindClass("FortMiniMapComponent");
+		if (IsLiveHealthStateObject(
+				PreferredCharacterDefinition))
+		{
+			auto ExistingState = FindAppliedPlayerMapIcon(
+				Pawn, false);
+			if (ExistingState &&
+				ExistingState->PreferredCharacterDefinition.Get() ==
+					PreferredCharacterDefinition &&
+				ExistingState->bPreferredTextureApplied &&
+				IsLiveHealthStateObject(
+					ExistingState->Component.Get()) &&
+				IsLiveHealthStateObject(
+					ExistingState->Texture.Get()))
+			{
+				return true;
+			}
+		}
+
+		static const UClass* ComponentClass = []
+		{
+			auto ClassClass = UClass::StaticClass();
+			if (Offsets::StaticFindObject && ClassClass)
+			{
+				auto Candidate = static_cast<const UClass*>(
+					SDK::StaticFindObject(
+						L"/Script/FortniteGame.FortMiniMapComponent",
+						ClassClass));
+				if (IsLiveHealthStateObject(Candidate) &&
+					Candidate->IsA(ClassClass))
+				{
+					return Candidate;
+				}
+			}
+
+			// StaticFindObject is unavailable only on the oldest offset sets;
+			// retain their one-time name lookup as a compatibility fallback.
+			return Offsets::StaticFindObject
+				? nullptr
+				: FindClass("FortMiniMapComponent");
+		}();
 		if (!ComponentClass)
 		{
 			if (!GWarnedMissingPlayerMapIconClass)
@@ -879,11 +1444,49 @@ namespace
 			return false;
 		}
 
+		bool bPreviewPending = false;
+		bool bResolvedPreferredPreview = false;
+		bool bTemporaryFallback = false;
+		ULONGLONG RetryAfterMs = 0;
 		auto IconTexture = ResolvePlayerMapIconTexture(
 			Controller,
-			Pawn);
+			Pawn,
+			PreferredCharacterDefinition,
+			bPreviewPending,
+			bResolvedPreferredPreview,
+			bTemporaryFallback,
+			RetryAfterMs);
+		const bool bNeedsPreferredUpgrade =
+			IsLiveHealthStateObject(PreferredCharacterDefinition) &&
+			!bResolvedPreferredPreview;
+		bool bRetryQueued = false;
+		if (bPreviewPending || bNeedsPreferredUpgrade)
+		{
+			QueuePendingPlayerMapIcon(
+				Controller,
+				Pawn,
+				PreferredCharacterDefinition,
+				bPreviewPending ? RetryAfterMs : 1000ULL);
+			bRetryQueued = true;
+			// If a resident generic/player portrait was found, configure it now
+			// and keep this retry alive for the selected CID. Same-texture retries
+			// are coalesced by the applied-state check below.
+			if (!IconTexture)
+				return true;
+		}
 		if (!IconTexture)
 		{
+			// A terminal/unavailable preview can become resident later (notably
+			// after FN30 finishes its cosmetic game-feature setup). Keep one
+			// bounded low-rate retry instead of permanently losing this pawn.
+			if (!bRetryQueued)
+			{
+				QueuePendingPlayerMapIcon(
+					Controller,
+					Pawn,
+					PreferredCharacterDefinition,
+					1000ULL);
+			}
 			if (!GWarnedMissingPlayerMapIconTexture)
 			{
 				GWarnedMissingPlayerMapIconTexture = true;
@@ -933,6 +1536,75 @@ namespace
 			return false;
 		}
 
+		auto AppliedState = FindAppliedPlayerMapIcon(
+			Pawn, false);
+		const bool bSameTrackedComponent = AppliedState &&
+			AppliedState->Component.Get() == Component;
+		if (bSameTrackedComponent &&
+			AppliedState->Texture.Get() == IconTexture)
+		{
+			AppliedState->PreferredCharacterDefinition =
+				TWeakObjectPtr<UObject>(
+					IsLiveHealthStateObject(
+						PreferredCharacterDefinition)
+						? const_cast<UObject*>(
+							PreferredCharacterDefinition)
+						: nullptr);
+			AppliedState->bPreferredTextureApplied =
+				bResolvedPreferredPreview;
+			AppliedState->bTemporaryFallbackApplied =
+				bTemporaryFallback;
+			return true;
+		}
+
+		if (!bCreated && bSameTrackedComponent)
+		{
+			// A deferred portrait replaced the previous texture. The component
+			// is already registered, active, replicated, and visible; updating
+			// those properties again only amplifies reflection and network work.
+			if (Functions.SetIcon)
+			{
+				Component->Call<void>(
+					Functions.SetIcon,
+					IconTexture);
+			}
+			else
+			{
+				const FPlayerMapIconLinearColor White{
+					1.f, 1.f, 1.f, 1.f
+				};
+				float ColorPulsesPerSecond = 0.f;
+				float SizePulsesPerSecond = 0.f;
+				Component->Call<void>(
+					Functions.Setup,
+					IconTexture,
+					White,
+					White,
+					ColorPulsesPerSecond,
+					SizePulsesPerSecond);
+			}
+
+			if (!bTemporaryFallback)
+				ApplyPlayerMapIconPawnBrush(Pawn, IconTexture);
+			if (Functions.RepNotify)
+				Component->Call<void>(Functions.RepNotify);
+			Pawn->ForceNetUpdate();
+			AppliedState->Texture =
+				TWeakObjectPtr<UObject>(IconTexture);
+			AppliedState->PreferredCharacterDefinition =
+				TWeakObjectPtr<UObject>(
+					IsLiveHealthStateObject(
+						PreferredCharacterDefinition)
+						? const_cast<UObject*>(
+							PreferredCharacterDefinition)
+						: nullptr);
+			AppliedState->bPreferredTextureApplied =
+				bResolvedPreferredPreview;
+			AppliedState->bTemporaryFallbackApplied =
+				bTemporaryFallback;
+			return true;
+		}
+
 		bool bReplicated = true;
 		Component->Call<void>(
 			Functions.SetReplicated,
@@ -956,6 +1628,12 @@ namespace
 			White,
 			ColorPulsesPerSecond,
 			SizePulsesPerSecond);
+		if (Functions.SetIcon)
+		{
+			Component->Call<void>(
+				Functions.SetIcon,
+				IconTexture);
+		}
 
 		if (Functions.SetViewableDistance)
 		{
@@ -981,7 +1659,8 @@ namespace
 			}
 		}
 
-		ApplyPlayerMapIconPawnBrush(Pawn, IconTexture);
+		if (!bTemporaryFallback)
+			ApplyPlayerMapIconPawnBrush(Pawn, IconTexture);
 
 		if (Functions.RepNotify)
 		{
@@ -989,6 +1668,25 @@ namespace
 		}
 
 		Pawn->ForceNetUpdate();
+		AppliedState = FindAppliedPlayerMapIcon(Pawn, true);
+		if (AppliedState)
+		{
+			AppliedState->Component =
+				TWeakObjectPtr<UObject>(Component);
+			AppliedState->Texture =
+				TWeakObjectPtr<UObject>(IconTexture);
+			AppliedState->PreferredCharacterDefinition =
+				TWeakObjectPtr<UObject>(
+					IsLiveHealthStateObject(
+						PreferredCharacterDefinition)
+						? const_cast<UObject*>(
+							PreferredCharacterDefinition)
+						: nullptr);
+			AppliedState->bPreferredTextureApplied =
+				bResolvedPreferredPreview;
+			AppliedState->bTemporaryFallbackApplied =
+				bTemporaryFallback;
+		}
 		if (bCreated)
 		{
 			SDK::DbgLog(
@@ -1183,7 +1881,7 @@ namespace
 				: nullptr;
 	}
 
-	bool IsWritableReviveMemory(void* Address, size_t Size)
+	bool IsWritableObjectMemory(void* Address, size_t Size)
 	{
 		if (!Address || !Size)
 			return false;
@@ -1567,18 +2265,21 @@ namespace
 			return;
 		}
 
-		// This is the broken state: the exact possessed pawn was previously
-		// alive, now has a finite zero health value and positive capacity, but
-		// native damage produced neither DBNO nor death. When DBNO is explicitly
-		// disabled by the authoritative match settings, there is no next-frame
-		// knock transition to preserve, so finalize before the first bad zero can
-		// replicate. Otherwise retain one completed-flush grace period for builds
-		// that publish DBNO on the following frame. LastDamagedTime is diagnostic
-		// only because several high-damage GAS paths do not advance it.
+		// Only repair a stuck lethal state when authoritative match settings say
+		// DBNO is disabled. Enabled or unknown DBNO state can legitimately publish
+		// its native knock on a later frame; converting that uncertainty to
+		// ForceKill races the same death transaction this guard is preserving.
 		const bool bDBNOKnownDisabled =
 			IsDBNOAuthoritativelyDisabled(UWorld::GetWorld());
-		const uint8 RequiredZeroFlushes =
-			bDBNOKnownDisabled ? 1 : 2;
+		if (!bDBNOKnownDisabled)
+		{
+			State.LastForceKillAttemptMs = 0;
+			State.ConsecutiveUnresolvedZeroFlushes = 0;
+			State.ForceKillAttempts = 0;
+			return;
+		}
+
+		constexpr uint8 RequiredZeroFlushes = 1;
 		if (State.ConsecutiveUnresolvedZeroFlushes <
 			RequiredZeroFlushes)
 			++State.ConsecutiveUnresolvedZeroFlushes;
@@ -2253,8 +2954,11 @@ namespace
 		UAbilitySystemComponent* AbilitySystemComponent,
 		AController* EventInstigator)
 	{
-		if (VersionInfo.FortniteVersion != 27.11 ||
-			!IsLiveHealthStateObject(Pawn) ||
+		// Despite the legacy suffix, this is a reflected/capability-validated
+		// ownership check. 27.11 was merely the first build that needed the
+		// fallback; keeping a version gate here prevented the same safe path from
+		// repairing later builds whose stock revive RPC is also a no-op.
+		if (!IsLiveHealthStateObject(Pawn) ||
 			!IsLiveHealthStateObject(DeadController) ||
 			!IsLiveHealthStateObject(DeadPlayerState) ||
 			!IsLiveHealthStateObject(
@@ -2290,8 +2994,7 @@ namespace
 		bool& HasTag)
 	{
 		HasTag = false;
-		if (VersionInfo.FortniteVersion != 27.11 ||
-			!IsLiveHealthStateObject(
+		if (!IsLiveHealthStateObject(
 				AbilitySystemComponent) ||
 			!TagName)
 		{
@@ -2414,16 +3117,18 @@ namespace
 				: nullptr;
 		constexpr uint64 CPF_Parm = 0x80;
 		constexpr uint64 CPF_ReturnParm = 0x400;
+		const bool bEncryptedParameterMetadata =
+			VersionInfo.FortniteVersion >= 32.00;
 		const bool bSchemaValid =
-			Function->GetPropertiesSize() ==
-				sizeof(bool) &&
-			Params.Size == sizeof(bool) &&
 			ReturnParam &&
 			ReturnParam->Name == "ReturnValue" &&
 			ReturnParam->Offset == 0 &&
-			ReturnParam->ElementSize == sizeof(bool) &&
-			(ReturnParam->PropertyFlags & CPF_Parm) &&
-			(ReturnParam->PropertyFlags & CPF_ReturnParm);
+			(bEncryptedParameterMetadata ||
+				(Function->GetPropertiesSize() == sizeof(bool) &&
+					Params.Size == sizeof(bool) &&
+					ReturnParam->ElementSize == sizeof(bool) &&
+					(ReturnParam->PropertyFlags & CPF_Parm) &&
+					(ReturnParam->PropertyFlags & CPF_ReturnParm)));
 		if (!bSchemaValid)
 			return IsDBNO;
 
@@ -2437,8 +3142,7 @@ namespace
 		AFortPlayerControllerAthena* DeadController,
 		AController* EventInstigator)
 	{
-		if (VersionInfo.FortniteVersion != 27.11 ||
-			!IsLiveHealthStateObject(Pawn) ||
+		if (!IsLiveHealthStateObject(Pawn) ||
 			!IsLiveHealthStateObject(DeadController) ||
 			!IsLiveHealthStateObject(EventInstigator))
 		{
@@ -2462,7 +3166,7 @@ namespace
 				EventInstigator))
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback rejected "
+				"[Revive] compatibility manual fallback rejected "
 				"unstable ownership pawn=%p controller=%p "
 				"playerState=%p asc=%p\n",
 				(void*)Pawn,
@@ -2526,7 +3230,7 @@ namespace
 		if (!bNotificationSchemaValid)
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback rejected "
+				"[Revive] compatibility manual fallback rejected "
 				"notification schema onRep=%p onRepSize=0x%X "
 				"onRepFields=%d client=%p clientSize=0x%X "
 				"clientFields=%d\n",
@@ -2546,7 +3250,7 @@ namespace
 				CancelPreflightFailure))
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback rejected "
+				"[Revive] compatibility manual fallback rejected "
 				"cancel schema asc=%p reason=%s\n",
 				(void*)AbilitySystemComponent,
 				CancelPreflightFailure
@@ -2554,6 +3258,49 @@ namespace
 					: "unknown");
 			return false;
 		}
+
+		auto HasCompletedReflectedRevive =
+			[&](const char* Stage, bool& bOwnershipStable)
+			{
+				bOwnershipStable =
+					HasStableManualReviveOwnership27_11(
+						Pawn,
+						DeadController,
+						DeadPlayerState,
+						AbilitySystemComponent,
+						EventInstigator);
+				if (!bOwnershipStable)
+					return false;
+
+				bool bStateAvailable = false;
+				const bool bStillDBNO =
+					ReadDBNOState27_11(
+						Pawn,
+						bStateAvailable);
+				const float CurrentHealth = Pawn->GetHealth();
+				const bool bCompleted =
+					bStateAvailable && !bStillDBNO &&
+					FPlatformMath::IsFinite(CurrentHealth) &&
+					CurrentHealth > 0.f;
+				if (bCompleted)
+				{
+					// The reflected event/cancel path owned the complete transition.
+					// Wake replication, but do not clear state or replay either
+					// OnRep_IsDBNO or ClientOnPawnRevived.
+					Pawn->ForceNetUpdate();
+					DeadPlayerState->ForceNetUpdate();
+					DeadController->ForceNetUpdate();
+					SDK::DbgLog(
+						"[Revive] compatibility manual transition "
+						"completed by %s pawn=%p health=%.2f "
+						"version=%.2f\n",
+						Stage ? Stage : "reflected dispatch",
+						(void*)Pawn,
+						CurrentHealth,
+						VersionInfo.FortniteVersion);
+				}
+				return bCompleted;
+			};
 
 		// This event is the version-owned signal that releases the owning
 		// client's DBNO ability, crawl/input restrictions, and gameplay cues.
@@ -2568,7 +3315,7 @@ namespace
 		if (!bReviveEventDispatched)
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback aborted "
+				"[Revive] compatibility manual fallback aborted "
 				"before state clear pawn=%p controller=%p "
 				"instigator=%p\n",
 				(void*)Pawn,
@@ -2577,15 +3324,17 @@ namespace
 			return false;
 		}
 
-		if (!HasStableManualReviveOwnership27_11(
-				Pawn,
-				DeadController,
-				DeadPlayerState,
-				AbilitySystemComponent,
-				EventInstigator))
+		bool bStableAfterReviveEvent = false;
+		if (HasCompletedReflectedRevive(
+				"revive gameplay event",
+				bStableAfterReviveEvent))
+		{
+			return true;
+		}
+		if (!bStableAfterReviveEvent)
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback aborted "
+				"[Revive] compatibility manual fallback aborted "
 				"after revive event ownership changed "
 				"pawn=%p controller=%p\n",
 				(void*)Pawn,
@@ -2596,19 +3345,30 @@ namespace
 		const bool bTagCancelDispatched =
 			CancelDBNOAbilitiesByTag15_30(
 				AbilitySystemComponent);
-		if (!bTagCancelDispatched ||
-			!HasStableManualReviveOwnership27_11(
-				Pawn,
-				DeadController,
-				DeadPlayerState,
-				AbilitySystemComponent,
-				EventInstigator))
+		if (!bTagCancelDispatched)
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback aborted "
+				"[Revive] compatibility manual fallback aborted "
 				"after tag cancel dispatched=%d pawn=%p "
 				"controller=%p\n",
 				(int)bTagCancelDispatched,
+				(void*)Pawn,
+				(void*)DeadController);
+			return false;
+		}
+		bool bStableAfterTagCancel = false;
+		if (HasCompletedReflectedRevive(
+				"DBNO ability cancellation",
+				bStableAfterTagCancel))
+		{
+			return true;
+		}
+		if (!bStableAfterTagCancel)
+		{
+			SDK::DbgLog(
+				"[Revive] compatibility manual fallback aborted "
+				"after tag cancel ownership changed pawn=%p "
+				"controller=%p\n",
 				(void*)Pawn,
 				(void*)DeadController);
 			return false;
@@ -2629,7 +3389,7 @@ namespace
 				!bTagsClearedBeforeState))
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback aborted "
+				"[Revive] compatibility manual fallback aborted "
 				"DBNO tags remain query=%d clear=%d "
 				"pawn=%p asc=%p\n",
 				(int)bTagQueryAvailableBeforeState,
@@ -2650,7 +3410,7 @@ namespace
 				EventInstigator))
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback aborted "
+				"[Revive] compatibility manual fallback aborted "
 				"after death-info notification pawn=%p "
 				"controller=%p\n",
 				(void*)Pawn,
@@ -2721,7 +3481,7 @@ namespace
 			auto Address =
 				reinterpret_cast<uint8*>(Pawn) +
 				PropertyOffset;
-			if (!IsWritableReviveMemory(
+			if (!IsWritableObjectMemory(
 					Address,
 					sizeof(uint8)))
 			{
@@ -2762,7 +3522,7 @@ namespace
 				EventInstigator))
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback aborted "
+				"[Revive] compatibility manual fallback aborted "
 				"after DBNO notification pawn=%p "
 				"controller=%p\n",
 				(void*)Pawn,
@@ -2790,7 +3550,7 @@ namespace
 				EventInstigator))
 		{
 			SDK::DbgLog(
-				"[Revive] 27.11 manual fallback aborted "
+				"[Revive] compatibility manual fallback aborted "
 				"after client notification pawn=%p "
 				"controller=%p\n",
 				(void*)Pawn,
@@ -2840,7 +3600,7 @@ namespace
 			(!bTagQueryAvailableAfterState ||
 				bTagsClearedAfterState);
 		SDK::DbgLog(
-			"[Revive] 27.11 manual fallback result "
+			"[Revive] compatibility manual fallback result "
 			"pawn=%p controller=%p instigator=%p "
 			"event=%d tags=%d deathInfo=%d stack=%d "
 			"tagQuery=%d/%d dbnoState=%d "
@@ -3174,7 +3934,8 @@ namespace
 
 bool AFortPlayerPawnAthena::EnsurePlayerMapIcon(
 	AFortPlayerControllerAthena* Controller,
-	AFortPlayerPawnAthena* Pawn)
+	AFortPlayerPawnAthena* Pawn,
+	const UObject* PreferredCharacterDefinition)
 {
 	if (!FConfiguration::bPlayerMapIcons.load(
 			std::memory_order_acquire) ||
@@ -3188,7 +3949,8 @@ bool AFortPlayerPawnAthena::EnsurePlayerMapIcon(
 	{
 		bConfigured = EnsurePlayerMapIconUnsafe(
 			Controller,
-			Pawn);
+			Pawn,
+			PreferredCharacterDefinition);
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER)
 	{
@@ -3205,6 +3967,28 @@ bool AFortPlayerPawnAthena::EnsurePlayerMapIcon(
 	}
 
 	return bConfigured;
+}
+
+void AFortPlayerPawnAthena::TickPendingPlayerMapIcons()
+{
+	__try
+	{
+		TickPendingPlayerMapIconsUnsafe();
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		GPendingPlayerMapIcons = {};
+		GPendingPlayerMapIconCursor = 0;
+		GPendingPlayerMapIconRetryCursor = 0;
+		if (!GWarnedPlayerMapIconException)
+		{
+			GWarnedPlayerMapIconException = true;
+			SDK::DbgLog(
+				"[PlayerMapIcons] deferred portrait retry faulted and was "
+				"cleared on FN %.2f\n",
+				VersionInfo.FortniteVersion);
+		}
+	}
 }
 
 bool AFortPlayerPawnAthena::SetMinimumHealthGodMode(
@@ -3687,16 +4471,281 @@ static bool CompletePickupWithoutSpline(
 	return true;
 }
 
-// Makes a shield value written straight into the attribute actually absorb
-// damage on S4+ builds. The raw write only works on the earliest builds (1.7.2);
-// by S4 the shield lives in the ability-system aggregator that native damage
-// reads, and a struct write never reaches it. The game's own BR shield GE does
-// reach it, so we apply that GE at level 0 - it activates the aggregator on the
-// amount we already wrote and adds nothing. On 1.7.2 there is no such GE and the
-// raw write already absorbs, so finding nothing here is the correct no-op.
-// The BR shield-grant GE, cached. GE_Athena_Shields (Ch1) / GE_Athena_*_Shields
-// (Ch2). Null on 1.7.2, where the raw write already absorbs. Skips the
-// damage/tag/default-object variants.
+struct FLegacyAttributeUnwindInfoHeader
+{
+	uint8 VersionAndFlags;
+	uint8 PrologSize;
+	uint8 CodeCount;
+	uint8 FrameRegisterAndOffset;
+};
+
+static uintptr_t FindLegacyApplyModToAttribute()
+{
+	static uintptr_t Native = 0;
+	static bool bInitialized = false;
+	if (bInitialized)
+		return Native;
+	bInitialized = true;
+
+	// This bridge is needed only by the PlayerState-owned ASC family. Later
+	// builds use the normal native setters/gameplay-effect path.
+	if (VersionInfo.FortniteVersion > 2.50)
+		return 0;
+
+	auto StringRef = Memcury::Scanner::FindStringRef(
+		L"FActiveGameplayEffectsContainer::ApplyModToAttribute CurrentModcallbackData was not consumed For attribute %s on %s.",
+		false);
+	if (!StringRef.IsValid())
+		return 0;
+
+	const uintptr_t StringReference = StringRef.Get();
+	DWORD64 RuntimeImageBase = 0;
+	auto Entry = RtlLookupFunctionEntry(
+		static_cast<DWORD64>(StringReference),
+		&RuntimeImageBase, nullptr);
+	const uintptr_t ExpectedImageBase =
+		Memcury::PE::GetModuleBase();
+	if (!Entry || !RuntimeImageBase ||
+		static_cast<uintptr_t>(RuntimeImageBase) !=
+			ExpectedImageBase)
+	{
+		return 0;
+	}
+
+	struct FRuntimeFunctionIdentity
+	{
+		DWORD BeginAddress;
+		DWORD EndAddress;
+		DWORD UnwindData;
+	};
+	FRuntimeFunctionIdentity Visited[16]{};
+	int VisitedCount = 0;
+	constexpr uint8 UnwindFlagChainInfo = 0x4;
+	uintptr_t Candidate = 0;
+	for (int Depth = 0; Depth < 16; ++Depth)
+	{
+		if (!SDK::MemReadable(Entry, sizeof(*Entry)))
+			return 0;
+		const FRuntimeFunctionIdentity Identity{
+			Entry->BeginAddress,
+			Entry->EndAddress,
+			Entry->UnwindData};
+		if (Identity.BeginAddress >= Identity.EndAddress)
+			return 0;
+		for (int Index = 0; Index < VisitedCount; ++Index)
+		{
+			if (Visited[Index].BeginAddress == Identity.BeginAddress &&
+				Visited[Index].EndAddress == Identity.EndAddress &&
+				Visited[Index].UnwindData == Identity.UnwindData)
+			{
+				return 0;
+			}
+		}
+		Visited[VisitedCount++] = Identity;
+
+		const uintptr_t BeginAddress =
+			ExpectedImageBase + Identity.BeginAddress;
+		const uintptr_t EndAddress =
+			ExpectedImageBase + Identity.EndAddress;
+		const uintptr_t UnwindInfoAddress =
+			ExpectedImageBase + Identity.UnwindData;
+		if (BeginAddress < ExpectedImageBase ||
+			EndAddress < ExpectedImageBase ||
+			UnwindInfoAddress < ExpectedImageBase ||
+			!SDK::MemReadable(
+				reinterpret_cast<void*>(BeginAddress), 3))
+		{
+			return 0;
+		}
+
+		auto UnwindInfo =
+			reinterpret_cast<const FLegacyAttributeUnwindInfoHeader*>(
+				UnwindInfoAddress);
+		if (!SDK::MemReadable(
+				UnwindInfo,
+				sizeof(FLegacyAttributeUnwindInfoHeader)) ||
+			(UnwindInfo->VersionAndFlags & 0x7) != 1)
+		{
+			return 0;
+		}
+
+		const uint8 Flags =
+			UnwindInfo->VersionAndFlags >> 3;
+		if (!(Flags & UnwindFlagChainInfo))
+		{
+			Candidate = BeginAddress;
+			break;
+		}
+		if (Flags != UnwindFlagChainInfo)
+			return 0;
+		const size_t AlignedCodeCount =
+			(static_cast<size_t>(UnwindInfo->CodeCount) + 1u) &
+			~size_t(1);
+		const uintptr_t ChainedEntryAddress =
+			UnwindInfoAddress +
+			sizeof(FLegacyAttributeUnwindInfoHeader) +
+			AlignedCodeCount * sizeof(uint16);
+		if (ChainedEntryAddress < UnwindInfoAddress)
+			return 0;
+		auto ChainedEntry =
+			reinterpret_cast<PRUNTIME_FUNCTION>(
+				ChainedEntryAddress);
+		if (!SDK::MemReadable(
+				ChainedEntry, sizeof(*ChainedEntry)))
+		{
+			return 0;
+		}
+		Entry = ChainedEntry;
+	}
+
+	if (!Candidate || Candidate >= StringReference ||
+		StringReference - Candidate > 0x4000)
+	{
+		return 0;
+	}
+	MEMORY_BASIC_INFORMATION Memory{};
+	if (!VirtualQuery(
+			reinterpret_cast<void*>(Candidate),
+			&Memory, sizeof(Memory)) ||
+		Memory.State != MEM_COMMIT ||
+		(Memory.Protect & PAGE_GUARD) ||
+		!(Memory.Protect &
+		  (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+		   PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+	{
+		return 0;
+	}
+
+	const auto Opcodes =
+		reinterpret_cast<const uint8*>(Candidate);
+	const bool bPlausiblePrologue =
+		(Opcodes[0] == 0x48 && Opcodes[1] == 0x8B &&
+		 Opcodes[2] == 0xC4) ||
+		(Opcodes[0] == 0x48 && Opcodes[1] == 0x89 &&
+		 (Opcodes[2] == 0x5C || Opcodes[2] == 0x6C ||
+		  Opcodes[2] == 0x74 || Opcodes[2] == 0x7C)) ||
+		((Opcodes[0] == 0x40 || Opcodes[0] == 0x41) &&
+		 Opcodes[1] >= 0x53 && Opcodes[1] <= 0x57) ||
+		Opcodes[0] == 0x53 || Opcodes[0] == 0x55 ||
+		Opcodes[0] == 0x56 || Opcodes[0] == 0x57;
+	if (!bPlausiblePrologue)
+		return 0;
+
+	Native = Candidate;
+	return Native;
+}
+
+bool AFortPlayerPawnAthena::ApplyLegacyShieldAggregatorOverride(
+	float NewMaxShield,
+	float NewShield) const
+{
+	if (VersionInfo.FortniteVersion > 2.50)
+		return true;
+	if (!FPlatformMath::IsFinite(NewMaxShield) ||
+		!FPlatformMath::IsFinite(NewShield) ||
+		NewMaxShield < 0.f || NewShield < 0.f ||
+		NewMaxShield > 10000.f || NewShield > NewMaxShield)
+	{
+		return false;
+	}
+
+	auto PlayerStateAthena = PlayerState
+		? PlayerState->Cast<AFortPlayerStateAthena>()
+		: nullptr;
+	auto AbilitySystemComponent = PlayerStateAthena
+		? PlayerStateAthena->AbilitySystemComponent
+		: nullptr;
+	auto Set = HasHealthSet() ? HealthSet : nullptr;
+	const uintptr_t ApplyMod = FindLegacyApplyModToAttribute();
+	if (!AbilitySystemComponent ||
+		!AbilitySystemComponent->HasActiveGameplayEffects() ||
+		!Set || !ApplyMod)
+	{
+		SDK::DbgLog(
+			"  [HealthSet] legacy shield aggregate bridge unavailable "
+			"pawn=%p asc=%p set=%p native=%p FN=%.2f\n",
+			(void*)this, (void*)AbilitySystemComponent,
+			(void*)Set, (void*)ApplyMod,
+			VersionInfo.FortniteVersion);
+		return false;
+	}
+
+	auto GameplayAttributeStruct =
+		FindStruct("GameplayAttribute");
+	const uint32 AttributeSize = GameplayAttributeStruct
+		? GameplayAttributeStruct->GetPropertiesSize()
+		: 0;
+	const uint32 AttributeOffset = GameplayAttributeStruct
+		? GameplayAttributeStruct->GetOffset("Attribute")
+		: uint32(-1);
+	const uint32 OwnerOffset = GameplayAttributeStruct
+		? GameplayAttributeStruct->GetOffset("AttributeOwner")
+		: uint32(-1);
+	if (!GameplayAttributeStruct || AttributeSize == 0 ||
+		AttributeSize > 0x80 ||
+		AttributeOffset == uint32(-1) ||
+		AttributeOffset > AttributeSize ||
+		sizeof(void*) > AttributeSize - AttributeOffset ||
+		(OwnerOffset != uint32(-1) &&
+		 (OwnerOffset > AttributeSize ||
+		  sizeof(void*) > AttributeSize - OwnerOffset)))
+	{
+		return false;
+	}
+
+	using FApplyModToAttribute = void (*)(
+		FActiveGameplayEffectsContainer*,
+		const void*, const uint8*, float, const void*);
+	auto ApplyModToAttribute =
+		reinterpret_cast<FApplyModToAttribute>(ApplyMod);
+	const uint8 OverrideOperation = 3;
+	std::vector<uint8> AttributeBuffer(AttributeSize, 0);
+	auto ApplyOverride =
+		[&](const char* PropertyName, float Value)
+		{
+			const UField* Property = Set->GetProperty(PropertyName);
+			if (!Property)
+				return false;
+			std::fill(
+				AttributeBuffer.begin(),
+				AttributeBuffer.end(), 0);
+			memcpy(
+				AttributeBuffer.data() + AttributeOffset,
+				&Property, sizeof(Property));
+			if (OwnerOffset != uint32(-1))
+			{
+				auto AttributeOwner = Property->Outer;
+				memcpy(
+					AttributeBuffer.data() + OwnerOffset,
+					&AttributeOwner,
+					sizeof(AttributeOwner));
+			}
+			ApplyModToAttribute(
+				&AbilitySystemComponent->ActiveGameplayEffects,
+				AttributeBuffer.data(), &OverrideOperation,
+				Value, nullptr);
+			return true;
+		};
+
+	const bool bMaxApplied =
+		ApplyOverride("Shield", NewMaxShield);
+	const bool bCurrentApplied = bMaxApplied &&
+		ApplyOverride("CurrentShield", NewShield);
+	SDK::DbgLog(
+		"  [HealthSet] legacy shield aggregate override "
+		"pawn=%p asc=%p native=%p max=%.1f current=%.1f "
+		"applied=%d/%d FN=%.2f\n",
+		(void*)this, (void*)AbilitySystemComponent,
+		(void*)ApplyMod, NewMaxShield, NewShield,
+		(int)bMaxApplied, (int)bCurrentApplied,
+		VersionInfo.FortniteVersion);
+	return bMaxApplied && bCurrentApplied;
+}
+
+// Makes a direct shield write reach the native damage aggregator on later
+// builds. Season 1/2 use ApplyLegacyShieldAggregatorOverride above instead;
+// newer builds can synchronize through the game's own BR shield GE. Cache that
+// GE here while excluding damage/tag/default-object variants.
 static UClass* FindShieldAbsorbGE()
 {
 	static UClass* ShieldGE = nullptr;
@@ -4453,7 +5502,8 @@ void AFortPlayerPawnAthena::EndSkydiving(AFortPlayerPawnAthena* Pawn)
 
 bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 	AFortPlayerPawnAthena* Pawn,
-	AController* EventInstigator)
+	AController* EventInstigator,
+	bool bNativeTransitionAlreadyAttempted)
 {
 	if (!IsLiveHealthStateObject(Pawn) ||
 		!IsLiveHealthStateObject(EventInstigator) ||
@@ -4514,19 +5564,21 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 		return false;
 	}
 
-	const bool bWasDBNO =
-		Pawn->HasbIsDBNO()
-			? Pawn->bIsDBNO
-			: (Pawn->GetFunction("IsDBNO") &&
-				Pawn->Call<bool>(
-					Pawn->GetFunction("IsDBNO")));
+	// A replicated false bit does not disprove DBNO on modern builds: the
+	// authoritative native getter can still be true while replication is in
+	// flight. Read both sources and OR them through the validated helper.
+	bool bInitialDBNOStateAvailable = false;
+	const bool bWasDBNO = ReadDBNOState27_11(
+		Pawn,
+		bInitialDBNOStateAvailable);
 	if (!bWasDBNO)
 	{
 		SDK::DbgLog(
 			"[Revive] ignored non-DBNO pawn=%p controller=%p "
-			"version=%.2f\n",
+			"stateAvailable=%d version=%.2f\n",
 			(void*)Pawn,
 			(void*)DeadController,
+			(int)bInitialDBNOStateAvailable,
 			VersionInfo.FortniteVersion);
 		return false;
 	}
@@ -4542,68 +5594,145 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 			DeadController,
 			EventInstigator);
 	}
-	if (VersionInfo.FortniteVersion == 27.11)
+	bool bStillDBNO = bWasDBNO;
+	float FinalHealth = Pawn->GetHealth();
+	bool bStateAvailable = bInitialDBNOStateAvailable;
+	auto RefreshReviveState = [&]()
+		{
+			bStillDBNO = ReadDBNOState27_11(
+				Pawn,
+				bStateAvailable);
+			FinalHealth = Pawn->GetHealth();
+			return bStateAvailable &&
+				!bStillDBNO &&
+				FPlatformMath::IsFinite(FinalHealth) &&
+				FinalHealth > 0.f;
+		};
+
+	bool bSucceeded = false;
+	bool bNativeLowerInvoked = false;
+	bool bManualReviveInvoked = false;
+	bool bForceReviveInvoked = false;
+	const bool bSelfReviveRequest =
+		(void*)EventInstigator == (void*)DeadController;
+
+	// Admin self-revive requests cannot be sent through the native teammate
+	// transition on modern builds: the engine rejects the downed controller as
+	// its own instigator. Start with the fully preflighted same-pawn path.
+	if (bSelfReviveRequest)
 	{
-		return PerformManualDBNORevive27_11(
-			Pawn,
-			DeadController,
-			EventInstigator);
+		bManualReviveInvoked = true;
+		const bool bManualReportedSuccess =
+			PerformManualDBNORevive27_11(
+				Pawn,
+				DeadController,
+				EventInstigator);
+		if (!IsLiveHealthStateObject(Pawn))
+			return true;
+		bSucceeded = RefreshReviveState();
+		SDK::DbgLog(
+			"[Revive] self compatibility transition pawn=%p "
+			"reported=%d verified=%d version=%.2f\n",
+			(void*)Pawn,
+			(int)bManualReportedSuccess,
+			(int)bSucceeded,
+			VersionInfo.FortniteVersion);
 	}
 
 	// ReviveFromDBNO is inherited from FortPlayerPawn and keeps this exact pawn
-	// possessed. It also owns the version-correct teammate/self revive gameplay
-	// effect, set-by-caller health, DBNO ability cleanup, cues, and client
-	// notification. Calling any death-respawn API after it creates a second pawn.
+	// possessed. Use it for a real teammate first, but only after validating the
+	// reflected one-controller ABI. Later builds encrypt size/flag metadata, so
+	// there the stable name and zero offset are the bounded validation surface.
 	auto NativeReviveFunction =
 		Pawn->GetFunction("ReviveFromDBNO");
-	if (!NativeReviveFunction)
+	bool bNativeReviveSchemaValid = false;
+	if (NativeReviveFunction)
+	{
+		const auto NativeParams =
+			NativeReviveFunction->GetParamsNamed();
+		const UFunction::ParamNamed* InstigatorParam = nullptr;
+		for (const auto& Param : NativeParams.NameOffsetMap)
+		{
+			if (Param.Name == "EventInstigator")
+				InstigatorParam = &Param;
+		}
+		constexpr uint64 CPF_Parm = 0x80;
+		constexpr uint64 CPF_ReturnParm = 0x400;
+		const bool bEncryptedParameterMetadata =
+			VersionInfo.FortniteVersion >= 32.00;
+		bNativeReviveSchemaValid =
+			NativeParams.NameOffsetMap.size() == 1 &&
+			InstigatorParam &&
+			InstigatorParam->Offset == 0 &&
+			(bEncryptedParameterMetadata ||
+				(NativeReviveFunction->GetPropertiesSize() ==
+						sizeof(EventInstigator) &&
+					NativeParams.Size == sizeof(EventInstigator) &&
+					InstigatorParam->ElementSize ==
+						sizeof(EventInstigator) &&
+					(InstigatorParam->PropertyFlags & CPF_Parm) &&
+					!(InstigatorParam->PropertyFlags &
+						CPF_ReturnParm)));
+	}
+
+	if (!bSucceeded && bStillDBNO &&
+		!bNativeTransitionAlreadyAttempted &&
+		!bSelfReviveRequest && bNativeReviveSchemaValid)
+	{
+		FScopedReviveCompatCall ScopedCompatCall;
+		Pawn->ProcessEvent(
+			NativeReviveFunction,
+			&EventInstigator);
+		bNativeLowerInvoked = true;
+		if (!IsLiveHealthStateObject(Pawn))
+			return true;
+		bSucceeded = RefreshReviveState();
+	}
+	else if (!bSucceeded && !bSelfReviveRequest &&
+		!bNativeTransitionAlreadyAttempted &&
+		!bNativeReviveSchemaValid)
 	{
 		SDK::DbgLog(
-			"[Revive] native ReviveFromDBNO capability missing "
-			"pawn=%p; checking force capability version=%.2f\n",
+			"[Revive] native ReviveFromDBNO capability/schema "
+			"unavailable pawn=%p function=%p version=%.2f\n",
+			(void*)Pawn,
+			(void*)NativeReviveFunction,
+			VersionInfo.FortniteVersion);
+	}
+	else if (!bSucceeded && bStillDBNO &&
+		!bSelfReviveRequest &&
+		bNativeTransitionAlreadyAttempted)
+	{
+		SDK::DbgLog(
+			"[Revive] deferred fallback skipped duplicate native "
+			"transition pawn=%p version=%.2f\n",
 			(void*)Pawn,
 			VersionInfo.FortniteVersion);
 	}
 
-	// ReviveFromDBNO is a lower-level transition on some builds, but on 15.30
-	// its reflected path dispatches ServerReviveFromDBNO again. Mark this
-	// synchronous call so the nested server exec can use its original handler
-	// instead of recursing through this compatibility helper.
-	const bool bNativeLowerInvoked =
-		NativeReviveFunction != nullptr;
-	if (NativeReviveFunction)
+	// The validated manual transition first repaired 27.11, but every operation
+	// it uses is reflected and preflighted. Reuse it whenever the native path
+	// leaves a later (or earlier compatible) build downed.
+	if (!bSucceeded && bStillDBNO &&
+		!bManualReviveInvoked)
 	{
-		FScopedReviveCompatCall ScopedCompatCall;
-		Pawn->Call<void>(
-			NativeReviveFunction,
-			EventInstigator);
+		bManualReviveInvoked = true;
+		const bool bManualReportedSuccess =
+			PerformManualDBNORevive27_11(
+				Pawn,
+				DeadController,
+				EventInstigator);
+		if (!IsLiveHealthStateObject(Pawn))
+			return true;
+		bSucceeded = RefreshReviveState();
+		SDK::DbgLog(
+			"[Revive] compatibility fallback pawn=%p "
+			"reported=%d verified=%d version=%.2f\n",
+			(void*)Pawn,
+			(int)bManualReportedSuccess,
+			(int)bSucceeded,
+			VersionInfo.FortniteVersion);
 	}
-
-	if (!IsLiveHealthStateObject(Pawn))
-		return true;
-
-	auto ReadDBNOState =
-		[Pawn]()
-		{
-			bool bIsDBNO =
-				Pawn->HasbIsDBNO() && Pawn->bIsDBNO;
-			if (auto IsDBNOFunction =
-					Pawn->GetFunction("IsDBNO"))
-			{
-				bIsDBNO =
-					bIsDBNO ||
-					Pawn->Call<bool>(IsDBNOFunction);
-			}
-			return bIsDBNO;
-		};
-
-	bool bStillDBNO = ReadDBNOState();
-	float FinalHealth = Pawn->GetHealth();
-	bool bSucceeded =
-		!bStillDBNO &&
-		FPlatformMath::IsFinite(FinalHealth) &&
-		FinalHealth > 0.f;
-	bool bForceReviveInvoked = false;
 
 	// Some builds expose a complete authority-side fallback separately from
 	// ReviveFromDBNO. ForceReviveFromDBNO can take no parameters on older
@@ -4670,12 +5799,7 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 				if (!IsLiveHealthStateObject(Pawn))
 					return true;
 
-				bStillDBNO = ReadDBNOState();
-				FinalHealth = Pawn->GetHealth();
-				bSucceeded =
-					!bStillDBNO &&
-					FPlatformMath::IsFinite(FinalHealth) &&
-					FinalHealth > 0.f;
+				bSucceeded = RefreshReviveState();
 			}
 			else
 			{
@@ -4694,7 +5818,7 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 	SDK::DbgLog(
 		"[Revive] native same-pawn transition pawn=%p "
 		"controller=%p instigator=%p stillDBNO=%d "
-		"health=%.2f lower=%d forced=%d success=%d "
+		"health=%.2f lower=%d manual=%d forced=%d success=%d "
 		"version=%.2f\n",
 		(void*)Pawn,
 		(void*)DeadController,
@@ -4702,6 +5826,7 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 		(int)bStillDBNO,
 		FinalHealth,
 		(int)bNativeLowerInvoked,
+		(int)bManualReviveInvoked,
 		(int)bForceReviveInvoked,
 		(int)bSucceeded,
 		VersionInfo.FortniteVersion);

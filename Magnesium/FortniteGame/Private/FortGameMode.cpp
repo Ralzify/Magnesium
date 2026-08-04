@@ -367,9 +367,34 @@ namespace
         // retain the reflected field fallback for older layouts.
         auto Setter =
             GameState->GetFunction("SetIsDBNODeathEnabled");
-        if (Setter)
-            GameState->Call<void>(Setter, bEnabled);
-        else if (GameState->HasbDBNODeathEnabled())
+        bool bCalledSetter = false;
+        if (Setter && VersionInfo.FortniteVersion < 32.00)
+        {
+            const auto Params = Setter->GetParamsNamed();
+            const auto* EnabledParam =
+                Params.NameOffsetMap.size() == 1
+                    ? &Params.NameOffsetMap[0]
+                    : nullptr;
+            constexpr uint64 CPF_Parm = 0x80;
+            constexpr uint64 CPF_OutParm = 0x100;
+            constexpr uint64 CPF_ReturnParm = 0x400;
+            const bool bSchemaValid =
+                Params.Size == sizeof(bool) &&
+                Setter->GetPropertiesSize() == sizeof(bool) &&
+                EnabledParam && EnabledParam->Offset == 0 &&
+                EnabledParam->ElementSize == sizeof(bool) &&
+                (EnabledParam->PropertyFlags & CPF_Parm) &&
+                !(EnabledParam->PropertyFlags & CPF_OutParm) &&
+                !(EnabledParam->PropertyFlags & CPF_ReturnParm);
+            if (bSchemaValid)
+            {
+                bool ParamsValue = bEnabled;
+                GameState->ProcessEvent(Setter, &ParamsValue);
+                bCalledSetter = true;
+            }
+        }
+
+        if (!bCalledSetter && GameState->HasbDBNODeathEnabled())
             GameState->bDBNODeathEnabled = bEnabled;
     }
 
@@ -4307,6 +4332,7 @@ namespace
         case Playlist::Gav:
         case Playlist::Retrac1v1:
         case Playlist::RetracTurtle:
+        case Playlist::RetracWater:
         case Playlist::Creative:
         case Playlist::OnlyUp:
         case Playlist::TiltedZW:
@@ -4867,9 +4893,21 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
     // after native LTM ticks so a playlist-authored true value cannot make the
     // visible OFF state ineffective. Restore the authored value only when the
     // policy no longer applies (world/mode/version transition).
+    const bool bGliderBuildSupported =
+        FConfiguration::IsGliderRedeploySupportedBuild();
     const bool bGliderPolicyAvailable =
-        VersionInfo.FortniteVersion > 5.41 &&
-        VersionInfo.FortniteVersion <= 16.00;
+        bGliderBuildSupported &&
+        GUI::UsesDefaultMatchSettings(
+            GUI::GetSelectedPlaylist());
+    if (!bGliderBuildSupported &&
+        FConfiguration::bGliderRedeploy.load(
+            std::memory_order_acquire))
+    {
+        // A hidden value restored from another build must not opt a modern or
+        // legacy client into an implementation its UI deliberately gates out.
+        FConfiguration::bGliderRedeploy.store(
+            false, std::memory_order_release);
+    }
     if (bGliderPolicyAvailable &&
         GameState
             ->HasDefaultGliderRedeployCanRedeploy())
@@ -5995,9 +6033,6 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         {
             if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
                 GameState->DefaultParachuteDeployTraceForGroundDistance = 10000;
-
-            if (GameState->HasDefaultGliderRedeployCanRedeploy())
-                GameState->DefaultGliderRedeployCanRedeploy = FConfiguration::bGliderRedeploy ? 1.0f : 0.0f;
         }
 
         if (VersionInfo.FortniteVersion >= 27)
@@ -6445,6 +6480,7 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
         if (PlayerStart)
             Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(GameMode->GetDefaultPawnClassForController(NewPlayer), PlayerStart->GetTransform(), NewPlayer, 3);
     }
+
     // they only stripped it on athena for some reason
     /*static auto FortGMSpawnDefaultPawnFor = (AFortPlayerPawnAthena * (*)(AFortGameMode*, AFortPlayerControllerAthena*, AActor*)) DefaultObjImpl("FortGameMode")->Vft[SpawnDefaultPawnForIdx];
     Pawn = FortGMSpawnDefaultPawnFor(GameMode, NewPlayer, StartSpot);
@@ -7521,6 +7557,837 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
     }
 
     return;
+}
+
+
+bool AFortGameMode::AssignCheatBotIsolatedTeam(
+    AFortGameMode* GameMode,
+    AFortPlayerControllerAthena* BotController,
+    AActor* Instigator,
+    uint8& OutTeamIndex)
+{
+    OutTeamIndex = 0;
+    if (!IsSaneObject(GameMode) || !IsSaneObject(BotController) ||
+        !BotController->PlayerState)
+    {
+        return false;
+    }
+
+    auto PlayerState =
+        BotController->PlayerState->Cast<AFortPlayerStateAthena>();
+    auto GameState = GameMode->GameState;
+    if (!IsSaneObject(PlayerState) || !IsSaneObject(GameState) ||
+        !PlayerState->HasTeamIndex())
+    {
+        return false;
+    }
+
+    // A cheat bot is intentionally not a squad member or revive partner. Find
+    // an existing playable team object unused by every other live controller;
+    // choosing from the native Teams graph also avoids requesting a team that
+    // this particular build never initialized.
+    std::array<bool, 256> UsedTeams{};
+    auto MarkControllerTeam =
+        [&](AActor* Actor)
+        {
+            if (!IsSaneObject(Actor) ||
+                (void*)Actor == (void*)BotController)
+            {
+                return;
+            }
+
+            auto Controller =
+                Actor->Cast<AFortPlayerControllerAthena>();
+            auto State = Controller && Controller->PlayerState
+                ? Controller->PlayerState->Cast<
+                    AFortPlayerStateAthena>()
+                : nullptr;
+            if (IsSaneObject(State) && State->HasTeamIndex())
+                UsedTeams[State->TeamIndex] = true;
+        };
+    if (GameMode->HasAlivePlayers())
+    {
+        for (auto Actor : GameMode->AlivePlayers)
+            MarkControllerTeam(Actor);
+    }
+    if (GameMode->HasAliveBots())
+    {
+        for (auto Actor : GameMode->AliveBots)
+            MarkControllerTeam(Actor);
+    }
+    if (GameState->HasPlayerArray())
+    {
+        for (auto State : GameState->PlayerArray)
+        {
+            if (IsSaneObject(State) && State != PlayerState &&
+                State->HasTeamIndex())
+            {
+                UsedTeams[State->TeamIndex] = true;
+            }
+        }
+    }
+
+    auto Playlist = GameState->HasCurrentPlaylistInfo()
+        ? GameState->CurrentPlaylistInfo.BasePlaylist
+        : GameState->CurrentPlaylistData;
+    const uint8 FirstTeam = GetPlaylistFirstTeam(Playlist);
+    int32 LastTeamExclusive = 250;
+    bool bHasActiveTeamBound = false;
+    if (Playlist)
+    {
+        const int32 LastTeamOffset =
+            (int32)Playlist->GetOffset("DefaultLastTeam");
+        if (LastTeamOffset >= 0 && SDK::MemReadable(
+                (const uint8*)Playlist + LastTeamOffset,
+                sizeof(uint8)))
+        {
+            const uint8 LastTeam = GetFromOffset<uint8>(
+                Playlist, LastTeamOffset);
+            if (LastTeam >= FirstTeam && LastTeam < 250)
+            {
+                LastTeamExclusive = (int32)LastTeam + 1;
+                bHasActiveTeamBound = true;
+            }
+        }
+    }
+
+    int32 PlaylistTeamCount = GetLateSeasonIntProperty(
+        Playlist, "MaxTeamCount", 0);
+    int32 GameStateTeamCount = GetLateSeasonIntProperty(
+        GameState, "TeamCount", 0);
+    auto ApplyTeamCountBound = [&](int32 TeamCount)
+        {
+            if (TeamCount < 1 || TeamCount > 247)
+                return;
+            LastTeamExclusive = std::min<int32>(
+                LastTeamExclusive,
+                (int32)FirstTeam + TeamCount);
+            bHasActiveTeamBound = true;
+        };
+    ApplyTeamCountBound(PlaylistTeamCount);
+    ApplyTeamCountBound(GameStateTeamCount);
+    if (!bHasActiveTeamBound && Playlist)
+    {
+        int32 TeamSize = Playlist->HasMaxSquadSize()
+            ? Playlist->MaxSquadSize
+            : 1;
+        if (TeamSize < 1)
+            TeamSize = 1;
+        if (Playlist->HasMaxPlayers() && Playlist->MaxPlayers > 0)
+        {
+            const int32 DerivedTeamCount =
+                (Playlist->MaxPlayers + TeamSize - 1) / TeamSize;
+            ApplyTeamCountBound(DerivedTeamCount);
+        }
+    }
+    if (!bHasActiveTeamBound ||
+        LastTeamExclusive <= FirstTeam)
+    {
+        SDK::DbgLog(
+            "[SpawnBot] no validated active team range first=%u "
+            "playlistCount=%d gameStateCount=%d version=%.2f\n",
+            (unsigned)FirstTeam,
+            PlaylistTeamCount,
+            GameStateTeamCount,
+            VersionInfo.FortniteVersion);
+        return false;
+    }
+
+    uint8 CandidateTeam = 0;
+    UObject* CandidateTeamInfo = nullptr;
+    const int32 TeamsOffset = (int32)GameState->GetOffset("Teams");
+    if (TeamsOffset >= 0 && SDK::MemReadable(
+            (const uint8*)GameState + TeamsOffset,
+            sizeof(TArray<UObject*>)))
+    {
+        auto& Teams = GetFromOffset<TArray<UObject*>>(
+            GameState,
+            TeamsOffset);
+        if (Teams.Num() > 0 && Teams.Num() <= 256 &&
+            SDK::MemReadable(
+                Teams.GetData(),
+                sizeof(UObject*) * Teams.Num()))
+        {
+            for (auto TeamInfo : Teams)
+            {
+                if (!IsSaneObject(TeamInfo))
+                    continue;
+                const int32 TeamOffset =
+                    (int32)TeamInfo->GetOffset("Team");
+                if (TeamOffset < 0 || !SDK::MemReadable(
+                        (const uint8*)TeamInfo + TeamOffset,
+                        sizeof(uint8)))
+                {
+                    continue;
+                }
+
+                const uint8 Team =
+                    GetFromOffset<uint8>(TeamInfo, TeamOffset);
+                auto Members = GetLateSeasonTeamMembers(TeamInfo);
+                if (Team >= FirstTeam &&
+                    Team < LastTeamExclusive &&
+                    !UsedTeams[Team] && Members &&
+                    Members->Num() == 0 &&
+                    (!CandidateTeam || Team < CandidateTeam))
+                {
+                    CandidateTeam = Team;
+                    CandidateTeamInfo = TeamInfo;
+                }
+            }
+        }
+    }
+    if (CandidateTeam < FirstTeam || !IsSaneObject(CandidateTeamInfo))
+        return false;
+
+    struct FObjectReferenceField
+    {
+        uint32 Offset = uint32(-1);
+        bool bWeak = false;
+    };
+
+    // FN32 encrypts the FField class metadata used to distinguish an object
+    // pointer from an FWeakObjectPtr. Native team APIs remain available there;
+    // the direct repair below is deliberately disabled unless the reference
+    // representation can be proven from reflection.
+    auto ResolveObjectReferenceField =
+        [](UObject* Owner, const char* Name,
+            FObjectReferenceField& OutField)
+        {
+            OutField = {};
+            if (!IsSaneObject(Owner) ||
+                VersionInfo.FortniteVersion >= 32.00)
+            {
+                return false;
+            }
+
+            auto Property = Owner->GetProperty(Name, 0x8010000);
+            if (!Property || !SDK::MemReadable(
+                    Property, std::max<size_t>(
+                        Offsets::Offset_Internal + sizeof(uint32),
+                        Offsets::ElementSize + sizeof(uint32))))
+            {
+                return false;
+            }
+
+            uint64 FieldFlags = 0;
+            if (VersionInfo.FortniteVersion >= 12.10)
+            {
+                if (!SDK::MemReadable(
+                        (const uint8*)Property + 0x8,
+                        sizeof(void*)))
+                {
+                    return false;
+                }
+                auto FieldClass = GetFromOffset<void*>(Property, 0x8);
+                if (!FieldClass || !SDK::MemReadable(
+                        (const uint8*)FieldClass + 0x10,
+                        sizeof(uint64)))
+                {
+                    return false;
+                }
+                FieldFlags = GetFromOffset<uint64>(FieldClass, 0x10);
+            }
+            else
+            {
+                if (!Property->Class || !SDK::MemReadable(
+                        Property->Class, sizeof(UClass)))
+                {
+                    return false;
+                }
+                FieldFlags = Property->Class->GetCastFlags();
+            }
+
+            constexpr uint64 ObjectReferenceFlags = 0x8010000;
+            constexpr uint64 WeakObjectPropertyFlag = 0x8000000;
+            if (!(FieldFlags & ObjectReferenceFlags))
+                return false;
+
+            const uint32 Offset = SDK::DecryptPropOffset(
+                GetFromOffset<uint32>(
+                    Property, Offsets::Offset_Internal));
+            const uint32 ElementSize = GetFromOffset<uint32>(
+                Property, Offsets::ElementSize);
+            const int32 OwnerSize = Owner->Class->GetPropertiesSize();
+            if (Offset == uint32(-1) ||
+                ElementSize != sizeof(void*) ||
+                (OwnerSize > 0 &&
+                    Offset + sizeof(void*) > (uint32)OwnerSize) ||
+                !SDK::MemReadable(
+                    (const uint8*)Owner + Offset,
+                    sizeof(void*)))
+            {
+                return false;
+            }
+
+            OutField.Offset = Offset;
+            OutField.bWeak =
+                (FieldFlags & WeakObjectPropertyFlag) != 0;
+            return true;
+        };
+
+    auto ReadObjectReference =
+        [](UObject* Owner, const FObjectReferenceField& Field,
+            UObject*& OutObject)
+        {
+            OutObject = nullptr;
+            if (!IsSaneObject(Owner) ||
+                Field.Offset == uint32(-1) ||
+                !SDK::MemReadable(
+                    (const uint8*)Owner + Field.Offset,
+                    sizeof(void*)))
+            {
+                return false;
+            }
+
+            if (Field.bWeak)
+            {
+                const auto Weak =
+                    GetFromOffset<TWeakObjectPtr<UObject>>(
+                        Owner, Field.Offset);
+                OutObject = Weak.Get();
+            }
+            else
+            {
+                OutObject = GetFromOffset<UObject*>(
+                    Owner, Field.Offset);
+            }
+            return !OutObject || IsSaneObject(OutObject);
+        };
+
+    auto WriteObjectReference =
+        [](UObject* Owner, const FObjectReferenceField& Field,
+            UObject* Value)
+        {
+            if (!IsSaneObject(Owner) ||
+                Field.Offset == uint32(-1) ||
+                !SDK::MemReadable(
+                    (const uint8*)Owner + Field.Offset,
+                    sizeof(void*)))
+            {
+                return false;
+            }
+
+            if (Field.bWeak)
+            {
+                GetFromOffset<TWeakObjectPtr<UObject>>(
+                    Owner, Field.Offset) =
+                    TWeakObjectPtr<UObject>(Value);
+            }
+            else
+            {
+                GetFromOffset<UObject*>(Owner, Field.Offset) = Value;
+            }
+            return true;
+        };
+
+    FObjectReferenceField PlayerTeamField{};
+    const bool bCanReadPlayerTeam = ResolveObjectReferenceField(
+        PlayerState, "PlayerTeam", PlayerTeamField);
+    FObjectReferenceField PlayerTeamPrivateField{};
+    FObjectReferenceField TeamPrivateInfoField{};
+    const bool bCanReadPlayerTeamPrivate =
+        ResolveObjectReferenceField(
+            PlayerState, "PlayerTeamPrivate",
+            PlayerTeamPrivateField);
+    const bool bCanReadTeamPrivateInfo =
+        ResolveObjectReferenceField(
+            CandidateTeamInfo, "PrivateInfo",
+            TeamPrivateInfoField);
+    UObject* OriginalPlayerTeam = nullptr;
+    const bool bReadOriginalPlayerTeam = bCanReadPlayerTeam &&
+        ReadObjectReference(
+            PlayerState, PlayerTeamField, OriginalPlayerTeam);
+    UObject* OriginalPlayerTeamPrivate = nullptr;
+    const bool bReadOriginalPlayerTeamPrivate =
+        bCanReadPlayerTeamPrivate &&
+        ReadObjectReference(
+            PlayerState, PlayerTeamPrivateField,
+            OriginalPlayerTeamPrivate);
+    UObject* CandidatePrivateInfo = nullptr;
+    const bool bReadCandidatePrivateInfo =
+        bCanReadTeamPrivateInfo &&
+        ReadObjectReference(
+            CandidateTeamInfo, TeamPrivateInfoField,
+            CandidatePrivateInfo) &&
+        IsSaneObject(CandidatePrivateInfo);
+    const uint8 OriginalTeamIndex = PlayerState->TeamIndex;
+    const uint8 OriginalSquadId = PlayerState->HasSquadId()
+        ? PlayerState->SquadId
+        : 0;
+    auto OriginalTeamMembers =
+        GetLateSeasonTeamMembers(OriginalPlayerTeam);
+    const bool bWasInOriginalTeam = OriginalTeamMembers &&
+        OriginalTeamMembers->Contains((AActor*)BotController);
+    auto OriginalPlayerState = PlayerState;
+    auto OriginalPawn = BotController->Pawn;
+
+    auto TeamGraphMatches = [&]()
+        {
+            if (!IsSaneObject(BotController) ||
+                BotController->Pawn != OriginalPawn ||
+                !IsSaneObject(OriginalPawn) ||
+                BotController->PlayerState != OriginalPlayerState)
+            {
+                return false;
+            }
+
+            PlayerState = BotController->PlayerState
+                ->Cast<AFortPlayerStateAthena>();
+            auto Members =
+                GetLateSeasonTeamMembers(CandidateTeamInfo);
+            if (!IsSaneObject(PlayerState) ||
+                !PlayerState->HasTeamIndex() ||
+                PlayerState->TeamIndex != CandidateTeam ||
+                !Members ||
+                !Members->Contains((AActor*)BotController))
+            {
+                return false;
+            }
+
+            if (bCanReadPlayerTeam)
+            {
+                UObject* CurrentPlayerTeam = nullptr;
+                if (!ReadObjectReference(
+                        PlayerState, PlayerTeamField,
+                        CurrentPlayerTeam) ||
+                    CurrentPlayerTeam != CandidateTeamInfo)
+                {
+                    return false;
+                }
+            }
+            if (bReadCandidatePrivateInfo &&
+                bCanReadPlayerTeamPrivate)
+            {
+                UObject* CurrentPlayerTeamPrivate = nullptr;
+                if (!ReadObjectReference(
+                        PlayerState, PlayerTeamPrivateField,
+                        CurrentPlayerTeamPrivate) ||
+                    CurrentPlayerTeamPrivate !=
+                        CandidatePrivateInfo)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+    auto TeamGraphChanged = [&]()
+        {
+            if (!IsSaneObject(BotController) ||
+                BotController->PlayerState != OriginalPlayerState ||
+                BotController->Pawn != OriginalPawn)
+            {
+                return true;
+            }
+            PlayerState = BotController->PlayerState
+                ->Cast<AFortPlayerStateAthena>();
+            if (!IsSaneObject(PlayerState) ||
+                !PlayerState->HasTeamIndex() ||
+                PlayerState->TeamIndex != OriginalTeamIndex)
+            {
+                return true;
+            }
+            auto Members =
+                GetLateSeasonTeamMembers(CandidateTeamInfo);
+            if (Members &&
+                Members->Contains((AActor*)BotController))
+            {
+                return true;
+            }
+            auto CurrentOriginalMembers =
+                GetLateSeasonTeamMembers(OriginalPlayerTeam);
+            const bool bCurrentlyInOriginalTeam =
+                CurrentOriginalMembers &&
+                CurrentOriginalMembers->Contains(
+                    (AActor*)BotController);
+            if (bCurrentlyInOriginalTeam != bWasInOriginalTeam)
+                return true;
+            if (bReadOriginalPlayerTeam)
+            {
+                UObject* CurrentPlayerTeam = nullptr;
+                if (!ReadObjectReference(
+                        PlayerState, PlayerTeamField,
+                        CurrentPlayerTeam) ||
+                    CurrentPlayerTeam != OriginalPlayerTeam)
+                {
+                    return true;
+                }
+            }
+            if (bReadOriginalPlayerTeamPrivate)
+            {
+                UObject* CurrentPlayerTeamPrivate = nullptr;
+                if (!ReadObjectReference(
+                        PlayerState, PlayerTeamPrivateField,
+                        CurrentPlayerTeamPrivate) ||
+                    CurrentPlayerTeamPrivate !=
+                        OriginalPlayerTeamPrivate)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    auto FinalizeTeamAssignment = [&](const char* Method)
+        {
+            if (!TeamGraphMatches())
+                return false;
+
+            // Native team changes are moves. Discard any stale membership the
+            // implementation retained in the old team before publication.
+            RemoveLateSeasonMemberFromOtherTeams(
+                GameState, CandidateTeamInfo,
+                (AActor*)BotController);
+            if (!TeamGraphMatches())
+                return false;
+
+            if (PlayerState->HasSquadId())
+            {
+                PlayerState->SquadId = CandidateTeam >= FirstTeam
+                    ? (uint8)(CandidateTeam - FirstTeam)
+                    : 0;
+                PlayerState->OnRep_SquadId();
+                VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                    PlayerState, L"SquadId");
+            }
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                PlayerState, L"TeamIndex");
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                PlayerState, L"PlayerTeam");
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+                PlayerState, L"PlayerTeamPrivate");
+            PlayerState->ForceNetUpdate();
+            BotController->ForceNetUpdate();
+            GameState->ForceNetUpdate();
+            OutTeamIndex = CandidateTeam;
+            SDK::DbgLog(
+                "[SpawnBot] isolated team assigned bot=%p team=%u "
+                "method=%s version=%.2f\n",
+                (void*)BotController,
+                (unsigned)CandidateTeam,
+                Method,
+                VersionInfo.FortniteVersion);
+            return true;
+        };
+
+    constexpr uint64 CPF_Parm = 0x80;
+    constexpr uint64 CPF_OutParm = 0x100;
+    constexpr uint64 CPF_ReturnParm = 0x400;
+    const bool bEncryptedParameterMetadata =
+        VersionInfo.FortniteVersion >= 32.00;
+    auto IsInputParam =
+        [&](const UFunction::ParamNamed* Param,
+            uint32 Offset, uint32 Size)
+        {
+            return Param && Param->Offset == Offset &&
+                (bEncryptedParameterMetadata ||
+                    (Param->ElementSize == Size &&
+                        (Param->PropertyFlags & CPF_Parm) &&
+                        !(Param->PropertyFlags &
+                            (CPF_OutParm | CPF_ReturnParm))));
+        };
+
+    constexpr uint32 ChangeTeamParamsSize = 0x38;
+    auto Library = UFortKismetLibrary::GetDefaultObj();
+    auto ChangeTeamFunction =
+        IsSaneObject((UObject*)Library)
+            ? Library->GetFunction("ChangeTeam")
+            : nullptr;
+    bool bChangeTeamSchemaValid = false;
+    if (ChangeTeamFunction)
+    {
+        const auto Params = ChangeTeamFunction->GetParamsNamed();
+        const UFunction::ParamNamed* PlayerParam = nullptr;
+        const UFunction::ParamNamed* InstigatorParam = nullptr;
+        const UFunction::ParamNamed* TeamParam = nullptr;
+        const UFunction::ParamNamed* TagsParam = nullptr;
+        for (const auto& Param : Params.NameOffsetMap)
+        {
+            if (Param.Name == "PlayerToSwitch")
+                PlayerParam = &Param;
+            else if (Param.Name == "Instigator")
+                InstigatorParam = &Param;
+            else if (Param.Name == "NewTeam")
+                TeamParam = &Param;
+            else if (Param.Name == "ChangeTeamTags")
+                TagsParam = &Param;
+        }
+        bChangeTeamSchemaValid =
+            Params.NameOffsetMap.size() == 4 &&
+            IsInputParam(PlayerParam, 0x00, sizeof(AActor*)) &&
+            IsInputParam(InstigatorParam, 0x08, sizeof(AActor*)) &&
+            IsInputParam(TeamParam, 0x10, sizeof(uint8)) &&
+            IsInputParam(
+                TagsParam, 0x18,
+                sizeof(FGameplayTagContainer)) &&
+            (bEncryptedParameterMetadata ||
+                (Params.Size == ChangeTeamParamsSize &&
+                    ChangeTeamFunction->GetPropertiesSize() ==
+                        ChangeTeamParamsSize));
+        if (!bChangeTeamSchemaValid)
+        {
+            SDK::DbgLog(
+                "[SpawnBot] native ChangeTeam schema rejected "
+                "function=%p size=0x%X fields=%d version=%.2f\n",
+                (void*)ChangeTeamFunction,
+                Params.Size,
+                (int)Params.NameOffsetMap.size(),
+                VersionInfo.FortniteVersion);
+        }
+    }
+
+    auto InvokeChangeTeam = [&](AActor* PlayerToSwitch,
+        const char* TargetKind)
+        {
+            if (!bChangeTeamSchemaValid ||
+                !IsSaneObject(PlayerToSwitch))
+            {
+                return false;
+            }
+
+            std::array<uint8, ChangeTeamParamsSize> ParamMemory{};
+            AActor* ChangeInstigator = IsSaneObject(Instigator)
+                ? Instigator
+                : PlayerToSwitch;
+            memcpy(ParamMemory.data() + 0x00,
+                &PlayerToSwitch, sizeof(PlayerToSwitch));
+            memcpy(ParamMemory.data() + 0x08,
+                &ChangeInstigator, sizeof(ChangeInstigator));
+            memcpy(ParamMemory.data() + 0x10,
+                &CandidateTeam, sizeof(CandidateTeam));
+            Library->ProcessEvent(
+                ChangeTeamFunction, ParamMemory.data());
+            const bool bApplied = TeamGraphMatches();
+            SDK::DbgLog(
+                "[SpawnBot] native ChangeTeam target=%s bot=%p "
+                "requested=%u applied=%d mutated=%d version=%.2f\n",
+                TargetKind,
+                (void*)BotController,
+                (unsigned)CandidateTeam,
+                (int)bApplied,
+                (int)TeamGraphChanged(),
+                VersionInfo.FortniteVersion);
+            return bApplied;
+        };
+
+    // TeamInfo membership is controller-based on every inspected layout. Try
+    // the canonical controller actor again now that the synthetic identity is
+    // ready and the candidate is an actually empty, active team. The previous
+    // FN30 call happened before readiness and targeted the highest team (102).
+    auto BotPawn = BotController->Pawn
+        ? BotController->Pawn->Cast<AFortPlayerPawnAthena>()
+        : nullptr;
+    bool bGraphMutated = false;
+    if (InvokeChangeTeam((AActor*)BotController, "controller"))
+    {
+        if (FinalizeTeamAssignment("ChangeTeam(controller)"))
+            return true;
+        bGraphMutated = true;
+    }
+    bGraphMutated = bGraphMutated || TeamGraphChanged();
+
+    // ServerSetTeam is present across the middle and modern layouts and is the
+    // controller-native path used by Creative. Only invoke it if the first call
+    // left the complete pre-state untouched; stacking native team transitions
+    // over a partial mutation can double-fire team-change side effects.
+    if (!bGraphMutated)
+    {
+        auto ServerSetTeamFunction =
+            BotController->GetFunction("ServerSetTeam");
+        bool bServerSetTeamSchemaValid = false;
+        uint32 ServerSetTeamParamsSize = 0;
+        if (ServerSetTeamFunction)
+        {
+            const auto Params =
+                ServerSetTeamFunction->GetParamsNamed();
+            const auto* InTeamParam =
+                Params.NameOffsetMap.size() == 1
+                    ? &Params.NameOffsetMap[0]
+                    : nullptr;
+            bServerSetTeamSchemaValid =
+                InTeamParam && InTeamParam->Name == "InTeam" &&
+                IsInputParam(InTeamParam, 0, sizeof(uint8)) &&
+                (bEncryptedParameterMetadata ||
+                    (Params.Size == sizeof(uint8) &&
+                        ServerSetTeamFunction->GetPropertiesSize() ==
+                            sizeof(uint8)));
+            ServerSetTeamParamsSize = Params.Size;
+        }
+
+        if (bServerSetTeamSchemaValid)
+        {
+            uint8 InTeam = CandidateTeam;
+            BotController->ProcessEvent(
+                ServerSetTeamFunction, &InTeam);
+            if (FinalizeTeamAssignment("ServerSetTeam"))
+                return true;
+            bGraphMutated = TeamGraphChanged();
+            SDK::DbgLog(
+                "[SpawnBot] native ServerSetTeam did not establish graph "
+                "bot=%p requested=%u mutated=%d version=%.2f\n",
+                (void*)BotController,
+                (unsigned)CandidateTeam,
+                (int)bGraphMutated,
+                VersionInfo.FortniteVersion);
+        }
+        else if (ServerSetTeamFunction)
+        {
+            SDK::DbgLog(
+                "[SpawnBot] ServerSetTeam schema rejected function=%p "
+                "size=0x%X version=%.2f\n",
+                (void*)ServerSetTeamFunction,
+                ServerSetTeamParamsSize,
+                VersionInfo.FortniteVersion);
+        }
+    }
+
+    // ChangeTeam accepts a generic actor and several builds resolve that actor
+    // through its possessed pawn. Preserve the pawn variant as the last native
+    // attempt, again only after a proven no-op.
+    if (!bGraphMutated &&
+        InvokeChangeTeam((AActor*)BotPawn, "pawn"))
+    {
+        if (FinalizeTeamAssignment("ChangeTeam(pawn)"))
+            return true;
+        bGraphMutated = true;
+    }
+    bGraphMutated = bGraphMutated || TeamGraphChanged();
+
+    auto ApplyReflectedTeamGraph = [&]()
+        {
+            if (!IsSaneObject(BotController) ||
+                BotController->PlayerState != OriginalPlayerState ||
+                BotController->Pawn != OriginalPawn ||
+                !IsSaneObject(OriginalPlayerState) ||
+                !IsSaneObject(OriginalPawn) ||
+                !bCanReadPlayerTeam ||
+                !bReadOriginalPlayerTeam ||
+                !bCanReadPlayerTeamPrivate ||
+                !bReadOriginalPlayerTeamPrivate ||
+                !bReadCandidatePrivateInfo)
+            {
+                return false;
+            }
+
+            auto CandidateMembers =
+                GetLateSeasonTeamMembers(CandidateTeamInfo);
+            if (!CandidateMembers)
+                return false;
+
+            RemoveLateSeasonMemberFromOtherTeams(
+                GameState, CandidateTeamInfo,
+                (AActor*)BotController);
+            PlayerState->TeamIndex = CandidateTeam;
+            if (PlayerState->HasSquadId())
+            {
+                PlayerState->SquadId = CandidateTeam >= FirstTeam
+                    ? (uint8)(CandidateTeam - FirstTeam)
+                    : 0;
+            }
+            const bool bWroteTeam = WriteObjectReference(
+                PlayerState, PlayerTeamField,
+                CandidateTeamInfo);
+            const bool bWrotePrivate = WriteObjectReference(
+                PlayerState, PlayerTeamPrivateField,
+                CandidatePrivateInfo);
+            if (!CandidateMembers->Contains(
+                    (AActor*)BotController))
+            {
+                CandidateMembers->Add((AActor*)BotController);
+            }
+
+            bool bApplied = bWroteTeam && bWrotePrivate &&
+                TeamGraphMatches();
+            if (!bApplied)
+            {
+                RemoveLateSeasonMemberFromOtherTeams(
+                    GameState, nullptr,
+                    (AActor*)BotController);
+                PlayerState->GetTeamIndex() = OriginalTeamIndex;
+                if (PlayerState->HasSquadId())
+                    PlayerState->GetSquadId() = OriginalSquadId;
+                WriteObjectReference(
+                    PlayerState, PlayerTeamField,
+                    OriginalPlayerTeam);
+                WriteObjectReference(
+                    PlayerState, PlayerTeamPrivateField,
+                    OriginalPlayerTeamPrivate);
+                if (bWasInOriginalTeam && OriginalTeamMembers &&
+                    !OriginalTeamMembers->Contains(
+                        (AActor*)BotController))
+                {
+                    OriginalTeamMembers->Add(
+                        (AActor*)BotController);
+                }
+                return false;
+            }
+
+            auto CallNoParameterRepNotify =
+                [&](const char* FunctionName)
+                {
+                    auto Function =
+                        PlayerState->GetFunction(FunctionName);
+                    if (!Function)
+                        return;
+                    const auto Params = Function->GetParamsNamed();
+                    if (Params.NameOffsetMap.empty() &&
+                        Params.Size == 0 &&
+                        Function->GetPropertiesSize() == 0)
+                    {
+                        PlayerState->ProcessEvent(Function, nullptr);
+                    }
+                };
+            CallNoParameterRepNotify("OnRep_PlayerTeam");
+            CallNoParameterRepNotify("OnRep_PlayerTeamPrivate");
+
+            auto OnRepTeamIndex =
+                PlayerState->GetFunction("OnRep_TeamIndex");
+            if (OnRepTeamIndex)
+            {
+                const auto Params =
+                    OnRepTeamIndex->GetParamsNamed();
+                if (Params.NameOffsetMap.empty() &&
+                    Params.Size == 0 &&
+                    OnRepTeamIndex->GetPropertiesSize() == 0)
+                {
+                    PlayerState->ProcessEvent(
+                        OnRepTeamIndex, nullptr);
+                }
+                else if (Params.NameOffsetMap.size() == 1 &&
+                    IsInputParam(
+                        &Params.NameOffsetMap[0], 0,
+                        sizeof(uint8)) &&
+                    Params.Size == sizeof(uint8) &&
+                    OnRepTeamIndex->GetPropertiesSize() ==
+                        sizeof(uint8))
+                {
+                    uint8 PreviousTeam = OriginalTeamIndex;
+                    PlayerState->ProcessEvent(
+                        OnRepTeamIndex, &PreviousTeam);
+                }
+            }
+            return TeamGraphMatches();
+        };
+
+    // Manual repair starts only from the exact pre-native snapshot. A partial
+    // native mutation is intentionally failed closed; layering raw writes over
+    // an in-progress engine transition can publish a mixed team generation.
+    if (!bGraphMutated && ApplyReflectedTeamGraph() &&
+        FinalizeTeamAssignment("reflected graph"))
+    {
+        return true;
+    }
+
+    RemoveLateSeasonMemberFromOtherTeams(
+        GameState, nullptr, (AActor*)BotController);
+    SDK::DbgLog(
+        "[SpawnBot] isolated team assignment failed bot=%p "
+        "requested=%u nativeMutated=%d version=%.2f\n",
+        (void*)BotController,
+        (unsigned)CandidateTeam,
+        (int)bGraphMutated,
+        VersionInfo.FortniteVersion);
+    return false;
 }
 
 

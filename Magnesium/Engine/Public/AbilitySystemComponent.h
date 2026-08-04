@@ -10,23 +10,6 @@ public:
     int Handle;
 };
 
-class UFortGameplayAbility : public UObject
-{
-public:
-    UCLASS_COMMON_MEMBERS(UFortGameplayAbility);
-
-    DEFINE_FUNC(K2_ExecuteGameplayCue, void);
-    DEFINE_FUNC(K2_ExecuteGameplayCueWithParams, void);
-    DEFINE_FUNC(GetAbilitySystemComponentFromActorInfo, UObject*);
-    DEFINE_FUNC(K2_AddGameplayCueWithParams, void);
-    DEFINE_FUNC(K2_AddGameplayCue, void);
-
-    DefUHookOg(K2_ExecuteGameplayCue_);
-    DefUHookOg(K2_ExecuteGameplayCueWithParams_);
-    DefUHookOg(K2_AddGameplayCueWithParams_);
-    DefUHookOg(K2_AddGameplayCue_);
-};
-
 struct FPredictionKey
 {
 public:
@@ -55,6 +38,32 @@ struct FGameplayAbilityActivationInfo
 	DEFINE_STRUCT_PROP(PredictionKeyWhenActivated, FPredictionKey);
 };
 
+class UFortGameplayAbility : public UObject
+{
+public:
+    UCLASS_COMMON_MEMBERS(UFortGameplayAbility);
+
+    // Instanced death/DBNO abilities can survive pawn replacement on builds
+    // whose ASC is owned by PlayerState. ActiveCount alone is insufficient:
+    // inspect and end the live instance that still owns input-blocking tags.
+    DEFINE_PROP(CurrentActivationInfo, FGameplayAbilityActivationInfo);
+    DEFINE_BITFIELD_PROP(bIsActive);
+    DEFINE_BITFIELD_PROP(bIsBlockingOtherAbilities);
+
+    DEFINE_FUNC(K2_EndAbility, void);
+    DEFINE_FUNC(SetShouldBlockOtherAbilities, void);
+    DEFINE_FUNC(K2_ExecuteGameplayCue, void);
+    DEFINE_FUNC(K2_ExecuteGameplayCueWithParams, void);
+    DEFINE_FUNC(GetAbilitySystemComponentFromActorInfo, UObject*);
+    DEFINE_FUNC(K2_AddGameplayCueWithParams, void);
+    DEFINE_FUNC(K2_AddGameplayCue, void);
+
+    DefUHookOg(K2_ExecuteGameplayCue_);
+    DefUHookOg(K2_ExecuteGameplayCueWithParams_);
+    DefUHookOg(K2_AddGameplayCueWithParams_);
+    DefUHookOg(K2_AddGameplayCue_);
+};
+
 struct FGameplayAbilitySpec : public FFastArraySerializerItem
 {
 public:
@@ -65,6 +74,7 @@ public:
     DEFINE_STRUCT_PROP(Level, int32);
     DEFINE_STRUCT_PROP(InputID, int32);
     DEFINE_STRUCT_PROP(ActivationInfo, FGameplayAbilityActivationInfo);
+    DEFINE_STRUCT_PROP(DynamicAbilityTags, FGameplayTagContainer);
     DEFINE_STRUCT_NEWOBJ_PROP(SourceObject, UObject);
     DEFINE_STRUCT_PROP(ActiveCount, uint8);
     DEFINE_STRUCT_PROP(
@@ -221,7 +231,12 @@ public:
     DEFINE_FUNC(UpdateActiveGameplayEffectSetByCallerMagnitude, void);
     DEFINE_FUNC(SetActiveGameplayEffectLevel, void);
 
-    FGameplayAbilitySpecHandle GiveAbility(const UObject* Ability, UObject* SourceObject = nullptr);
+    FGameplayAbilitySpecHandle GiveAbility(
+        const UObject* Ability,
+        UObject* SourceObject = nullptr,
+        int32 Level = 1,
+        int32 InputID = -1);
+    bool ClearAbility(FGameplayAbilitySpecHandle Handle);
     void GiveAbilitySet(const UFortAbilitySet* Set);
     static void InternalServerTryActivateAbility(UAbilitySystemComponent*, FGameplayAbilitySpecHandle, bool, FPredictionKey*, void*);
 

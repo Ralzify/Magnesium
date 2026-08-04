@@ -188,13 +188,13 @@ public:
     //   2. The server-side OnRep - runs the game's own attribute-changed
     //      broadcast and clamping that a raw memory write skips. Without
     //      it the server value is right but the client HUD never updates.
-    //      CRUCIAL: call it with NO argument. It is a GAS repnotify that
-    //      applies delta (NewBase - OldValue.Base) to the aggregated current
-    //      value. A zeroed OldValue (what a no-arg call gives) makes the delta
-    //      the full new value; passing the just-written attribute makes the
-    //      delta zero, so current shield never leaves 0. This is the one line
-    //      that separates "works like Core" from "reports success, does
-    //      nothing" - the exact shield bug on Ch1 S5.
+    //      GAS repnotifies apply (NewBase - OldValue.Base) to the live
+    //      aggregator. The old value must therefore be captured BEFORE the
+    //      direct write. Supplying a zero old value works for the first spawn,
+    //      but adds the requested amount again when a persistent PlayerState
+    //      ASC is rebound during respawn (for example 32 + 100 = 132 health).
+    //      Supplying the already-written value produces a zero delta. The real
+    //      pre-write snapshot handles both cases exactly.
     //   3. ForceNetUpdate on the PAWN, not the attribute set - the set
     //      replicates as a subobject of the pawn's actor channel, so the
     //      pawn is what has to be dirtied.
@@ -222,6 +222,250 @@ public:
             Attribute.UnclampedBaseValue = NewValue;
         if (FFortGameplayAttributeData::HasUnclampedCurrentValue())
             Attribute.UnclampedCurrentValue = NewValue;
+    }
+
+    static std::vector<uint8_t> SnapshotDirectAttribute(
+        const FFortGameplayAttributeData& Attribute)
+    {
+        const uint32 AttributeSize =
+            FFortGameplayAttributeData::Size();
+        if (AttributeSize == 0 || AttributeSize > 0x400)
+            return {};
+
+        std::vector<uint8_t> Snapshot(AttributeSize);
+        memcpy(Snapshot.data(), &Attribute, AttributeSize);
+        return Snapshot;
+    }
+
+    // Marshal the reflected OldValue parameter when this build exposes it.
+    // Some very early repnotifies have no parameter at all; those retain their
+    // native no-argument path. Never use UObject::Call's one-argument fast path
+    // here because FFortGameplayAttributeData has a runtime-reflected size.
+    static bool NotifyDirectAttributeRep(
+        UFortHealthSet* Set,
+        const char* FunctionName,
+        const std::vector<uint8_t>& PreviousValue)
+    {
+        if (!Set || !FunctionName)
+            return false;
+
+        auto Function = Set->GetFunction(FunctionName);
+        if (!Function)
+            return false;
+
+        const auto Parameters = Function->GetParams();
+        if (Parameters.NameOffsetMap.empty())
+        {
+            if (Parameters.Size != 0)
+            {
+                SDK::DbgLog(
+                    "  [HealthSet] refused parameterless dispatch for %s "
+                    "with nonzero buffer size=%u\n",
+                    FunctionName, Parameters.Size);
+                return false;
+            }
+
+            // FN 1.7.2/2.50 expose genuine zero-parameter repnotifies. Their
+            // known-good Core path writes the nonnegative absolute attribute
+            // first and invokes the no-argument bridge. Runtime reflection
+            // still has to validate ParmsSize because text dumps omit it.
+            Set->ProcessEvent(Function, nullptr);
+            return true;
+        }
+
+        constexpr uint64 CPF_Parm = 0x0000000000000080;
+        constexpr uint64 CPF_OutParm = 0x0000000000000100;
+        constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+        int32 OldValueParameterIndex = -1;
+        int32 InputParameterCount = 0;
+        for (int32 Index = 0;
+            Index < Parameters.NameOffsetMap.size(); ++Index)
+        {
+            const auto& Parameter =
+                Parameters.NameOffsetMap[Index];
+            if (!(Parameter.PropertyFlags & CPF_Parm) ||
+                (Parameter.PropertyFlags & CPF_ReturnParm))
+            {
+                continue;
+            }
+
+            ++InputParameterCount;
+            if ((Parameter.PropertyFlags & CPF_OutParm) ||
+                Parameter.ElementSize != PreviousValue.size())
+                continue;
+
+            if (OldValueParameterIndex >= 0)
+            {
+                OldValueParameterIndex = -1;
+                break;
+            }
+            OldValueParameterIndex = Index;
+        }
+
+        const uint32 BufferSize = Parameters.Size;
+        if (InputParameterCount != 1 ||
+            OldValueParameterIndex < 0 || PreviousValue.empty() ||
+            BufferSize == 0 || BufferSize > 0x1000 ||
+            Parameters.NameOffsetMap[OldValueParameterIndex].Offset >
+                BufferSize ||
+            PreviousValue.size() >
+                BufferSize - Parameters.NameOffsetMap[
+                    OldValueParameterIndex].Offset)
+        {
+            // A nonzero unknown parameter layout cannot safely be invoked with
+            // nullptr. Log and fail closed instead of asking ProcessEvent to
+            // dereference a missing parameter buffer.
+            static UFunction* WarnedFunction = nullptr;
+            if (WarnedFunction != Function)
+            {
+                WarnedFunction = Function;
+                SDK::DbgLog(
+                    "  [HealthSet] could not marshal real OldValue for %s; "
+                    "notification skipped\n",
+                    FunctionName);
+            }
+            return false;
+        }
+
+        void* Memory = FMemory::Malloc(BufferSize);
+        if (!Memory)
+            return false;
+        memset(Memory, 0, BufferSize);
+        memcpy(
+            (PBYTE)Memory + Parameters.NameOffsetMap[
+                OldValueParameterIndex].Offset,
+            PreviousValue.data(), PreviousValue.size());
+        Set->ProcessEvent(Function, Memory);
+        FMemory::Free(Memory);
+        return true;
+    }
+
+    // Uses the early GAS container's native Override operation so the live
+    // damage aggregator and the replicated HealthSet agree after respawn.
+    // Implemented in the .cpp and capability-gated to the Season 1/2 family.
+    bool ApplyLegacyShieldAggregatorOverride(
+        float NewMaxShield,
+        float NewShield) const;
+
+    // Pre-Season-3 RestartPlayer reuses a PlayerState-owned ASC. Use the
+    // pawn's native health setters plus the ASC container's native attribute
+    // override for shield; raw HealthSet values alone can look full while the
+    // damage aggregator still contains zero.
+    bool SetLegacyRespawnAttributesExact(
+        float NewMaxHealth,
+        float NewHealth,
+        float NewMaxShield,
+        float NewShield) const
+    {
+        auto Set = HasHealthSet() ? HealthSet : nullptr;
+        if (!Set)
+            return false;
+
+        auto NativeSetMaxHealth = GetFunction("SetMaxHealth");
+        auto NativeSetHealth = GetFunction("SetHealth");
+        if (!NativeSetMaxHealth || !NativeSetHealth)
+        {
+            SDK::DbgLog(
+                "  [HealthSet] legacy respawn refused without native "
+                "health setters pawn=%p maxFn=%p healthFn=%p FN=%.2f\n",
+                (void*)this, (void*)NativeSetMaxHealth,
+                (void*)NativeSetHealth,
+                VersionInfo.FortniteVersion);
+            return false;
+        }
+
+        Call<void>(NativeSetMaxHealth, NewMaxHealth);
+        Call<void>(NativeSetHealth, NewHealth);
+
+        // The early PlayerState-owned ASC requires its native aggregate
+        // mutation. Applying raw values/OnRep first would run callbacks twice
+        // and was the path that could produce a full-looking but inert bar.
+        if (VersionInfo.FortniteVersion <= 2.50)
+        {
+            const bool bApplied =
+                ApplyLegacyShieldAggregatorOverride(
+                    NewMaxShield, NewShield);
+            ForceNetUpdate();
+            return bApplied;
+        }
+
+        const float PreviousLiveMaxShield = GetMaxShield();
+        const float PreviousLiveShield = GetShield();
+
+        auto ApplyShieldExact = [Set](
+            FFortGameplayAttributeData& Attribute,
+            const char* OnRepName,
+            float NewValue,
+            float PreviousLiveValue,
+            bool bSetMaximum)
+            {
+                const float PreviousCurrentValue = PreviousLiveValue;
+                const auto PreviousValue =
+                    SnapshotDirectAttribute(Attribute);
+                WriteDirectAttributeValue(Attribute, NewValue);
+                if (bSetMaximum &&
+                    FFortGameplayAttributeData::HasMaximum())
+                {
+                    Attribute.Maximum = NewValue;
+                }
+
+                const bool bNotificationSafe =
+                    FPlatformMath::IsFinite(PreviousCurrentValue) &&
+                    FPlatformMath::IsFinite(NewValue) &&
+                    NewValue >= 0.f && NewValue <= 10000.f &&
+                    NotifyDirectAttributeRep(
+                        Set, OnRepName, PreviousValue);
+                // Do not repaint the raw struct after OnRep. On the earliest
+                // GAS builds that callback synchronizes (and may recompute)
+                // the authoritative aggregator used by damage. Rewriting the
+                // display-facing values here can make verification report 100
+                // shield while the aggregator correctly remained at zero.
+                return bNotificationSafe;
+            };
+
+        bool bShieldSynchronized = true;
+        // Legacy naming: Shield is capacity and CurrentShield is current. If
+        // capacity is moving downward, first clamp current shield beneath that
+        // new ceiling. This follows Core's absolute fallback and never exposes
+        // a transient negative capacity to native listeners.
+        bool bCurrentShieldAppliedBeforeCapacity = false;
+        if (Set->HasShield() && Set->HasCurrentShield() &&
+            FPlatformMath::IsFinite(PreviousLiveShield) &&
+            PreviousLiveShield > NewMaxShield &&
+            NewMaxShield >= 0.f)
+        {
+            const float PreCapacityShield =
+                (std::min)(NewShield, NewMaxShield);
+            const bool bPreCapacityClampSynchronized = ApplyShieldExact(
+                Set->CurrentShield, "OnRep_CurrentShield",
+                PreCapacityShield, PreviousLiveShield, false);
+            bShieldSynchronized &= bPreCapacityClampSynchronized;
+            if (!bPreCapacityClampSynchronized)
+            {
+                // The capacity listener may clamp/re-enter through the current
+                // value. If its prerequisite notification could not be safely
+                // marshalled, leave capacity unchanged and retry later rather
+                // than exposing an invalid current-over-maximum transition.
+                ForceNetUpdate();
+                return false;
+            }
+            bCurrentShieldAppliedBeforeCapacity = true;
+        }
+        if (Set->HasShield())
+        {
+            bShieldSynchronized &= ApplyShieldExact(
+                Set->Shield, "OnRep_Shield",
+                NewMaxShield, PreviousLiveMaxShield, true);
+        }
+        if (Set->HasCurrentShield() &&
+            !bCurrentShieldAppliedBeforeCapacity)
+        {
+            bShieldSynchronized &= ApplyShieldExact(
+                Set->CurrentShield, "OnRep_CurrentShield",
+                NewShield, PreviousLiveShield, false);
+        }
+        ForceNetUpdate();
+        return bShieldSynchronized;
     }
 
     void SetHealth(float NewValue) const
@@ -261,9 +505,11 @@ public:
         }
 
         auto& Attribute = Set->Health;
+        const auto PreviousValue = SnapshotDirectAttribute(Attribute);
         WriteDirectAttributeValue(Attribute, NewValue);
 
-        Set->OnRep_Health();
+        NotifyDirectAttributeRep(
+            Set, "OnRep_Health", PreviousValue);
         // Re-apply after the OnRep recompute (see SetShield for why).
         WriteDirectAttributeValue(Attribute, NewValue);
 
@@ -290,10 +536,12 @@ public:
         }
 
         auto& Attribute = Set->MaxHealth;
+        const auto PreviousValue = SnapshotDirectAttribute(Attribute);
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
-        Set->OnRep_MaxHealth();
+        NotifyDirectAttributeRep(
+            Set, "OnRep_MaxHealth", PreviousValue);
         // Re-apply after the OnRep recompute (see SetShield for why).
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
@@ -346,12 +594,14 @@ public:
             Target = 0.f;
 
         auto& Attribute = Set->CurrentShield;
+        const auto PreviousValue = SnapshotDirectAttribute(Attribute);
         WriteDirectAttributeValue(Attribute, Target);
 
         // OnRep is what makes damage read the shield on the earliest builds
         // (1.7.2) - exactly Core's path. On S4+ the same OnRep recomputes current
         // from a GAS aggregator seeded at 0 and wipes it, so we re-write after.
-        Set->OnRep_CurrentShield();
+        NotifyDirectAttributeRep(
+            Set, "OnRep_CurrentShield", PreviousValue);
         WriteDirectAttributeValue(Attribute, Target);
 
         // The raw write only ABSORBS on the earliest builds. By S4 the shield
@@ -394,10 +644,12 @@ public:
 
         // "Shield" is the max-shield attribute on these builds.
         auto& Attribute = Set->Shield;
+        const auto PreviousValue = SnapshotDirectAttribute(Attribute);
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
-        Set->OnRep_Shield();
+        NotifyDirectAttributeRep(
+            Set, "OnRep_Shield", PreviousValue);
         // Re-apply after the OnRep recompute (see SetShield for why).
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
@@ -484,14 +736,24 @@ public:
     // the revived pawn behind and creates a duplicate at the configured spawn.
     static bool ReviveFromDBNOCompat(
         AFortPlayerPawnAthena* Pawn,
-        AController* EventInstigator);
+        AController* EventInstigator,
+        // Set only after a normal interaction already invoked the native
+        // transition and a later game-thread verification still found DBNO.
+        // This prevents the fallback from replaying the same native entry.
+        bool bNativeTransitionAlreadyAttempted = false);
 
     // Adds and configures Fortnite's native replicated map component for a
     // possessed player pawn. The implementation probes reflected capabilities
     // so the same call works from the earliest Athena builds through UE5.
     static bool EnsurePlayerMapIcon(
         AFortPlayerControllerAthena* Controller,
-        AFortPlayerPawnAthena* Pawn);
+        AFortPlayerPawnAthena* Pawn,
+        const UObject* PreferredCharacterDefinition = nullptr);
+
+    // Polls portrait loads queued by EnsurePlayerMapIcon and replaces the
+    // immediate generic marker once the selected skin's texture is resident.
+    // Must run on the game thread.
+    static void TickPendingPlayerMapIcons();
 
     DefUHookOg(ServerHandlePickup_);
     DefUHookOg(ServerHandlePickupInfo);

@@ -3,6 +3,7 @@
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
 #include "../Public/FortKismetLibrary.h"
 #include "../Public/FortSafeZoneIndicator.h"
+#include "../Public/FortPlayerPawnAthena.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/LevelStreamingDynamic.h"
 #include "../../Engine/Public/NetDriver.h"
@@ -28,6 +29,8 @@ namespace
     constexpr double ExitCraftDiscoveryInterval = 0.20;
     constexpr double OriginalFoodFightMinimumVersion = 6.30;
     constexpr double OriginalFoodFightMaximumVersion = 8.00;
+    constexpr uint8 FoodFightObjectiveHealthMaxAttempts = 20;
+    constexpr double FoodFightObjectiveHealthRetryInterval = 0.25;
     constexpr double NativeLTMVersion = 10.40;
     constexpr double NativeLTMVersionTolerance = 0.001;
     constexpr double NativeLTMInitializationGraceSeconds = 3.0;
@@ -266,6 +269,12 @@ namespace
         float LastWallYaw = 0.0f;
         int32 LastObservedWallState = -1;
         float LastObjectiveHealth[2]{-1.0f, -1.0f};
+        AAthenaBarrierObjective* ObjectiveHealthActors[2]{};
+        int32 AppliedObjectiveHealth[2]{-2, -2};
+        AAthenaBarrierObjective* ObjectiveHealthRetryActors[2]{};
+        int32 ObjectiveHealthRetryValues[2]{-2, -2};
+        uint8 ObjectiveHealthRetryAttempts[2]{};
+        double NextObjectiveHealthRetryTime[2]{};
         uint8 LastPublishedDamageState[2]{9, 9};
         bool bObjectiveDestroyed[2]{};
         bool bHasWallTransform = false;
@@ -281,6 +290,7 @@ namespace
         bool bLoggedWaitingForLava = false;
         bool bLoggedWaitingForStructuralGrid = false;
         bool bLoggedHudUnavailable = false;
+        bool bLoggedObjectiveHealthUnavailable = false;
         bool bOriginalTeamStatesInitialized = false;
         bool bOriginalObjectivePairCommitted = false;
         bool bLoggedOriginalRequirementsUnavailable = false;
@@ -14914,6 +14924,188 @@ namespace
         Objective->UpdateInGameHealth(HealthPercent);
     }
 
+    bool ApplyConfiguredFoodFightObjectiveHealth(
+        FDeepFriedArenaState& Arena,
+        int32 TeamIndex)
+    {
+        if (TeamIndex < 0 || TeamIndex >= 2)
+            return false;
+
+        auto Objective = Arena.Objectives[TeamIndex];
+        if (!IsLiveObject(Objective))
+            return false;
+
+        const int32 ConfiguredHealth =
+            FConfiguration::FoodFightObjectiveHealth.load(
+                std::memory_order_acquire);
+        if (Arena.ObjectiveHealthRetryActors[TeamIndex] !=
+                Objective ||
+            Arena.ObjectiveHealthRetryValues[TeamIndex] !=
+                ConfiguredHealth)
+        {
+            Arena.ObjectiveHealthRetryActors[TeamIndex] = Objective;
+            Arena.ObjectiveHealthRetryValues[TeamIndex] =
+                ConfiguredHealth;
+            Arena.ObjectiveHealthRetryAttempts[TeamIndex] = 0;
+            Arena.NextObjectiveHealthRetryTime[TeamIndex] = 0.0;
+        }
+        if (Arena.ObjectiveHealthActors[TeamIndex] == Objective &&
+            Arena.AppliedObjectiveHealth[TeamIndex] ==
+                ConfiguredHealth)
+        {
+            return true;
+        }
+
+        // Authored/default is intentionally a no-write state. This preserves
+        // playlist hotfixes and any build whose actual maximum differs from
+        // the known UI range.
+        if (ConfiguredHealth ==
+            FConfiguration::FoodFightObjectiveHealthAuthored)
+        {
+            Arena.ObjectiveHealthActors[TeamIndex] = Objective;
+            Arena.AppliedObjectiveHealth[TeamIndex] =
+                ConfiguredHealth;
+            Arena.ObjectiveHealthRetryAttempts[TeamIndex] = 0;
+            Arena.NextObjectiveHealthRetryTime[TeamIndex] = 0.0;
+            return true;
+        }
+
+        auto ScheduleRetry = [&]()
+        {
+            auto& Attempts =
+                Arena.ObjectiveHealthRetryAttempts[TeamIndex];
+            if (Attempts < FoodFightObjectiveHealthMaxAttempts)
+                ++Attempts;
+            if (Attempts >= FoodFightObjectiveHealthMaxAttempts)
+            {
+                Arena.NextObjectiveHealthRetryTime[TeamIndex] =
+                    (std::numeric_limits<double>::max)();
+                return;
+            }
+            const double Now = Arena.World
+                ? UGameplayStatics::GetTimeSeconds(Arena.World)
+                : 0.0;
+            Arena.NextObjectiveHealthRetryTime[TeamIndex] =
+                Now + FoodFightObjectiveHealthRetryInterval;
+        };
+
+        float DesiredHealth = static_cast<float>(std::clamp(
+            ConfiguredHealth,
+            FConfiguration::FoodFightObjectiveHealthMinimum,
+            FConfiguration::GetFoodFightObjectiveHealthMaximum()));
+
+        UFortHealthSet* HealthSet =
+            Objective->HasBuildingAttributeSet()
+                ? Objective->BuildingAttributeSet
+                : nullptr;
+        if (!IsLiveObject(HealthSet) &&
+            Objective->HasReplicatedBuildingAttributeSet())
+        {
+            HealthSet = Objective->ReplicatedBuildingAttributeSet;
+        }
+
+        const bool bHasRequiredAttributes =
+            IsLiveObject(HealthSet) &&
+            HealthSet->HasHealth() &&
+            HealthSet->HasMaxHealth() &&
+            FFortGameplayAttributeData::StaticStruct() &&
+            FFortGameplayAttributeData::HasBaseValue() &&
+            FFortGameplayAttributeData::HasCurrentValue() &&
+            HealthSet->GetFunction("OnRep_Health") &&
+            HealthSet->GetFunction("OnRep_MaxHealth");
+        if (!bHasRequiredAttributes)
+        {
+            if (!Arena.bLoggedObjectiveHealthUnavailable)
+            {
+                Arena.bLoggedObjectiveHealthUnavailable = true;
+                SDK::DbgLog(
+                    "[FoodFight] objective-health override skipped: "
+                    "building health attributes are unavailable\n");
+            }
+            // Objective children can bind before their replicated health set.
+            // Do not cache this as applied; the pre-divider tick retries at a
+            // bounded rate while it is still safe to restore full health.
+            ScheduleRetry();
+            return false;
+        }
+
+        if (Objective->HasMaxHealthInitializationValue())
+            Objective->MaxHealthInitializationValue = DesiredHealth;
+
+        auto& MaxHealthAttribute = HealthSet->MaxHealth;
+        AFortPlayerPawnAthena::WriteDirectAttributeValue(
+            MaxHealthAttribute, DesiredHealth);
+        if (FFortGameplayAttributeData::HasMaximum())
+            MaxHealthAttribute.Maximum = DesiredHealth;
+        HealthSet->OnRep_MaxHealth();
+        // Rep-notifies may rebuild the aggregator from an older base. Reapply
+        // every raw value so later damage cannot restore the authored maximum.
+        AFortPlayerPawnAthena::WriteDirectAttributeValue(
+            MaxHealthAttribute, DesiredHealth);
+        if (FFortGameplayAttributeData::HasMaximum())
+            MaxHealthAttribute.Maximum = DesiredHealth;
+
+        if (Objective->GetFunction("SetHealth"))
+        {
+            Objective->SetHealth(DesiredHealth);
+        }
+        else
+        {
+            auto& HealthAttribute = HealthSet->Health;
+            AFortPlayerPawnAthena::WriteDirectAttributeValue(
+                HealthAttribute, DesiredHealth);
+            HealthSet->OnRep_Health();
+            AFortPlayerPawnAthena::WriteDirectAttributeValue(
+                HealthAttribute, DesiredHealth);
+        }
+
+        UpdateDeepFriedObjectiveHealthVisual(
+            Objective, DesiredHealth);
+        Objective->ForceNetUpdate();
+
+        const float AppliedHealth =
+            ReadDeepFriedObjectiveHealth(Objective);
+        const float AppliedMaxHealth =
+            ReadDeepFriedObjectiveMaxHealth(Objective);
+        const bool bApplied = AppliedHealth >= 0.0f &&
+            AppliedMaxHealth > 0.0f &&
+            std::fabs(AppliedHealth - DesiredHealth) <= 1.0f &&
+            std::fabs(AppliedMaxHealth - DesiredHealth) <= 1.0f;
+
+        if (bApplied)
+        {
+            Arena.ObjectiveHealthActors[TeamIndex] = Objective;
+            Arena.AppliedObjectiveHealth[TeamIndex] =
+                ConfiguredHealth;
+            Arena.ObjectiveHealthRetryAttempts[TeamIndex] = 0;
+            Arena.NextObjectiveHealthRetryTime[TeamIndex] = 0.0;
+        }
+        else
+        {
+            ScheduleRetry();
+        }
+        const uint8 RetryAttempts =
+            Arena.ObjectiveHealthRetryAttempts[TeamIndex];
+        if (bApplied || RetryAttempts <= 1 ||
+            RetryAttempts == FoodFightObjectiveHealthMaxAttempts)
+        {
+            SDK::DbgLog(
+                "[FoodFight] objective-health team=%d requested=%.0f "
+                "health=%.1f max=%.1f applied=%d attempts=%u%s\n",
+                TeamIndex,
+                DesiredHealth,
+                AppliedHealth,
+                AppliedMaxHealth,
+                bApplied ? 1 : 0,
+                (unsigned)RetryAttempts,
+                !bApplied && RetryAttempts ==
+                        FoodFightObjectiveHealthMaxAttempts
+                    ? " (retry limit reached)"
+                    : "");
+        }
+        return bApplied;
+    }
+
     void FinishNormalFoodFightForObjectiveLoss(
         FDeepFriedArenaState& Arena,
         AFortGameStateAthena* GameState,
@@ -15405,6 +15597,8 @@ namespace
                     Arena.Objectives[TeamIndex];
                 Flag->FoodTeam = TeamIndex;
                 Objective->FoodTeam = TeamIndex;
+                ApplyConfiguredFoodFightObjectiveHealth(
+                    Arena, TeamIndex);
                 // MAX is the constructor's full-health sentinel. State 0
                 // means the 75% threshold has already been crossed.
                 Objective->ObjectiveDamageState =
@@ -15456,6 +15650,8 @@ namespace
 
         UFunction* CheckHealthThresholdFunction =
             Barrier->GetFunction("CheckHealthThreshold");
+        const double Now =
+            UGameplayStatics::GetTimeSeconds(World);
         for (int32 TeamIndex = 0;
              TeamIndex < 2;
              ++TeamIndex)
@@ -15463,6 +15659,29 @@ namespace
             auto Objective = Arena.Objectives[TeamIndex];
             if (!IsLiveObject(Objective))
                 continue;
+
+            // A health component may finish registering after the objective
+            // binding pass. Retry only before the divider opens; once combat
+            // can reach the mascots, a retry must never heal live damage.
+            const int32 ConfiguredHealth =
+                FConfiguration::FoodFightObjectiveHealth.load(
+                    std::memory_order_acquire);
+            const bool bObjectiveHealthPending =
+                ConfiguredHealth !=
+                    FConfiguration::
+                        FoodFightObjectiveHealthAuthored &&
+                (Arena.ObjectiveHealthActors[TeamIndex] !=
+                        Objective ||
+                    Arena.AppliedObjectiveHealth[TeamIndex] !=
+                        ConfiguredHealth);
+            if (!Arena.bDamageEnabled &&
+                bObjectiveHealthPending &&
+                Now >= Arena.NextObjectiveHealthRetryTime[
+                    TeamIndex])
+            {
+                ApplyConfiguredFoodFightObjectiveHealth(
+                    Arena, TeamIndex);
+            }
 
             bool bShouldAllowDamage =
                 bOriginalFoodFight || bWallDown;

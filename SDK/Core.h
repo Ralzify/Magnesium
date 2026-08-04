@@ -1386,10 +1386,10 @@ namespace SDK
 					auto& AssetName = *(FName*)(__int64(this) + (VersionInfo.EngineVersion < 5.3 ? 0x14 : 0xC));
 					auto& SubPathString = *(FString*)(__int64(this) + (VersionInfo.EngineVersion < 5.3 ? 0x18 : 0x10));
 
-					if (PackageName.ComparisonIndex > 0)
+					if (PackageName.IsValid())
 					{
 						auto FullPath = PackageName.ToWString();
-						if (AssetName.ComparisonIndex > 0)
+						if (AssetName.IsValid())
 							FullPath += L"." + AssetName.ToWString();
 						if (SubPathString.Num() > 0)
 							FullPath += L":" + SubPathString.ToWString();
@@ -1397,7 +1397,7 @@ namespace SDK
 						WeakPtr = Ret = FindObject(FullPath.c_str(), Class);
 					}
 				}
-				else if (ObjectID.AssetPathName.ComparisonIndex > 0)
+				else if (ObjectID.AssetPathName.IsValid())
 				{
 					auto FullPath = ObjectID.AssetPathName.ToWString();
 					if (ObjectID.SubPathString.Num() > 0)

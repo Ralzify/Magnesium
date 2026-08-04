@@ -221,3 +221,8 @@ public:
 // PlayerState ability system when a lower-season pawn is replaced.
 void ResetLowerSeasonStormStateForRespawn(AFortPlayerControllerAthena* Player,
     AFortPlayerPawnAthena* OldPawn, AFortPlayerPawnAthena* NewPawn);
+
+// Removes only the native outside-safe-zone damage effect and optionally arms
+// the pawn's application latch. It does not grant general damage immunity.
+bool SuppressOutsideSafeZoneEffectForController(
+    AFortPlayerControllerAthena* Player, bool bPrimeSafeZoneLatch = false);

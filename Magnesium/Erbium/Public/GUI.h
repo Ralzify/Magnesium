@@ -148,6 +148,9 @@ public:
 
     static int GetSelectedPlaylist();
     static void PublishSelectedPlaylist(int Value);
+    // True for ordinary playlists whose generic Match-tab settings may own
+    // gameplay policy. Special maps, Creative, and Events keep authored state.
+    static bool UsesDefaultMatchSettings(int Value);
     static bool GetNormalizedSafeZoneSelection(
         float& U,
         float& V);
@@ -193,6 +196,12 @@ public:
     static std::string GetPlayerNameFromConnection(
         UNetConnection* Connection);
     static std::string GetPlayerName(
+        AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection);
+    // Game-thread callers may resolve a connectionless synthetic player's
+    // replicated PlayerState name directly. UI/render-thread callers must keep
+    // using the cache-only GetPlayerName overload above.
+    static std::string GetPlayerNameGameThread(
         AFortPlayerStateAthena* PlayerState,
         UNetConnection* Connection);
 };

@@ -85,9 +85,12 @@ public:
     DEFINE_PROP(HeroType, const UObject*);
     DEFINE_BITFIELD_PROP(bIsABot);
     DEFINE_BITFIELD_PROP(bIsSpectator);
+    DEFINE_BITFIELD_PROP(bOnlySpectator);
+    DEFINE_BITFIELD_PROP(bIsInactive);
     DEFINE_BITFIELD_PROP(bHasWonAGame);
     DEFINE_BITFIELD_PROP(bInGhostMode);
     DEFINE_PROP(WorldPlayerId, int16);
+    DEFINE_PROP(SpectatingTarget, UObject*);
     DEFINE_PROP(TeamMemberState, uint8);
     DEFINE_PROP(ReplicatedTeamMemberState, uint8);
     DEFINE_PROP(PlayerTeam, FPlayerTeam*);
@@ -95,6 +98,8 @@ public:
     DEFINE_FUNC(GetPlayerName, FString);
     DEFINE_FUNC(OnRep_SquadId, void);
     DEFINE_FUNC(OnRep_DeathInfo, void);
+    DEFINE_FUNC(OnRep_bIsInactive, void);
+    DEFINE_FUNC(OnRep_SpectatingTarget, void);
     DEFINE_STATIC_FUNC(ToDeathCause, uint8);
     DEFINE_FUNC(OnRep_Kills, void);
     DEFINE_FUNC(OnRep_TeamKillScore, void);

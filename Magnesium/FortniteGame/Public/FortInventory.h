@@ -9,6 +9,7 @@
 #include "FortPlaylistAthena.h"
 
 class AFortPlayerControllerAthena;
+class AFortWeapon;
 
 struct FGuid
 {
@@ -321,6 +322,7 @@ public:
 
     DEFINE_PROP(WeaponRechargeAmmoRate, FScalableFloat);
     DEFINE_PROP(WeaponRechargeAmmoQuantity, FScalableFloat);
+    DEFINE_BITFIELD_PROP(bRechargeAmmoToClip);
     DEFINE_BITFIELD_PROP(bUsesPhantomReserveAmmo);
     DEFINE_PROP(WeaponStatHandle, FDataTableRowHandle);
     DEFINE_PROP(PrimaryFireAbility, TSoftClassPtr<UClass>);
@@ -586,6 +588,13 @@ public:
     static FFortRangedWeaponStats* CloneStats(const UFortWeaponItemDefinition* Def);
     static bool IsPrimaryQuickbar(const UFortItemDefinition*);
     static void TickRegeneratingItems();
+    static bool BeginTrackedRechargeEquip(
+        AFortPlayerControllerAthena*,
+        const FGuid&);
+    static void FinishTrackedRechargeEquip(
+        AFortPlayerControllerAthena*,
+        const FGuid&,
+        AFortWeapon*);
     // Scoped around native pawn-death processing so Keep Inventory can retain
     // ordinary rows without weakening forced/admin removals at any other time.
     static void BeginNativeDeathInventoryRetention(

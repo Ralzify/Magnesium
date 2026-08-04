@@ -738,6 +738,7 @@ namespace
     constexpr ULONGLONG kAsyncIconLoadTimeoutMs = 12000;
     constexpr ULONGLONG kAsyncIconLiveRetryMs = 10000;
     constexpr ULONGLONG kAsyncIconPickerRetryMs = 30000;
+    constexpr ULONGLONG kSynchronousPreviewLoadIntervalMs = 500;
     constexpr int kReportedQuickbarCapacity = 10;
     constexpr ULONGLONG kReportedMutationPollMs = 100;
     constexpr ULONGLONG kReportedMutationAckTimeoutMs = 6000;
@@ -921,9 +922,17 @@ namespace
         uintptr_t ItemToken = 0;
         uint64_t ItemIdentity = 0;
         uint64_t WorldIdentity = 0;
+        const UClass* ExpectedClass = nullptr;
         bool PickerOnly = false;
         ULONGLONG StartedAt = 0;
         std::wstring Path;
+    };
+
+    struct FAsyncAssetLoadFailure
+    {
+        uint64_t WorldIdentity = 0;
+        ULONGLONG RetryAt = 0;
+        bool PickerOnly = false;
     };
 
     struct FAsyncIconLoadSchema
@@ -1166,11 +1175,12 @@ namespace
     std::unordered_map<uintptr_t, FTextureDecodeFailure>
         GTextureDecodeFailures;
     std::vector<FAsyncIconLoad> GAsyncIconLoads;
-    std::unordered_map<uintptr_t, FIconFailure>
+    std::unordered_map<std::wstring, FAsyncAssetLoadFailure>
         GAsyncIconLoadFailures;
     std::unordered_set<std::wstring> GAsyncIconAttemptedPaths;
     FAsyncIconLoadSchema GAsyncIconLoadSchema;
     bool GAsyncIconLoadingDisabled = false;
+    bool GSynchronousPreviewLoadingDisabled = false;
     std::unordered_set<uint64_t> GFailedControllerIdentities;
     std::unordered_map<uint64_t, FModernSlotLedger>
         GModernSlotLedgers;
@@ -1264,10 +1274,19 @@ namespace
         if (!Item)
             return 0;
 
+        // Match TWeakObjectPtr construction before publishing an identity.
+        // Some synthetic/runtime objects enter the array with serial zero;
+        // allowing a later weak-pointer construction to assign that serial
+        // would make an in-flight request look like address reuse.
+        FWeakObjectPtr StableWeakIdentity(Object);
+        const int32 Serial = StableWeakIdentity.ObjectSerialNumber;
+        if (!Serial || Item->SerialRef() != Serial)
+            return 0;
+
         return
             (static_cast<uint64_t>(
                 static_cast<uint32_t>(Object->Index)) << 32) |
-            static_cast<uint32_t>(Item->SerialRef());
+            static_cast<uint32_t>(Serial);
     }
 
     static uint64_t GetTargetIdentity(
@@ -5863,20 +5882,42 @@ namespace
                 It->WorldIdentity != GObservedWorldIdentity;
             const bool TimedOut =
                 Now - It->StartedAt >= kAsyncIconLoadTimeoutMs;
-            if (!WorldChanged && !TimedOut)
+            const UObject* Resident = nullptr;
+            if (!WorldChanged && SDK::Offsets::StaticFindObject &&
+                IsLiveObject(It->ExpectedClass))
+            {
+                Resident = SDK::StaticFindObject(
+                    It->Path.c_str(), It->ExpectedClass);
+                if (!IsLiveObject(Resident) ||
+                    !Resident->IsA(It->ExpectedClass))
+                {
+                    Resident = nullptr;
+                }
+            }
+            if (!WorldChanged && !TimedOut && !Resident)
             {
                 ++It;
                 continue;
             }
-            if (TimedOut && !WorldChanged)
+            if (Resident)
+                GAsyncIconLoadFailures.erase(It->Path);
+            if (TimedOut && !WorldChanged && !Resident)
             {
-                GAsyncIconLoadFailures[It->ItemToken] = {
-                    It->ItemIdentity,
+                GAsyncIconLoadFailures[It->Path] = {
+                    It->WorldIdentity,
                     Now + (It->PickerOnly
                         ? kAsyncIconPickerRetryMs
                         : kAsyncIconLiveRetryMs),
                     It->PickerOnly
                 };
+                // AttemptedPaths is the permanent guard used after a native
+                // request has completed or a synchronous fallback has
+                // faulted. A latent request that genuinely timed out is
+                // different: once its bounded backoff expires, the caller
+                // must be allowed to issue a fresh load for the same CID
+                // portrait. Leaving this token set made FN30's map-icon retry
+                // queue permanently return the temporary resident fallback.
+                GAsyncIconAttemptedPaths.erase(It->Path);
             }
             It = GAsyncIconLoads.erase(It);
         }
@@ -5895,21 +5936,24 @@ namespace
                 It->ItemToken == ItemToken &&
                 It->ItemIdentity == ItemIdentity;
             const bool SamePath = HasPath && It->Path == ResidentPath;
-            if (SameItem || SamePath)
+            // A stable request owner can serialize several different assets.
+            // When the completed path is known, never discard bookkeeping for
+            // another latent load that happens to share that owner.
+            if (SamePath || (!HasPath && SameItem))
                 It = GAsyncIconLoads.erase(It);
             else
                 ++It;
         }
-        auto Failure = GAsyncIconLoadFailures.find(ItemToken);
-        if (Failure != GAsyncIconLoadFailures.end() &&
-            Failure->second.ItemIdentity == ItemIdentity)
-            GAsyncIconLoadFailures.erase(Failure);
+        if (HasPath)
+            GAsyncIconLoadFailures.erase(
+                std::wstring(ResidentPath));
     }
 
     static bool RequestAsyncIconLoad(
         const FPreviewSoftReference& Reference,
         uintptr_t ItemToken,
         uint64_t ItemIdentity,
+        const UClass* ExpectedClass,
         bool PickerOnly,
         ULONGLONG* DeferredUntil,
         bool* StartedLoad)
@@ -5919,6 +5963,7 @@ namespace
         if (GAsyncIconLoadingDisabled ||
             VersionInfo.FortniteVersion >= 32.0 ||
             !Reference.Valid || !ItemToken || !ItemIdentity ||
+            !IsLiveObject(ExpectedClass) ||
             Reference.Path.empty() || Reference.Path.size() > 2048 ||
             Reference.Path[0] != L'/' || Reference.Size == 0 ||
             Reference.Size > Reference.Bytes.size())
@@ -5927,34 +5972,22 @@ namespace
         const ULONGLONG Now = GetTickCount64();
         const std::wstring Path(Reference.Path.c_str());
         PruneAsyncIconLoads(Now);
-        for (auto It = GAsyncIconLoads.begin();
-             It != GAsyncIconLoads.end();)
+        for (auto& Load : GAsyncIconLoads)
         {
-            if (It->ItemToken == ItemToken &&
-                It->ItemIdentity != ItemIdentity)
-            {
-                It = GAsyncIconLoads.erase(It);
-                continue;
-            }
-            if (It->Path == Path)
+            if (Load.Path == Path)
             {
                 if (!PickerOnly)
-                    It->PickerOnly = false;
+                    Load.PickerOnly = false;
                 *DeferredUntil = Now + (PickerOnly ? 250 : 100);
                 return true;
             }
-            if (It->ItemToken == ItemToken)
-            {
-                It = GAsyncIconLoads.erase(It);
-                continue;
-            }
-            ++It;
         }
 
-        auto Failure = GAsyncIconLoadFailures.find(ItemToken);
+        auto Failure = GAsyncIconLoadFailures.find(Path);
         if (Failure != GAsyncIconLoadFailures.end())
         {
-            if (Failure->second.ItemIdentity == ItemIdentity &&
+            if (Failure->second.WorldIdentity ==
+                    GObservedWorldIdentity &&
                 Failure->second.RetryAt > Now &&
                 (PickerOnly || !Failure->second.PickerOnly))
                 return false;
@@ -5982,9 +6015,27 @@ namespace
                 GLastAsyncIconLoadAt + kAsyncIconLoadRequestIntervalMs;
             return true;
         }
-        if (!EnsureAsyncIconLoadSchema() ||
-            Reference.Size != GAsyncIconLoadSchema.Asset.ElementSize)
+        if (!EnsureAsyncIconLoadSchema())
+        {
+            // Reflection can be temporarily unavailable while the early world
+            // is still initializing. Keep the same requested CID queued until
+            // the schema's bounded retry instead of burning through unrelated
+            // catalog candidates as if their packages were invalid.
+            if (!GAsyncIconLoadingDisabled &&
+                GAsyncIconLoadSchema.Initialized &&
+                GAsyncIconLoadSchema.NextRetryAt > Now)
+            {
+                *DeferredUntil =
+                    GAsyncIconLoadSchema.NextRetryAt;
+                return true;
+            }
             return false;
+        }
+        if (Reference.Size !=
+            GAsyncIconLoadSchema.Asset.ElementSize)
+        {
+            return false;
+        }
 
         auto World = UWorld::GetWorld();
         const uint64_t WorldIdentity = GetLiveObjectIdentity(World);
@@ -6030,11 +6081,177 @@ namespace
         GAsyncIconAttemptedPaths.insert(Path);
         GAsyncIconLoads.push_back({
             ItemToken, ItemIdentity, WorldIdentity,
-            PickerOnly, Now, Path
+            ExpectedClass, PickerOnly, Now, Path
         });
         *DeferredUntil = Now + (PickerOnly ? 250 : 100);
         *StartedLoad = true;
         return true;
+    }
+
+    // Kept POD-only so an invalid version-specific native loader address is
+    // contained without requiring C++ unwinding through an SEH boundary.
+    static const UTexture2D* LoadPreviewTextureGuarded(
+        const wchar_t* Path,
+        const UClass* TextureClass)
+    {
+        const UTexture2D* Texture = nullptr;
+        bool Completed = false;
+        __try
+        {
+            Texture = static_cast<const UTexture2D*>(
+                SDK::StaticLoadObject(Path, TextureClass));
+            Completed = true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+
+        if (!Completed)
+            GSynchronousPreviewLoadingDisabled = true;
+        return Completed ? Texture : nullptr;
+    }
+
+    static FSoftObjectLoadResult
+        ResolveOrRequestSoftObjectUnsafe(
+            const void* Owner,
+            const void* SoftReference,
+            uint32 SoftReferenceSize,
+            const UClass* ExpectedClass,
+            bool AllowSynchronousFallback)
+    {
+        FSoftObjectLoadResult Result{
+            nullptr,
+            EPreviewTextureLoadState::Unavailable,
+            0
+        };
+        if (!Owner || !SoftReference || !ExpectedClass ||
+            SoftReferenceSize != ResidentSoftReferenceSize() ||
+            !SDK::MemReadable(
+                SoftReference,
+                SoftReferenceSize))
+        {
+            return Result;
+        }
+
+        auto OwnerObject =
+            reinterpret_cast<const UObject*>(Owner);
+        const uint64_t OwnerIdentity =
+            GetLiveObjectIdentity(OwnerObject);
+        if (!OwnerIdentity || !IsLiveObject(ExpectedClass))
+            return Result;
+
+        auto SoftObject = reinterpret_cast<FSoftObjectPtr*>(
+            const_cast<void*>(SoftReference));
+        UEAllocatedWString Path;
+        auto Resident = ResolveResidentSoftReference(
+            SoftObject,
+            ExpectedClass,
+            &Path);
+        if (Resident)
+        {
+            CompleteAsyncIconLoad(
+                reinterpret_cast<uintptr_t>(OwnerObject),
+                OwnerIdentity,
+                Path.empty() ? nullptr : Path.c_str());
+            Result.Object = Resident;
+            Result.State = EPreviewTextureLoadState::Resident;
+            return Result;
+        }
+        if (Path.empty() || Path.size() > 2048 || Path[0] != L'/')
+            return Result;
+
+        FPreviewSoftReference Reference;
+        if (SoftReferenceSize > Reference.Bytes.size())
+            return Result;
+        memcpy(
+            Reference.Bytes.data(),
+            SoftReference,
+            SoftReferenceSize);
+        Reference.Size = SoftReferenceSize;
+        Reference.Path = Path;
+        Reference.Valid = true;
+
+        const uintptr_t OwnerToken =
+            reinterpret_cast<uintptr_t>(OwnerObject);
+        const ULONGLONG Now = GetTickCount64();
+        if (VersionInfo.FortniteVersion < 32.0)
+        {
+            ULONGLONG DeferredUntil = 0;
+            bool StartedLoad = false;
+            if (RequestAsyncIconLoad(
+                    Reference,
+                    OwnerToken,
+                    OwnerIdentity,
+                    ExpectedClass,
+                    false,
+                    &DeferredUntil,
+                    &StartedLoad) &&
+                DeferredUntil > Now)
+            {
+                Result.State = EPreviewTextureLoadState::Pending;
+                Result.RetryAfterMs = DeferredUntil - Now;
+            }
+            return Result;
+        }
+
+        // FN 32 changed the latent LoadAsset reflection ABI. Gameplay callers
+        // explicitly opt out here so an optional deferred cosmetic can never
+        // become a blocking game-thread load. The inventory preview wrapper
+        // retains its guarded, throttled compatibility fallback.
+        if (!AllowSynchronousFallback)
+            return Result;
+
+        const std::wstring StablePath(Path.c_str());
+        if (GAsyncIconAttemptedPaths.find(StablePath) !=
+                GAsyncIconAttemptedPaths.end() ||
+            GSynchronousPreviewLoadingDisabled ||
+            !SDK::Offsets::StaticLoadObject)
+        {
+            return Result;
+        }
+        if (Now - GLastAsyncIconLoadAt <
+                kSynchronousPreviewLoadIntervalMs)
+        {
+            Result.State = EPreviewTextureLoadState::Pending;
+            Result.RetryAfterMs =
+                GLastAsyncIconLoadAt +
+                    kSynchronousPreviewLoadIntervalMs -
+                Now;
+            return Result;
+        }
+
+        // Insert before entering native code so a faulting package path cannot
+        // be retried by every future pawn. World reset clears this cache.
+        GAsyncIconAttemptedPaths.insert(StablePath);
+        GLastAsyncIconLoadAt = Now;
+        auto Loaded = LoadPreviewTextureGuarded(
+            StablePath.c_str(), ExpectedClass);
+        if (IsLiveObject(Loaded) && Loaded->IsA(ExpectedClass))
+        {
+            Result.Object = Loaded;
+            Result.State = EPreviewTextureLoadState::Resident;
+        }
+        return Result;
+    }
+
+    static FPreviewTextureLoadResult
+        ResolveOrRequestPreviewTextureUnsafe(
+            const void* Owner,
+            const void* SoftReference,
+            uint32 SoftReferenceSize)
+    {
+        auto TextureClass = UTexture2D::StaticClass();
+        auto Generic = ResolveOrRequestSoftObjectUnsafe(
+            Owner,
+            SoftReference,
+            SoftReferenceSize,
+            TextureClass,
+            true);
+        return {
+            static_cast<const UTexture2D*>(Generic.Object),
+            Generic.State,
+            Generic.RetryAfterMs
+        };
     }
 
     constexpr const char* kPreviewProperties[] = {
@@ -6496,6 +6713,7 @@ namespace
                 PendingSoftReference,
                 ItemToken,
                 ItemIdentity,
+                UTexture2D::StaticClass(),
                 PickerOnly,
                 &DeferredUntil,
                 &StartedAsyncLoad) &&
@@ -12921,6 +13139,138 @@ namespace
         if (GRecoveryFaultRequested)
             PublishSubsystemFault(WorldToken);
     }
+}
+
+FPreviewTextureLoadResult ResolveOrRequestPreviewTexture(
+    const void* Owner,
+    const void* SoftReference,
+    std::uint32_t SoftReferenceSize) noexcept
+{
+    FPreviewTextureLoadResult Result{
+        nullptr,
+        EPreviewTextureLoadState::Unavailable,
+        0
+    };
+    if (GProcessDisabled.load(std::memory_order_acquire))
+        return Result;
+    if (GGameTickActive.test_and_set(std::memory_order_acquire))
+    {
+        Result.State = EPreviewTextureLoadState::Pending;
+        Result.RetryAfterMs = 16;
+        return Result;
+    }
+
+    bool Completed = false;
+    __try
+    {
+        uintptr_t WorldToken = 0;
+        uint64_t WorldIdentity = 0;
+        if (TryReadWorldContext(
+                &WorldToken,
+                &WorldIdentity) &&
+            TryResetForWorld(WorldIdentity))
+        {
+            Result = ResolveOrRequestPreviewTextureUnsafe(
+                Owner,
+                SoftReference,
+                SoftReferenceSize);
+        }
+        else
+        {
+            Result.State = EPreviewTextureLoadState::Pending;
+            Result.RetryAfterMs = 16;
+        }
+        Completed = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Completed = false;
+    }
+
+    if (!Completed)
+    {
+        // This API mutates the same request containers as GameThreadTick(). If
+        // an SEH interrupted that mutation, quarantine the optional subsystem
+        // rather than touching potentially inconsistent STL state again.
+        GProcessDisabled.store(true, std::memory_order_release);
+        GDisabledWorld.store(1, std::memory_order_release);
+        GFaultPublicationPending.store(true, std::memory_order_release);
+        GAsyncIconLoadingDisabled = true;
+        GSynchronousPreviewLoadingDisabled = true;
+        Result = {
+            nullptr,
+            EPreviewTextureLoadState::Unavailable,
+            0
+        };
+    }
+    GGameTickActive.clear(std::memory_order_release);
+    return Result;
+}
+
+FSoftObjectLoadResult ResolveOrRequestSoftObject(
+    const void* Owner,
+    const void* SoftReference,
+    std::uint32_t SoftReferenceSize,
+    const UClass* ExpectedClass) noexcept
+{
+    FSoftObjectLoadResult Result{
+        nullptr,
+        EPreviewTextureLoadState::Unavailable,
+        0
+    };
+    if (GProcessDisabled.load(std::memory_order_acquire))
+        return Result;
+    if (GGameTickActive.test_and_set(std::memory_order_acquire))
+    {
+        Result.State = EPreviewTextureLoadState::Pending;
+        Result.RetryAfterMs = 16;
+        return Result;
+    }
+
+    bool Completed = false;
+    __try
+    {
+        uintptr_t WorldToken = 0;
+        uint64_t WorldIdentity = 0;
+        if (TryReadWorldContext(
+                &WorldToken,
+                &WorldIdentity) &&
+            TryResetForWorld(WorldIdentity))
+        {
+            Result = ResolveOrRequestSoftObjectUnsafe(
+                Owner,
+                SoftReference,
+                SoftReferenceSize,
+                ExpectedClass,
+                false);
+        }
+        else
+        {
+            Result.State = EPreviewTextureLoadState::Pending;
+            Result.RetryAfterMs = 16;
+        }
+        Completed = true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Completed = false;
+    }
+
+    if (!Completed)
+    {
+        GProcessDisabled.store(true, std::memory_order_release);
+        GDisabledWorld.store(1, std::memory_order_release);
+        GFaultPublicationPending.store(true, std::memory_order_release);
+        GAsyncIconLoadingDisabled = true;
+        GSynchronousPreviewLoadingDisabled = true;
+        Result = {
+            nullptr,
+            EPreviewTextureLoadState::Unavailable,
+            0
+        };
+    }
+    GGameTickActive.clear(std::memory_order_release);
+    return Result;
 }
 
 void GameThreadTick()

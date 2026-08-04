@@ -723,7 +723,45 @@ uint64_t FindGiveAbility()
         else if (VersionInfo.EngineVersion == 4.21)
             return GiveAbility = Memcury::Scanner::FindPattern("48 89 5C 24 ? 48 89 6C 24 ? 48 89 7C 24 ? 41 56 48 83 EC 20 83 B9 ? ? ? ? ? 49 8B E8 4C 8B F2").Get();
         else if (VersionInfo.EngineVersion >= 5.3)
-            return GiveAbility = Memcury::Scanner::FindPattern("40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 49 8B 40 ? 45 33 E4").Get();
+        {
+            GiveAbility = Memcury::Scanner::FindPattern(
+                "40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 49 8B 40 ? 45 33 E4").Get();
+
+            if (GiveAbility)
+                return GiveAbility;
+
+            // UE 5.4's UAbilitySystemComponent::GiveAbility has a different
+            // prologue, and the diagnostic below has only one code reference.
+            // The older ref-#1/next-call route therefore returns null on FN 30.
+            // Anchor the exact implementation to its own authority warning and
+            // walk back to the distinctive nonvolatile-register prologue.
+            auto sRef = Memcury::Scanner::FindStringRef(
+                L"GiveAbility called on ability %s on the client, not allowed!",
+                false, 0, true).Get();
+            if (sRef)
+            {
+                for (int i = 0; i < 0x1000; ++i)
+                {
+                    auto Ptr = reinterpret_cast<uint8_t*>(sRef - i);
+                    if (!SDK::MemReadable(Ptr, 16))
+                        continue;
+
+                    if (Ptr[0] == 0x48 && Ptr[1] == 0x89 &&
+                        Ptr[2] == 0x5C && Ptr[3] == 0x24 &&
+                        Ptr[5] == 0x55 && Ptr[6] == 0x56 &&
+                        Ptr[7] == 0x57 && Ptr[8] == 0x41 &&
+                        Ptr[9] == 0x54 && Ptr[10] == 0x41 &&
+                        Ptr[11] == 0x55 && Ptr[12] == 0x41 &&
+                        Ptr[13] == 0x56 && Ptr[14] == 0x41 &&
+                        Ptr[15] == 0x57)
+                    {
+                        return GiveAbility = reinterpret_cast<uint64_t>(Ptr);
+                    }
+                }
+            }
+
+            return 0;
+        }
         else if (VersionInfo.EngineVersion >= 5.0)
         {
             GiveAbility = Memcury::Scanner::FindPattern("48 89 5C 24 ? 48 89 6C 24 ? 56 57 41 56 48 83 EC 20 8B 81 ? ? ? ? 49 8B E8 4C").Get();
@@ -783,7 +821,13 @@ uint64_t FindConstructAbilitySpec()
         }
         else if (VersionInfo.EngineVersion >= 5.1)
         {
-            ConstructAbilitySpec = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 48 8B 44 24 ? 41 83 CE").Get();
+            // 5.1-5.3 Fortnite builds use the same five-argument constructor
+            // prologue as later UE5 builds (validated on 27.11). Prefer the
+            // specific signature before the older speculative fallbacks.
+            ConstructAbilitySpec = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 41 83 CE ? 33 ED 40 38 2D ? ? ? ? 41 8B F8").Get();
+
+            if (!ConstructAbilitySpec)
+                ConstructAbilitySpec = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 48 8B 44 24 ? 41 83 CE").Get();
 
             if (!ConstructAbilitySpec)
                 ConstructAbilitySpec = Memcury::Scanner::FindPattern("48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 44 89 48 ? 57 48 83 EC ? 48 8B 44 24").Get();
@@ -1661,6 +1705,202 @@ uint64 FindRemoveFromAlivePlayers()
     }
 
     return RemoveFromAlivePlayers;
+}
+
+uint64 FindAddToAlivePlayers()
+{
+    static uint64 AddToAlivePlayers = 0;
+    static bool bInitialized = false;
+
+    if (bInitialized)
+        return AddToAlivePlayers;
+    bInitialized = true;
+
+    auto StringRef = Memcury::Scanner::FindStringRef(
+        L"FortGameModeAthena: Player [%s] added to alive players list (Team [%d]).  Player count is now [%d].  Team count is now [%d]. ");
+    if (!StringRef.IsValid())
+    {
+        StringRef = Memcury::Scanner::FindStringRef(
+            L"FortGameModeAthena: Player [%s] doesn't have a valid PvP team, and won't be added to the alive players list.");
+    }
+    if (!StringRef.IsValid())
+    {
+        StringRef = Memcury::Scanner::FindStringRef(
+            L"FortGameModeAthena::AddToAlivePlayers: Player [%s] PC [%s] doesn't have a valid PvP team, and won't be added to the alive players list.");
+    }
+    if (!StringRef.IsValid())
+    {
+        StringRef = Memcury::Scanner::FindStringRef(
+            L"FortGameModeAthena::AddToAlivePlayers: Player [%s] PC [%s] added to alive players list (Team [%d]).  Player count is now [%d].  Team count is now [%d].");
+    }
+    if (!StringRef.IsValid())
+        return 0;
+
+    const auto StringReference = StringRef.Get();
+
+    // AddToAlivePlayers is shrink-wrapped on the earliest Win64 builds. Its
+    // log call can live in a chained unwind fragment, so stopping at the first
+    // RUNTIME_FUNCTION BeginAddress produces an interior address (1.7.2 has
+    // two such fragments). Follow UNW_FLAG_CHAININFO back to the root before
+    // treating the result as callable.
+    struct FUnwindInfoHeader
+    {
+        uint8 VersionAndFlags;
+        uint8 PrologSize;
+        uint8 CodeCount;
+        uint8 FrameRegisterAndOffset;
+    };
+    struct FRuntimeFunctionIdentity
+    {
+        DWORD BeginAddress;
+        DWORD EndAddress;
+        DWORD UnwindData;
+    };
+
+    auto FindRuntimeFunctionRoot = [](uintptr_t ControlPc) -> uintptr_t
+        {
+            DWORD64 RuntimeImageBase = 0;
+            auto Entry = RtlLookupFunctionEntry(
+                static_cast<DWORD64>(ControlPc),
+                &RuntimeImageBase, nullptr);
+            const uintptr_t ExpectedImageBase =
+                Memcury::PE::GetModuleBase();
+            if (!Entry || !RuntimeImageBase ||
+                static_cast<uintptr_t>(RuntimeImageBase) !=
+                    ExpectedImageBase)
+            {
+                return 0;
+            }
+
+            constexpr uint8 UnwindFlagChainInfo = 0x4;
+            FRuntimeFunctionIdentity Visited[16]{};
+            int VisitedCount = 0;
+            for (int Depth = 0; Depth < 16; ++Depth)
+            {
+                if (!SDK::MemReadable(Entry, sizeof(*Entry)))
+                    return 0;
+
+                const FRuntimeFunctionIdentity Identity{
+                    Entry->BeginAddress,
+                    Entry->EndAddress,
+                    Entry->UnwindData};
+                if (Identity.BeginAddress >= Identity.EndAddress)
+                    return 0;
+                for (int Index = 0; Index < VisitedCount; ++Index)
+                {
+                    if (Visited[Index].BeginAddress ==
+                            Identity.BeginAddress &&
+                        Visited[Index].EndAddress ==
+                            Identity.EndAddress &&
+                        Visited[Index].UnwindData ==
+                            Identity.UnwindData)
+                    {
+                        return 0;
+                    }
+                }
+                Visited[VisitedCount++] = Identity;
+
+                const uintptr_t BeginAddress =
+                    ExpectedImageBase + Identity.BeginAddress;
+                const uintptr_t EndAddress =
+                    ExpectedImageBase + Identity.EndAddress;
+                const uintptr_t UnwindInfoAddress =
+                    ExpectedImageBase + Identity.UnwindData;
+                if (BeginAddress < ExpectedImageBase ||
+                    EndAddress < ExpectedImageBase ||
+                    UnwindInfoAddress < ExpectedImageBase ||
+                    !SDK::MemReadable(
+                        reinterpret_cast<void*>(BeginAddress), 3))
+                {
+                    return 0;
+                }
+
+                auto UnwindInfo =
+                    reinterpret_cast<const FUnwindInfoHeader*>(
+                        UnwindInfoAddress);
+                if (!SDK::MemReadable(
+                        UnwindInfo, sizeof(FUnwindInfoHeader)) ||
+                    (UnwindInfo->VersionAndFlags & 0x7) != 1)
+                {
+                    return 0;
+                }
+
+                const uint8 Flags =
+                    UnwindInfo->VersionAndFlags >> 3;
+                if (!(Flags & UnwindFlagChainInfo))
+                    return BeginAddress;
+                // Chained entries cannot simultaneously carry exception or
+                // termination handlers; reject malformed metadata rather than
+                // walking an ambiguous tail record.
+                if (Flags != UnwindFlagChainInfo)
+                    return 0;
+
+                const size_t AlignedCodeCount =
+                    (static_cast<size_t>(UnwindInfo->CodeCount) + 1u) &
+                    ~size_t(1);
+                const uintptr_t ChainedEntryAddress =
+                    UnwindInfoAddress + sizeof(FUnwindInfoHeader) +
+                    AlignedCodeCount * sizeof(uint16);
+                if (ChainedEntryAddress < UnwindInfoAddress)
+                    return 0;
+                auto ChainedEntry =
+                    reinterpret_cast<PRUNTIME_FUNCTION>(
+                        ChainedEntryAddress);
+                if (!SDK::MemReadable(
+                        ChainedEntry, sizeof(*ChainedEntry)))
+                {
+                    return 0;
+                }
+                Entry = ChainedEntry;
+            }
+            return 0;
+        };
+
+    const auto Candidate = FindRuntimeFunctionRoot(StringReference);
+    if (!Candidate || Candidate >= StringReference ||
+        StringReference - Candidate > 0x4000)
+    {
+        return 0;
+    }
+
+    MEMORY_BASIC_INFORMATION CandidateMemory{};
+    if (!VirtualQuery(
+            reinterpret_cast<void*>(Candidate),
+            &CandidateMemory, sizeof(CandidateMemory)) ||
+        CandidateMemory.State != MEM_COMMIT ||
+        (CandidateMemory.Protect & PAGE_GUARD) ||
+        !(CandidateMemory.Protect &
+          (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+           PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+    {
+        return 0;
+    }
+
+    // Fail closed on unknown/custom prologues. Accept only common Win64 frame
+    // starts, not every REX-prefixed instruction: an interior `test rdx,rdx`
+    // also begins 48 and must never become a callable native entry point.
+    const auto Opcodes =
+        reinterpret_cast<const uint8_t*>(Candidate);
+    const bool bPlausibleWin64Prologue =
+        ((Opcodes[0] == 0x40 || Opcodes[0] == 0x41) &&
+         Opcodes[1] >= 0x53 && Opcodes[1] <= 0x57) ||
+        (Opcodes[0] == 0x48 && Opcodes[1] == 0x89 &&
+         (Opcodes[2] == 0x5C || Opcodes[2] == 0x6C ||
+          Opcodes[2] == 0x74 || Opcodes[2] == 0x7C)) ||
+        (Opcodes[0] == 0x4C && Opcodes[1] == 0x89 &&
+         Opcodes[2] == 0x4C) ||
+        (Opcodes[0] == 0x48 && Opcodes[1] == 0x8B &&
+         Opcodes[2] == 0xC4) ||
+        (Opcodes[0] == 0x48 &&
+         (Opcodes[1] == 0x81 || Opcodes[1] == 0x83) &&
+         Opcodes[2] == 0xEC) ||
+        Opcodes[0] == 0x53 || Opcodes[0] == 0x55 ||
+        Opcodes[0] == 0x56 || Opcodes[0] == 0x57;
+    if (!bPlausibleWin64Prologue)
+        return 0;
+
+    AddToAlivePlayers = Candidate;
+    return AddToAlivePlayers;
 }
 
 
@@ -3832,6 +4072,7 @@ void ValidateFinders()
         { "OnRep_ZiplineState", FindOnRep_ZiplineState },
         { "GiveAbilityAndActivateOnce", FindGiveAbilityAndActivateOnce },
         { "GameSessionPatch", FindGameSessionPatch },
+        { "AddToAlivePlayers", FindAddToAlivePlayers },
         { "RemoveFromAlivePlayers", FindRemoveFromAlivePlayers },
         { "StartAircraftPhase", FindStartAircraftPhase },
         { "SetPickupItems", FindSetPickupItems },

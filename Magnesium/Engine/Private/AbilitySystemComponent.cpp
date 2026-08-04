@@ -6,7 +6,11 @@
 
 uint64 ConstructAbilitySpec;
 uint64 GiveAbility_;
-FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(const UObject* Ability, UObject* SourceObject)
+static uint64 ClearAbilityAddress;
+
+FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(
+    const UObject* Ability, UObject* SourceObject,
+    int32 Level, int32 InputID)
 {
     if (!this || !Ability || !GiveAbility_)
         return {};
@@ -16,15 +20,15 @@ FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(const UObject* A
     memset(PBYTE(Spec), 0, FGameplayAbilitySpec::Size());
 
     if (ConstructAbilitySpec)
-        ((void (*)(FGameplayAbilitySpec*, const UObject*, int, int, UObject*))ConstructAbilitySpec)(Spec, Ability, 1, -1, SourceObject);
+        ((void (*)(FGameplayAbilitySpec*, const UObject*, int, int, UObject*))ConstructAbilitySpec)(Spec, Ability, Level, InputID, SourceObject);
     else
     {
         Spec->MostRecentArrayReplicationKey = -1;
         Spec->ReplicationID = -1;
         Spec->ReplicationKey = -1;
         Spec->Ability = (UFortGameplayAbility*)Ability;
-        Spec->Level = 1;
-        Spec->InputID = -1;
+        Spec->Level = Level;
+        Spec->InputID = InputID;
         Spec->Handle.Handle = rand();
         Spec->SourceObject = SourceObject;
     }
@@ -33,6 +37,18 @@ FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(const UObject* A
     ((FGameplayAbilitySpecHandle * (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle*, __int64)) GiveAbility_)(this, &OutHandle, __int64(Spec));
     free(Spec);
     return OutHandle;
+}
+
+bool UAbilitySystemComponent::ClearAbility(FGameplayAbilitySpecHandle Handle)
+{
+    if (!this || !ClearAbilityAddress)
+        return false;
+
+    auto ClearAbilityInternal =
+        (void(*)(UAbilitySystemComponent*,
+            FGameplayAbilitySpecHandle&))ClearAbilityAddress;
+    ClearAbilityInternal(this, Handle);
+    return true;
 }
 
 void UAbilitySystemComponent::GiveAbilitySet(const UFortAbilitySet* Set)
@@ -258,6 +274,8 @@ void UAbilitySystemComponent::Hook()
     SDK::DbgLog("  [ASC] 2 CAS=%p pre-FindGiveAbility\n", (void*)ConstructAbilitySpec);
     GiveAbility_ = FindGiveAbility();
     SDK::DbgLog("  [ASC] 3 GA=%p pre-FindITAA\n", (void*)GiveAbility_);
+    ClearAbilityAddress = FindClearAbility();
+    SDK::DbgLog("  [ASC] 3a CA=%p\n", (void*)ClearAbilityAddress);
     InternalTryActivateAbility_ = FindInternalTryActivateAbility();
     SDK::DbgLog("  [ASC] 4 ITAA=%p\n", (void*)InternalTryActivateAbility_);
 

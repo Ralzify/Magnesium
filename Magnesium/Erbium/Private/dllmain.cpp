@@ -249,7 +249,7 @@ void Main()
     if (VersionInfo.FortniteVersion <= 2.50)
         FConfiguration::bMovingBus = false;
 
-    if (VersionInfo.FortniteVersion <= 5.41)
+    if (!FConfiguration::IsGliderRedeploySupportedBuild())
         FConfiguration::bGliderRedeploy = false;
 
     if (VersionInfo.EngineVersion >= 5.0)

@@ -15,6 +15,7 @@ class AAthenaFillFloor;
 class AFortPlayerStateAthena;
 class AFortPlayerControllerAthena;
 class AFortPlayerPawnAthena;
+class UFortHealthSet;
 class AFortAthenaMutator_Wax;
 class AFortAthena_WaxToken;
 class ABuildingContainer;
@@ -596,6 +597,11 @@ public:
     DEFINE_PROP(ObjectiveDamageState, uint8);
     DEFINE_PROP(HeadRotationYaw, float);
     DEFINE_PROP(bAllowDamage, bool);
+    // Inherited ABuildingActor state. Reflection walks the native hierarchy,
+    // so these remain capability checked on every supported Food Fight build.
+    DEFINE_PROP(BuildingAttributeSet, UFortHealthSet*);
+    DEFINE_PROP(ReplicatedBuildingAttributeSet, UFortHealthSet*);
+    DEFINE_PROP(MaxHealthInitializationValue, float);
 
     DEFINE_FUNC(OnRep_FoodTeam, void);
     DEFINE_FUNC(OnRep_ObjectiveDamageState, void);
@@ -603,6 +609,7 @@ public:
     DEFINE_FUNC(GetHealth, float);
     DEFINE_FUNC(GetMaxHealth, float);
     DEFINE_FUNC(GetHealthPercent, float);
+    DEFINE_FUNC(SetHealth, void);
     DEFINE_FUNC(SetTeam, void);
     DEFINE_FUNC(UpdateInGameHealth, void);
     DEFINE_FUNC(OnGeneratorDestroyed, void);

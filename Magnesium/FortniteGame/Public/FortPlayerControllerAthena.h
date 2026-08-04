@@ -74,6 +74,10 @@ class UAthenaCharacterItemDefinition : public UFortItemDefinition
 public:
     UCLASS_COMMON_MEMBERS(UAthenaCharacterItemDefinition);
 
+    // Modern builds expose the outfit's directly authored parts here. Older
+    // builds omit the property and continue to resolve parts through the hero
+    // specializations below.
+    DEFINE_PROP(BaseCharacterParts, TArray<TSoftObjectPtr<UCustomCharacterPart>>);
     DEFINE_PROP(HeroDefinition, UFortHeroType*);
     DEFINE_PROP(Gender, EFortCustomGender);
 };
@@ -147,6 +151,8 @@ public:
     DEFINE_STRUCT_NEWOBJ_PROP(KillerPawn, AFortPlayerPawnAthena);
     DEFINE_STRUCT_PROP(Tags, FGameplayTagContainer);
     DEFINE_STRUCT_NEWOBJ_PROP(DamageCauser, AActor);
+    DEFINE_STRUCT_PROP(ServerTimeForRespawn, float);
+    DEFINE_STRUCT_BITFIELD_PROP(bNotifyUI);
 };
 
 class UAthenaDanceItemDefinition : public UObject
@@ -447,6 +453,9 @@ public:
     DEFINE_BITFIELD_PROP(bReadyToStartMatch);
     DEFINE_BITFIELD_PROP(bMarkedAlive);
     DEFINE_BITFIELD_PROP(bClientNotifiedOfPawnDied);
+    DEFINE_BITFIELD_PROP(bPlayerIsWaiting);
+    DEFINE_BITFIELD_PROP(bFailedToRespawn);
+    DEFINE_BITFIELD_PROP(bClientPawnIsLoaded);
     DEFINE_BITFIELD_PROP(bHoldingObject);
     DEFINE_PROP(DeathInputComponent, UActorComponent*);
     DEFINE_PROP(StrongMyHero, UObject*);
@@ -474,6 +483,7 @@ public:
     DEFINE_FUNC(ClientNotifyTeamWon, void);
     DEFINE_FUNC(ClientMessage, void);
     DEFINE_FUNC(ClientGotoState, void);
+    DEFINE_FUNC(ClientRestart, void);
     DEFINE_FUNC(ClientOnPawnSpawned, void);
     DEFINE_FUNC(IsActionInputIgnored, bool);
     DEFINE_FUNC(IsInAircraft, bool);
@@ -546,6 +556,9 @@ public:
     static void ServerPlayEmoteItem_(UObject*, FFrame&);
     static void PlayEmoteInternal(AFortPlayerControllerAthena* PC, UObject* Asset);
     static void ServerClientIsReadyToRespawn(UObject*, FFrame&);
+    // Clears camera generations that belong to a completed match when the
+    // engine reuses the same UWorld for a manual restart.
+    static void ResetRespawnCameraForMatchRestart();
     static void CaptureLandingItemBeforeNativeEnd(
         AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
     static void FinalizeRespawnAfterLanding(AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
@@ -553,13 +566,17 @@ public:
     // Catches the exits the RPC above cannot see, so a temporary vehicle weapon
     // never outlives the ride. Call once per server tick.
     static void TickVehicleLoadoutReconcile();
-    // Requests an authoritative self-elimination through FortPawn::ForceKill.
-    // Unlike the stripped controller ServerSuicide stub on later clients, this
-    // enters the normal death-report, scoring, inventory, and respawn pipeline.
+    // Requests one authoritative native self-death transaction. Prefer the
+    // controller suicide pipeline and use pawn suicide/ForceKill only as
+    // mutually exclusive, schema-validated capability fallbacks.
     static bool TryEliminatePlayer(
         AFortPlayerControllerAthena* PlayerController);
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
+    // Exact membership in the synthetic `cheat spawnbot` lifecycle. This does
+    // not include PlayerAI, wildlife, or native playlist bots.
+    static bool IsCheatSpawnedBotController(
+        AFortPlayerControllerAthena* PlayerController);
     static void TickNukeRockets(float DeltaSeconds);
     // Runs on the server/game thread and keeps an explicitly selected
     // respawn policy authoritative after playlist/mutator initialization.

@@ -20,6 +20,17 @@ enum class EPlayerAIAircraftDropState : uint8_t
     Open,
 };
 
+enum class EPlayerAICosmeticLoadPolicy : uint8_t
+{
+    // PlayerAI's background spawn path must never pause the server to load a
+    // cosmetic package.
+    ResidentOnly,
+
+    // Explicit cheat-bot spawning is user initiated, so it may load the one
+    // selected outfit and its parts synchronously.
+    AllowSynchronousLoad,
+};
+
 class VersionFeatureAdapter
 {
 public:
@@ -32,6 +43,21 @@ public:
     // Expensive native probes consume this shared budget instead of every AI
     // issuing the same work in one TickFlush.
     static void BeginServerTick(float TimeSeconds);
+
+    // Server-owned controllers never send the client loading/possession RPCs
+    // that normally unlock character customization. Publish the equivalent
+    // reflected readiness state for both PlayerAI and cheat-spawned bots.
+    static void MarkSyntheticParticipantReady(
+        AFortPlayerControllerAthena* PC,
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn);
+
+    // Connectionless FN19-FN31 pawns can be possessed without receiving the
+    // PlayerState repnotify that creates/binds their cosmetic component. Run
+    // that lifecycle once after readiness and before any outfit or equipment.
+    static void InitializeSyntheticPawnCosmeticLifecycle(
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn);
 
     // ---- Guarded native invocation ------------------------------------------
     // Calls a UFunction with a correctly sized, zeroed parameter buffer
@@ -122,11 +148,76 @@ public:
     // Picks a random character skin from the cosmetics that exist in the
     // hosted build and applies it (hero + character parts). Falls back to
     // the default soldier when the build has no usable skins.
-    static void ApplyRandomSkin(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn);
+    // Returns the exact CID that was successfully applied. Callers retain it
+    // for features such as skin-specific map icons on builds whose synthetic
+    // PlayerState has no reflected HeroType field.
+    static UAthenaCharacterItemDefinition* ResolveCharacterSkin(
+        const char* IdOrPath,
+        EPlayerAICosmeticLoadPolicy LoadPolicy =
+            EPlayerAICosmeticLoadPolicy::ResidentOnly);
 
-    // Amortizes current-build skin discovery across server ticks. This never
-    // loads packages and never walks the complete UObject array in one frame.
+    // Applies one already-resolved CID. No partial outfit is committed: head
+    // and body must both resolve, otherwise callers can safely use default.
+    static bool ApplyCharacterSkin(
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn,
+        UAthenaCharacterItemDefinition* Character,
+        EPlayerAICosmeticLoadPolicy LoadPolicy =
+            EPlayerAICosmeticLoadPolicy::ResidentOnly,
+        bool* OutTargetRetained = nullptr);
+
+    static UAthenaCharacterItemDefinition* ApplyRandomSkin(
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn,
+        EPlayerAICosmeticLoadPolicy LoadPolicy =
+            EPlayerAICosmeticLoadPolicy::ResidentOnly);
+
+    // Chooses current-build CIDs without replacement and resolves one soft
+    // reference at a time through bounded asynchronous requests. The queue is
+    // game-thread-only and world-bound; it never performs synchronous package
+    // IO, and unavailable entries fall back safely.
+    static bool QueueRandomSkin(
+        AFortPlayerControllerAthena* PC,
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn,
+        UAthenaCharacterItemDefinition** AppliedImmediately = nullptr);
+
+    // Defers a user-requested CID (or a safe default when Character is null)
+    // so counted cheat-bot commands never rebuild every pawn in one frame.
+    static bool QueueRequestedSkin(
+        AFortPlayerControllerAthena* PC,
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn,
+        UAthenaCharacterItemDefinition* Character);
+
+    // Amortizes discovery and random-bot commits without blocking package IO or
+    // walking the full UObject array in one frame. Explicit CID/default requests
+    // may perform one user-authorized synchronous resolution, but all resulting
+    // pawn mesh commits share the one-per-tick budget; explicit resolution is
+    // retried in small cached batches until the complete outfit is resident.
     static void TickCosmeticCache();
+
+    // True while the bounded cheat-bot cosmetic queue still owns this pawn.
+    // Spawn equipment waits for this to clear so mesh reconstruction cannot
+    // race a newly created weapon actor.
+    static bool IsSkinCommitPending(
+        AFortPlayerPawnAthena* Pawn);
+
+    // Monotonic heartbeat advanced only when the guarded bot-cosmetic queue
+    // starts or completes meaningful work. Equipment uses it to distinguish
+    // a healthy serialized batch from a genuinely stalled queue.
+    static uint64 GetSkinCommitProgressGeneration();
+
+    // True after this pawn has received its queue turn and begun bounded
+    // candidate/native work. Used with the shared heartbeat so unrelated bot
+    // progress cannot conceal one individually stalled transaction.
+    static bool IsSkinCommitActivelyWorking(
+        AFortPlayerPawnAthena* Pawn);
+
+    // Drops any queued cosmetic work for one pawn during terminal bot cleanup
+    // or a pawn/world lifecycle transition.
+    static void CancelSkinCommit(
+        AFortPlayerPawnAthena* Pawn);
 
     // ---- Death --------------------------------------------------------------------
     // Kills a pawn through the native death pipeline (ForceKill) so kill
@@ -137,8 +228,22 @@ public:
 
     // ---- Cosmetics -------------------------------------------------------------------
     // Applies default character parts + hero so the AI replicates as a valid
-    // player-like entity on every version. Custom skins only when supported.
-    static void ApplyDefaultCosmetics(AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn);
+    // player-like entity on every version. Returns true only after a complete
+    // default or resident-donor outfit was committed.
+    static bool ApplyDefaultCosmetics(
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn,
+        EPlayerAICosmeticLoadPolicy LoadPolicy =
+            EPlayerAICosmeticLoadPolicy::ResidentOnly);
+
+    // Applies only the fixed HID_001/head/body/no-backpack defaults. Unlike
+    // universal PlayerAI fallback, this never borrows a real player's outfit.
+    // If those defaults are unavailable, the pawn keeps its engine appearance.
+    static bool ApplyFixedDefaultCosmetics(
+        AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* Pawn,
+        EPlayerAICosmeticLoadPolicy LoadPolicy =
+            EPlayerAICosmeticLoadPolicy::ResidentOnly);
 
     // Reset all cached feature lookups (new match / map).
     static void ResetCaches();

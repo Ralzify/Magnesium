@@ -525,15 +525,85 @@ static std::vector<FActiveGameplayEffectHandle> FindLowerSeasonStormEffectHandle
 	UAbilitySystemComponent* AbilitySystemComponent, UClass* StormEffectClass)
 {
 	std::vector<FActiveGameplayEffectHandle> Handles;
-	if (!AbilitySystemComponent || !StormEffectClass)
+	if (!AbilitySystemComponent || !StormEffectClass ||
+		!SDK::MemReadable(AbilitySystemComponent, sizeof(UObject)) ||
+		!AbilitySystemComponent->HasActiveGameplayEffects() ||
+		!FActiveGameplayEffectsContainer::StaticStruct() ||
+		!FActiveGameplayEffect::StaticStruct() ||
+		!FGameplayEffectSpec::StaticStruct() ||
+		!FActiveGameplayEffectsContainer::HasGameplayEffects_Internal() ||
+		!FActiveGameplayEffect::HasSpec() ||
+		!FGameplayEffectSpec::HasDef())
 		return Handles;
 
-	auto& Effects = AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
-	for (int Index = 0; Index < Effects.Num(); Index++)
+	const int32 ActiveGameplayEffectsSize =
+		FActiveGameplayEffectsContainer::Size();
+	const int32 EffectsOffset =
+		FActiveGameplayEffectsContainer::GameplayEffects_Internal__Offset;
+	if (ActiveGameplayEffectsSize < static_cast<int32>(
+			sizeof(TArray<FActiveGameplayEffect>)) ||
+		EffectsOffset < 0 ||
+		EffectsOffset > ActiveGameplayEffectsSize -
+			static_cast<int32>(sizeof(TArray<FActiveGameplayEffect>)))
 	{
-		auto& Effect = Effects.Get(Index, FActiveGameplayEffect::Size());
-		if (Effect.Spec.Def && Effect.Spec.Def->IsA(StormEffectClass))
+		return Handles;
+	}
+
+	auto& Effects =
+		AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
+	if (!SDK::MemReadable(&Effects, sizeof(Effects)))
+		return Handles;
+
+	const int EffectCount = Effects.Num();
+	const int EffectCapacity = Effects.Max();
+	const int32 ActiveEffectSize = FActiveGameplayEffect::Size();
+	const int32 GameplayEffectSpecSize = FGameplayEffectSpec::Size();
+	const int32 GameplayEffectSpecOffset =
+		FActiveGameplayEffect::Spec__Offset;
+	const int32 GameplayEffectDefinitionOffset =
+		FGameplayEffectSpec::Def__Offset;
+	constexpr int MaxSafeStormEffectCount = 4096;
+	if (EffectCount < 0 ||
+		EffectCount > MaxSafeStormEffectCount ||
+		EffectCapacity < EffectCount ||
+		EffectCapacity > 100000 ||
+		ActiveEffectSize < 0x14 ||
+		ActiveEffectSize > 0x1000 ||
+		GameplayEffectSpecSize < static_cast<int32>(sizeof(void*)) ||
+		GameplayEffectSpecSize > ActiveEffectSize ||
+		GameplayEffectSpecOffset < 0 ||
+		GameplayEffectSpecOffset >
+			ActiveEffectSize - GameplayEffectSpecSize ||
+		GameplayEffectDefinitionOffset < 0 ||
+		GameplayEffectDefinitionOffset >
+			GameplayEffectSpecSize - static_cast<int32>(sizeof(void*)))
+	{
+		return Handles;
+	}
+
+	if (EffectCount == 0)
+		return Handles;
+
+	const size_t EffectsByteCount =
+		static_cast<size_t>(EffectCount) *
+		static_cast<size_t>(ActiveEffectSize);
+	if (!Effects.GetData() ||
+		!SDK::MemReadable(Effects.GetData(), EffectsByteCount))
+	{
+		return Handles;
+	}
+
+	Handles.reserve(EffectCount);
+	for (int Index = 0; Index < EffectCount; Index++)
+	{
+		auto& Effect = Effects.Get(Index, ActiveEffectSize);
+		auto EffectDefinition = Effect.Spec.Def;
+		if (EffectDefinition &&
+			SDK::MemReadable(EffectDefinition, sizeof(UObject)) &&
+			EffectDefinition->IsA(StormEffectClass))
+		{
 			Handles.push_back(*(FActiveGameplayEffectHandle*)(__int64(&Effect) + 0xc));
+		}
 	}
 	return Handles;
 }
@@ -552,6 +622,11 @@ static int NormalizeLowerSeasonStormEffectLevels(AFortGameMode* GameMode,
 		auto Player = (AFortPlayerControllerAthena*)UncastedPlayer;
 		if (!Player || !Player->PlayerState || !Player->PlayerState->AbilitySystemComponent)
 			continue;
+		if (AFortPlayerControllerAthena::
+			IsCheatSpawnedBotController(Player))
+		{
+			continue;
+		}
 
 		auto AbilitySystemComponent = Player->PlayerState->AbilitySystemComponent;
 		auto& Effects = AbilitySystemComponent->ActiveGameplayEffects.GameplayEffects_Internal;
@@ -651,6 +726,28 @@ static bool SetReflectedSafeZoneBool(UObject* Object, const char* PropertyName, 
 	return true;
 }
 
+static bool TryGetReflectedSafeZoneBool(
+	UObject* Object, const char* PropertyName, bool& OutValue)
+{
+	OutValue = false;
+	if (!Object)
+		return false;
+
+	auto Property = Object->GetProperty(PropertyName, 0x20000);
+	if (!Property)
+		return false;
+
+	auto Offset = GetFromOffset<uint32>(
+		Property, Offsets::Offset_Internal);
+	if (Offset == (uint32)-1)
+		return false;
+
+	const auto Mask = Property->GetFieldMask();
+	const auto Byte = GetFromOffset<uint8_t>(Object, Offset);
+	OutValue = Mask ? (Byte & Mask) != 0 : Byte != 0;
+	return true;
+}
+
 static bool SetReflectedSafeZoneClass(UObject* Object, const char* PropertyName,
 	UClass* NewValue, UClass*& PreviousValue)
 {
@@ -671,6 +768,72 @@ static bool SetReflectedSafeZoneClass(UObject* Object, const char* PropertyName,
 	PreviousValue = Value;
 	Value = NewValue;
 	return true;
+}
+
+bool SuppressOutsideSafeZoneEffectForController(
+	AFortPlayerControllerAthena* Player, bool bPrimeSafeZoneLatch)
+{
+	if (!Player || !Player->PlayerState)
+		return false;
+
+	auto AbilitySystemComponent =
+		Player->PlayerState->AbilitySystemComponent;
+	auto StormEffectClass = GetLowerSeasonStormEffectClass();
+	if (!AbilitySystemComponent || !StormEffectClass)
+		return false;
+
+	auto Handles = FindLowerSeasonStormEffectHandles(
+		AbilitySystemComponent, StormEffectClass);
+	const bool bHadOutsideSafeZoneEffect = !Handles.empty();
+	if (bHadOutsideSafeZoneEffect)
+	{
+		RemoveLowerSeasonStormEffects(
+			AbilitySystemComponent, StormEffectClass);
+	}
+
+	auto Pawn = Player->MyFortPawn;
+	if (!Pawn && Player->Pawn &&
+		Player->Pawn->IsA(AFortPlayerPawnAthena::StaticClass()))
+	{
+		Pawn = (AFortPlayerPawnAthena*)Player->Pawn;
+	}
+	if (!Pawn)
+		return bHadOutsideSafeZoneEffect;
+
+	// Field layouts changed over time. Any affirmative outside/storm signal is
+	// sufficient; the explicit inside flag is used only in its inverse form.
+	bool bOutsideSafeZone = false;
+	bool ReflectedValue = false;
+	if (TryGetReflectedSafeZoneBool(
+			Pawn, "bIsOutsideSafeZone", ReflectedValue))
+	{
+		bOutsideSafeZone |= ReflectedValue;
+	}
+	// These two fields have generated cached accessors; avoid repeating a
+	// reflected property lookup for every tracked bot in the maintenance pass.
+	if (Pawn->HasbIsInAnyStorm())
+		bOutsideSafeZone |= Pawn->bIsInAnyStorm;
+	if (Pawn->HasbIsInsideSafeZone())
+		bOutsideSafeZone |= !Pawn->bIsInsideSafeZone;
+
+	// SafeZoneAppliedGE is the native duplicate-application latch on both early
+	// Athena and current builds. Priming it when a synthetic controller is
+	// registered closes the one-frame application window; later maintenance
+	// restores it only while outside or after observing the exact storm effect.
+	if (bPrimeSafeZoneLatch || bOutsideSafeZone ||
+		bHadOutsideSafeZoneEffect)
+	{
+		UClass* PreviousAppliedEffect = nullptr;
+		if (SetReflectedSafeZoneClass(
+				Pawn, "SafeZoneAppliedGE", StormEffectClass,
+				PreviousAppliedEffect) &&
+			PreviousAppliedEffect != StormEffectClass)
+		{
+			Pawn->ForceNetUpdate();
+		}
+	}
+
+	return bHadOutsideSafeZoneEffect;
 }
 
 void ResetLowerSeasonStormStateForRespawn(AFortPlayerControllerAthena* Player,
@@ -786,6 +949,16 @@ static void SynchronizeRespawnManagedStormEffects(UNetDriver* Driver,
 
 	for (auto Player : PlayersToSynchronize)
 	{
+		// This custom lower-season synchronizer explicitly applies the storm GE
+		// and does not consult SafeZoneAppliedGE. Leave exact cheat-spawned bots
+		// to their dedicated suppression path so FN 4.x cannot reapply damage
+		// immediately after it was removed. PlayerAI/native bots remain native.
+		if (AFortPlayerControllerAthena::
+			IsCheatSpawnedBotController(Player))
+		{
+			continue;
+		}
+
 		if (!Player->MyFortPawn || !Player->PlayerState ||
 			!Player->PlayerState->AbilitySystemComponent)
 		{
@@ -1434,6 +1607,8 @@ namespace
 			State.bObservedLegacyLivePhase =
 				!bUsingModernPhase && bPhaseLive;
 			State.bObservedNativeTerminal = false;
+			AFortPlayerControllerAthena::
+				ResetRespawnCameraForMatchRestart();
 			GUI::ResetServerLifecycle();
 			if (bWaitingToStart)
 				GUI::MarkServerJoinable();

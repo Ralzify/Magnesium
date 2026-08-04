@@ -312,6 +312,12 @@ namespace AutoHosting
                 { "custom_point_z", FConfiguration::CustomRespawnPoint.Z }
             };
 
+            Preferences["ltm_configuration"] = {
+                { "food_fight_objective_health",
+                    FConfiguration::FoodFightObjectiveHealth.load(
+                        std::memory_order_acquire) }
+            };
+
             Preferences["gameplay"] = {
                 { "glider_redeploy", FConfiguration::bGliderRedeploy.load(std::memory_order_acquire) },
                 { "infinite_materials", FConfiguration::bInfiniteMats.load(std::memory_order_acquire) },
@@ -427,6 +433,14 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Respawns["respawn_height"] =
                 FConfiguration::RespawnHeight.load(
+                    std::memory_order_acquire);
+
+            auto& LTMConfiguration =
+                GStoredPreferences["ltm_configuration"];
+            if (!LTMConfiguration.is_object())
+                LTMConfiguration = nlohmann::json::object();
+            LTMConfiguration["food_fight_objective_health"] =
+                FConfiguration::FoodFightObjectiveHealth.load(
                     std::memory_order_acquire);
 
             auto& Gameplay = GStoredPreferences["gameplay"];
@@ -842,9 +856,31 @@ namespace AutoHosting
                         "custom_point_z",
                         0.0));
 
+            const auto& LTMConfiguration =
+                ReadObject(Preferences, "ltm_configuration");
+            const int FoodFightObjectiveHealth = ReadInt(
+                LTMConfiguration,
+                "food_fight_objective_health",
+                FConfiguration::FoodFightObjectiveHealthAuthored);
+            FConfiguration::FoodFightObjectiveHealth.store(
+                FoodFightObjectiveHealth ==
+                        FConfiguration::
+                            FoodFightObjectiveHealthAuthored
+                    ? FConfiguration::
+                        FoodFightObjectiveHealthAuthored
+                    : ClampValue(
+                          FoodFightObjectiveHealth,
+                          FConfiguration::
+                              FoodFightObjectiveHealthMinimum,
+                          FConfiguration::
+                              GetFoodFightObjectiveHealthMaximum()),
+                std::memory_order_release);
+
             const auto& Gameplay =
                 ReadObject(Preferences, "gameplay");
             FConfiguration::bGliderRedeploy.store(
+                FConfiguration::
+                    IsGliderRedeploySupportedBuild() &&
                 ReadBool(
                     Gameplay,
                     "glider_redeploy",

@@ -130,6 +130,14 @@ public:
     static void TickPendingVehicleSpawns();
     static void TickSupplyDropSuppression(bool bForceDiscovery = false);
     static void TickGameplayConfigurationPolicy(float DeltaSeconds);
+    // Cheat-spawned controllers must never become revive partners. On modern
+    // builds this uses the engine's native team graph rather than changing only
+    // the replicated numeric fields.
+    static bool AssignCheatBotIsolatedTeam(
+        AFortGameMode* GameMode,
+        AFortPlayerControllerAthena* BotController,
+        AActor* Instigator,
+        uint8& OutTeamIndex);
     
     InitHooks;
     InitPostLoadHooks;

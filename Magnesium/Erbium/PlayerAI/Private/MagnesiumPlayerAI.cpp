@@ -287,81 +287,6 @@ static bool PlayerAIFindSpawnTransform(FTransform& OutTransform)
     return false;
 }
 
-static bool PlayerAISetReflectedBool(
-    UObject* Object,
-    const char* PropertyName,
-    bool Value)
-{
-    if (!Object || !PropertyName)
-        return false;
-
-    auto Property =
-        Object->GetProperty(PropertyName, 0x20000);
-
-    if (!Property)
-        return false;
-
-    const auto Offset = GetFromOffset<uint32>(
-        Property, Offsets::Offset_Internal);
-    const auto Mask = Property->GetFieldMask();
-
-    if (Offset >= 0x20000)
-        return false;
-
-    auto& Byte = GetFromOffset<uint8>(Object, Offset);
-
-    if (Mask)
-        Value ? Byte |= Mask : Byte &= ~Mask;
-    else
-        Byte = Value ? 1 : 0;
-
-    return true;
-}
-
-// Real clients acknowledge these loading milestones before native match and
-// aircraft cleanup considers them valid participants. A server-owned PlayerAI
-// has no connection that can send those RPCs, so complete the same lifecycle
-// by reflected name. Missing properties are expected across engine versions.
-static void PlayerAIMarkSyntheticParticipantReady(
-    AFortPlayerControllerAthena* PC,
-    AFortPlayerStateAthena* PlayerState,
-    AFortPlayerPawnAthena* Pawn)
-{
-    if (!PC)
-        return;
-
-    PlayerAISetReflectedBool(
-        PC, "bHasClientFinishedLoading", true);
-    PlayerAISetReflectedBool(
-        PC, "bHasServerFinishedLoading", true);
-    PlayerAISetReflectedBool(
-        PC, "bReadyToStartMatch", true);
-    PlayerAISetReflectedBool(
-        PC, "bAssignedStartSpawn", true);
-
-    if (Pawn)
-    {
-        PlayerAISetReflectedBool(
-            PC, "bHasInitiallySpawned", true);
-        PlayerAISetReflectedBool(
-            PC, "bClientPawnIsLoaded", true);
-    }
-
-    PlayerAISetReflectedBool(
-        PC, "bMarkedAlive", true);
-
-    if (PlayerState)
-    {
-        PlayerAISetReflectedBool(
-            PlayerState, "bIsSpectator", false);
-        PlayerAISetReflectedBool(
-            PlayerState, "bHasStartedPlaying", true);
-        PlayerState->ForceNetUpdate();
-    }
-
-    PC->ForceNetUpdate();
-}
-
 // Registers the entity in the same match participation structures real
 // players use so damage / eliminations / kill credit / alive counts / win
 // conditions work natively.
@@ -430,7 +355,7 @@ static bool PlayerAIRegisterMatchParticipant(AFortPlayerControllerAthena* PC, AF
 
     PC->bHasInitializedWorldInventory = true;
 
-    PlayerAIMarkSyntheticParticipantReady(
+    VersionFeatureAdapter::MarkSyntheticParticipantReady(
         PC, PlayerState, Pawn);
 
     bool bAlreadyAlive = false;
@@ -695,10 +620,16 @@ PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
         if (Entity.IsValid())
         {
             PlayerAIApplyDisplayName(nullptr, Entity.NativeController, Entity.PlayerState, Name);
-            VersionFeatureAdapter::ApplyRandomSkin(Entity.PlayerState, Entity.GetPawn());
+            auto SelectedCharacter =
+                VersionFeatureAdapter::ApplyRandomSkin(
+                    Entity.PlayerState, Entity.GetPawn());
+            Entity.SelectedCharacterDefinition =
+                TWeakObjectPtr<UAthenaCharacterItemDefinition>(
+                    SelectedCharacter);
             AFortPlayerPawnAthena::EnsurePlayerMapIcon(
                 nullptr,
-                Entity.GetPawn());
+                Entity.GetPawn(),
+                SelectedCharacter);
             PlayerAIApplyFallImmunity(Entity.PlayerState);
 
             auto Registered =
@@ -794,8 +725,11 @@ PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
         return nullptr;
     }
 
-    VersionFeatureAdapter::ApplyRandomSkin(PlayerState, Pawn);
-    AFortPlayerPawnAthena::EnsurePlayerMapIcon(PC, Pawn);
+    auto SelectedCharacter =
+        VersionFeatureAdapter::ApplyRandomSkin(
+            PlayerState, Pawn);
+    AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+        PC, Pawn, SelectedCharacter);
     PlayerAIApplyFallImmunity(PlayerState);
 
     PlayerAIGiveStartingItems(PC);
@@ -803,6 +737,9 @@ PlayerAIController* MagnesiumPlayerAISpawner::SpawnOne()
     PlayerAIEntity Entity{};
     Entity.PC = PC;
     Entity.PlayerState = PlayerState;
+    Entity.SelectedCharacterDefinition =
+        TWeakObjectPtr<UAthenaCharacterItemDefinition>(
+            SelectedCharacter);
     Entity.DisplayName = Name;
 
     return PlayerAIManager::RegisterEntity(Entity);
@@ -854,7 +791,10 @@ AFortPlayerPawnAthena* MagnesiumPlayerAISpawner::SpawnPawnAt(PlayerAIController&
         }
 
         ReplicationBehavior::SetupPawnReplication(Pawn);
-        AFortPlayerPawnAthena::EnsurePlayerMapIcon(PC, Pawn);
+        AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+            PC,
+            Pawn,
+            AI.Entity.SelectedCharacterDefinition.Get());
         ReplicationBehavior::PushTeleportUpdate(Pawn);
 
         if (bGround)
@@ -904,7 +844,10 @@ AFortPlayerPawnAthena* MagnesiumPlayerAISpawner::SpawnPawnAt(PlayerAIController&
     Pawn->SetShield(0.f);
 
     ReplicationBehavior::SetupPawnReplication(Pawn);
-    AFortPlayerPawnAthena::EnsurePlayerMapIcon(PC, Pawn);
+    AFortPlayerPawnAthena::EnsurePlayerMapIcon(
+        PC,
+        Pawn,
+        AI.Entity.SelectedCharacterDefinition.Get());
     // The persistent PlayerState already owns the build-randomized cosmetic
     // selection from initial spawn. Re-running discovery/customization for a
     // recovery pawn both changed its skin and multiplied bus-exit workload.
@@ -1534,6 +1477,7 @@ void MagnesiumPlayerAIIntegration::OnAircraftDropZoneEnding()
 
     const float Now = VersionFeatureAdapter::GetTimeSeconds();
     VersionFeatureAdapter::BeginServerTick(Now);
+
     int Queued = 0;
     int ExitCertified = 0;
     int ExitUnresolved = 0;
@@ -1556,7 +1500,8 @@ void MagnesiumPlayerAIIntegration::OnAircraftDropZoneEnding()
         // native processing resumes.
         if (PC)
         {
-            PlayerAIMarkSyntheticParticipantReady(
+            VersionFeatureAdapter::
+                MarkSyntheticParticipantReady(
                 PC,
                 (AFortPlayerStateAthena*)PC->PlayerState,
                 AI->GetPawn());
@@ -1708,12 +1653,14 @@ void MagnesiumPlayerAIIntegration::OnServerTickInternal(UNetDriver* Driver, floa
         }
     }
 
+    // Cheat-command bots share the version-aware cosmetic cache even when
+    // universal PlayerAI is disabled. Run this after manager initialization:
+    // Initialize resets version caches, so warming them before it could erase
+    // the entire catalog again in the same server frame.
+    VersionFeatureAdapter::TickCosmeticCache();
+
     if (!PlayerAIManager::bInitialized)
         return;
-
-    if (MagnesiumPlayerAISettings::bEnableAIs.load(
-            std::memory_order_relaxed))
-        VersionFeatureAdapter::TickCosmeticCache();
 
     // Turning this visible toggle off is authoritative in every phase.
     // Continuing to update already-spawned AI after the checkbox disappeared
@@ -1861,12 +1808,10 @@ void MagnesiumPlayerAIIntegration::OnServerTick(UNetDriver* Driver, float DeltaS
             return;
     }
 
-    // Fully disabled and never initialized: Magnesium behaves exactly like
-    // it does without the PlayerAI system (zero cost, no guard entered).
-    if (!MagnesiumPlayerAISettings::bEnableAIs.load(
-            std::memory_order_relaxed) &&
-        !PlayerAIManager::bInitialized)
-        return;
+    // Cheat-command bots use the cosmetic queue independently of universal
+    // PlayerAI. Always enter the guarded server tick so its small bounded
+    // cache/deferred-load slice can advance; OnServerTickInternal still exits
+    // immediately after that slice while PlayerAI itself is disabled.
 
     if (TryServerTick(Driver, DeltaSeconds))
         return;

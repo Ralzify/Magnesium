@@ -104,6 +104,14 @@ GetLateGameVictoryCrownComponent(
 
     auto CrownComponentClass =
         UFortControllerComponent_VictoryCrowns::StaticClass();
+    if (!IsUsableLateGameObject(CrownComponentClass))
+    {
+        // UCLASS_COMMON_MEMBERS caches its first lookup, including a null
+        // result. Retry by name in case the crown runtime module loaded after
+        // the first probe on a newer client.
+        CrownComponentClass =
+            FindClass("FortControllerComponent_VictoryCrowns");
+    }
     auto RawCrownComponent =
         IsUsableLateGameObject(CrownComponentClass)
             ? PlayerController->GetComponentByClass(
@@ -120,6 +128,15 @@ static const UFortWorldItemDefinition*
 ResolveLateGameVictoryCrownDefinition(
     UFortControllerComponent_VictoryCrowns* CrownComponent)
 {
+    // Prefer the stable gameplay asset path. Besides avoiding an unnecessary
+    // component read on known builds, this remains safe if a future client
+    // changes the reflected type of CrownInventoryItemClass.
+    auto FallbackDefinition =
+        FindObject<UFortWorldItemDefinition>(
+            L"/VictoryCrownsGameplay/Items/AGID_VictoryCrown.AGID_VictoryCrown");
+    if (IsUsableLateGameObject(FallbackDefinition))
+        return FallbackDefinition;
+
     if (CrownComponent &&
         CrownComponent->HasCrownInventoryItemClass())
     {
@@ -131,12 +148,7 @@ ResolveLateGameVictoryCrownDefinition(
             return ConfiguredDefinition;
     }
 
-    auto FallbackDefinition =
-        FindObject<UFortWorldItemDefinition>(
-            L"/VictoryCrownsGameplay/Items/AGID_VictoryCrown.AGID_VictoryCrown");
-    return IsUsableLateGameObject(FallbackDefinition)
-        ? FallbackDefinition
-        : nullptr;
+    return nullptr;
 }
 
 TArray<TArray<TPair<FString, int>>> LateGame::GetLoadout()
@@ -2620,11 +2632,10 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
 
     // Magnesium does not persist a winner's crown into the next server match.
     // Seed one outside the randomized quickbar slots so Crown Slomo can produce
-    // the native Crowned Victory Royale presentation on the verified FN19-25
-    // implementation. FN26+ uses a different victory UI and intentionally
-    // falls back to the ordinary server victory path.
+    // the native Crowned Victory Royale presentation on every crown-capable
+    // build. The component, asset, state-value, and function checks below keep
+    // this safe if a later build changes or removes part of the crown runtime.
     if (VersionInfo.FortniteVersion >= 19.0 &&
-        VersionInfo.FortniteVersion < 26.0 &&
         FConfiguration::bCrownSlomo)
     {
         auto CrownComponent =
@@ -2690,32 +2701,37 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
         bool bAlreadyHasCrown =
             CrownItem != nullptr ||
             bHasReplicatedCrownEntry;
-        if (!bAlreadyHasCrown &&
-            FFortItemEntryStateValue::StaticStruct() &&
-            FFortItemEntryStateValue::HasIntValue() &&
-            FFortItemEntryStateValue::HasStateType())
+        if (!bAlreadyHasCrown)
         {
-            const int32 StateValueSize =
-                FFortItemEntryStateValue::Size();
-            if (StateValueSize > 0 && StateValueSize <= 0x1000)
+            // Toast metadata is optional. A changed state-value schema on a
+            // newer build must not prevent ownership of the crown itself.
+            TArray<FFortItemEntryStateValue> StateValues{};
+            if (FFortItemEntryStateValue::StaticStruct() &&
+                FFortItemEntryStateValue::HasIntValue() &&
+                FFortItemEntryStateValue::HasStateType())
             {
-                TArray<FFortItemEntryStateValue> StateValues{};
-                auto StateValue =
-                    (FFortItemEntryStateValue*)malloc(StateValueSize);
-                if (StateValue)
+                const int32 StateValueSize =
+                    FFortItemEntryStateValue::Size();
+                if (StateValueSize > 0 && StateValueSize <= 0x1000)
                 {
-                    memset((PBYTE)StateValue, 0, StateValueSize);
-                    StateValue->IntValue = 1;
-                    StateValue->StateType = 2;
-                    StateValues.Add(*StateValue, StateValueSize);
-                    free(StateValue);
-
-                    CrownItem = WorldInventory->GiveItem(
-                        CrownDefinition, 1, 0, 0, true, true, 0,
-                        StateValues);
-                    StateValues.Free();
+                    auto StateValue =
+                        (FFortItemEntryStateValue*)malloc(
+                            StateValueSize);
+                    if (StateValue)
+                    {
+                        memset((PBYTE)StateValue, 0, StateValueSize);
+                        StateValue->IntValue = 1;
+                        StateValue->StateType = 2;
+                        StateValues.Add(*StateValue, StateValueSize);
+                        free(StateValue);
+                    }
                 }
             }
+
+            CrownItem = WorldInventory->GiveItem(
+                CrownDefinition, 1, 0, 0, true, true, 0,
+                StateValues);
+            StateValues.Free();
         }
 
         // Confirm that the native crown component sees the actual seeded world
