@@ -2705,10 +2705,10 @@ static ELegacyRespawnReadiness ObserveLegacyRespawnReadiness(
 		else if (bInstanceArraysAvailable && !Instances.empty())
 		{
 			// For instanced abilities the live instances are authoritative. UE
-			// 4.16 can leave ActiveCount set after every retained instance has become
-			// inactive. Prefer the instances over that stale count, but keep a live
-			// blocking bit authoritative: it represents the tag state that prevents
-			// weapon and movement abilities from activating.
+			// 4.16 retains the authored bIsBlockingOtherAbilities policy after an
+			// instance has ended; that bit is only applied to the ASC while the
+			// instance is active. Treating the inactive policy bit as live block
+			// state stalls the whole replacement-pawn finalizer forever.
 			for (auto Instance : Instances)
 			{
 				bool bInstanceActive = false;
@@ -2720,8 +2720,7 @@ static ELegacyRespawnReadiness ObserveLegacyRespawnReadiness(
 					bUnknownAbilityState = true;
 					continue;
 				}
-				bSpecBlocked |=
-					bInstanceActive || bInstanceBlocking;
+				bSpecBlocked |= bInstanceActive;
 			}
 		}
 		else if (!Spec.HasActiveCount())
@@ -2871,8 +2870,7 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 						BlockingInstanceCount +=
 							InstanceEnd.bWasBlocking ? 1 : 0;
 						Pending.bWasActive |=
-							InstanceEnd.bWasActive ||
-							InstanceEnd.bWasBlocking;
+							InstanceEnd.bWasActive;
 						if (bValidActivationInfoSize &&
 							Instance->HasCurrentActivationInfo())
 						{
@@ -2892,9 +2890,10 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 			ActiveAbilityCount += Pending.bWasActive ? 1 : 0;
 			// Do not emit terminal RPCs for every named death ability merely
 			// because its spec exists. On the early clients an inactive spec's
-			// default ActivationInfo can alias a fresh/predicted activation. Only
-			// repair state for an active spec or an instance that is still active
-			// or blocking other abilities.
+			// default ActivationInfo can alias a fresh/predicted activation. Repair
+			// state only for an active spec or active instance. An ended
+			// instanced ability may retain its authored blocking-policy bit, which
+			// is not evidence that block tags remain applied to the ASC.
 			if (Pending.bWasActive)
 				AbilitiesToCancel.push_back(std::move(Pending));
 		}
@@ -3161,7 +3160,8 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 			else if (bInstanceArraysAvailable && !Instances.empty())
 			{
 				// Match the readiness observer: the instance list overrides stale
-				// ActiveCount, while either live state bit remains a real blocker.
+				// ActiveCount and only an active instance is a live blocker. Keep
+				// counting inactive blocking-policy bits for diagnostics.
 				bSpecStillActive = false;
 				for (auto Instance : Instances)
 				{
@@ -3178,8 +3178,7 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 						bInstanceActive ? 1 : 0;
 					RemainingBlockingInstanceCount +=
 						bInstanceBlocking ? 1 : 0;
-					bSpecStillActive |=
-						bInstanceActive || bInstanceBlocking;
+					bSpecStillActive |= bInstanceActive;
 				}
 			}
 		}
@@ -22549,12 +22548,36 @@ bool AFortPlayerControllerAthena::TryEliminatePlayer(
 	return false;
 }
 
+// Commands run inside the dispatch of the client's received ServerCheat RPC.
+// Any `WithValidation` function a command invokes server-side records its
+// rejection in UE's shared last-failure slot, and FObjectReplicator inspects
+// that slot once this dispatch returns - closing the commanding client's
+// connection for a failure the client never caused. Clearing on every exit
+// path is a best-effort backstop for layouts where the slot can be proven; it
+// is not permission to invoke a validation RPC on a synthetic controller,
+// because some supported builds (including 7.40) expose no safe slot witness.
+struct FScopedSyntheticRpcValidation
+{
+	const char* Context;
+
+	explicit FScopedSyntheticRpcValidation(const char* InContext)
+		: Context(InContext)
+	{
+	}
+
+	~FScopedSyntheticRpcValidation()
+	{
+		ClearPendingRpcValidationFailure(Context);
+	}
+};
+
 void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 {
 	FString Msg;
 	Stack.StepCompiledIn(&Msg);
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
+	FScopedSyntheticRpcValidation SyntheticRpcValidation("ServerCheat");
 	auto originalCommand = Msg.ToString();
 	// This optional, fixed-format telemetry channel is negotiated per client.
 	// Consume it before cheat authorization and never expose it as a command.
@@ -22650,6 +22673,7 @@ cheat startevent - Starts the event for the current version
 cheat getlocation - Copies your current location to the clipboard
 cheat setrespawnpoint - Sets your respawn point to a specified location
 cheat tpto <exact player name> - Teleports you next to a real player
+cheat tphere <exact player name> - Teleports a real player next to you
 cheat swap <player name> - Swaps places with a player or bot (partial name)
 cheat tp | tp <X> <Y> <Z> - Teleports to where your crosshair is aiming, or to a location
 cheat launch <X> <Y> <Z> - Launches the player
@@ -22659,7 +22683,7 @@ cheat skydive - Toggles skydiving
 cheat mark - Toggles teleporting to placed map markers
 cheat togglepersonalvehicle - Toggles the personal vehicle
 cheat giveitem <WID/path> <Count = 1> - Gives you an item
-cheat givetoall <WID/path> - Gives an item to all connected players
+cheat givetoall <WID/path> [Count] - Gives an item to all connected players
 cheat giveall - Gives you all ammo, mats, and traps
 cheat givetraps - Gives you all available traps
 cheat giveammo - Gives you 999 of every ammo type
@@ -24817,21 +24841,29 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						FinalName = "Anonymous [" + std::string(Buffer) + "]";
 					}
 
+					// An empty configured bot name would reach ServerChangeName,
+					// whose native validation rejects exactly that. Rejection is
+					// recorded in UE's shared last-failed-RPC slot and charged to
+					// the bunch being dispatched - the commanding player's cheat
+					// command - dropping them from the match. Keep a real name.
+					if (FinalName.empty())
+						FinalName = "Anonymous [000]";
+
 					std::wstring WideName(FinalName.begin(), FinalName.end());
 
 					FString BotName = FString(WideName.c_str());
 
-					if (std::floor(VersionInfo.FortniteVersion) < 9)
-					{
-						PC->ServerChangeName(BotName);
-					}
-					else
-					{
-						GameMode->ChangeName(PC, BotName, true);
-					}
+					// Never dispatch a client-to-server RPC on a connectionless bot
+					// while handling the real player's ServerCheat bunch. A rejected
+					// WithValidation call is charged to that real connection on builds
+					// where UE's validation-failure slot cannot be recovered (7.40 is
+					// one such layout). ServerChangeName's authoritative implementation
+					// delegates to GameMode::ChangeName, so call that implementation
+					// directly on every generation instead.
+					GameMode->ChangeName(PC, BotName, true);
 
 					// Pre-9 clients use Fortnite's legacy encoded-name protocol. The
-					// native ServerChangeName path above encodes the replicated backing
+					// native ChangeName path above encodes the replicated backing
 					// value; replacing it with plaintext makes the client transform an
 					// intended "Anonymous [nnn]" into text such as "Gosu{roxy!...".
 					// Keep raw reflected publication only for the later ChangeName path,
@@ -25076,6 +25108,82 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					PlayerPawn->CharacterMovement->Velocity = FVector{};
 
 				PlayerController->ClientMessage(FString(L"Teleported next to player!"), FName(), 1.f);
+			}
+			else if (command == "tphere")
+			{
+				auto PlayerPawn = PlayerController->Pawn;
+
+				if (!IsUsableDeathObject(PlayerPawn) ||
+					!IsFortPlayerPawnForCommand(PlayerPawn))
+				{
+					PlayerController->ClientMessage(FString(L"No pawn!"), FName(), 1.f);
+					return;
+				}
+
+				auto PlayerNameStart = originalCommand.find_first_of(" \t");
+
+				if (PlayerNameStart == std::string::npos)
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat tphere <exact player name>"), FName(), 1.f);
+					return;
+				}
+
+				auto PlayerName = TrimPlayerCommandString(
+					originalCommand.substr(PlayerNameStart + 1).c_str());
+
+				if (PlayerName.empty())
+				{
+					PlayerController->ClientMessage(FString(L"Usage: cheat tphere <exact player name>"), FName(), 1.f);
+					return;
+				}
+
+				std::string MatchedName;
+				bool bAmbiguous = false;
+				auto TargetPC = FindRealPlayerByExactNameForCommand(
+					PlayerName, PlayerController, MatchedName, bAmbiguous);
+
+				if (bAmbiguous)
+				{
+					PlayerController->ClientMessage(FString(L"Multiple real players have that exact name."), FName(), 1.f);
+					return;
+				}
+
+				if (!IsUsableDeathObject(TargetPC))
+				{
+					PlayerController->ClientMessage(FString(L"Could not find a real player with that exact name."), FName(), 1.f);
+					return;
+				}
+
+				auto TargetPawn = TargetPC->Pawn;
+
+				if (!IsUsableDeathObject(TargetPawn) ||
+					!IsFortPlayerPawnForCommand(TargetPawn) ||
+					TargetPawn->Controller != TargetPC)
+				{
+					PlayerController->ClientMessage(FString(L"Could not find a real player with that exact name."), FName(), 1.f);
+					return;
+				}
+
+				auto SideVector = PlayerPawn->GetActorRightVector();
+				SideVector.Z = 0.0f;
+
+				if (SideVector.IsZero())
+					SideVector = FVector(1.f, 0.f, 0.f);
+				else
+					SideVector.Normalize();
+
+				auto TeleportLoc = PlayerPawn->K2_GetActorLocation() +
+					(SideVector * 250.f);
+				TeleportLoc.Z += 50.f;
+
+				TargetPawn->K2_TeleportTo(
+					TeleportLoc, PlayerPawn->K2_GetActorRotation(), false, true);
+				if (TargetPawn->CharacterMovement)
+					TargetPawn->CharacterMovement->Velocity = FVector{};
+
+				TargetPawn->ForceNetUpdate();
+				TargetPC->ForceNetUpdate();
+				PlayerController->ClientMessage(FString(L"Teleported player to you!"), FName(), 1.f);
 			}
 			else if (command == "troll")
 			{
@@ -25913,10 +26021,11 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				auto GiveToAllTokens =
 					SplitPlayerCommandArgs(GiveToAllArgs);
 
-				if (GiveToAllTokens.size() != 1)
+				if (GiveToAllTokens.size() < 1 ||
+					GiveToAllTokens.size() > 2)
 				{
 					PlayerController->ClientMessage(
-						FString(L"Usage: cheat givetoall <WID/path>"),
+						FString(L"Usage: cheat givetoall <WID/path> [Count]"),
 						FName(), 1.f);
 					return;
 				}
@@ -25942,6 +26051,23 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						? 6
 						: ItemDefinition->GetMaxStackSize();
 				Count = std::max<int32>(Count, 1);
+
+				if (GiveToAllTokens.size() == 2)
+				{
+					int ParsedCount = 0;
+
+					if (!TryParseCommandInt(
+							GiveToAllTokens[1], ParsedCount) ||
+						ParsedCount < 1)
+					{
+						PlayerController->ClientMessage(
+							FString(L"Count must be a whole number of at least 1."),
+							FName(), 1.f);
+						return;
+					}
+
+					Count = static_cast<int32>(ParsedCount);
+				}
 
 				std::vector<AFortPlayerControllerAthena*> Targets;
 				std::unordered_set<AFortPlayerControllerAthena*> SeenTargets;

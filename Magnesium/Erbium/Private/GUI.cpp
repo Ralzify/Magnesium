@@ -6585,7 +6585,7 @@ void GUI::Init()
             ImGui::SameLine(0.f, 8.f);
             ImGui::SetCursorPosY(TitleY);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.54f, 1.f));
-            ImGui::TextUnformatted("v2.1.1");
+            ImGui::TextUnformatted("v2.3.0");
             ImGui::PopStyleColor();
 
             // FN / UE versions on the right, aligned to the visible viewport so they
@@ -10067,7 +10067,7 @@ void GUI::Init()
             ImGui::TextUnformatted("MAGNESIUM");
             ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 1.f));
-            ImGui::TextUnformatted("Gameserver  -  v2.1.1");
+            ImGui::TextUnformatted("Gameserver  -  v2.3.0");
             ImGui::PopStyleColor();
             ImGui::EndGroup();
 

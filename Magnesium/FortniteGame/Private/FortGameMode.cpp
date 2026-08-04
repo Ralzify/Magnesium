@@ -8186,60 +8186,24 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
     }
     bGraphMutated = bGraphMutated || TeamGraphChanged();
 
-    // ServerSetTeam is present across the middle and modern layouts and is the
-    // controller-native path used by Creative. Only invoke it if the first call
-    // left the complete pre-state untouched; stacking native team transitions
-    // over a partial mutation can double-fire team-change side effects.
-    if (!bGraphMutated)
-    {
-        auto ServerSetTeamFunction =
-            BotController->GetFunction("ServerSetTeam");
-        bool bServerSetTeamSchemaValid = false;
-        uint32 ServerSetTeamParamsSize = 0;
-        if (ServerSetTeamFunction)
-        {
-            const auto Params =
-                ServerSetTeamFunction->GetParamsNamed();
-            const auto* InTeamParam =
-                Params.NameOffsetMap.size() == 1
-                    ? &Params.NameOffsetMap[0]
-                    : nullptr;
-            bServerSetTeamSchemaValid =
-                InTeamParam && InTeamParam->Name == "InTeam" &&
-                IsInputParam(InTeamParam, 0, sizeof(uint8)) &&
-                (bEncryptedParameterMetadata ||
-                    (Params.Size == sizeof(uint8) &&
-                        ServerSetTeamFunction->GetPropertiesSize() ==
-                            sizeof(uint8)));
-            ServerSetTeamParamsSize = Params.Size;
-        }
-
-        if (bServerSetTeamSchemaValid)
-        {
-            uint8 InTeam = CandidateTeam;
-            BotController->ProcessEvent(
-                ServerSetTeamFunction, &InTeam);
-            if (FinalizeTeamAssignment("ServerSetTeam"))
-                return true;
-            bGraphMutated = TeamGraphChanged();
-            SDK::DbgLog(
-                "[SpawnBot] native ServerSetTeam did not establish graph "
-                "bot=%p requested=%u mutated=%d version=%.2f\n",
-                (void*)BotController,
-                (unsigned)CandidateTeam,
-                (int)bGraphMutated,
-                VersionInfo.FortniteVersion);
-        }
-        else if (ServerSetTeamFunction)
-        {
-            SDK::DbgLog(
-                "[SpawnBot] ServerSetTeam schema rejected function=%p "
-                "size=0x%X version=%.2f\n",
-                (void*)ServerSetTeamFunction,
-                ServerSetTeamParamsSize,
-                VersionInfo.FortniteVersion);
-        }
-    }
+    // ServerSetTeam is deliberately NOT used here, even though it is the
+    // controller-native team path on the middle and modern layouts.
+    //
+    // It is a `WithValidation` client->server RPC, and a connectionless
+    // synthetic controller is exactly the state its checks reject. UE records
+    // that rejection in one process-global slot which FObjectReplicator reads
+    // after the *received* RPC currently being dispatched returns - and cheat
+    // commands are dispatched from the commanding client's own ServerCheat
+    // bunch, so the engine closes that player's connection. Observed on FN
+    // 7.40, 17.30 and 26.30: the spawning player is dropped and, if they were
+    // alone, the match immediately ends.
+    //
+    // Clearing the slot afterwards only works where it can be located, and it
+    // cannot be on every build (FN 7.40 has no discoverable reference to the
+    // validate-name literals), so the call itself has to go. Nothing is lost:
+    // it never once established the graph on any inspected build - the
+    // reflected path below is what actually assigns the team - and asking a
+    // controller with no client to request a team change was never meaningful.
 
     // ChangeTeam accepts a generic actor and several builds resolve that actor
     // through its possessed pawn. Preserve the pawn variant as the last native

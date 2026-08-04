@@ -24,6 +24,12 @@ uint64 FindPickTeam();
 uint64 FindCantBuild();
 uint64 FindReplaceBuildingActor();
 uint64 FindKickPlayer();
+// Address of UE's "last failed RPC validation" global, or 0 when it cannot be
+// identified with confidence. See the definition for why it matters.
+uint64 FindRpcValidationFailureSlot();
+// Drops a validation failure recorded by server-side synthetic RPC calls so
+// the engine cannot charge it to the client whose bunch is being processed.
+void ClearPendingRpcValidationFailure(const char* Context);
 uint64 FindEncryptionPatch();
 uint64 FindRemoveInventoryItem();
 uint64 FindRemoveInventoryStateValue();

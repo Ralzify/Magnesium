@@ -1339,6 +1339,162 @@ uint64_t FindKickPlayer()
     return Memcury::Scanner::FindPattern("40 53 41 56 48 81 EC ? ? ? ? 48 8B 01 48 8B DA 4C 8B F1 FF 90").Get();
 }
 
+// UE records the most recent failed RPC validation in one process-global
+// `const TCHAR*`. FObjectReplicator::ReceivedRPC clears it, dispatches the
+// received function, then closes the sending connection if the slot came back
+// non-null. Magnesium runs synthetic work (spawnbot and friends) inside that
+// dispatch, so a `WithValidation` RPC rejected there is blamed on whichever
+// client sent the command.
+//
+// RPC_ValidateFailed is inlined at every generated thunk as
+//     lea <reg>, ["<Function>_Validate"]
+//     mov qword ptr [rip + GLastRPCFailedReason], <reg>
+// so the slot is recovered from the store that follows a validate-name string
+// reference. Several unrelated names are decoded and the address is only
+// accepted when they agree, which keeps a stray match from turning into a
+// write to an arbitrary global.
+uint64_t FindRpcValidationFailureSlot()
+{
+    static uint64_t Slot = 0;
+    static bool bInitialized = false;
+
+    if (bInitialized)
+        return Slot;
+
+    bInitialized = true;
+
+    // Decodes `lea <reg>, [rip+d]` followed by `mov [rip+d2], <reg>` and
+    // returns the absolute address of the stored-to global.
+    auto SlotFromValidateRef = [](uint64_t Ref) -> uint64_t
+        {
+            if (!Ref || !SDK::MemReadable((const void*)Ref, 7))
+                return 0;
+
+            const auto* Lea = (const uint8_t*)Ref;
+            const bool bLeaRex = Lea[0] == 0x48 || Lea[0] == 0x4C;
+            if (!bLeaRex || Lea[1] != 0x8D || (Lea[2] & 0xC7) != 0x05)
+                return 0;
+
+            // ModRM reg field plus REX.R gives the destination register.
+            const uint8_t LeaReg =
+                (uint8_t)(((Lea[2] >> 3) & 0x7) | ((Lea[0] & 0x4) ? 0x8 : 0x0));
+            const uint8_t StoreRex = (uint8_t)(LeaReg & 0x8 ? 0x4C : 0x48);
+            const uint8_t StoreModRM = (uint8_t)(0x05 | ((LeaReg & 0x7) << 3));
+
+            // The store is emitted right after the lea, but tolerate a little
+            // scheduling slack before giving up.
+            for (uint32 Offset = 7; Offset < 32; Offset++)
+            {
+                const auto* At = Lea + Offset;
+                if (!SDK::MemReadable(At, 7))
+                    return 0;
+
+                if (At[0] == StoreRex && At[1] == 0x89 && At[2] == StoreModRM)
+                {
+                    const int32 Disp = *(const int32*)(At + 3);
+                    return (uint64_t)(At + 7) + (int64)Disp;
+                }
+            }
+
+            return 0;
+        };
+
+    // Names chosen to be present across the supported range and to live in
+    // unrelated modules, so agreement is meaningful rather than incidental.
+    static const wchar_t* const ValidateNames[] = {
+        L"ServerSuicide_Validate",
+        L"ServerCheat_Validate",
+        L"ServerExecuteInventoryItem_Validate",
+        L"ServerAttemptInventoryDrop_Validate",
+        L"ServerPlayEmoteItem_Validate",
+        L"ServerReturnToMainMenu_Validate",
+        L"ServerAcknowledgePossession_Validate",
+        L"ServerSetTeam_Validate",
+    };
+
+    uint64_t Candidate = 0;
+    int Agreements = 0;
+    int Disagreements = 0;
+
+    for (const wchar_t* Name : ValidateNames)
+    {
+        const auto Resolved = SlotFromValidateRef(
+            Memcury::Scanner::FindStringRef(Name, false).Get());
+        if (!Resolved)
+            continue;
+
+        if (!Candidate)
+        {
+            Candidate = Resolved;
+            Agreements = 1;
+        }
+        else if (Resolved == Candidate)
+        {
+            Agreements++;
+        }
+        else
+        {
+            Disagreements++;
+        }
+    }
+
+    // A single witness could be a coincidental byte match, and conflicting
+    // witnesses mean the decode is wrong somewhere; both fail closed.
+    if (Agreements >= 2 && Disagreements == 0 &&
+        SDK::MemReadable((const void*)Candidate, sizeof(void*)))
+    {
+        Slot = Candidate;
+    }
+
+    SDK::DbgLog(
+        "[RPC] validation failure slot=%p agreements=%d disagreements=%d version=%.2f\n",
+        (void*)Slot,
+        Agreements,
+        Disagreements,
+        VersionInfo.FortniteVersion);
+
+    return Slot;
+}
+
+void ClearPendingRpcValidationFailure(const char* Context)
+{
+    const auto Slot = FindRpcValidationFailureSlot();
+    if (!Slot)
+        return;
+
+    // The slot must be writable before it is touched: a misidentified address
+    // in read-only data would fault the whole server rather than lose a log.
+    MEMORY_BASIC_INFORMATION Info{};
+    if (!VirtualQuery((const void*)Slot, &Info, sizeof(Info)) ||
+        Info.State != MEM_COMMIT ||
+        !(Info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
+            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) ||
+        (Info.Protect & PAGE_GUARD))
+    {
+        return;
+    }
+
+    auto Reason = (const wchar_t**)Slot;
+    if (!SDK::MemReadable(Reason, sizeof(*Reason)) || !*Reason)
+        return;
+
+    // Legitimately this holds a pointer to a "<Function>_Validate" literal.
+    // Requiring the target to read like one keeps an unrelated global that
+    // merely decoded to this address from being zeroed.
+    if (!SDK::MemReadable(*Reason, sizeof(wchar_t)) ||
+        **Reason < L' ' || **Reason > L'~')
+    {
+        return;
+    }
+
+    SDK::DbgLog(
+        "[RPC] cleared synthetic validation failure reason=%ls context=%s version=%.2f\n",
+        *Reason,
+        Context ? Context : "",
+        VersionInfo.FortniteVersion);
+    *Reason = nullptr;
+}
+
 uint64_t FindEncryptionPatch()
 {
     static uint64_t EncryptionPatch = 0;
@@ -4065,6 +4221,7 @@ void ValidateFinders()
         { "CantBuild", FindCantBuild },
         { "ReplaceBuildingActor", FindReplaceBuildingActor },
         { "KickPlayer", FindKickPlayer },
+        { "RpcValidationFailureSlot", FindRpcValidationFailureSlot },
         { "EncryptionPatch", FindEncryptionPatch },
         { "RemoveInventoryItem", FindRemoveInventoryItem },
         { "RemoveInventoryStateValue", FindRemoveInventoryStateValue },

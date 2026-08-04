@@ -1316,15 +1316,35 @@ namespace SDK
 	};
 
 
+	// FString::CStr() hands back its raw Data, which is null for an unset or
+	// empty string - an unconfigured FConfiguration entry reaches here as a
+	// null path. Neither engine function tolerates that: StaticLoadObject
+	// builds its "Failed to find object" text out of the name and the class on
+	// the miss path, so a null path or class faults on address 0 only when the
+	// lookup fails, which is why bad paths crash and good ones look fine.
 	__forceinline static const UObject* StaticFindObject(const wchar_t* ObjectPath, const UClass* Class)
 	{
+		// A null Class legitimately means "any class" here, so only the path is
+		// required.
+		if (!ObjectPath || !*ObjectPath)
+			return nullptr;
+
 		auto StaticFindObjectInternal = (UObject * (*)(const UClass*, UObject*, const wchar_t*, bool)) SDK::Offsets::StaticFindObject;
 		return StaticFindObjectInternal(Class, nullptr, ObjectPath, false);
 	}
 
 	__forceinline static const UObject* StaticLoadObject(const wchar_t* ObjectPath, const UClass* InClass, UObject* Outer = nullptr)
 	{
+		// Loading additionally needs a real class: the miss path dereferences it
+		// for the error text, and "an object of a class this build does not
+		// have" cannot resolve anyway.
+		if (!ObjectPath || !*ObjectPath || !InClass)
+			return nullptr;
+
 		auto StaticLoadObjectInternal = (UObject * (*)(const UClass*, UObject*, const wchar_t*, const wchar_t*, uint32_t, UObject*, bool, void*)) SDK::Offsets::StaticLoadObject;
+		if (!SDK::Offsets::StaticLoadObject)
+			return nullptr;
+
 		return StaticLoadObjectInternal(InClass, Outer, ObjectPath, nullptr, 0, nullptr, false, nullptr);
 	}
 
