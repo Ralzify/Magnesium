@@ -22437,10 +22437,20 @@ bool AFortPlayerControllerAthena::TryEliminatePlayer(
 	// Select one native death transaction before changing pawn state. A normal
 	// team-mode suicide may publish DBNO asynchronously; probing it in this same
 	// stack and invoking a second death API re-enters native DBNO/death teardown.
-	// Modern reference servers restore this exact controller RPC from
-	// FortPlayerControllerZone, as Magnesium does during PostLoadHook.
+	//
+	// Pre-Season-10 Athena does not have the pawn-side suicide capability used by
+	// later builds. Its controller slot was borrowed from FortPlayerControllerZone
+	// during PostLoadHook, but on 1.7.2 that wrapper resumes after Athena's
+	// terminal-death callback has detached the pawn and reads invalid lifecycle
+	// state. Reflection can prove the RPC has zero parameters, not those hidden
+	// runtime preconditions. Route the legacy cohort directly to the stable,
+	// schema-validated FortPawn::ForceKill transaction.
+	const bool bSupportsModernSuicideTransaction =
+		VersionInfo.FortniteVersion >= 10.00;
 	auto ControllerServerSuicide =
-		PlayerController->GetFunction("ServerSuicide");
+		bSupportsModernSuicideTransaction
+			? PlayerController->GetFunction("ServerSuicide")
+			: nullptr;
 	if (ControllerServerSuicide)
 	{
 		const auto Params =
@@ -22466,7 +22476,9 @@ bool AFortPlayerControllerAthena::TryEliminatePlayer(
 	// Use exactly one validated fallback only when the controller capability is
 	// absent or has an incompatible schema. Never call this after issuing the
 	// controller transaction.
-	auto PawnServerSuicide = Pawn->GetFunction("ServerSuicide");
+	auto PawnServerSuicide = bSupportsModernSuicideTransaction
+		? Pawn->GetFunction("ServerSuicide")
+		: nullptr;
 	FPawnServerSuicideSchema PawnSuicideSchema{};
 	if (TryResolvePawnServerSuicideSchema(
 			PawnServerSuicide, PawnSuicideSchema))
@@ -22889,11 +22901,14 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 			{
 				const bool bRequested = TryEliminatePlayer(
 					PlayerController);
-				PlayerController->ClientMessage(
-					FString(bRequested
-						? L"Killed player!"
-						: L"Unable to eliminate player."),
-					FName(), 1.f);
+				if (IsUsableDeathObject(PlayerController))
+				{
+					PlayerController->ClientMessage(
+						FString(bRequested
+							? L"Killed player!"
+							: L"Unable to eliminate player."),
+						FName(), 1.f);
+				}
 			}
 			else if (command == "infiniteammo")
 				FConfiguration::bInfiniteAmmo.store(
@@ -23842,11 +23857,14 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				if (Health <= 0.f)
 				{
 					const bool bRequested = TryEliminatePlayer(PlayerController);
-					PlayerController->ClientMessage(
-						FString(bRequested
-							? L"Killed player!"
-							: L"Unable to eliminate player."),
-						FName(), 1.f);
+					if (IsUsableDeathObject(PlayerController))
+					{
+						PlayerController->ClientMessage(
+							FString(bRequested
+								? L"Killed player!"
+								: L"Unable to eliminate player."),
+							FName(), 1.f);
+					}
 					return;
 				}
 
@@ -27527,11 +27545,14 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 			{
 				const bool bRequested = TryEliminatePlayer(
 					PlayerController);
-				PlayerController->ClientMessage(
-					FString(bRequested
-						? L"Killed player!"
-						: L"Unable to eliminate player."),
-					FName(), 1.f);
+				if (IsUsableDeathObject(PlayerController))
+				{
+					PlayerController->ClientMessage(
+						FString(bRequested
+							? L"Killed player!"
+							: L"Unable to eliminate player."),
+						FName(), 1.f);
+				}
 			}
 			else
 			{
@@ -32605,30 +32626,46 @@ void AFortPlayerControllerAthena::PostLoadHook()
 	}
 	SDK::DbgLog("  [FPC] 5 ServerRestartPlayer done\n");
 
-	auto ServerSuicideFunction =
-		GetDefaultObj()->GetFunction("ServerSuicide");
-	const int32 ServerSuicideIdx = ServerSuicideFunction
-		? ServerSuicideFunction->GetVTableIndex()
-		: -1;
-	auto DefaultFortPCZone = DefaultObjImpl("FortPlayerControllerZone");
-	SDK::DbgLog("  [FPC] 6 ServerSuicideIdx=0x%X\n", ServerSuicideIdx);
-	void* ZoneServerSuicide = nullptr;
-	if (DefaultFortPCZone &&
-		ServerSuicideIdx >= 0 &&
-		ServerSuicideIdx < 0x1000 &&
-		SDK::MemReadable(
-			&DefaultFortPCZone->Vft[ServerSuicideIdx],
-			sizeof(void*)))
+	// The early Zone controller's native ServerSuicide body has lifecycle
+	// preconditions that reflection cannot validate and faults after 1.7.2's
+	// synchronous Athena terminal-death cleanup. Later builds retain the
+	// established controller route; the legacy cohort uses reflected
+	// FortPawn::ForceKill in TryEliminatePlayer.
+	if (VersionInfo.FortniteVersion >= 10.00)
 	{
-		ZoneServerSuicide =
-			DefaultFortPCZone->Vft[ServerSuicideIdx];
+		auto ServerSuicideFunction =
+			GetDefaultObj()->GetFunction("ServerSuicide");
+		const int32 ServerSuicideIdx = ServerSuicideFunction
+			? ServerSuicideFunction->GetVTableIndex()
+			: -1;
+		auto DefaultFortPCZone =
+			DefaultObjImpl("FortPlayerControllerZone");
+		SDK::DbgLog(
+			"  [FPC] 6 ServerSuicideIdx=0x%X\n",
+			ServerSuicideIdx);
+		void* ZoneServerSuicide = nullptr;
+		if (DefaultFortPCZone &&
+			ServerSuicideIdx >= 0 &&
+			ServerSuicideIdx < 0x1000 &&
+			SDK::MemReadable(
+				&DefaultFortPCZone->Vft[ServerSuicideIdx],
+				sizeof(void*)))
+		{
+			ZoneServerSuicide =
+				DefaultFortPCZone->Vft[ServerSuicideIdx];
+		}
+		if (ZoneServerSuicide &&
+			SDK::MemReadable(ZoneServerSuicide, 1))
+		{
+			Utils::Hook<AFortPlayerControllerAthena>(
+				static_cast<uint32>(ServerSuicideIdx),
+				ZoneServerSuicide);
+		}
 	}
-	if (ZoneServerSuicide &&
-		SDK::MemReadable(ZoneServerSuicide, 1))
+	else
 	{
-		Utils::Hook<AFortPlayerControllerAthena>(
-			static_cast<uint32>(ServerSuicideIdx),
-			ZoneServerSuicide);
+		SDK::DbgLog(
+			"  [FPC] 6 legacy ServerSuicide uses FortPawn::ForceKill\n");
 	}
 
 	//if (VersionInfo.FortniteVersion >= 11)
