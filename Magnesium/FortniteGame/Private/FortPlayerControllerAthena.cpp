@@ -3014,23 +3014,22 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 			const auto InstanceName =
 				Instance->Name.ToString();
 
-			// UE 4.16 can retain bIsBlockingOtherAbilities after the instance is
-			// inactive, even when ActiveCount is already zero. The native unblock
-			// function rejects an inactive instance, so briefly reconcile its active
-			// bit solely while removing BlockAbilitiesWithTag. Only invoke K2_End when
-			// ActiveCount has an unmatched activation to consume; the zero-count case
-			// must restore the bit without decrementing the spec.
+			// On UE 4.16 the death spec can remain ActiveCount=1 while its
+			// instance has already flipped bIsActive off but retained
+			// bIsBlockingOtherAbilities. Both native cleanup functions reject
+			// that contradictory inactive instance, leaving BlockAbilitiesWithTag
+			// installed forever. Reconcile only this exact stale state to the
+			// authoritative active spec before invoking the normal native teardown.
 			const bool bReconciledInactiveBlocker =
 				!InstanceEnd.bWasActive &&
 				InstanceEnd.bWasBlocking &&
+				Ability.bHasSpecActiveCount &&
+				Ability.SpecActiveCountBefore > 0 &&
+				SyntheticEndBudget > 0 &&
 				Instance->HasbIsActive();
-			const bool bSyntheticNativeEnd =
-				bReconciledInactiveBlocker &&
-				SyntheticEndBudget > 0;
 			if (bReconciledInactiveBlocker)
 			{
-				if (bSyntheticNativeEnd)
-					--SyntheticEndBudget;
+				--SyntheticEndBudget;
 				Instance->bIsActive = true;
 				++ReconciledInactiveBlockerCount;
 			}
@@ -3048,7 +3047,7 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 			}
 			const bool bNeedsNativeEnd =
 				InstanceEnd.bWasActive ||
-				bSyntheticNativeEnd;
+				bReconciledInactiveBlocker;
 			if (bNeedsNativeEnd)
 			{
 				if (auto EndAbility =
@@ -3074,15 +3073,6 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 						InstanceEnd.ActivationInfoBytes,
 						bCanServerEnd);
 				}
-			}
-			if (bReconciledInactiveBlocker &&
-				!bNeedsNativeEnd &&
-				IsUsableDeathObject(Instance) &&
-				Instance->HasbIsActive())
-			{
-				// ActiveCount is zero. The synthetic bit existed only long enough for
-				// SetShouldBlockOtherAbilities(false) to remove the native block tags.
-				Instance->bIsActive = false;
 			}
 			bool bPostActive = false;
 			bool bPostBlocking = false;
