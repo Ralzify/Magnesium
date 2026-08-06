@@ -342,6 +342,9 @@ namespace AutoHosting
                 { "infinite_render", FConfiguration::bInfiniteRender.load(std::memory_order_acquire) },
                 { "randomize_arena_points", FConfiguration::RandomizeArenaPoints.load(std::memory_order_acquire) },
                 { "player_map_icons", FConfiguration::bPlayerMapIcons.load(std::memory_order_acquire) },
+                { "auto_god_mode", FConfiguration::bAutoGodMode.load(std::memory_order_acquire) },
+                { "auto_god_mode_type", FConfiguration::AutoGodModeType.load(std::memory_order_acquire) },
+                { "auto_god_mode_exclude_last_player", FConfiguration::bAutoGodModeExcludeLastPlayer.load(std::memory_order_acquire) },
                 { "randomize_kills", FConfiguration::RandomizeKills.load(std::memory_order_acquire) },
                 { "randomize_levels", FConfiguration::RandomizeLevels.load(std::memory_order_acquire) },
                 { "disable_jump_fatigue", FConfiguration::bDisableJumpFatigue.load(std::memory_order_acquire) },
@@ -485,6 +488,15 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Trickshot["player_map_icons"] =
                 FConfiguration::bPlayerMapIcons.load(
+                    std::memory_order_acquire);
+            Trickshot["auto_god_mode"] =
+                FConfiguration::bAutoGodMode.load(
+                    std::memory_order_acquire);
+            Trickshot["auto_god_mode_type"] =
+                FConfiguration::AutoGodModeType.load(
+                    std::memory_order_acquire);
+            Trickshot["auto_god_mode_exclude_last_player"] =
+                FConfiguration::bAutoGodModeExcludeLastPlayer.load(
                     std::memory_order_acquire);
             Trickshot["randomize_kills"] =
                 FConfiguration::RandomizeKills.load(
@@ -975,6 +987,27 @@ namespace AutoHosting
                 ReadBool(
                     Trickshot,
                     "player_map_icons",
+                    false),
+                std::memory_order_release);
+            FConfiguration::bAutoGodMode.store(
+                ReadBool(
+                    Trickshot,
+                    "auto_god_mode",
+                    false),
+                std::memory_order_release);
+            FConfiguration::AutoGodModeType.store(
+                ClampValue(
+                    ReadInt(
+                        Trickshot,
+                        "auto_god_mode_type",
+                        (int)FConfiguration::EAutoGodMode::Maximum),
+                    (int)FConfiguration::EAutoGodMode::Maximum,
+                    (int)FConfiguration::EAutoGodMode::Minimum),
+                std::memory_order_release);
+            FConfiguration::bAutoGodModeExcludeLastPlayer.store(
+                ReadBool(
+                    Trickshot,
+                    "auto_god_mode_exclude_last_player",
                     false),
                 std::memory_order_release);
             FConfiguration::RandomizeKills.store(

@@ -6139,6 +6139,245 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 	Calendar::RequestSnowRefreshForPlayer();
 }
 
+// Join order for auto god mode's "Exclude Last Player". A weak pointer already
+// drops a controller the moment it is destroyed, but the world guard is what
+// stops a controller that survived a travel from still counting as the newest
+// arrival in the match that followed.
+static TWeakObjectPtr<AFortPlayerControllerAthena> GLastJoinedPlayer;
+static TWeakObjectPtr<UWorld> GLastJoinedPlayerWorld;
+
+static void RefreshLastJoinedPlayerWorld()
+{
+	auto World = UWorld::GetWorld();
+	if (GLastJoinedPlayerWorld.Get() == World)
+		return;
+
+	GLastJoinedPlayer = {};
+	GLastJoinedPlayerWorld = TWeakObjectPtr<UWorld>(World);
+}
+
+void AFortPlayerControllerAthena::NoteJoinedPlayer(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	RefreshLastJoinedPlayerWorld();
+	if (!PlayerController)
+		return;
+
+	auto PlayerState = PlayerController->PlayerState;
+	if (PlayerState &&
+		PlayerState->HasbIsABot() &&
+		PlayerState->bIsABot)
+	{
+		return;
+	}
+
+	GLastJoinedPlayer =
+		TWeakObjectPtr<AFortPlayerControllerAthena>(
+			PlayerController);
+}
+
+bool AFortPlayerControllerAthena::IsLastJoinedPlayer(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	RefreshLastJoinedPlayerWorld();
+	return PlayerController &&
+		GLastJoinedPlayer.Get() == PlayerController;
+}
+
+// The shield-potion cue is what makes godding legible in game - the player sees
+// the flash instead of having to take a chat line's word for it.
+static void PlayGodModeCue(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController)
+		return;
+
+	auto PlayerState = PlayerController->PlayerState;
+	if (!PlayerState ||
+		!PlayerState->HasAbilitySystemComponent() ||
+		!PlayerState->AbilitySystemComponent)
+	{
+		return;
+	}
+
+	auto AbilitySystem = PlayerState->AbilitySystemComponent;
+	auto Handle = AbilitySystem->MakeEffectContext();
+	FGameplayTag Tag{};
+	static auto Cue = FName(
+		L"GameplayCue.Shield.PotionConsumed");
+	Tag.TagName = Cue;
+	auto PredictionKey =
+		(FPredictionKey*)malloc(FPredictionKey::Size());
+	if (!PredictionKey)
+		return;
+	memset(
+		(PBYTE)PredictionKey, 0, FPredictionKey::Size());
+	AbilitySystem->NetMulticast_InvokeGameplayCueAdded(
+		Tag, *PredictionKey, Handle);
+	AbilitySystem->NetMulticast_InvokeGameplayCueExecuted(
+		Tag, *PredictionKey, Handle);
+	free(PredictionKey);
+}
+
+// God mode has two shapes, and the "god" command and the Trickshot tab's auto
+// god mode hand out the same two. Keeping the writes in one place is what stops
+// the entry points drifting on what "godded" actually means.
+//
+// The health attribute is only usable when the build exposes a Minimum on it.
+// Builds without an immunity flag lean on that floor instead, so a missing
+// Minimum means there is nothing safe to write.
+static FFortGameplayAttributeData* GetGodModeHealthAttribute(
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!Pawn ||
+		!Pawn->HasHealthSet() ||
+		!Pawn->HealthSet ||
+		!Pawn->HealthSet->HasHealth() ||
+		!FFortGameplayAttributeData::StaticStruct() ||
+		!FFortGameplayAttributeData::HasMinimum())
+	{
+		return nullptr;
+	}
+
+	return &Pawn->HealthSet->Health;
+}
+
+// Full god: immunity where the build has it, a health floor pinned to max
+// health otherwise. False means this build exposes neither mechanism.
+static bool ApplyFullGodMode(AFortPlayerPawnAthena* Pawn, bool bEnable)
+{
+	if (!Pawn)
+		return false;
+
+	auto Health = GetGodModeHealthAttribute(Pawn);
+
+	if (VersionInfo.FortniteVersion >= 21 &&
+		Pawn->HasbCanBeDamaged())
+	{
+		Pawn->bCanBeDamaged = !bEnable;
+		return true;
+	}
+
+	if (Health)
+	{
+		Health->Minimum = bEnable ? Pawn->GetMaxHealth() : 0.f;
+		return true;
+	}
+
+	if (Pawn->HasbCanBeDamaged())
+	{
+		Pawn->bCanBeDamaged = !bEnable;
+		return true;
+	}
+
+	return false;
+}
+
+// Minimum god: damage keeps landing, health just stops at 1 HP. Callers own the
+// liveness check - this only ever runs against a pawn they already accepted.
+static bool ApplyMinimumGodMode(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	auto Health = GetGodModeHealthAttribute(Pawn);
+	if (!PlayerController || !Health)
+		return false;
+
+	// Switching from full god must make the pawn damageable. The one-health
+	// floor, rather than immunity, now prevents the lethal transition.
+	if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
+		Pawn->bCanBeDamaged = true;
+
+	const float MaxHealth = Pawn->GetMaxHealth();
+	if (FPlatformMath::IsFinite(Health->Minimum) &&
+		FPlatformMath::IsFinite(MaxHealth) &&
+		MaxHealth > 1.f &&
+		std::abs(Health->Minimum - MaxHealth) <= 0.01f)
+	{
+		Health->Minimum = 0.f;
+	}
+
+	return AFortPlayerPawnAthena::SetMinimumHealthGodMode(
+		PlayerController, true);
+}
+
+// Auto god mode arms a player the instant they leave the bus, which is the
+// first moment their real pawn exists - the aircraft pawn is thrown away by the
+// jump itself, so anything applied earlier would go with it.
+//
+// Deliberately no health or shield refill, unlike the command: the replacement
+// pawn already spawns at full health, so the only thing a refill would do here
+// is hand out a full shield bar nobody asked for. The cue still plays, so the
+// player gets the same confirmation flash either way.
+static void ApplyAutoGodModeOnAircraftJump(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!FConfiguration::bAutoGodMode.load(
+			std::memory_order_acquire) ||
+		!PlayerController)
+	{
+		return;
+	}
+
+	// Gated on Infinite Render to match where the Trickshot tab offers the
+	// checkbox. A toggle that still changed who gets godded after its control
+	// disappeared would be impossible to reason about from the tab.
+	if (FConfiguration::bInfiniteRender.load(
+			std::memory_order_acquire) &&
+		FConfiguration::bAutoGodModeExcludeLastPlayer.load(
+			std::memory_order_acquire) &&
+		AFortPlayerControllerAthena::IsLastJoinedPlayer(
+			PlayerController))
+	{
+		return;
+	}
+
+	auto Pawn = PlayerController->MyFortPawn
+		? PlayerController->MyFortPawn
+		: PlayerController->Pawn;
+	if (!Pawn)
+		return;
+
+	const bool bUseMinimum =
+		FConfiguration::AutoGodModeType.load(
+			std::memory_order_acquire) ==
+		(int)FConfiguration::EAutoGodMode::Minimum;
+
+	bool bApplied = false;
+	if (bUseMinimum)
+	{
+		bApplied = ApplyMinimumGodMode(PlayerController, Pawn);
+	}
+	else
+	{
+		// The minimum-health floor is controller scoped, so a stale one
+		// outlives the pawn swap and would fight the full floor below.
+		AFortPlayerPawnAthena::SetMinimumHealthGodMode(
+			PlayerController, false);
+		bApplied = ApplyFullGodMode(Pawn, true);
+	}
+
+	if (!bApplied)
+	{
+		PlayerController->ClientMessage(
+			FString(
+				L"Auto god mode could not be applied on this "
+				L"build."),
+			FName(), 1.f);
+		return;
+	}
+
+	PlayGodModeCue(PlayerController);
+	Pawn->ForceNetUpdate();
+	PlayerController->ClientMessage(
+		FString(
+			bUseMinimum
+				? L"Auto god mode enabled: damage is active and "
+				  L"health stops at 1 HP."
+				: L"Auto god mode enabled: full god mode."),
+		FName(), 1.f);
+}
+
 uint32 ServerAttemptAircraftJumpVft;
 void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, FFrame& Stack)
 {
@@ -6236,6 +6475,10 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 		PlayerController->MyFortPawn->K2_SetActorLocation(NewLoc, false, nullptr, true);
 
 	}
+
+	// Last, so the late-game spawn shield and the LTM readiness passes above
+	// have already had their say about this pawn's health.
+	ApplyAutoGodModeOnAircraftJump(PlayerController);
 }
 
 void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, FFrame& Stack)
@@ -22956,17 +23199,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						Mode == "check" || Mode == "c";
 				}
 
-				UFortHealthSet* HealthSet = nullptr;
-				FFortGameplayAttributeData* Health = nullptr;
-				if (Pawn->HasHealthSet() &&
-					Pawn->HealthSet &&
-					Pawn->HealthSet->HasHealth() &&
-					FFortGameplayAttributeData::StaticStruct() &&
-					FFortGameplayAttributeData::HasMinimum())
-				{
-					HealthSet = Pawn->HealthSet;
-					Health = &HealthSet->Health;
-				}
+				FFortGameplayAttributeData* Health =
+					GetGodModeHealthAttribute(Pawn);
 
 				const float MaxHealth = Pawn->GetMaxHealth();
 				const float MaxShield = Pawn->GetMaxShield();
@@ -22999,39 +23233,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						Pawn->SetShield(MaxShield);
 					}
 
-					auto PlayerState =
-						PlayerController->PlayerState;
-					if (!PlayerState ||
-						!PlayerState
-							->HasAbilitySystemComponent() ||
-						!PlayerState->AbilitySystemComponent)
-					{
-						return;
-					}
-
-					auto AbilitySystem =
-						PlayerState->AbilitySystemComponent;
-					auto Handle =
-						AbilitySystem->MakeEffectContext();
-					FGameplayTag Tag{};
-					static auto Cue = FName(
-						L"GameplayCue.Shield.PotionConsumed");
-					Tag.TagName = Cue;
-					auto PredictionKey =
-						(FPredictionKey*)malloc(
-							FPredictionKey::Size());
-					if (!PredictionKey)
-						return;
-					memset(
-						(PBYTE)PredictionKey, 0,
-						FPredictionKey::Size());
-					AbilitySystem
-						->NetMulticast_InvokeGameplayCueAdded(
-							Tag, *PredictionKey, Handle);
-					AbilitySystem
-						->NetMulticast_InvokeGameplayCueExecuted(
-							Tag, *PredictionKey, Handle);
-					free(PredictionKey);
+					PlayGodModeCue(PlayerController);
 				};
 
 				const bool bTrackedMinimum =
@@ -23112,28 +23314,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 						return;
 					}
 
-					// Switching from full god must make the pawn damageable.
-					// The one-health floor, rather than immunity, now prevents
-					// the lethal transition.
-					if (Pawn->HasbCanBeDamaged() &&
-						!Pawn->bCanBeDamaged)
-					{
-						Pawn->bCanBeDamaged = true;
-					}
-					if (FPlatformMath::IsFinite(
-							Health->Minimum) &&
-						FPlatformMath::IsFinite(MaxHealth) &&
-						MaxHealth > 1.f &&
-						std::abs(
-							Health->Minimum - MaxHealth) <=
-							0.01f)
-					{
-						Health->Minimum = 0.f;
-					}
-
-					if (!AFortPlayerPawnAthena::
-							SetMinimumHealthGodMode(
-								PlayerController, true))
+					if (!ApplyMinimumGodMode(
+							PlayerController, Pawn))
 					{
 						PlayerController->ClientMessage(
 							FString(
@@ -23169,26 +23351,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				const bool bEnableFull =
 					bSwitchingFromMinimum ||
 					!HasFullGodMode();
-				bool bApplied = false;
-				if (VersionInfo.FortniteVersion >= 21 &&
-					Pawn->HasbCanBeDamaged())
-				{
-					Pawn->bCanBeDamaged = !bEnableFull;
-					bApplied = true;
-				}
-				else if (Health)
-				{
-					Health->Minimum =
-						bEnableFull ? MaxHealth : 0.f;
-					bApplied = true;
-				}
-				else if (Pawn->HasbCanBeDamaged())
-				{
-					Pawn->bCanBeDamaged = !bEnableFull;
-					bApplied = true;
-				}
-
-				if (!bApplied)
+				if (!ApplyFullGodMode(Pawn, bEnableFull))
 				{
 					PlayerController->ClientMessage(
 						FString(

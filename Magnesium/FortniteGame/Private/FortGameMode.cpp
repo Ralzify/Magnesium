@@ -7480,6 +7480,10 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
         ShouldRepairLateSeasonTeams() && !bIsBot;
     uint8 ReservedLateSeasonTeam = 0;
 
+    // Auto god mode's "Exclude Last Player" reads join order from here, so it
+    // has to be recorded before anything below can bail out on this player.
+    AFortPlayerControllerAthena::NoteJoinedPlayer(NewPlayer);
+
     if (bRepairLateSeasonTeam)
     {
         auto Playlist = GameState->HasCurrentPlaylistInfo()

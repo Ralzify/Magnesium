@@ -542,6 +542,13 @@ public:
         AFortPlayerControllerAthena* PlayerController,
         const char* Source,
         bool bRequireAircraftPassenger = false);
+    // Auto god mode's "Exclude Last Player" needs join order. Bots are ignored
+    // - they are spawned rather than joining, and one filling the lobby would
+    // otherwise take the trickshot target's place.
+    static void NoteJoinedPlayer(
+        AFortPlayerControllerAthena* PlayerController);
+    static bool IsLastJoinedPlayer(
+        AFortPlayerControllerAthena* PlayerController);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);
     DefHookOg(void, ServerAttemptAircraftJump_, UObject*, FFrame&);
     static void ServerExecuteInventoryItem_(UObject*, FFrame&);

@@ -5187,7 +5187,9 @@ static void ApplyInitialTrickshotDefaults()
     FConfiguration::bDisableSupplyDrops.store(
         true, std::memory_order_release);
     FConfiguration::bVehicleBumpLaunch.store(
-        false, std::memory_order_release);
+        true, std::memory_order_release);
+    FConfiguration::bAutoGodMode.store(
+        true, std::memory_order_release);
     FConfiguration::bAutoPauseTODM.store(
         false, std::memory_order_release);
 
@@ -9768,6 +9770,39 @@ void GUI::Init()
                 AtomicCheckbox(
                     "Player Map Icons",
                     FConfiguration::bPlayerMapIcons);
+
+                AtomicCheckbox(
+                    "Auto God Mode",
+                    FConfiguration::bAutoGodMode);
+
+                if (FConfiguration::bAutoGodMode)
+                {
+                    ImGui::Indent(12.f);
+
+                    static const char* const AutoGodModes[] = {
+                        "Maximum",
+                        "Minimum"
+                    };
+
+                    ImGui::TextUnformatted("God Mode Type");
+                    ImGui::SetNextItemWidth(Width);
+                    AtomicCombo(
+                        "##auto-god-mode",
+                        FConfiguration::AutoGodModeType,
+                        AutoGodModes,
+                        IM_ARRAYSIZE(AutoGodModes));
+
+                    // The trickshotters join first and the player they are all
+                    // aiming at joins last, so the newest arrival is the one
+                    // who has to stay killable.
+                    if (FConfiguration::bInfiniteRender)
+                        AtomicCheckbox(
+                            "Exclude Last Player",
+                            FConfiguration::
+                                bAutoGodModeExcludeLastPlayer);
+
+                    ImGui::Unindent(12.f);
+                }
 
                 if (FConfiguration::bLateGame)
                     AtomicCheckbox(
