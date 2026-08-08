@@ -8,7 +8,7 @@
 // Building/editing behavior is version dependent and currently not
 // simulated (safe skip).
 // ============================================================================
-#include "PlayerAITypes.h"
+#include "SupportTypes.h"
 
 struct FPlayerAISkillSettings
 {

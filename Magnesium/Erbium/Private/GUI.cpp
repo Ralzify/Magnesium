@@ -18,7 +18,7 @@
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
 #include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
-#include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
+#include "../BotAI/Public/BotAI.h"
 #include "../../Engine/Public/Texture.h"
 #include <sstream>
 #include <fstream>
@@ -9001,11 +9001,10 @@ void GUI::Init()
             if (gsStatus < StartedMatch)
             {
                 // Special maps and native objective modes require their normal
-                // phase flow. PlayerAI also owns match setup while enabled.
+                // phase flow.
                 const bool bLockLateGame =
                     LocksLateGameForSelection(
-                        SelectedPlaylist) ||
-                    MagnesiumPlayerAISettings::bEnableAIs;
+                        SelectedPlaylist);
                 if (bLockLateGame)
                     FConfiguration::SetLateGameEnabled(false);
 
@@ -9428,15 +9427,50 @@ void GUI::Init()
         }
         case 4:
         {
-            SectionHeader("AI Players", SectionWidth);
+            SectionHeader("Bot AI", SectionWidth);
             BeginSectionBody();
 
-            ImGui::BeginDisabled(
-                FConfiguration::bLateGame);
             AtomicCheckbox(
-                "Enable AIs (EXPERIMENTAL)",
-                MagnesiumPlayerAISettings::bEnableAIs);
-            ImGui::EndDisabled();
+                "Enable Bot AI (EXPERIMENTAL)",
+                BotAISettings::bEnabled);
+            ImGui::TextDisabled(
+                "Makes bots from the spawnbot command walk, run and");
+            ImGui::TextDisabled(
+                "swim around instead of standing still. They use the");
+            ImGui::TextDisabled(
+                "game's own movement. Native AI is untouched.");
+
+            if (BotAISettings::bEnabled.load(
+                    std::memory_order_acquire))
+            {
+                ImGui::Spacing();
+
+                AtomicCheckbox(
+                    "Stay Inside The Safe Zone",
+                    BotAISettings::bSeekSafeZone);
+                AtomicCheckbox(
+                    "Idle Jumps And Pauses",
+                    BotAISettings::bIdleFlourishes);
+                AtomicCheckbox(
+                    "Native Movement",
+                    BotAISettings::bNativeMovement);
+                ImGui::TextDisabled(
+                    "Uses the game's own walking, running and swimming.");
+                ImGui::TextDisabled(
+                    "Turn off if bots misbehave on this build.");
+
+                ImGui::Spacing();
+                AtomicCheckbox(
+                    "Movement Diagnostics",
+                    BotAISettings::bMovementDiagnostics);
+                ImGui::TextDisabled(
+                    "Debug only: bots stop moving and log why once a");
+                ImGui::TextDisabled(
+                    "second. Look for [BotAI][Diag] in the console.");
+
+                ImGui::Spacing();
+                ImGui::TextDisabled("%s", BotAI::GetStatusLine());
+            }
 
             EndSectionBody();
 

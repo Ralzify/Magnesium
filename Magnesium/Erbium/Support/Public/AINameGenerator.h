@@ -6,7 +6,7 @@
 // separate from the existing bot command naming (FConfiguration::BotName /
 // "Anonymous [xxx]") - this module never reads or writes those settings.
 // ============================================================================
-#include "PlayerAITypes.h"
+#include "SupportTypes.h"
 #include <string>
 
 class AINameGenerator

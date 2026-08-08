@@ -11,9 +11,7 @@
 #include "../../Engine/Public/DataTableFunctionLibrary.h"
 #include "../../Erbium/Public/Calendar.h"
 #include "../../Erbium/Public/Configuration.h"
-#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
-#include "../../Erbium/PlayerAI/Public/PlayerAIManager.h"
-#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
+#include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
 #include "../Public/FortLootPackage.h"
 #include "../Public/BuildingFoundation.h"
 #include "../../Erbium/Public/LateGame.h"
@@ -6475,20 +6473,6 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
     if (!NewPlayer || !StartSpot)
         return;
 
-    if (auto AI = PlayerAIManager::FindByController(NewPlayer);
-        AI && (AI->bDeathHandled ||
-            AI->GetState() == EPlayerAIState::Dead))
-    {
-        if (Ret)
-            *Ret = nullptr;
-
-        SDK::DbgLog(
-            "[PlayerAI][Respawn] blocked SpawnDefaultPawnFor "
-            "for terminal controller=%p\n",
-            (void*)NewPlayer);
-        return;
-    }
-
     auto GameState = GameMode->GameState;
     AFortPlayerPawnAthena* Pawn = nullptr;
    
@@ -8528,47 +8512,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
                 GameState);
     }
 
-    // Legacy native StartAircraftPhase owns every AlivePlayers entry: it can
-    // destroy/reset the warmup pawn before the PlayerAI EnterAircraft guard
-    // is reached. Temporarily park PlayerAI roster entries, then restore them
-    // unchanged after the native transition.
-    std::vector<AActor*> ParkedPlayerAIs;
-
-    for (int i = GameMode->AlivePlayers.Num() - 1; i >= 0; i--)
-    {
-        auto Controller =
-            (AFortPlayerControllerAthena*)GameMode->AlivePlayers[i];
-
-        if (Controller &&
-            MagnesiumPlayerAIIntegration::
-                IsPlayerAIController(Controller))
-        {
-            ParkedPlayerAIs.push_back(GameMode->AlivePlayers[i]);
-            GameMode->AlivePlayers.Remove(i);
-        }
-    }
-
     auto Ret = StartAircraftPhaseOG(GameMode, a2);
-
-    for (auto Controller : ParkedPlayerAIs)
-    {
-        bool bAlreadyPresent = false;
-
-        for (auto Existing : GameMode->AlivePlayers)
-        {
-            if (Existing == Controller)
-            {
-                bAlreadyPresent = true;
-                break;
-            }
-        }
-
-        if (!bAlreadyPresent)
-            GameMode->AlivePlayers.Add(Controller);
-    }
-
-    if (!ParkedPlayerAIs.empty())
-        VersionFeatureAdapter::SyncPlayersLeft(true);
 
     // A legacy console dispatch can be dropped or native setup can reject a
     // transient attempt. Do not publish StartedMatch or consume the release
@@ -8603,12 +8547,6 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
         {
             auto PlayerController =
                 (AFortPlayerControllerAthena*)Player;
-
-            if (MagnesiumPlayerAIIntegration::
-                IsPlayerAIController(PlayerController))
-            {
-                continue;
-            }
 
             AFortPlayerControllerAthena::
                 ClearDroppableInventoryForAircraft(
@@ -8829,11 +8767,6 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
     auto GameMode = (AFortGameMode*)Context;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-    // PlayerAI must be off the aircraft's books before the native exit
-    // processing runs: its auto-jump rejects connectionless controllers
-    // and kills the AI as leftover passengers instead.
-    MagnesiumPlayerAIIntegration::OnAircraftDropZoneEnding();
-
     // A passenger that never sent the jump RPC is about to be ejected by the
     // native drop-zone path. Restrict this fallback to controllers still
     // aboard so players who jumped early and already looted are never wiped.
@@ -8842,8 +8775,6 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
         auto PlayerController =
             (AFortPlayerControllerAthena*)Player;
         if (PlayerController &&
-            !MagnesiumPlayerAIIntegration::IsPlayerAIController(
-                PlayerController) &&
             PlayerController->IsInAircraft())
         {
             AFortPlayerControllerAthena::

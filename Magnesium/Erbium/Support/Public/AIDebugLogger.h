@@ -6,7 +6,7 @@
 // terminology (never "bot") so they cannot be confused with the existing
 // bot command output.
 // ============================================================================
-#include "PlayerAITypes.h"
+#include "SupportTypes.h"
 
 class AIDebugLogger
 {

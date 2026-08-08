@@ -1,10 +1,7 @@
 ﻿#include "pch.h"
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/FortGameMode.h"
-#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
-#include "../../Erbium/PlayerAI/Public/AIDebugLogger.h"
-#include "../../Erbium/PlayerAI/Public/PlayerAIManager.h"
-#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
+#include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/BuildingSMActor.h"
 #include "../Public/FortKismetLibrary.h"
@@ -1032,9 +1029,7 @@ int32 AFortPlayerControllerAthena::ClearDroppableInventoryForAircraft(
 	// preserve loot collected on the warmup island. Aircraft transition cleanup
 	// therefore applies regardless of that respawn setting.
 	if (!IsUsableDeathObject(PlayerController) ||
-		!IsUsableDeathObject(PlayerController->WorldInventory) ||
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(
-			PlayerController))
+		!IsUsableDeathObject(PlayerController->WorldInventory))
 	{
 		return 0;
 	}
@@ -7886,9 +7881,7 @@ static void RememberLandingItemSelection(
 	RefreshLandingItemRestoreWorld();
 	if (!IsValidLandingItemPlayer(PlayerController, Pawn) ||
 		!IsLandingItemPawnCombatReady(Pawn) ||
-		IsTrackedSpawnedBotController(PlayerController) ||
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(
-			PlayerController))
+		IsTrackedSpawnedBotController(PlayerController))
 	{
 		return;
 	}
@@ -7974,9 +7967,7 @@ static void EnsureLandingItemTracking(
 	RefreshLandingItemRestoreWorld();
 	if (!IsValidLandingItemPlayer(PlayerController, Pawn) ||
 		!IsLandingItemPawnCombatReady(Pawn) ||
-		IsTrackedSpawnedBotController(PlayerController) ||
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(
-			PlayerController))
+		IsTrackedSpawnedBotController(PlayerController))
 	{
 		return;
 	}
@@ -8018,9 +8009,7 @@ void AFortPlayerControllerAthena::CaptureLandingItemBeforeNativeEnd(
 	RefreshLandingItemRestoreWorld();
 	if (!IsValidLandingItemPlayer(PlayerController, Pawn) ||
 		!IsLandingItemPawnCombatReady(Pawn) ||
-		IsTrackedSpawnedBotController(PlayerController) ||
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(
-			PlayerController))
+		IsTrackedSpawnedBotController(PlayerController))
 	{
 		return;
 	}
@@ -8306,9 +8295,7 @@ static void TickLandingItemSelectionRestores()
 			!AFortPlayerControllerAthena::StaticClass() ||
 			!PlayerController->IsA(
 				AFortPlayerControllerAthena::StaticClass()) ||
-			IsTrackedSpawnedBotController(PlayerController) ||
-			MagnesiumPlayerAIIntegration::IsPlayerAIController(
-				PlayerController))
+			IsTrackedSpawnedBotController(PlayerController))
 		{
 			StateIt = GLandingItemRestoreStates.erase(StateIt);
 			continue;
@@ -9358,30 +9345,20 @@ static bool IsUsableDeathObject(const UObject* Object)
 static bool IsManagedNonRespawningBot(
 	AFortPlayerControllerAthena* PlayerController)
 {
-	// Both Magnesium PlayerAI backends and `spawnbot` controllers are
-	// connectionless, server-owned participants. A player respawn handshake
-	// cannot complete normally for them; allowing the global override through
-	// creates an untracked replacement pawn that can retain transition
-	// invulnerability. Their first terminal death is therefore authoritative.
+	// `spawnbot` controllers are connectionless, server-owned participants.
+	// A player respawn handshake cannot complete normally for them; allowing
+	// the global override through creates an untracked replacement pawn that
+	// can retain transition invulnerability. Their first terminal death is
+	// therefore authoritative.
 	return PlayerController &&
-		(IsTrackedSpawnedBotController(PlayerController) ||
-			MagnesiumPlayerAIIntegration::IsPlayerAIController(
-				PlayerController));
+		IsTrackedSpawnedBotController(PlayerController);
 }
 
 static bool IsTerminalManagedBot(
 	AFortPlayerControllerAthena* PlayerController)
 {
-	if (!PlayerController)
-		return false;
-
-	if (IsTrackedSpawnedBotController(PlayerController))
-		return true;
-
-	auto AI = PlayerAIManager::FindByController(PlayerController);
-	return AI &&
-		(AI->bDeathHandled ||
-		 AI->GetState() == EPlayerAIState::Dead);
+	return PlayerController &&
+		IsTrackedSpawnedBotController(PlayerController);
 }
 
 static bool IsHumanVictoryController(
@@ -9398,8 +9375,7 @@ static bool IsHumanVictoryController(
 		Controller->PlayerState->Cast<AFortPlayerStateAthena>();
 	if (!PlayerState ||
 		(PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
-		IsTrackedSpawnedBotController(Controller) ||
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(Controller))
+		IsTrackedSpawnedBotController(Controller))
 	{
 		return false;
 	}
@@ -10788,8 +10764,6 @@ static bool RequestLegacyClientEquipmentRefresh(
 		return false;
 	if (IsTrackedSpawnedBotController(PlayerController))
 		return false;
-	if (MagnesiumPlayerAIIntegration::IsPlayerAIController(PlayerController))
-		return false;
 
 	return InvokeLegacyClientExecuteInventoryItem(
 		PlayerController, ItemGuid);
@@ -11413,8 +11387,7 @@ static bool IsLateSeasonHumanVictoryController(
 	auto PlayerState =
 		(AFortPlayerStateAthena*)Controller->PlayerState;
 	if ((PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
-		IsTrackedSpawnedBotController(Controller) ||
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(Controller))
+		IsTrackedSpawnedBotController(Controller))
 	{
 		return false;
 	}
@@ -12983,9 +12956,9 @@ static bool IsRespawningAllowedForDeath(
 		return false;
 	}
 
-	// The global GUI respawn override is a player policy. Native AI, managed
-	// PlayerAI, and command-spawned bots all have server-owned lifecycles and
-	// no client handshake that can safely finish a replacement pawn. Treat any
+	// The global GUI respawn override is a player policy. Native AI and
+	// command-spawned bots all have server-owned lifecycles and no client
+	// handshake that can safely finish a replacement pawn. Treat any
 	// reflected bot player state as terminal even when it is not registered in
 	// one of Magnesium's explicit bot containers.
 	if (PlayerState &&
@@ -15660,9 +15633,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 		return ClientOnPawnDiedOG(PlayerController, DeathReport);
 	const ULONGLONG DeathPipelineStartMs = GetTickCount64();
 
-	const bool bPlayerAIVictim =
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(
-			PlayerController);
 	const bool bSpawnedCommandBotVictim =
 		IsTrackedSpawnedBotController(PlayerController);
 	auto ManagedBotEliminatedPawn =
@@ -15691,9 +15661,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	const bool bIsLateSeasonBotVictim =
 		VersionInfo.FortniteVersion >= 17.0 &&
 		VersionInfo.FortniteVersion < 19.0 &&
-		((PlayerState->HasbIsABot() && PlayerState->bIsABot) ||
-			MagnesiumPlayerAIIntegration::IsPlayerAIController(
-				PlayerController));
+		(PlayerState->HasbIsABot() && PlayerState->bIsABot);
 	UFortWeaponItemDefinition* LateSeasonFinishingWeapon = nullptr;
 	uint8 LateSeasonDeathCause = 0;
 
@@ -15883,12 +15851,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			{
 				SDK::DbgLog(
 					"[EliminationTiming] ClientOnPawnDiedOG "
-					"elapsed=%llu ms victim=%p commandBot=%d "
-					"playerAI=%d version=%.2f\n",
+					"elapsed=%llu ms victim=%p commandBot=%d version=%.2f\n",
 					NativePawnDiedElapsedMs,
 					(void*)PlayerController,
 					bSpawnedCommandBotVictim ? 1 : 0,
-					bPlayerAIVictim ? 1 : 0,
 					VersionInfo.FortniteVersion);
 			}
 
@@ -16070,12 +16036,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	if (!bWasAshtonLeader)
 		PurgeExclusiveGadgets(PlayerController);
 
-	// PlayerAI victim diagnostic: kill credit for the killer flows from this
-	// report - a missing killer here explains "no credit for killing AI".
-	if (MagnesiumPlayerAIIntegration::IsPlayerAIController(PlayerController))
-		AIDebugLogger::Log("Elimination", "AI death report: killerPS %d, killerPawn %d, killerCtrl %d",
-			KillerPlayerState ? 1 : 0, KillerPawn ? 1 : 0,
-			(KillerPawn && KillerPawn->Controller) ? 1 : 0);
 	FGameplayTagContainer EmptyDeathTags{};
 	auto& DeathTags = DeathReport.HasTags() ? DeathReport.Tags : EmptyDeathTags;
 	const bool bConfirmedStormDeath =
@@ -16338,17 +16298,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				// remain attached to a death animation that never completes.
 				if (VersionInfo.FortniteVersion == 2.50)
 				{
-					if (bPlayerAIVictim ||
-						bSpawnedCommandBotVictim)
+					if (bSpawnedCommandBotVictim)
 					{
 						InvalidateRespawnHandshake(
 							PlayerState);
-					}
-					if (bPlayerAIVictim)
-					{
-						PlayerAIManager::HandleControllerDeath(
-							PlayerController,
-							ManagedBotEliminatedPawn);
 					}
 					CallNativePawnDied();
 					bCalledNativeDeathEarly = true;
@@ -16365,11 +16318,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					SDK::DbgLog(
 						"[EliminationTiming] RemoveFromAlivePlayers "
 						"elapsed=%llu ms victim=%p commandBot=%d "
-						"playerAI=%d matchState=%s version=%.2f\n",
+						"matchState=%s version=%.2f\n",
 						RemoveFromAlivePlayersElapsedMs,
 						(void*)PlayerController,
 						bSpawnedCommandBotVictim ? 1 : 0,
-						bPlayerAIVictim ? 1 : 0,
 						GameMode->MatchState.ToString().c_str(),
 						VersionInfo.FortniteVersion);
 				}
@@ -16865,9 +16817,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	// victim's pawn state. Old builds use the delayed SpectateOnDeath timer;
 	// modern builds are repaired immediately after native death initialization.
 	const bool bIsHumanVictim =
-		!(PlayerState->HasbIsABot() && PlayerState->bIsABot) &&
-		!MagnesiumPlayerAIIntegration::IsPlayerAIController(
-			PlayerController);
+		!(PlayerState->HasbIsABot() && PlayerState->bIsABot);
 	const bool bDeathSpectatingAllowed =
 		!GameMode->HasbAllowSpectateAfterDeath() ||
 		GameMode->bAllowSpectateAfterDeath;
@@ -16993,24 +16943,18 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 			bVictimWasAliveParticipant);
 	}
 
-	if (bPlayerAIVictim || bSpawnedCommandBotVictim)
+	if (bSpawnedCommandBotVictim)
 		InvalidateRespawnHandshake(PlayerState);
 
-	// Command-spawned bots are not owned by PlayerAIManager, so retain their
-	// actor graph through one replication pass and then tear it down as one
-	// unit. The cleanup also catches any unauthorized replacement pawn native
+	// Command-spawned bots have no owning connection, so retain their actor
+	// graph through one replication pass and then tear it down as one unit.
+	// The cleanup also catches any unauthorized replacement pawn native
 	// respawn code managed to create.
 	if (bSpawnedCommandBotVictim)
 	{
 		ScheduleSpawnedBotCleanup(
 			PlayerController, ManagedBotEliminatedPawn,
 			PlayerState, ManagedBotInventory);
-	}
-
-	if (bPlayerAIVictim)
-	{
-		PlayerAIManager::HandleControllerDeath(
-			PlayerController, ManagedBotEliminatedPawn);
 	}
 
 	if (!bCalledNativeDeathEarly)
@@ -17024,7 +16968,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	// repeats this idempotently after possession.
 	if (bLegacyDirectRespawnDeath &&
 		bVictimWasAliveParticipant &&
-		!bPlayerAIVictim &&
 		!bSpawnedCommandBotVictim &&
 		GUI::gsStatus != Ended &&
 		GameMode->MatchState != FName(L"WaitingPostMatch"))
@@ -17246,12 +17189,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 	{
 		SDK::DbgLog(
 			"[EliminationTiming] complete custom death pipeline "
-			"elapsed=%llu ms victim=%p commandBot=%d "
-			"playerAI=%d version=%.2f\n",
+			"elapsed=%llu ms victim=%p commandBot=%d version=%.2f\n",
 			DeathPipelineElapsedMs,
 			(void*)PlayerController,
 			bSpawnedCommandBotVictim ? 1 : 0,
-			bPlayerAIVictim ? 1 : 0,
 			VersionInfo.FortniteVersion);
 	}
 }
@@ -22915,7 +22856,7 @@ cheat timeofday <hour> - Sets the time of day (0-24)
 cheat pausetimeofday - Pauses/Unpauses the time of day
 cheat spawnbot [X Y Z] [count] [weapon] [s[size] | s[X,Y,Z]] - Spawns a player bot with its default appearance
 cheat tpbot - Teleports the player bot to your location
-cheat delbot - Removes every spawned player bot (PlayerAI is left alone)
+cheat delbot - Removes every spawned player bot
 cheat dumppawns - Lists every player pawn with its index and owner
 cheat dumpge - Builds an indexed gameplay-effect catalog and writes DumpedGameplayEffects.txt
 cheat applyge <index | effect name/path | remove> - Applies a gameplay effect, or removes all active effects
@@ -27628,10 +27569,10 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					if (!BotPS->HasbIsABot() || !BotPS->bIsABot)
 						continue;
 
-					// PlayerAI entities also carry bIsABot. They are owned by
-					// PlayerAI (which does its own alive-count bookkeeping), so
-					// leave them alone - delbot is for "spawnbot" bots only.
-					if (PlayerAIManager::FindByController(BotPC))
+					// Native playlist/NPC bots also carry bIsABot and own their
+					// own lifecycle, so leave them alone - delbot is for
+					// "spawnbot" bots only.
+					if (!IsTrackedSpawnedBotController(BotPC))
 						continue;
 
 					BotsToRemove.push_back(BotPC);
@@ -30805,15 +30746,6 @@ void AFortPlayerControllerAthena::EnterAircraft(UObject* Object, AActor* Aircraf
 {
 	auto PlayerController =
 		ResolveAircraftPlayerController(Object);
-
-	// PlayerAI entities are virtual passengers: native entry can destroy or
-	// replace their warmup pawn/inventory and native jump RPCs reject
-	// connectionless controllers on old versions. Their bus ride and skydive
-	// are owned by the bounded PlayerAI transport flow.
-	if (PlayerController &&
-		MagnesiumPlayerAIIntegration::IsPlayerAIController(
-			PlayerController))
-		return;
 
 	const bool bWasInAircraft =
 		PlayerController &&

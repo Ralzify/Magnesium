@@ -13,7 +13,7 @@
 #include "../../FortniteGame/Public/FortVehicleMods.h"
 #include "../../FortniteGame/Public/FortWeapon.h"
 #include "../Public/AbilitySystemComponent.h"
-#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
+#include "../../Erbium/BotAI/Public/BotAI.h"
 
 #include <algorithm>
 #include <cmath>
@@ -952,7 +952,7 @@ static void SynchronizeRespawnManagedStormEffects(UNetDriver* Driver,
 		// This custom lower-season synchronizer explicitly applies the storm GE
 		// and does not consult SafeZoneAppliedGE. Leave exact cheat-spawned bots
 		// to their dedicated suppression path so FN 4.x cannot reapply damage
-		// immediately after it was removed. PlayerAI/native bots remain native.
+		// immediately after it was removed. Native bots remain native.
 		if (AFortPlayerControllerAthena::
 			IsCheatSpawnedBotController(Player))
 		{
@@ -1715,8 +1715,8 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 	TickAuthoritativeMatchLifecycle(Driver);
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
-	// Universal PlayerAI system (separate from the bot command and native AI).
-	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+	// Drives the bots created by the spawnbot command (native AI untouched).
+	BotAI::OnServerTick(Driver, DeltaSeconds);
 
 	// Finalize invalid health states after every custom gameplay producer and
 	// immediately before this path's replication send.
@@ -1862,8 +1862,8 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 
 	TickAuthoritativeMatchLifecycle(Driver);
 
-	// Universal PlayerAI system (separate from the bot command and native AI).
-	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+	// Drives the bots created by the spawnbot command (native AI untouched).
+	BotAI::OnServerTick(Driver, DeltaSeconds);
 
 	if (Driver->ReplicationDriver)
 		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
@@ -2083,8 +2083,8 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-NukeRockets\n", _tf);
 
-	// Universal PlayerAI system (separate from the bot command and native AI).
-	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+	// Drives the bots created by the spawnbot command (native AI untouched).
+	BotAI::OnServerTick(Driver, DeltaSeconds);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OnServerTick\n", _tf);
 
 	// Finalize invalid health states after every custom gameplay producer and

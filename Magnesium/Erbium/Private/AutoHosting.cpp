@@ -3,7 +3,7 @@
 #include "../Public/Calendar.h"
 #include "../Public/Configuration.h"
 #include "../Public/GUI.h"
-#include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
+#include "../BotAI/Public/BotAI.h"
 #include "../../json.hpp"
 
 #include <ShlObj.h>
@@ -330,7 +330,10 @@ namespace AutoHosting
             };
 
             Preferences["bots"] = {
-                { "enable_ai_players", MagnesiumPlayerAISettings::bEnableAIs.load(std::memory_order_acquire) },
+                { "enable_bot_ai", BotAISettings::bEnabled.load(std::memory_order_acquire) },
+                { "bot_ai_seek_safe_zone", BotAISettings::bSeekSafeZone.load(std::memory_order_acquire) },
+                { "bot_ai_idle_flourishes", BotAISettings::bIdleFlourishes.load(std::memory_order_acquire) },
+                { "bot_ai_native_movement", BotAISettings::bNativeMovement.load(std::memory_order_acquire) },
                 { "health", FConfiguration::BotHealth.load(std::memory_order_acquire) },
                 { "shield", FConfiguration::BotShield.load(std::memory_order_acquire) },
                 { "use_custom_names", FConfiguration::UseCustomBotNames.load(std::memory_order_acquire) },
@@ -939,11 +942,17 @@ namespace AutoHosting
 
             const auto& Bots =
                 ReadObject(Preferences, "bots");
-            MagnesiumPlayerAISettings::bEnableAIs.store(
-                ReadBool(
-                    Bots,
-                    "enable_ai_players",
-                    false),
+            BotAISettings::bEnabled.store(
+                ReadBool(Bots, "enable_bot_ai", false),
+                std::memory_order_release);
+            BotAISettings::bSeekSafeZone.store(
+                ReadBool(Bots, "bot_ai_seek_safe_zone", true),
+                std::memory_order_release);
+            BotAISettings::bIdleFlourishes.store(
+                ReadBool(Bots, "bot_ai_idle_flourishes", true),
+                std::memory_order_release);
+            BotAISettings::bNativeMovement.store(
+                ReadBool(Bots, "bot_ai_native_movement", true),
                 std::memory_order_release);
             FConfiguration::BotHealth.store(
                 ReadInt(Bots, "health", 21),

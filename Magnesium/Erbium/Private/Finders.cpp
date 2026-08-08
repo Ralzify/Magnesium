@@ -2,7 +2,7 @@
 #include "pch.h"
 #include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
-#include "../PlayerAI/Public/PlayerAIFaultGuard.h"
+#include "../Support/Public/FaultGuard.h"
 
 uint64_t FindGIsClient()
 {
@@ -4174,21 +4174,21 @@ static void ReportLine(FILE* File, const char* Fmt, ...)
 // with C++ objects that need unwinding.
 //
 // The crash reporter is a *vectored* handler that runs before this frame
-// __except and would terminate the process first. Raising the PlayerAI fault
+// __except and would terminate the process first. Raising the guarded fault
 // guard depth for the duration of the call makes it return
 // EXCEPTION_CONTINUE_SEARCH so this frame handler actually gets the fault.
 static uint64_t CallFinderGuarded(uint64_t (*Func)(), bool* bCrashed)
 {
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     __try
     {
         uint64_t Result = Func();
-        GPlayerAIGuardedNativeCallDepth--;
+        GGuardedNativeCallDepth--;
         return Result;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        GPlayerAIGuardedNativeCallDepth--;
+        GGuardedNativeCallDepth--;
         *bCrashed = true;
         return 0;
     }

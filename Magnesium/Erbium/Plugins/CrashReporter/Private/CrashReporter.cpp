@@ -1,6 +1,6 @@
 #include "pch.h"
 #include "../Public/CrashReporter.h"
-#include "../../../PlayerAI/Public/PlayerAIFaultGuard.h"
+#include "../../../Support/Public/FaultGuard.h"
 #include <TlHelp32.h>
 #include <winternl.h>
 #include <sstream>
@@ -61,10 +61,10 @@ LONG WINAPI ErbiumUnhandledExceptionFilter(LPEXCEPTION_POINTERS ExceptionInfo)
     if ((ExceptionInfo->ExceptionRecord->ExceptionCode & 0x80000000) == 0 || (ExceptionInfo->ExceptionRecord->ExceptionCode & 0x30000000) != 0)
         return EXCEPTION_CONTINUE_SEARCH;
 
-    // A PlayerAI SEH guard is active on this thread and will contain this
+    // A support-layer SEH guard is active on this thread and will contain this
     // fault (feature degrade instead of a crash) - let the frame handler
     // run. All other exceptions are reported exactly as before.
-    if (GPlayerAIGuardedNativeCallDepth > 0)
+    if (GGuardedNativeCallDepth > 0)
         return EXCEPTION_CONTINUE_SEARCH;
 
     // This address is used by some Fortnite builds as an intentional probe.
