@@ -737,14 +737,14 @@ namespace
             ? (AFortGameStateAthena*)World->GameState
             : nullptr;
 
-        if (!GameState || !GameState->HasCurrentPlaylistInfo() ||
-            !GameState->CurrentPlaylistInfo.BasePlaylist ||
-            !GameState->CurrentPlaylistInfo.BasePlaylist->HasMaxSquadSize())
+        const auto Playlist =
+            AFortGameMode::GetActivePlaylist(GameState);
+        if (!Playlist || !Playlist->HasMaxSquadSize())
         {
             return false;
         }
 
-        return GameState->CurrentPlaylistInfo.BasePlaylist->MaxSquadSize <= 1;
+        return Playlist->MaxSquadSize <= 1;
     }
 
     // Only two situations deal damage: nobody is driving, or the driver is an
@@ -1031,7 +1031,8 @@ void FortVehicleBump::OnVehicleMoved(
     const FVector& Location,
     const FVector& LinearVelocity)
 {
-    if (!FConfiguration::bVehicleBumpLaunch || !Vehicle)
+    if (VersionInfo.FortniteVersion < 4.30 ||
+        !FConfiguration::bVehicleBumpLaunch || !Vehicle)
         return;
 
     const ULONGLONG CurrentTimeMs = GetTickCount64();
@@ -1052,7 +1053,8 @@ void FortVehicleBump::OnVehicleMoved(
 
 void FortVehicleBump::Tick()
 {
-    if (!FConfiguration::bVehicleBumpLaunch)
+    if (VersionInfo.FortniteVersion < 4.30 ||
+        !FConfiguration::bVehicleBumpLaunch)
         return;
 
     auto* World = UWorld::GetWorld();

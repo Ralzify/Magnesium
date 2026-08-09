@@ -40,6 +40,7 @@ struct FConfiguration
     static inline std::atomic<float> MaxTickRate{ 30.f };
     static inline std::atomic_int Port{ 7777 };
     static inline std::atomic_bool bAutoHost{ false };
+    static inline std::atomic_bool bSaveAutoHostSettings{ false };
     static inline constexpr int DefaultAutoHostDelaySeconds = 30;
     static inline std::atomic_int AutoHostDelaySeconds{
         DefaultAutoHostDelaySeconds
@@ -120,7 +121,7 @@ struct FConfiguration
     // FortVehicleBump reproduces it from the replicated linear velocity.
     static inline std::atomic_bool bVehicleBumpLaunch{ true };
     // Below this the vehicle just nudges past you, as in the retail game.
-    static inline std::atomic<float> VehicleBumpMinSpeedKmh{ 20.f };
+    static inline std::atomic<float> VehicleBumpMinSpeedKmh{ 10.f };
     // Compensates for how much of the launch survives the trip to the client.
     // The launch velocity itself is computed from the game's own tuning, but a
     // server-side LaunchCharacter reaches the client as a position correction
@@ -136,6 +137,24 @@ struct FConfiguration
     static inline std::atomic_bool bUseWinLines{ true };
     static inline std::atomic_bool RandomizeArenaPoints{ false };
     static inline std::atomic_bool bPlayerMapIcons{ false };
+    // Auto god mode hands out the "god" command's protection the moment a
+    // player leaves the bus, so a trickshot run never has to be typed for.
+    // Maximum pins the health floor to max health - nothing lands at all;
+    // Minimum keeps damage live and floors health at 1 HP instead.
+    enum class EAutoGodMode : int
+    {
+        Maximum = 0,
+        Minimum = 1,
+    };
+    static inline std::atomic_bool bAutoGodMode{ false };
+    static inline std::atomic_int AutoGodModeType{
+        (int)EAutoGodMode::Maximum
+    };
+    // A trickshot lobby fills with the shooters first and the target last, so
+    // the newest human is the one player who has to stay killable. Offered
+    // alongside Infinite Render, and only takes effect while that is on, since
+    // that pairing is what a trickshot lobby actually runs.
+    static inline std::atomic_bool bAutoGodModeExcludeLastPlayer{ false };
     static inline std::atomic_bool RandomizeKills{ false };
     static inline std::atomic_bool RandomizeLevels{ false };
     static inline std::atomic_bool bEnableDBNO{ true };

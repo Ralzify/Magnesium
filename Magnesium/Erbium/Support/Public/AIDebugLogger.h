@@ -6,7 +6,7 @@
 // terminology (never "bot") so they cannot be confused with the existing
 // bot command output.
 // ============================================================================
-#include "PlayerAITypes.h"
+#include "SupportTypes.h"
 
 class AIDebugLogger
 {
@@ -28,3 +28,4 @@ public:
     // An error that was handled with a safe fallback (never crashes the match).
     static void Error(const char* Category, const char* Format, ...);
 };
+

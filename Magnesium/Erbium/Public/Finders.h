@@ -88,6 +88,7 @@ uint64 FindQueueStatEvent();
 uint64 FindFinishWorldInitialization();
 uint64 FindSetIsDoorOpen();
 uint64 FindActivatePhase();
+uint64 FindHasStreamingLevelsCompletedLoadingUnLoading();
 uint64 FindSelectAndSetupMyBuildingLevel();
 uint64 FindStreamInMyBuilding();
 

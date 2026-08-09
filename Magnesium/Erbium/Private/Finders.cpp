@@ -2,7 +2,7 @@
 #include "pch.h"
 #include "../../FortniteGame/Public/FortPlayerControllerAthena.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
-#include "../PlayerAI/Public/PlayerAIFaultGuard.h"
+#include "../Support/Public/FaultGuard.h"
 
 uint64_t FindGIsClient()
 {
@@ -3629,25 +3629,84 @@ uint64 FindActivatePhase()
     auto sRef = Memcury::Scanner::FindStringRef(
         L"[ASpecialEventScript::ActivatePhase()] [%s] New Phase [%s] OldPhase [%s] SequenceTimeOffset [%f]", false, 0, VersionInfo.FortniteVersion >= 17, false);
 
-    if (!sRef.IsValid())
+    // The event hook uses the three-argument ABI that includes
+    // SequenceTimeOffset. Installing it from the legacy log string on modern
+    // builds can bind a different function shape and corrupt the call frame.
+    if (!sRef.IsValid() && VersionInfo.FortniteVersion < 23)
         sRef = Memcury::Scanner::FindStringRef(L"[ASpecialEventScript::ActivatePhase()] [%s] New Phase [%s] OldPhase [%s]", false, 0, VersionInfo.FortniteVersion >= 17, false);
 
     if (!sRef.IsValid())
         return 0;
 
+	uint64 ActivatePhasePart = 0;
     for (int i = 0; i < 2000; i++)
     {
         auto Ptr = (uint8_t*)(sRef.Get() - i);
 
-        if (*Ptr == 0x48 && *(Ptr + 1) == 0x8B && *(Ptr + 2) == 0xC4)
-            return uint64_t(Ptr);
-        else if (*Ptr == 0x48 && *(Ptr + 1) == 0x89 && *(Ptr + 2) == 0x5C)
-            return uint64_t(Ptr);
-        else if (*Ptr == 0x40 && *(Ptr + 1) == 0x55)
-            return uint64_t(Ptr);
+		if ((*Ptr == 0x48 && *(Ptr + 1) == 0x83 &&
+			 *(Ptr + 2) == 0xEC) ||
+			(*Ptr == 0x48 && *(Ptr + 1) == 0x81 &&
+			 *(Ptr + 2) == 0xEC))
+		{
+			ActivatePhasePart = uint64_t(Ptr);
+			break;
+		}
     }
+	if (!ActivatePhasePart)
+		return 0;
+
+	for (int i = 0; i < 2000; i++)
+	{
+		auto Ptr = (uint8_t*)(ActivatePhasePart - i);
+
+		if (*Ptr == 0x48 && *(Ptr + 1) == 0x8B &&
+			*(Ptr + 2) == 0xC4)
+			return uint64_t(Ptr);
+		if (*Ptr == 0x48 && *(Ptr + 1) == 0x89 &&
+			*(Ptr + 2) == 0x5C)
+			return uint64_t(Ptr);
+		if (*Ptr == 0x4C && *(Ptr + 1) == 0x8B &&
+			*(Ptr + 2) == 0xDC)
+			return uint64_t(Ptr);
+		if (*Ptr == 0x40 && *(Ptr + 1) == 0x55)
+			return uint64_t(Ptr);
+	}
 
     return 0;
+}
+
+uint64 FindHasStreamingLevelsCompletedLoadingUnLoading()
+{
+    static uint64 Address = 0;
+    static bool bSearched = false;
+    if (bSearched)
+        return Address;
+    bSearched = true;
+
+    const auto StringReference = Memcury::Scanner::FindStringRef(
+        L"AFortPlayerControllerAthena::HasStreamingLevelsCompletedLoadingUnLoading(): %s still not visible",
+        false,
+        0,
+        VersionInfo.FortniteVersion >= 19).Get();
+    if (!StringReference)
+        return 0;
+
+    for (int32 Distance = 0; Distance < 1000; ++Distance)
+    {
+        auto Candidate = reinterpret_cast<const uint8*>(
+            StringReference - Distance);
+        if (!SDK::MemReadable(Candidate, 3))
+            break;
+        if ((Candidate[0] == 0x48 && Candidate[1] == 0x89 &&
+             Candidate[2] == 0x5C) ||
+            (Candidate[0] == 0x48 && Candidate[1] == 0x8B &&
+             Candidate[2] == 0xC4))
+        {
+            Address = reinterpret_cast<uint64>(Candidate);
+            break;
+        }
+    }
+    return Address;
 }
 
 auto FindCmpRef(void* Pointer) -> Memcury::Scanner
@@ -4100,29 +4159,11 @@ void FindNullsAndRetTrues()
         }
     }
 
-    SDK::DbgLog("  [nf] D: CanActivateAbility block done, pre-HasStreamingLevels\n");
-    auto sRef = Memcury::Scanner::FindStringRef(L"AFortPlayerControllerAthena::HasStreamingLevelsCompletedLoadingUnLoading(): %s still not visible", false, 0, VersionInfo.FortniteVersion >= 19).Get();
+	// The player-controller hook calls the native predicate first and supplies
+	// the legacy one-shot handshake fallback without patching this function.
+	SDK::DbgLog("  [nf] D: CanActivateAbility block done; streaming readiness owned by hook\n");
 
-    if (sRef)
-    {
-        for (int i = 0; i < 1000; i++)
-        {
-            auto Ptr = (uint8_t*)(sRef - i);
-
-            if (*Ptr == 0x48 && *(Ptr + 1) == 0x89 && *(Ptr + 2) == 0x5C)
-            {
-                RetTrueFuncs.push_back(uint64_t(Ptr));
-                break;
-            }
-            else if (*Ptr == 0x48 && *(Ptr + 1) == 0x8B && *(Ptr + 2) == 0xC4)
-            {
-                RetTrueFuncs.push_back(uint64_t(Ptr));
-                break;
-            }
-        }
-    }
-
-    SDK::DbgLog("  [nf] E: HasStreamingLevels done, pre-Curie(FN>=23)\n");
+    SDK::DbgLog("  [nf] E: pre-Curie(FN>=23)\n");
     if (VersionInfo.FortniteVersion >= 23)
     {
         NullFuncs.push_back(Memcury::Scanner::FindStringRef(L"STAT_FortCurieVoxelFirePropagationManager_IgniteGrassInBounds").ScanFor({ 0x48, 0x8B, 0xC4 }, false).Get());
@@ -4174,21 +4215,21 @@ static void ReportLine(FILE* File, const char* Fmt, ...)
 // with C++ objects that need unwinding.
 //
 // The crash reporter is a *vectored* handler that runs before this frame
-// __except and would terminate the process first. Raising the PlayerAI fault
+// __except and would terminate the process first. Raising the guarded fault
 // guard depth for the duration of the call makes it return
 // EXCEPTION_CONTINUE_SEARCH so this frame handler actually gets the fault.
 static uint64_t CallFinderGuarded(uint64_t (*Func)(), bool* bCrashed)
 {
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     __try
     {
         uint64_t Result = Func();
-        GPlayerAIGuardedNativeCallDepth--;
+        GGuardedNativeCallDepth--;
         return Result;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        GPlayerAIGuardedNativeCallDepth--;
+        GGuardedNativeCallDepth--;
         *bCrashed = true;
         return 0;
     }

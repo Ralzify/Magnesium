@@ -70,7 +70,7 @@ public:
     DEFINE_PROP(CurrentPlaylistName, FName);
     DEFINE_PROP(GameState, AFortGameStateAthena*);
     DEFINE_PROP(AlivePlayers, TArray<AActor*>);
-    DEFINE_PROP(AliveBots, TArray<AActor*>); // native player bots (PlayerAI native backend)
+    DEFINE_PROP(AliveBots, TArray<AActor*>); // native player bots (playlist/NPC AI)
     DEFINE_PROP(SafeZoneIndicator, AFortSafeZoneIndicator*);
     DEFINE_PROP(SafeZonePhase, int32);
     DEFINE_PROP(StartingItems, TArray<FItemAndCount>);
@@ -130,6 +130,8 @@ public:
     static void TickPendingVehicleSpawns();
     static void TickSupplyDropSuppression(bool bForceDiscovery = false);
     static void TickGameplayConfigurationPolicy(float DeltaSeconds);
+    static const UFortPlaylistAthena* GetActivePlaylist(
+        AFortGameStateAthena* GameState);
     // Cheat-spawned controllers must never become revive partners. On modern
     // builds this uses the engine's native team graph rather than changing only
     // the replicated numeric fields.

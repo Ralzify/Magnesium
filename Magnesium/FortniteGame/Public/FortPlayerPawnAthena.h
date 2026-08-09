@@ -3,6 +3,7 @@
 #include "GameplayTagContainer.h"
 
 class AFortPlayerControllerAthena;
+class UFortItemDefinition;
 
 enum class ETryExitVehicleBehavior : uint8
 {
@@ -17,10 +18,21 @@ public:
     UCLASS_COMMON_MEMBERS(UCharacterMovementComponent);
 
     DEFINE_PROP(Velocity, FVector);
+    // Input the component accumulated for this move. Zero here while a move
+    // target is set means the component is not consuming pawn input at all.
+    DEFINE_PROP(Acceleration, FVector);
+    DEFINE_PROP(MovementMode, uint8);
+    DEFINE_PROP(MaxWalkSpeed, float);
+    DEFINE_PROP(MaxSwimSpeed, float);
+    DEFINE_PROP(MaxAcceleration, float);
 
     DEFINE_BITFIELD_PROP(bCheatFlying, bool);
+    DEFINE_BITFIELD_PROP(bRunPhysicsWithNoController, bool);
 
     DEFINE_FUNC(SetMovementMode, void);
+    DEFINE_FUNC(IsMovingOnGround, bool);
+    DEFINE_FUNC(IsSwimming, bool);
+    DEFINE_FUNC(IsFalling, bool);
 };
 
 class UFortMovementComp_CharacterAthena : public UCharacterMovementComponent
@@ -154,10 +166,15 @@ public:
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
     DEFINE_PROP(VehicleInputComponent, UObject*);
 
-    // Used by the PlayerAI system (native player-bot driving).
+    // Used by the bot AI system (server-driven player-bot movement).
     DEFINE_PROP(CurrentMovementStyle, uint8);
     DEFINE_PROP(RemoteViewPitch, uint8); // replicated aim pitch clients render
     DEFINE_FUNC(AddMovementInput, void);
+    DEFINE_FUNC(IsSprinting, bool);
+    // True only when the possessing controller is a local controller, which is
+    // exactly the condition UCharacterMovementComponent requires before it
+    // will run a move for this pawn.
+    DEFINE_FUNC(IsLocallyControlled, bool);
     DEFINE_FUNC(Jump, void);
     DEFINE_FUNC(StopJumping, void);
     DEFINE_FUNC(Crouch, void);
@@ -774,6 +791,13 @@ public:
     // Repairs native damage outcomes that leave a possessed pawn with an
     // invalid shield or at zero health without entering DBNO/death.
     static void TickHealthStateRepair(UNetDriver* Driver);
+
+    static bool PlayCommandGrantPickupAnimation(
+        AFortPlayerPawnAthena* Pawn,
+        const UFortItemDefinition* ItemDefinition,
+        int32 Count,
+        int32 LoadedAmmo,
+        int32 Level);
 
     // "god min" remains controller-scoped so it survives pawn replacement.
     // The active pawn still receives a real Health.Minimum of 1, allowing

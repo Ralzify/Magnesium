@@ -500,7 +500,7 @@ void UFortQuestManager::SendStatEvent(AActor* PlayerController, long long StatEv
     auto GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-    auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+    auto Playlist = AFortGameMode::GetActivePlaylist(GameState);
 
     if (Playlist && Playlist->HasGameplayTagContainer())
         ContextTags.AppendTags(Playlist->GameplayTagContainer);
@@ -544,7 +544,7 @@ void QueueStatEvent(UFortQuestManager* QuestManager, uint8_t InType, UObject* In
     auto GameMode = (AFortGameModeAthena*)UWorld::GetWorld()->AuthorityGameMode;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-    auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+    auto Playlist = AFortGameMode::GetActivePlaylist(GameState);
 
     if (Playlist && Playlist->HasGameplayTagContainer())
         (*InContextTags).AppendTags(Playlist->GameplayTagContainer);

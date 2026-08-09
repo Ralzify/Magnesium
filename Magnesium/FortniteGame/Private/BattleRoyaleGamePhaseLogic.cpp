@@ -2,8 +2,7 @@
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/GUI.h"
-#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
-#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
+#include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
 
 uint64_t SetGamePhase_ = 0;
 
@@ -2361,7 +2360,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 	auto Time = UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
 
 	auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-    auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+	auto Playlist = AFortGameMode::GetActivePlaylist(GameMode->GameState);
 	
     if constexpr (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)
     {
@@ -2478,21 +2477,17 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 		{
 			auto Player = (AFortPlayerControllerAthena*)Player__Uncasted;
 
-			// PlayerAI uses a version-neutral parked-seat transition and keeps
-			// its valid pawn. Destroying/resetting it here leaves a stale
-			// MyFortPawn on component-driven builds (27.11/30.00).
-			if (!Player ||
-				MagnesiumPlayerAIIntegration::
-					IsPlayerAIController(Player))
-			{
+			if (!Player)
 				continue;
-			}
 
 			auto Pawn = (AFortPlayerPawnAthena*)Player->Pawn;
 
 			// Component-driven seasons do not pass through the legacy
 			// AFortGameMode::StartAircraftPhase hook. Clear warmup loot at the
 			// same authoritative transition before destroying the island pawn.
+			AFortPlayerControllerAthena::
+				ClearWarmupShieldForAircraft(
+					Player, "component-phase");
 			AFortPlayerControllerAthena::
 				ClearDroppableInventoryForAircraft(
 					Player, "component-phase");
@@ -2538,7 +2533,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 	static auto GamePhaseOffset = this->GetOffset("GamePhase");
 	auto& _GamePhase = *(EAthenaGamePhase*)(__int64(this) + GamePhaseOffset);
 
-	struct FPlayerAIPhaseTickState
+	struct FPhaseTickState
 	{
 		const void* Owner = nullptr;
 		EAthenaGamePhase LastPhase = EAthenaGamePhase::None;
@@ -2551,7 +2546,7 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 		bool bUpdatedPhase = false;
 	};
 
-	static FPlayerAIPhaseTickState TickState;
+	static FPhaseTickState TickState;
 	const bool bReturnedToWarmup =
 		TickState.Owner == this &&
 		TickState.bHasLastPhase &&
@@ -2620,12 +2615,6 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 					startedForming = true;
 					auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 					auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
-
-					// The legacy GameMode drop-zone hook is not invoked by
-					// component-driven seasons. Force every AI off its virtual
-					// seat before the phase changes and aircraft is destroyed.
-					MagnesiumPlayerAIIntegration::
-						OnAircraftDropZoneEnding();
 
 					for (auto& Player__Uncasted : GameMode->AlivePlayers)
 					{

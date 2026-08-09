@@ -6,7 +6,7 @@
 #include "../Public/FortAthenaMutator.h"
 #include "../Public/FortKismetLibrary.h"
 #include "../../Erbium/Public/Configuration.h"
-#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
+#include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/FortWeaponMods.h"
 #include <ShlObj.h>
@@ -48,6 +48,7 @@ namespace
         int32 NativeEndAttempts = 0;
         int32 FinalizationPass = 0;
         bool bLoggedWaitingForPawn = false;
+        bool bHarvestingToolRefocusAttempted = false;
     };
 
     std::vector<FPendingGhostModeCleanup>
@@ -955,7 +956,44 @@ namespace
         if (!Entry)
             return false;
 
-        const FGuid Guid = Entry->ItemGuid;
+        FGuid Guid = Entry->ItemGuid;
+        auto Pawn = PlayerController->MyFortPawn
+            ? PlayerController->MyFortPawn
+            : PlayerController->Pawn
+                ? PlayerController->Pawn
+                    ->Cast<AFortPlayerPawnAthena>()
+                : nullptr;
+        auto CurrentWeapon =
+            Pawn && Pawn->HasCurrentWeapon() && Pawn->CurrentWeapon
+                ? Pawn->CurrentWeapon->Cast<AFortWeapon>()
+                : nullptr;
+        if (CurrentWeapon && CurrentWeapon->HasItemEntryGuid())
+        {
+            if (CurrentWeapon->ItemEntryGuid == Guid)
+                return true;
+
+            auto CurrentEntry = PlayerController->WorldInventory
+                ->Inventory.ReplicatedEntries.Search(
+                    [&](FFortItemEntry& Candidate)
+                    {
+                        return Candidate.ItemGuid ==
+                            CurrentWeapon->ItemEntryGuid;
+                    },
+                    FFortItemEntry::Size());
+            if (CurrentEntry && CurrentEntry->ItemDefinition &&
+                !UFortKismetLibrary::IsGhostModeItemDefinition(
+                    CurrentEntry->ItemDefinition))
+            {
+                SDK::DbgLog(
+                    "[GhostMode] preserved selected weapon after exit "
+                    "controller=%p definition=%s\n",
+                    static_cast<void*>(PlayerController),
+                    CurrentEntry->ItemDefinition->Name
+                        .ToString().c_str());
+                return false;
+            }
+        }
+
         PlayerController->ClientEquipItem(Guid, true);
         PlayerController->ServerExecuteInventoryItem(Guid);
         SDK::DbgLog(
@@ -1451,8 +1489,12 @@ namespace
                 ApplyGhostCharacterPartRestore(Restore);
             }
 
-            RefocusHarvestingToolAfterGhostMode(
-                PlayerController);
+            if (!Pending.bHarvestingToolRefocusAttempted)
+            {
+                Pending.bHarvestingToolRefocusAttempted = true;
+                RefocusHarvestingToolAfterGhostMode(
+                    PlayerController);
+            }
 
             SDK::DbgLog(
                 "[GhostMode] finalized post-transition cleanup "

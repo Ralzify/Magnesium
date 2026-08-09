@@ -1,14 +1,17 @@
 #include "pch.h"
 // ============================================================================
-// Magnesium PlayerAI - support modules
+// Magnesium shared support modules
 //   AIDebugLogger, AINameGenerator, AISkillProfile, VersionFeatureAdapter
+//
+// This is the version-abstraction layer the whole gameserver leans on for
+// synthetic (connectionless) participants: cheat-spawned bots, the bot AI
+// module, replication dirtying, cosmetics and safe-zone queries. It contains
+// no AI behavior of its own.
 // ============================================================================
 #include "../Public/AIDebugLogger.h"
 #include "../Public/AINameGenerator.h"
 #include "../Public/AISkillProfile.h"
-#include "../Public/PlayerAIConfig.h"
-#include "../Public/PlayerAIFaultGuard.h"
-#include "../Public/PlayerAIManager.h"
+#include "../Public/FaultGuard.h"
 #include "../Public/VersionFeatureAdapter.h"
 #include "../../Public/Configuration.h"
 #include "../../Public/Finders.h"
@@ -297,7 +300,7 @@ extern uint64_t ApplyCharacterCustomization;
 // counter tells the vectored crash reporter to defer to this handler.)
 static bool PlayerAIGuardedProcessEvent(const UObject* Obj, UFunction* Fn, void* Params)
 {
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     bool bOk;
 
     __try
@@ -310,7 +313,7 @@ static bool PlayerAIGuardedProcessEvent(const UObject* Obj, UFunction* Fn, void*
         bOk = false;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bOk;
 }
 
@@ -583,6 +586,16 @@ static bool PlayerAIIsLiveSupportActor(const AActor* Actor)
 
     return !Actor->HasbActorIsBeingDestroyed() ||
         !Actor->bActorIsBeingDestroyed;
+}
+
+bool VersionFeatureAdapter::IsLiveObject(const UObject* Object)
+{
+    return PlayerAIIsLiveSupportObject(Object);
+}
+
+bool VersionFeatureAdapter::IsLiveActor(const AActor* Actor)
+{
+    return PlayerAIIsLiveSupportActor(Actor);
 }
 
 struct FPlayerAIClassLookupCache
@@ -912,7 +925,7 @@ bool VersionFeatureAdapter::MarkReplicatedPropertyDirty(
     }
 
     bool bSucceeded = false;
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
 
     __try
     {
@@ -941,8 +954,33 @@ bool VersionFeatureAdapter::MarkReplicatedPropertyDirty(
             GetTickCount64() + 2000ULL;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bSucceeded;
+}
+
+static VersionFeatureAdapter::FIsManagedAIControllerFn
+    GIsManagedAIController = nullptr;
+static VersionFeatureAdapter::FHasManagedAIControllersFn
+    GHasManagedAIControllers = nullptr;
+
+void VersionFeatureAdapter::SetManagedAIControllerHooks(
+    FIsManagedAIControllerFn IsManaged,
+    FHasManagedAIControllersFn HasAny)
+{
+    GIsManagedAIController = IsManaged;
+    GHasManagedAIControllers = HasAny;
+}
+
+bool VersionFeatureAdapter::IsManagedAIController(
+    const AFortPlayerControllerAthena* PC)
+{
+    return PC && GIsManagedAIController &&
+        GIsManagedAIController(PC);
+}
+
+bool VersionFeatureAdapter::HasManagedAIControllers()
+{
+    return GHasManagedAIControllers && GHasManagedAIControllers();
 }
 
 int VersionFeatureAdapter::CountAliveParticipants()
@@ -963,28 +1001,6 @@ int VersionFeatureAdapter::CountAliveParticipants()
         for (auto Controller : GameMode->AliveBots)
             if (Controller)
                 UniqueControllers.insert(Controller);
-    }
-
-    // Some builds publish their engine roster late (or remove a dead bot
-    // late). The manager supplies live AIs and explicitly subtracts managed
-    // dead entries, while the set keeps all normal engine participants.
-    for (auto& Managed : PlayerAIManager::GetControllers())
-    {
-        if (!Managed)
-            continue;
-
-        const AActor* ManagedController =
-            Managed->Entity.bNativeBacked
-            ? Managed->Entity.NativeController
-            : (const AActor*)Managed->Entity.PC;
-
-        if (!ManagedController)
-            continue;
-
-        if (Managed->IsAlive())
-            UniqueControllers.insert(ManagedController);
-        else
-            UniqueControllers.erase(ManagedController);
     }
 
     return (int)UniqueControllers.size();
@@ -1060,15 +1076,8 @@ int VersionFeatureAdapter::GetMaxPlayerCount()
 
     // Fallback: playlist max players.
     auto GameState = GetGameState();
-    const UFortPlaylistAthena* Playlist = nullptr;
-
-    if (GameState)
-    {
-        if (GameState->HasCurrentPlaylistInfo())
-            Playlist = GameState->CurrentPlaylistInfo.BasePlaylist;
-        else if (GameState->HasCurrentPlaylistData())
-            Playlist = GameState->CurrentPlaylistData;
-    }
+    const auto Playlist =
+        AFortGameMode::GetActivePlaylist(GameState);
 
     if (Playlist && Playlist->HasMaxPlayers() && Playlist->MaxPlayers > 0 && Playlist->MaxPlayers <= 255)
         return Playlist->MaxPlayers;
@@ -1463,7 +1472,7 @@ static bool PlayerAITryQueryInAircraft(
         return false;
 
     bool bCalled = false;
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
 
     __try
     {
@@ -1475,7 +1484,7 @@ static bool PlayerAITryQueryInAircraft(
     {
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bCalled;
 }
 
@@ -1962,7 +1971,7 @@ static bool PlayerAITryApplyLegacyAircraftExitLatch(
     // the legacy transition.
     if (!PC ||
         VersionInfo.FortniteVersion >= 11.00 ||
-        !PlayerAIManager::IsPlayerAI(PC) ||
+        !VersionFeatureAdapter::IsManagedAIController(PC) ||
         !PlayerAIResolveLegacyAircraftExitLatch(PC))
     {
         return false;
@@ -2039,7 +2048,7 @@ PlayerAITryGetAircraftComponent(
 
     if (Function)
     {
-        GPlayerAIGuardedNativeCallDepth++;
+        GGuardedNativeCallDepth++;
 
         __try
         {
@@ -2052,7 +2061,7 @@ PlayerAITryGetAircraftComponent(
             Result = nullptr;
         }
 
-        GPlayerAIGuardedNativeCallDepth--;
+        GGuardedNativeCallDepth--;
     }
 
     if ((!PlayerAIIsLiveSupportObject(Result) ||
@@ -2082,7 +2091,7 @@ bool VersionFeatureAdapter::MarkVirtualAircraftExited(
     if (!ControllerClass ||
         !PlayerAIIsLiveSupportActor(PC) ||
         !PC->IsA(ControllerClass) ||
-        !PlayerAIManager::IsPlayerAI(PC))
+        !VersionFeatureAdapter::IsManagedAIController(PC))
     {
         return false;
     }
@@ -2344,7 +2353,7 @@ bool VersionFeatureAdapter::TryBeginSkydiving(AFortPlayerPawnAthena* Pawn)
 // (Kept free of unwindable C++ objects so SEH is allowed here.)
 static bool PlayerAITryGroundTrace(UWorld* World, AFortPlayerPawnAthena* IgnorePawn, const FVector& Near, FVector& OutGround)
 {
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     bool bOk;
 
     __try
@@ -2357,7 +2366,7 @@ static bool PlayerAITryGroundTrace(UWorld* World, AFortPlayerPawnAthena* IgnoreP
         bOk = false;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bOk;
 }
 
@@ -2521,7 +2530,7 @@ static bool PlayerAITryReadWalkingMovementMode(
     bool& OutGrounded)
 {
     bool bRead = false;
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
 
     __try
     {
@@ -2551,7 +2560,7 @@ static bool PlayerAITryReadWalkingMovementMode(
         bRead = false;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bRead;
 }
 
@@ -2776,7 +2785,7 @@ static bool PlayerAITryIsInCurrentSafeZone(
         return false;
 
     bool bCalled = false;
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
 
     __try
     {
@@ -2788,7 +2797,7 @@ static bool PlayerAITryIsInCurrentSafeZone(
     {
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bCalled;
 }
 
@@ -3204,7 +3213,7 @@ static const UObject* PlayerAITryFindLoadedCosmetic(
         !Offsets::StaticFindObject)
         return nullptr;
 
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
 
     const UObject* Result = nullptr;
     bool bFaulted = false;
@@ -3218,7 +3227,7 @@ static const UObject* PlayerAITryFindLoadedCosmetic(
         bFaulted = true;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
 
     if (bFaulted)
     {
@@ -3240,7 +3249,7 @@ static const UObject* PlayerAITryLoadCosmetic(
         !Offsets::StaticLoadObject)
         return nullptr;
 
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     const UObject* Result = nullptr;
     bool bFaulted = false;
 
@@ -3261,7 +3270,7 @@ static const UObject* PlayerAITryLoadCosmetic(
         bFaulted = true;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
 
     if (bFaulted)
     {
@@ -3302,7 +3311,7 @@ static const UObject* PlayerAITryResolveLoadedSoftObject(
     if (bSoftCosmeticResolveDisabled || !Class)
         return nullptr;
 
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     const UObject* Result = nullptr;
     bool bFaulted = false;
 
@@ -3327,7 +3336,7 @@ static const UObject* PlayerAITryResolveLoadedSoftObject(
         bFaulted = true;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
 
     // A latent package load does not necessarily refresh the weak-object
     // cache stored in every copy of a TSoftObjectPtr. Resolve its exact path
@@ -3516,7 +3525,7 @@ static bool PlayerAITryWriteSoftObjectPath(
 
     Output[0] = L'\0';
     bool bFaulted = false;
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
 
     __try
     {
@@ -3529,7 +3538,7 @@ static bool PlayerAITryWriteSoftObjectPath(
         Output[0] = L'\0';
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
 
     if (bFaulted)
     {
@@ -3647,7 +3656,7 @@ PlayerAITryResolveReturnedSoftObjectForCommand(
 // (Kept free of C++ objects so SEH is allowed here.)
 static bool PlayerAITryNativeCustomization(uint64_t NativeFn, AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* Pawn)
 {
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     bool bOk;
 
     __try
@@ -3660,7 +3669,7 @@ static bool PlayerAITryNativeCustomization(uint64_t NativeFn, AFortPlayerStateAt
         bOk = false;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bOk;
 }
 
@@ -3670,7 +3679,7 @@ static bool PlayerAITryUpdateCharacterPartsVisualization(
     if (!PlayerState)
         return false;
 
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     bool bOk;
 
     __try
@@ -3684,7 +3693,7 @@ static bool PlayerAITryUpdateCharacterPartsVisualization(
         bOk = false;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bOk &&
         UFortKismetLibrary::
         UpdatePlayerCustomCharacterPartsVisualization__Ptr != nullptr;
@@ -8476,7 +8485,7 @@ static bool PlayerAITryProcessCosmeticFunction(
     if (!Object || !Function || !Params)
         return false;
 
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     bool bOk = false;
 
     __try
@@ -8489,7 +8498,7 @@ static bool PlayerAITryProcessCosmeticFunction(
         bOk = false;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bOk;
 }
 
@@ -8552,7 +8561,7 @@ static bool PlayerAITryWriteFNameString(
         return false;
 
     Output[0] = '\0';
-    GPlayerAIGuardedNativeCallDepth++;
+    GGuardedNativeCallDepth++;
     bool bOk = false;
 
     __try
@@ -8566,7 +8575,7 @@ static bool PlayerAITryWriteFNameString(
         bOk = false;
     }
 
-    GPlayerAIGuardedNativeCallDepth--;
+    GGuardedNativeCallDepth--;
     return bOk;
 }
 
@@ -9177,7 +9186,7 @@ void VersionFeatureAdapter::TickCosmeticCache()
     // with universal PlayerAI disabled. Pre-catalog builds retain their small
     // resident warm-up so 1.x random bots still have candidates available.
     if (VersionInfo.FortniteVersion >= 2.00 &&
-        !PlayerAIManager::bInitialized &&
+        !VersionFeatureAdapter::HasManagedAIControllers() &&
         !bHasPendingCheatBotCosmetics)
     {
         return;

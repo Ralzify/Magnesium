@@ -2,11 +2,11 @@
 
 namespace AutoHosting
 {
-    // Loads the profile for the running Fortnite version. Corrupt or incomplete
-    // profiles fail closed and never arm automatic startup.
+    // Loads Auto Host controls for the running Fortnite version. Optional full
+    // preferences are restored only when Save Settings is enabled and valid.
     void Initialize();
 
-    // True only when a complete enabled profile was restored during startup.
+    // True only when Save Settings restored a complete preference snapshot.
     bool HasRestoredPreferences();
 
     // Countdown controls are driven by the GUI thread so the final preference
@@ -23,12 +23,12 @@ namespace AutoHosting
     void OnAuthoritativeMatchEnded();
     void TickPostMatchShutdown();
 
-    // Persist toggle/delay unconditionally. Full launch preferences are
-    // auto-saved while Auto Host is enabled.
+    // Persist Auto Host, delay, and Save Settings unconditionally. Full launch
+    // preferences are saved only while Save Settings is enabled.
     void SaveIfChanged();
     void SaveNow(bool ForcePreferenceSnapshot = false);
 
-    // Restores Magnesium defaults for the running Fortnite-version profile.
+    // Restores Magnesium defaults and removes every saved version profile.
     // Before server start this also refreshes the live launcher controls.
     void ResetPreferences();
 }

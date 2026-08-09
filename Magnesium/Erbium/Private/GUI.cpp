@@ -18,7 +18,7 @@
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
 #include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
-#include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
+#include "../BotAI/Public/BotAI.h"
 #include "../../Engine/Public/Texture.h"
 #include <sstream>
 #include <fstream>
@@ -4956,6 +4956,7 @@ namespace SafeZoneMap
 
 void GUI::SafeZoneMapGameTick()
 {
+    Events::Tick();
     SafeZoneMap::GameThreadTick();
     PlayerLoadout::GameThreadTick();
     AFortPlayerPawnAthena::TickPendingPlayerMapIcons();
@@ -5187,7 +5188,10 @@ static void ApplyInitialTrickshotDefaults()
     FConfiguration::bDisableSupplyDrops.store(
         true, std::memory_order_release);
     FConfiguration::bVehicleBumpLaunch.store(
-        false, std::memory_order_release);
+        VersionInfo.FortniteVersion >= 4.30,
+        std::memory_order_release);
+    FConfiguration::bAutoGodMode.store(
+        true, std::memory_order_release);
     FConfiguration::bAutoPauseTODM.store(
         false, std::memory_order_release);
 
@@ -6455,11 +6459,10 @@ void GUI::Init()
     bool g_SwapChainOccluded = false;
 
     // Start a restored Auto Host countdown only after the launcher and its
-    // countdown control are ready to render. This keeps short delays visible
-    // instead of spending them during SDK diagnostics or window creation.
+    // countdown control are ready to render. Auto Host does not require a
+    // saved preference snapshot; with Save Settings off it uses clean defaults.
     if (FConfiguration::bAutoHost.load(
-            std::memory_order_acquire) &&
-        AutoHosting::HasRestoredPreferences())
+            std::memory_order_acquire))
     {
         AutoHosting::ArmCountdown();
     }
@@ -6521,16 +6524,6 @@ void GUI::Init()
         static bool bStartBusEarlyDismissed = false;
         if (gsStatus != Joinable)
             bStartBusEarlyDismissed = false;
-
-        if (FConfiguration::bAutoStartEvent && !FConfiguration::bEventStarted && FConfiguration::EventStartBaseTime > 0.f)
-        {
-            float CurrentTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-            if (CurrentTime >= FConfiguration::EventStartBaseTime + FConfiguration::EventStartTime)
-            {
-                printf("[Events] Auto-starting event at T=%.1f\n", CurrentTime);
-                Events::StartEvent();
-            }
-        }
 
         main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
@@ -7349,42 +7342,98 @@ void GUI::Init()
                         "##siphon-amount",
                         FConfiguration::SiphonAmount);
 
-                    std::vector<const char*> SiphonAnimations = { "Default" };
+					struct FSiphonAnimationOption
+					{
+						int Type;
+						const char* Label;
+					};
+					std::vector<FSiphonAnimationOption> SiphonAnimations = {
+						{ 0, "Default" }
+					};
 
-                    if (VersionInfo.FortniteVersion >= 11.00)
-                    {
-                        SiphonAnimations.push_back("Slurp");
-                        SiphonAnimations.push_back("Bandage Bazooka");
-                    }
+					if (VersionInfo.FortniteVersion >= 11.00)
+					{
+						SiphonAnimations.push_back({ 1, "Slurp" });
+						SiphonAnimations.push_back(
+							{ 2, "Bandage Bazooka" });
+					}
 
-                    if (VersionInfo.FortniteVersion >= 12.50)
-                    {
-                        SiphonAnimations.push_back("Orange Paint");
-                        SiphonAnimations.push_back("Purple Paint");
-                    }
+					if (VersionInfo.FortniteVersion >= 12.50)
+					{
+						SiphonAnimations.push_back(
+							{ 3, "Orange Paint" });
+						SiphonAnimations.push_back(
+							{ 4, "Purple Paint" });
+					}
 
-                    SiphonAnimations.push_back("Health Siphon");
+					SiphonAnimations.push_back({ 5, "Health Siphon" });
 
-                    if (VersionInfo.FortniteVersion >= 19.00)
-                    {
-                        SiphonAnimations.push_back("Med Mist");
-                    }
+					if (VersionInfo.FortniteVersion >= 19.00)
+					{
+						SiphonAnimations.push_back({ 6, "Med Mist" });
+					}
 
-                    if (VersionInfo.FortniteVersion >= 11.40)
-                    {
-                        SiphonAnimations.push_back("Upgrade Weapon");
-                    }
+					if (VersionInfo.FortniteVersion >= 11.40)
+					{
+						SiphonAnimations.push_back(
+							{ 7, "Upgrade Weapon" });
+					}
 
-                    if (FConfiguration::SiphonAnimType >= (int)SiphonAnimations.size())
-                        FConfiguration::SiphonAnimType = 0;
+					if (VersionInfo.FortniteVersion == 12.41)
+					{
+						SiphonAnimations.push_back(
+							{ 8, "Astronomical Event Glow" });
+					}
 
-                    ImGui::TextUnformatted("Siphon Animation");
-                    ImGui::SetNextItemWidth(Width);
-                    AtomicCombo(
-                        "##siphon-animation",
-                        FConfiguration::SiphonAnimType,
-                        SiphonAnimations.data(),
-                        (int)SiphonAnimations.size());
+					if (VersionInfo.FortniteVersion == 17.30)
+					{
+						SiphonAnimations.push_back(
+							{ 9, "Rift Tour Golden Glow" });
+						SiphonAnimations.push_back(
+							{ 10, "Rift Tour Rift" });
+						SiphonAnimations.push_back(
+							{ 11, "Rift Tour Paint Boost" });
+					}
+
+					std::vector<const char*> SiphonAnimationLabels;
+					SiphonAnimationLabels.reserve(
+						SiphonAnimations.size());
+					int SelectedSiphonAnimation = 0;
+					const int ConfiguredSiphonAnimation =
+						FConfiguration::SiphonAnimType.load(
+							std::memory_order_acquire);
+					bool bFoundConfiguredSiphonAnimation = false;
+					for (int OptionIndex = 0;
+						 OptionIndex < (int)SiphonAnimations.size();
+						 ++OptionIndex)
+					{
+						const auto& Option = SiphonAnimations[OptionIndex];
+						SiphonAnimationLabels.push_back(Option.Label);
+						if (Option.Type == ConfiguredSiphonAnimation)
+						{
+							SelectedSiphonAnimation = OptionIndex;
+							bFoundConfiguredSiphonAnimation = true;
+						}
+					}
+					if (!bFoundConfiguredSiphonAnimation)
+					{
+						FConfiguration::SiphonAnimType.store(
+							0, std::memory_order_release);
+					}
+
+					ImGui::TextUnformatted("Siphon Animation");
+					ImGui::SetNextItemWidth(Width);
+					if (ImGui::Combo(
+						"##siphon-animation",
+						&SelectedSiphonAnimation,
+						SiphonAnimationLabels.data(),
+						(int)SiphonAnimationLabels.size()))
+					{
+						FConfiguration::SiphonAnimType.store(
+							SiphonAnimations[
+								SelectedSiphonAnimation].Type,
+							std::memory_order_release);
+					}
 
                     ImGui::Unindent(12.f);
                 }
@@ -7441,6 +7490,21 @@ void GUI::Init()
                         AutoHosting::CancelCountdown();
                         AutoHosting::SaveNow(false);
                     }
+                }
+
+                if (FConfiguration::bAutoHost.load(
+                        std::memory_order_acquire))
+                {
+                    ImGui::Indent(12.f);
+                    if (AtomicCheckbox(
+                            "Save Settings",
+                            FConfiguration::bSaveAutoHostSettings))
+                    {
+                        AutoHosting::SaveNow(
+                            FConfiguration::bSaveAutoHostSettings.load(
+                                std::memory_order_acquire));
+                    }
+                    ImGui::Unindent(12.f);
                 }
 
                 bool bCountdownActive =
@@ -8760,18 +8824,24 @@ void GUI::Init()
                     free(PredictionKey);
                 }
 
-                if (ImGui::Button("Rift Player", ImVec2(Width, Height)))
+                if (VersionInfo.FortniteVersion >= 5.00 &&
+                    ImGui::Button(
+                        "Rift Player", ImVec2(Width, Height)))
                 {
 					auto Loc = TargetPawn->K2_GetActorLocation();
 
                     static auto RiftClass = FindObject<UClass>(L"/Game/Athena/Items/Consumables/RiftItem/BGA_RiftPortal_Item_Athena.BGA_RiftPortal_Item_Athena_C");
 
-                    auto Rift = UWorld::SpawnActor<UClass>(RiftClass, Loc, {});
-
-                    auto Actor = (AActor*)Rift;
-                    Actor->ForceNetUpdate();
-
-                    Actor->K2_DestroyActor();
+                    if (RiftClass)
+                    {
+                        auto Actor = UWorld::SpawnActor<AActor>(
+                            RiftClass, Loc, {});
+                        if (Actor)
+                        {
+                            Actor->ForceNetUpdate();
+                            Actor->K2_DestroyActor();
+                        }
+                    }
 				}
 
                 UFortHealthSet* GodHealthSet =
@@ -8999,11 +9069,10 @@ void GUI::Init()
             if (gsStatus < StartedMatch)
             {
                 // Special maps and native objective modes require their normal
-                // phase flow. PlayerAI also owns match setup while enabled.
+                // phase flow.
                 const bool bLockLateGame =
                     LocksLateGameForSelection(
-                        SelectedPlaylist) ||
-                    MagnesiumPlayerAISettings::bEnableAIs;
+                        SelectedPlaylist);
                 if (bLockLateGame)
                     FConfiguration::SetLateGameEnabled(false);
 
@@ -9426,15 +9495,50 @@ void GUI::Init()
         }
         case 4:
         {
-            SectionHeader("AI Players", SectionWidth);
+            SectionHeader("Bot AI", SectionWidth);
             BeginSectionBody();
 
-            ImGui::BeginDisabled(
-                FConfiguration::bLateGame);
             AtomicCheckbox(
-                "Enable AIs (EXPERIMENTAL)",
-                MagnesiumPlayerAISettings::bEnableAIs);
-            ImGui::EndDisabled();
+                "Enable Bot AI (EXPERIMENTAL)",
+                BotAISettings::bEnabled);
+            ImGui::TextDisabled(
+                "Makes bots from the spawnbot command walk, run and");
+            ImGui::TextDisabled(
+                "swim around instead of standing still. They use the");
+            ImGui::TextDisabled(
+                "game's own movement. Native AI is untouched.");
+
+            if (BotAISettings::bEnabled.load(
+                    std::memory_order_acquire))
+            {
+                ImGui::Spacing();
+
+                AtomicCheckbox(
+                    "Stay Inside The Safe Zone",
+                    BotAISettings::bSeekSafeZone);
+                AtomicCheckbox(
+                    "Idle Jumps And Pauses",
+                    BotAISettings::bIdleFlourishes);
+                AtomicCheckbox(
+                    "Native Movement",
+                    BotAISettings::bNativeMovement);
+                ImGui::TextDisabled(
+                    "Uses the game's own walking, running and swimming.");
+                ImGui::TextDisabled(
+                    "Turn off if bots misbehave on this build.");
+
+                ImGui::Spacing();
+                AtomicCheckbox(
+                    "Movement Diagnostics",
+                    BotAISettings::bMovementDiagnostics);
+                ImGui::TextDisabled(
+                    "Debug only: bots stop moving and log why once a");
+                ImGui::TextDisabled(
+                    "second. Look for [BotAI][Diag] in the console.");
+
+                ImGui::Spacing();
+                ImGui::TextDisabled("%s", BotAI::GetStatusLine());
+            }
 
             EndSectionBody();
 
@@ -9769,6 +9873,39 @@ void GUI::Init()
                     "Player Map Icons",
                     FConfiguration::bPlayerMapIcons);
 
+                AtomicCheckbox(
+                    "Auto God Mode",
+                    FConfiguration::bAutoGodMode);
+
+                if (FConfiguration::bAutoGodMode)
+                {
+                    ImGui::Indent(12.f);
+
+                    static const char* const AutoGodModes[] = {
+                        "Maximum",
+                        "Minimum"
+                    };
+
+                    ImGui::TextUnformatted("God Mode Type");
+                    ImGui::SetNextItemWidth(Width);
+                    AtomicCombo(
+                        "##auto-god-mode",
+                        FConfiguration::AutoGodModeType,
+                        AutoGodModes,
+                        IM_ARRAYSIZE(AutoGodModes));
+
+                    // The trickshotters join first and the player they are all
+                    // aiming at joins last, so the newest arrival is the one
+                    // who has to stay killable.
+                    if (FConfiguration::bInfiniteRender)
+                        AtomicCheckbox(
+                            "Exclude Last Player",
+                            FConfiguration::
+                                bAutoGodModeExcludeLastPlayer);
+
+                    ImGui::Unindent(12.f);
+                }
+
                 if (FConfiguration::bLateGame)
                     AtomicCheckbox(
                         "Randomize Kills",
@@ -9804,60 +9941,66 @@ void GUI::Init()
 
             //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
 
-            AtomicCheckbox(
-                "Cannon Launch Animations",
-                FConfiguration::bCannonLaunchAnimations);
-
-            // The multipliers scale a launch this code applies itself, so they
-            // have nothing to act on while native owns the shot.
-            if (!FConfiguration::bCannonLaunchAnimations)
+            if (VersionInfo.FortniteVersion >= 8.00)
             {
-                ImGui::Indent(12.f);
+                AtomicCheckbox(
+                    "Cannon Launch Animations",
+                    FConfiguration::bCannonLaunchAnimations);
 
-                AtomicLabeledSliderFloat(
-                    "Cannon Launch X",
-                    "##cannon-launch-x",
-                    FConfiguration::CannonLaunchXMultiplier,
-                    0.0f, 5.0f, "%.2fx", Width);
-                AtomicLabeledSliderFloat(
-                    "Cannon Launch Y",
-                    "##cannon-launch-y",
-                    FConfiguration::CannonLaunchYMultiplier,
-                    0.0f, 5.0f, "%.2fx", Width);
-                AtomicLabeledSliderFloat(
-                    "Cannon Launch Z",
-                    "##cannon-launch-z",
-                    FConfiguration::CannonLaunchZMultiplier,
-                    0.0f, 5.0f, "%.2fx", Width);
+                // The multipliers scale a launch this code applies itself, so
+                // they have nothing to act on while native owns the shot.
+                if (!FConfiguration::bCannonLaunchAnimations)
+                {
+                    ImGui::Indent(12.f);
 
-                ImGui::Unindent(12.f);
+                    AtomicLabeledSliderFloat(
+                        "Cannon Launch X",
+                        "##cannon-launch-x",
+                        FConfiguration::CannonLaunchXMultiplier,
+                        0.0f, 5.0f, "%.2fx", Width);
+                    AtomicLabeledSliderFloat(
+                        "Cannon Launch Y",
+                        "##cannon-launch-y",
+                        FConfiguration::CannonLaunchYMultiplier,
+                        0.0f, 5.0f, "%.2fx", Width);
+                    AtomicLabeledSliderFloat(
+                        "Cannon Launch Z",
+                        "##cannon-launch-z",
+                        FConfiguration::CannonLaunchZMultiplier,
+                        0.0f, 5.0f, "%.2fx", Width);
+
+                    ImGui::Unindent(12.f);
+                }
             }
 
-            AtomicCheckbox(
-                "Vehicle Bump Launch",
-                FConfiguration::bVehicleBumpLaunch);
-
-            if (FConfiguration::bVehicleBumpLaunch)
+            if (VersionInfo.FortniteVersion >= 4.30)
             {
-                ImGui::Indent(12.f);
-
                 AtomicCheckbox(
-                    "Bump Damage",
-                    FConfiguration::bVehicleBumpDamage);
+                    "Vehicle Bump Launch",
+                    FConfiguration::bVehicleBumpLaunch);
 
-                AtomicLabeledSliderFloat(
-                    "Bump Minimum Speed",
-                    "##vehicle-bump-min-speed",
-                    FConfiguration::VehicleBumpMinSpeedKmh,
-                    0.0f, 120.0f, "%.0f km/h", Width);
+                if (FConfiguration::bVehicleBumpLaunch)
+                {
+                    ImGui::Indent(12.f);
 
-                AtomicLabeledSliderFloat(
-                    "Bump Force Multiplier",
-                    "##vehicle-bump-force-multiplier",
-                    FConfiguration::VehicleBumpForceMultiplier,
-                    0.0f, 10.0f, "%.1fx", Width);
+                    AtomicCheckbox(
+                        "Bump Damage",
+                        FConfiguration::bVehicleBumpDamage);
 
-                ImGui::Unindent(12.f);
+                    AtomicLabeledSliderFloat(
+                        "Bump Minimum Speed",
+                        "##vehicle-bump-min-speed",
+                        FConfiguration::VehicleBumpMinSpeedKmh,
+                        0.0f, 120.0f, "%.0f km/h", Width);
+
+                    AtomicLabeledSliderFloat(
+                        "Bump Force Multiplier",
+                        "##vehicle-bump-force-multiplier",
+                        FConfiguration::VehicleBumpForceMultiplier,
+                        0.0f, 10.0f, "%.1fx", Width);
+
+                    ImGui::Unindent(12.f);
+                }
             }
 
             AtomicCheckbox(

@@ -13,7 +13,7 @@
 #include "../../FortniteGame/Public/FortVehicleMods.h"
 #include "../../FortniteGame/Public/FortWeapon.h"
 #include "../Public/AbilitySystemComponent.h"
-#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
+#include "../../Erbium/BotAI/Public/BotAI.h"
 
 #include <algorithm>
 #include <cmath>
@@ -952,7 +952,7 @@ static void SynchronizeRespawnManagedStormEffects(UNetDriver* Driver,
 		// This custom lower-season synchronizer explicitly applies the storm GE
 		// and does not consult SafeZoneAppliedGE. Leave exact cheat-spawned bots
 		// to their dedicated suppression path so FN 4.x cannot reapply damage
-		// immediately after it was removed. PlayerAI/native bots remain native.
+		// immediately after it was removed. Native bots remain native.
 		if (AFortPlayerControllerAthena::
 			IsCheatSpawnedBotController(Player))
 		{
@@ -1097,11 +1097,8 @@ static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
 		GameMode->GE_OutsideSafeZone = GetLowerSeasonStormEffectClass();
 
 	auto SafeZoneInsideChecksFn = GameMode->GetFunction("SafeZoneInsideChecks");
-	const UFortPlaylistAthena* Playlist = nullptr;
-	if (GameState->HasCurrentPlaylistInfo() && GameState->CurrentPlaylistInfo.BasePlaylist)
-		Playlist = GameState->CurrentPlaylistInfo.BasePlaylist;
-	else if (GameState->HasCurrentPlaylistData())
-		Playlist = GameState->CurrentPlaylistData;
+	const auto Playlist =
+		AFortGameMode::GetActivePlaylist(GameState);
 	const float StormEffectDelay = Playlist && Playlist->HasStormEffectDelay()
 		? Playlist->StormEffectDelay
 		: -1.f;
@@ -1715,8 +1712,8 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 	TickAuthoritativeMatchLifecycle(Driver);
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
-	// Universal PlayerAI system (separate from the bot command and native AI).
-	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+	// Drives the bots created by the spawnbot command (native AI untouched).
+	BotAI::OnServerTick(Driver, DeltaSeconds);
 
 	// Finalize invalid health states after every custom gameplay producer and
 	// immediately before this path's replication send.
@@ -1748,11 +1745,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
 		auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 		auto CurrentPlaylist =
-			GameState->HasCurrentPlaylistInfo()
-				? GameState->CurrentPlaylistInfo.BasePlaylist
-				: (GameState->HasCurrentPlaylistData()
-					? GameState->CurrentPlaylistData
-					: nullptr);
+			AFortGameMode::GetActivePlaylist(GameState);
 		const bool bSkipAircraft =
 			CurrentPlaylist &&
 			CurrentPlaylist->HasbSkipAircraft() &&
@@ -1787,7 +1780,8 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 
 					sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
 
-    				auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+					auto Playlist = AFortGameMode::GetActivePlaylist(
+						GameMode->GameState);
 					auto payload = UEAllocatedString("{\"embeds\": [{\"title\": \"Match has ended!\", \"fields\": [{\"name\":\"Version\",\"value\":\"") + version + "\"}, {\"name\":\"Playlist\",\"value\":\"" + (Playlist ? Playlist->PlaylistName.ToString() : "Playlist_DefaultSolo") + "\"}], \"color\": " + "\"7237230\", \"footer\": {\"text\":\"Erbium\", \"icon_url\":\"https://cdn.discordapp.com/attachments/1341168629378584698/1436803905119064105/L0WnFa.png.png?ex=6910ef69&is=690f9de9&hm=01a0888b46647959b38ee58df322048ab49e2a5a678e52d4502d9c5e3978d805&\"}, \"timestamp\":\"" + iso8601() + "\"}] }";
 
 					curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
@@ -1862,8 +1856,8 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 
 	TickAuthoritativeMatchLifecycle(Driver);
 
-	// Universal PlayerAI system (separate from the bot command and native AI).
-	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+	// Drives the bots created by the spawnbot command (native AI untouched).
+	BotAI::OnServerTick(Driver, DeltaSeconds);
 
 	if (Driver->ReplicationDriver)
 		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
@@ -1903,11 +1897,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 			auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 			auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 			auto CurrentPlaylist =
-				GameState->HasCurrentPlaylistInfo()
-					? GameState->CurrentPlaylistInfo.BasePlaylist
-					: (GameState->HasCurrentPlaylistData()
-						? GameState->CurrentPlaylistData
-						: nullptr);
+				AFortGameMode::GetActivePlaylist(GameState);
 			const bool bSkipAircraft =
 				CurrentPlaylist &&
 				CurrentPlaylist->HasbSkipAircraft() &&
@@ -1941,7 +1931,8 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 
 						sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
 
-        				auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+						auto Playlist = AFortGameMode::GetActivePlaylist(
+							GameMode->GameState);
 						auto payload = UEAllocatedString("{\"embeds\": [{\"title\": \"Match has ended!\", \"fields\": [{\"name\":\"Version\",\"value\":\"") + version + "\"}, {\"name\":\"Playlist\",\"value\":\"" + (Playlist ? Playlist->PlaylistName.ToString() : "Playlist_DefaultSolo") + "\"}], \"color\": " + "\"7237230\", \"footer\": {\"text\":\"Erbium\", \"icon_url\":\"https://cdn.discordapp.com/attachments/1341168629378584698/1436803905119064105/L0WnFa.png.png?ex=6910ef69&is=690f9de9&hm=01a0888b46647959b38ee58df322048ab49e2a5a678e52d4502d9c5e3978d805&\"}, \"timestamp\":\"" + iso8601() + "\"}] }";
 
 						curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
@@ -2083,8 +2074,8 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-NukeRockets\n", _tf);
 
-	// Universal PlayerAI system (separate from the bot command and native AI).
-	MagnesiumPlayerAIIntegration::OnServerTick(Driver, DeltaSeconds);
+	// Drives the bots created by the spawnbot command (native AI untouched).
+	BotAI::OnServerTick(Driver, DeltaSeconds);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OnServerTick\n", _tf);
 
 	// Finalize invalid health states after every custom gameplay producer and
@@ -2130,11 +2121,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 		auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
 		auto CurrentPlaylist =
-			GameState->HasCurrentPlaylistInfo()
-				? GameState->CurrentPlaylistInfo.BasePlaylist
-				: (GameState->HasCurrentPlaylistData()
-					? GameState->CurrentPlaylistData
-					: nullptr);
+			AFortGameMode::GetActivePlaylist(GameState);
 		const bool bSkipAircraft =
 			CurrentPlaylist &&
 			CurrentPlaylist->HasbSkipAircraft() &&
@@ -2169,7 +2156,8 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 					sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
 
 					
-        			auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+					auto Playlist = AFortGameMode::GetActivePlaylist(
+						GameMode->GameState);
 					auto payload = UEAllocatedString("{\"embeds\": [{\"title\": \"Match has ended!\", \"fields\": [{\"name\":\"Version\",\"value\":\"") + version + "\"}, {\"name\":\"Playlist\",\"value\":\"" + (Playlist ? Playlist->PlaylistName.ToString() : "Playlist_DefaultSolo") + "\"}], \"color\": " + "\"7237230\", \"footer\": {\"text\":\"Erbium\", \"icon_url\":\"https://cdn.discordapp.com/attachments/1341168629378584698/1436803905119064105/L0WnFa.png.png?ex=6910ef69&is=690f9de9&hm=01a0888b46647959b38ee58df322048ab49e2a5a678e52d4502d9c5e3978d805&\"}, \"timestamp\":\"" + iso8601() + "\"}] }";
 
 					curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());

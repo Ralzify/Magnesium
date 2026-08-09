@@ -10,7 +10,7 @@
 // it only *reads* engine state and calls player-level functions that real
 // players use as well.
 // ============================================================================
-#include "PlayerAITypes.h"
+#include "SupportTypes.h"
 #include "../../../FortniteGame/Public/FortGameMode.h"
 
 enum class EPlayerAIAircraftDropState : uint8_t
@@ -38,6 +38,26 @@ public:
     static AFortGameMode* GetGameMode();
     static AFortGameStateAthena* GetGameState();
     static float GetTimeSeconds();
+
+    // UObject-array validated liveness checks. Safe on any pointer, including
+    // one that belonged to a destroyed actor or a previous world.
+    static bool IsLiveObject(const UObject* Object);
+    static bool IsLiveActor(const AActor* Actor);
+
+    // ---- Managed-AI registry ------------------------------------------------
+    // The bot AI module registers a predicate here so shared support code can
+    // recognize a server-driven AI participant without this layer depending on
+    // (or even knowing about) the AI implementation. Unregistered is the
+    // default, and every caller behaves as if no AI participants exist.
+    using FIsManagedAIControllerFn =
+        bool (*)(const AFortPlayerControllerAthena*);
+    using FHasManagedAIControllersFn = bool (*)();
+    static void SetManagedAIControllerHooks(
+        FIsManagedAIControllerFn IsManaged,
+        FHasManagedAIControllersFn HasAny);
+    static bool IsManagedAIController(
+        const AFortPlayerControllerAthena* PC);
+    static bool HasManagedAIControllers();
 
     // Opens one bounded PlayerAI work budget for the current server frame.
     // Expensive native probes consume this shared budget instead of every AI
@@ -248,3 +268,4 @@ public:
     // Reset all cached feature lookups (new match / map).
     static void ResetCaches();
 };
+

@@ -20,6 +20,18 @@ enum class EMovementMode : uint8_t
     MOVE_MAX = 7,
 };
 
+// UPlayer is the engine's "someone is driving this controller" object. A
+// ULocalPlayer subclass here is what makes APlayerController::IsLocalController
+// true, which in turn is what lets UCharacterMovementComponent run moves for
+// the possessed pawn. Server-spawned bot controllers have none by default.
+class UPlayer : public UObject
+{
+public:
+    UCLASS_COMMON_MEMBERS(UPlayer);
+
+    DEFINE_PROP(PlayerController, AActor*);
+};
+
 class UAthenaPickaxeItemDefinition : public UFortItemDefinition
 {
 public:
@@ -394,6 +406,8 @@ public:
     DEFINE_PROP(LastDamager, AActor*);
     DEFINE_PROP(MyFortPawn, AFortPlayerPawnAthena*);
     DEFINE_PROP(Pawn, AFortPlayerPawnAthena*);
+    // Null on every server-spawned bot controller. See UPlayer above.
+    DEFINE_PROP(Player, UPlayer*);
 
     static inline uint32_t WorldInventory__Offset = 0;
     static inline bool WorldInventory__Initialized = false;
@@ -487,6 +501,7 @@ public:
     DEFINE_FUNC(ClientOnPawnSpawned, void);
     DEFINE_FUNC(IsActionInputIgnored, bool);
     DEFINE_FUNC(IsInAircraft, bool);
+    DEFINE_FUNC(IsLocalController, bool);
     DEFINE_FUNC(ServerSetTeam, void);
     DEFINE_FUNC(GetAircraftComponent, UFortControllerComponent_Aircraft*);
     DEFINE_FUNC(ServerAttemptAircraftJump, void);
@@ -538,10 +553,20 @@ public:
     // lifecycle checkpoints; later calls become no-ops.
     static void BeginAircraftInventoryCleanupForMatch(
         UObject* MatchToken);
+    static bool ClearWarmupShieldForAircraft(
+        AFortPlayerControllerAthena* PlayerController,
+        const char* Source,
+        bool bRequireAircraftPassenger = false);
     static int32 ClearDroppableInventoryForAircraft(
         AFortPlayerControllerAthena* PlayerController,
         const char* Source,
         bool bRequireAircraftPassenger = false);
+    // Resolves the newest connected human from Unreal's native player lists.
+    // Connectionless bots are ignored automatically.
+    static bool IsLastJoinedPlayer(
+        AFortPlayerControllerAthena* PlayerController);
+    DefHookOg(bool, ClientStreamingReadiness,
+        AFortPlayerControllerAthena*);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);
     DefHookOg(void, ServerAttemptAircraftJump_, UObject*, FFrame&);
     static void ServerExecuteInventoryItem_(UObject*, FFrame&);
@@ -574,7 +599,7 @@ public:
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
     // Exact membership in the synthetic `cheat spawnbot` lifecycle. This does
-    // not include PlayerAI, wildlife, or native playlist bots.
+    // not include wildlife or native playlist bots.
     static bool IsCheatSpawnedBotController(
         AFortPlayerControllerAthena* PlayerController);
     static void TickNukeRockets(float DeltaSeconds);

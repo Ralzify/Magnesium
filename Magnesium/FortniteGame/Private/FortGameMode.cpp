@@ -11,9 +11,7 @@
 #include "../../Engine/Public/DataTableFunctionLibrary.h"
 #include "../../Erbium/Public/Calendar.h"
 #include "../../Erbium/Public/Configuration.h"
-#include "../../Erbium/PlayerAI/Public/MagnesiumPlayerAIIntegration.h"
-#include "../../Erbium/PlayerAI/Public/PlayerAIManager.h"
-#include "../../Erbium/PlayerAI/Public/VersionFeatureAdapter.h"
+#include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
 #include "../Public/FortLootPackage.h"
 #include "../Public/BuildingFoundation.h"
 #include "../../Erbium/Public/LateGame.h"
@@ -949,7 +947,8 @@ namespace
         }
 
         auto GameState = GameMode->GameState;
-        if (GameState->HasCurrentPlaylistInfo())
+        if (GameState->HasCurrentPlaylistInfo() &&
+            FPlaylistPropertyArray::StaticStruct())
         {
             const UFortPlaylistAthena* OverridePlaylist =
                 FPlaylistPropertyArray::HasOverridePlaylist()
@@ -1685,15 +1684,91 @@ namespace
     FNative1040PlaylistPublishState
         GNative1040PlaylistPublishState;
 
+    void RefreshPlaylistReflectionCache(
+        AFortGameStateAthena* GameState)
+    {
+        if (!GameState || !GameState->Class)
+            return;
+
+        const int32 PreviousInfoOffset =
+            AFortGameStateAthena::CurrentPlaylistInfo__Offset;
+        const int32 PreviousDataOffset =
+            AFortGameStateAthena::CurrentPlaylistData__Offset;
+
+        AFortGameStateAthena::CurrentPlaylistInfo__Offset =
+            static_cast<int32>(
+                GameState->GetOffset("CurrentPlaylistInfo"));
+        AFortGameStateAthena::CurrentPlaylistData__Offset =
+            static_cast<int32>(
+                GameState->GetOffset("CurrentPlaylistData"));
+
+        const auto PlaylistInfoStruct =
+            FindStruct("PlaylistPropertyArray");
+        if (PlaylistInfoStruct)
+        {
+            FPlaylistPropertyArray::BasePlaylist__Offset =
+                static_cast<int32>(
+                    PlaylistInfoStruct->GetOffset("BasePlaylist"));
+            FPlaylistPropertyArray::OverridePlaylist__Offset =
+                static_cast<int32>(
+                    PlaylistInfoStruct->GetOffset(
+                        "OverridePlaylist"));
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset =
+                static_cast<int32>(
+                    PlaylistInfoStruct->GetOffset(
+                        "PlaylistReplicationKey"));
+        }
+        else
+        {
+            FPlaylistPropertyArray::BasePlaylist__Offset = -1;
+            FPlaylistPropertyArray::OverridePlaylist__Offset = -1;
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset = -1;
+        }
+
+        const auto ClassName = GameState->Class->Name.ToString();
+        SDK::DbgLog(
+            "[Playlist] reflection refresh class=%s previousInfo=%d "
+            "previousData=%d info=%d data=%d struct=%p base=%d "
+            "override=%d key=%d FN=%.2f UE=%.2f\n",
+            ClassName.c_str(),
+            PreviousInfoOffset,
+            PreviousDataOffset,
+            AFortGameStateAthena::CurrentPlaylistInfo__Offset,
+            AFortGameStateAthena::CurrentPlaylistData__Offset,
+            (void*)PlaylistInfoStruct,
+            FPlaylistPropertyArray::BasePlaylist__Offset,
+            FPlaylistPropertyArray::OverridePlaylist__Offset,
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset,
+            VersionInfo.FortniteVersion,
+            VersionInfo.EngineVersion);
+    }
+
     const UFortPlaylistAthena* GetPublishedPlaylist(
         AFortGameStateAthena* GameState)
     {
         if (!IsSaneObject(GameState))
             return nullptr;
 
-        if (GameState->HasCurrentPlaylistInfo())
+        const bool bHasPlaylistInfo =
+            GameState->HasCurrentPlaylistInfo();
+        const bool bHasBasePlaylist =
+            FPlaylistPropertyArray::BasePlaylist__Offset >= 0;
+        const bool bHasOverridePlaylist =
+            FPlaylistPropertyArray::OverridePlaylist__Offset >= 0;
+
+        if (VersionInfo.EngineVersion < 4.24 &&
+            bHasPlaylistInfo && bHasBasePlaylist)
         {
-            if (FPlaylistPropertyArray::HasOverridePlaylist())
+            const auto BasePlaylist =
+                GameState->CurrentPlaylistInfo.BasePlaylist;
+            if (IsSanePlaylist(BasePlaylist))
+                return BasePlaylist;
+        }
+
+        if (bHasPlaylistInfo &&
+            (bHasBasePlaylist || bHasOverridePlaylist))
+        {
+            if (bHasOverridePlaylist)
             {
                 if (const auto OverridePlaylist =
                         GameState->CurrentPlaylistInfo
@@ -1703,7 +1778,7 @@ namespace
                         return OverridePlaylist;
                 }
             }
-            if (FPlaylistPropertyArray::HasBasePlaylist())
+            if (bHasBasePlaylist)
             {
                 const auto BasePlaylist =
                     GameState->CurrentPlaylistInfo.BasePlaylist;
@@ -1720,6 +1795,30 @@ namespace
         }
 
         return nullptr;
+    }
+
+    const UFortPlaylistAthena* ResolveActivePlaylist(
+        AFortGameStateAthena* GameState)
+    {
+        if (const auto Published = GetPublishedPlaylist(GameState))
+            return Published;
+
+        // Several event builds, including 18.40, expose
+        // CurrentPlaylistInfo without exposing a readable BasePlaylist member
+        // and omit CurrentPlaylistData entirely. Never fall through from one
+        // missing reflected slot into an unchecked DEFINE_PROP read. The
+        // configured asset is the authoritative safe fallback on those dumps.
+        auto Configured =
+            FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+        if (IsSanePlaylist(Configured))
+            return Configured;
+
+        auto DefaultPlaylist = FindObject<UFortPlaylistAthena>(
+            L"/Game/Athena/Playlists/"
+            L"Playlist_DefaultSolo.Playlist_DefaultSolo");
+        return IsSanePlaylist(DefaultPlaylist)
+            ? DefaultPlaylist
+            : nullptr;
     }
 
     bool PublishNative1040Playlist(
@@ -1775,6 +1874,12 @@ namespace
     }
 }
 
+const UFortPlaylistAthena* AFortGameMode::GetActivePlaylist(
+    AFortGameStateAthena* GameState)
+{
+    return ResolveActivePlaylist(GameState);
+}
+
 void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 {
     auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
@@ -1784,6 +1889,8 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 
     if (Playlist)
     {
+        RefreshPlaylistReflectionCache(GameState);
+
         // Capture the authored values before this function applies any
         // pre-start override. The same game-thread policy is reasserted after
         // native mutators initialize and can therefore restore these values if
@@ -1850,9 +1957,33 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             if (GameMode->HasbPlaylistHotfixChangedGCDisabling())
                 GameMode->bPlaylistHotfixChangedGCDisabling = true;
         }
-        if (GameState->HasCurrentPlaylistInfo())
+        const bool bHasCurrentPlaylistInfo =
+            GameState->HasCurrentPlaylistInfo();
+        const bool bHasPlaylistInfoLayout =
+            bHasCurrentPlaylistInfo &&
+            FPlaylistPropertyArray::BasePlaylist__Offset >= 0 &&
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset >= 0;
+        const bool bUseLegacyPlaylistInfo =
+            VersionInfo.EngineVersion < 4.24 &&
+            bHasPlaylistInfoLayout;
+        SDK::DbgLog(
+            "[Playlist] setup gameState=%p playlist=%p name=%s "
+            "hasInfo=%d hasData=%d infoOffset=%d dataOffset=%d "
+            "baseOffset=%d keyOffset=%d legacy=%d FN=%.2f UE=%.2f\n",
+            (void*)GameState,
+            (void*)Playlist,
+            Playlist->Name.ToString().c_str(),
+            (int)bHasCurrentPlaylistInfo,
+            (int)GameState->HasCurrentPlaylistData(),
+            AFortGameStateAthena::CurrentPlaylistInfo__Offset,
+            AFortGameStateAthena::CurrentPlaylistData__Offset,
+            FPlaylistPropertyArray::BasePlaylist__Offset,
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset,
+            (int)bUseLegacyPlaylistInfo,
+            VersionInfo.FortniteVersion,
+            VersionInfo.EngineVersion);
+        if (bUseLegacyPlaylistInfo)
         {
-            //if (VersionInfo.EngineVersion >= 4.27)
             GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
             if ((ShouldRepairLateSeasonTeams() ||
                     FFortAthenaHeistCompatibility::IsHeistPlaylist(
@@ -1868,11 +1999,44 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             GameState->CurrentPlaylistInfo.MarkArrayDirty();
             if (!bIsNative1040LTM)
                 GameState->OnRep_CurrentPlaylistInfo();
+
+            SDK::DbgLog(
+                "[Playlist] legacy publication gameState=%p playlist=%p "
+                "name=%s key=%d FN=%.2f UE=%.2f\n",
+                (void*)GameState,
+                (void*)Playlist,
+                Playlist->Name.ToString().c_str(),
+                GameState->CurrentPlaylistInfo.PlaylistReplicationKey,
+                VersionInfo.FortniteVersion,
+                VersionInfo.EngineVersion);
         }
-        else if (GameState->HasCurrentPlaylistData())
+        else
         {
-            GameState->CurrentPlaylistData = Playlist;
-            GameState->OnRep_CurrentPlaylistData();
+            const bool bUseReflectedPlaylistInfo =
+                bHasPlaylistInfoLayout;
+            if (bUseReflectedPlaylistInfo)
+            {
+                GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
+                if ((ShouldRepairLateSeasonTeams() ||
+                        FFortAthenaHeistCompatibility::IsHeistPlaylist(
+                            Playlist) ||
+                        bIsNative1040LTM ||
+                        bIsOriginalFoodFight ||
+                        bIsCarminePlaylist) &&
+                    FPlaylistPropertyArray::HasOverridePlaylist())
+                {
+                    GameState->CurrentPlaylistInfo.OverridePlaylist = Playlist;
+                }
+                GameState->CurrentPlaylistInfo.PlaylistReplicationKey++;
+                GameState->CurrentPlaylistInfo.MarkArrayDirty();
+                if (!bIsNative1040LTM)
+                    GameState->OnRep_CurrentPlaylistInfo();
+            }
+            else if (GameState->HasCurrentPlaylistData())
+            {
+                GameState->CurrentPlaylistData = Playlist;
+                GameState->OnRep_CurrentPlaylistData();
+            }
         }
 
         GameMode->CurrentPlaylistId = Playlist->PlaylistId;
@@ -3003,35 +3167,11 @@ namespace
         {
             auto GameState =
                 static_cast<AFortGameStateAthena*>(World->GameState);
-            if (GameState->HasCurrentPlaylistInfo())
-            {
-                const UFortPlaylistAthena* CurrentPlaylist = nullptr;
-                if (FPlaylistPropertyArray::HasBasePlaylist())
-                {
-                    CurrentPlaylist =
-                        GameState->CurrentPlaylistInfo.BasePlaylist;
-                }
-                if (!CurrentPlaylist &&
-                    FPlaylistPropertyArray::HasOverridePlaylist())
-                {
-                    CurrentPlaylist =
-                        GameState->CurrentPlaylistInfo.OverridePlaylist;
-                }
-
-                auto MutablePlaylist =
-                    const_cast<UFortPlaylistAthena*>(CurrentPlaylist);
-                if (IsSaneObject(MutablePlaylist))
-                    return MutablePlaylist;
-            }
-
-            if (GameState->HasCurrentPlaylistData())
-            {
-                auto CurrentPlaylist =
-                    const_cast<UFortPlaylistAthena*>(
-                        GameState->CurrentPlaylistData);
-                if (IsSaneObject(CurrentPlaylist))
-                    return CurrentPlaylist;
-            }
+            auto CurrentPlaylist =
+                const_cast<UFortPlaylistAthena*>(
+                    GetPublishedPlaylist(GameState));
+            if (IsSaneObject(CurrentPlaylist))
+                return CurrentPlaylist;
         }
 
         auto& State = GSupplyDropSuppressionState;
@@ -3094,7 +3234,8 @@ namespace
         {
             auto GameState =
                 static_cast<AFortGameStateAthena*>(World->GameState);
-            if (GameState->HasCurrentPlaylistInfo())
+            if (GameState->HasCurrentPlaylistInfo() &&
+                FPlaylistPropertyArray::StaticStruct())
             {
                 if (FPlaylistPropertyArray::HasOverridePlaylist())
                 {
@@ -5367,6 +5508,600 @@ void AFortGameMode::TickPendingVehicleSpawns()
         CurrentTimeMs + VehicleSpawnRetryIntervalMs;
 }
 
+namespace
+{
+    struct FManagedPlaylistStreamingState
+    {
+        UWorld* World = nullptr;
+        const UFortPlaylistAthena* Playlist = nullptr;
+        ULONGLONG FirstObservedTimeMs = 0;
+        ULONGLONG NextRetryTimeMs = 0;
+        bool bLoggedInvalidTracker = false;
+        bool bLoggedExternalFallback = false;
+        std::vector<FName> LevelNamesByTrackerIndex;
+        std::vector<ULevelStreamingDynamic*> StreamingObjectsByTrackerIndex;
+    };
+
+    FManagedPlaylistStreamingState GManagedPlaylistStreamingState;
+
+    bool TryGetPlaylistLevelName(
+        const FSoftObjectPtr& SoftLevel,
+        FName& OutLevelName)
+    {
+        OutLevelName = FName();
+        if (VersionInfo.FortniteVersion < 23)
+        {
+            if (!SoftLevel.ObjectID.AssetPathName.IsValid())
+                return false;
+            OutLevelName = SoftLevel.ObjectID.AssetPathName;
+            return true;
+        }
+
+        // UE5 split FSoftObjectPath into package/asset names and UE5.3 also
+        // moved those fields. Reading ObjectID.AssetPathName on 27.11 reads
+        // the weak-pointer bytes instead of the Durian level path.
+        const uint8* Value =
+            reinterpret_cast<const uint8*>(&SoftLevel);
+        const uint32 PackageOffset =
+            VersionInfo.EngineVersion < 5.3 ? 0x10 : 0x08;
+        const uint32 AssetOffset =
+            VersionInfo.EngineVersion < 5.3 ? 0x14 : 0x0C;
+        if (!SDK::MemReadable(
+                Value + PackageOffset, sizeof(FName)) ||
+            !SDK::MemReadable(
+                Value + AssetOffset, sizeof(FName)))
+        {
+            return false;
+        }
+
+        const auto& PackageName =
+            *reinterpret_cast<const FName*>(
+                Value + PackageOffset);
+        const auto& AssetName =
+            *reinterpret_cast<const FName*>(
+                Value + AssetOffset);
+        if (!PackageName.IsValid())
+            return false;
+
+        auto FullPath = PackageName.ToWString();
+        if (AssetName.IsValid())
+        {
+            FullPath += L".";
+            FullPath += AssetName.ToWString();
+        }
+        if (FullPath.empty() || FullPath[0] != L'/')
+            return false;
+
+        OutLevelName = FName(FullPath.c_str());
+        return OutLevelName.IsValid();
+    }
+
+    bool IsSaneReflectedArray(
+        const void* Data,
+        int32 Num,
+        int32 Max,
+        int32 ElementSize,
+        int32 MaximumElements)
+    {
+        if (Num < 0 || Max < Num || Max > MaximumElements ||
+            ElementSize <= 0)
+        {
+            return false;
+        }
+
+        if (Max == 0)
+            return Data == nullptr;
+
+        return Data &&
+            SDK::MemReadable(
+                Data,
+                static_cast<size_t>(Max) *
+                    static_cast<size_t>(ElementSize));
+    }
+
+    bool GetInternalPlaylistStreamingTracker(
+        AFortGameStateAthena* GameState,
+        const TArray<FPlaylistStreamedLevelData>** OutTracker,
+        int32* OutElementSize)
+    {
+        if (OutTracker)
+            *OutTracker = nullptr;
+        if (OutElementSize)
+            *OutElementSize = 0;
+        if (!GameState ||
+            !GameState->HasAdditionalPlaylistLevelsStreamed())
+        {
+            return false;
+        }
+
+        const int32 ReplicatedLevelsOffset =
+            GameState->GetOffset(
+                "AdditionalPlaylistLevelsStreamed");
+        int32 TrackerOffset =
+            GameState->GetOffset("AdditionalPlaylistLevels");
+        const UStruct* TrackerStruct =
+            FPlaylistStreamedLevelData::StaticStruct();
+        if (ReplicatedLevelsOffset < 0x10 || !TrackerStruct ||
+            !FPlaylistStreamedLevelData::
+                HasbIsFinishedStreaming())
+        {
+            return false;
+        }
+
+        const int32 ElementSize =
+            TrackerStruct->GetPropertiesSize();
+        if (ElementSize < static_cast<int32>(sizeof(void*)) ||
+            ElementSize > 0x100)
+        {
+            return false;
+        }
+
+        // This tracker is owned by Fortnite's asynchronous playlist loader.
+        // Some older dumps omit its property even though the field is adjacent
+        // to the replicated array. The adjacent fallback is observation-only:
+        // callers receive a const array and must never add, remove, clear, or
+        // update entries that a native async completion may still reference.
+        const bool bKnownAdjacentTrackerLayout =
+            std::fabs(
+                VersionInfo.FortniteVersion - 9.40) < 0.001 ||
+            std::fabs(
+                VersionInfo.FortniteVersion - 9.41) < 0.001 ||
+            std::fabs(
+                VersionInfo.FortniteVersion - 18.40) < 0.001 ||
+            std::fabs(
+                VersionInfo.FortniteVersion - 27.11) < 0.001;
+        const bool bUsingAdjacentTracker =
+            TrackerOffset < 0 && bKnownAdjacentTrackerLayout;
+        if (bUsingAdjacentTracker)
+            TrackerOffset = ReplicatedLevelsOffset - 0x10;
+        const int32 GameStateSize =
+            GameState->Class
+                ? GameState->Class->GetPropertiesSize()
+                : 0;
+        if (TrackerOffset < 0 ||
+            TrackerOffset == ReplicatedLevelsOffset ||
+            GameStateSize <= 0 ||
+            TrackerOffset >
+                GameStateSize -
+                    static_cast<int32>(sizeof(TArray<void*>)) ||
+            ReplicatedLevelsOffset >
+                GameStateSize -
+                    static_cast<int32>(sizeof(TArray<void*>)) ||
+            (bUsingAdjacentTracker &&
+             TrackerOffset +
+                     static_cast<int32>(sizeof(TArray<void*>)) !=
+                 ReplicatedLevelsOffset))
+        {
+            return false;
+        }
+
+        const auto Tracker =
+            reinterpret_cast<const TArray<FPlaylistStreamedLevelData>*>(
+                reinterpret_cast<uint8*>(GameState) +
+                TrackerOffset);
+        if (!SDK::MemReadable(Tracker, sizeof(*Tracker)) ||
+            !IsSaneReflectedArray(
+                Tracker->Data,
+                Tracker->Num(),
+                Tracker->Max(),
+                ElementSize,
+                256))
+        {
+            return false;
+        }
+
+        if (OutTracker)
+            *OutTracker = Tracker;
+        if (OutElementSize)
+            *OutElementSize = ElementSize;
+        return true;
+    }
+
+    bool EnsureReplicatedPlaylistLevel(
+        AFortGameStateAthena* GameState,
+        const FName& LevelName,
+        bool bServerOnly,
+        bool* OutAdded)
+    {
+        if (OutAdded)
+            *OutAdded = false;
+        if (!GameState || !LevelName.IsValid() ||
+            !GameState->HasAdditionalPlaylistLevelsStreamed())
+        {
+            return false;
+        }
+
+        auto& StreamedLevels =
+            GameState->AdditionalPlaylistLevelsStreamed;
+        const UStruct* AdditionalLevelStruct =
+            FAdditionalLevelStreamed::StaticStruct();
+        if (!AdditionalLevelStruct)
+        {
+            auto& LegacyLevels =
+                reinterpret_cast<TArray<FName>&>(
+                    StreamedLevels);
+            if (!IsSaneReflectedArray(
+                    LegacyLevels.Data,
+                    LegacyLevels.Num(),
+                    LegacyLevels.Max(),
+                    static_cast<int32>(sizeof(FName)),
+                    256))
+            {
+                return false;
+            }
+
+            for (int32 Index = 0;
+                 Index < LegacyLevels.Num(); ++Index)
+            {
+                if (LegacyLevels[Index] == LevelName)
+                    return true;
+            }
+
+            FName MutableLevelName = LevelName;
+            LegacyLevels.Add(MutableLevelName);
+            if (OutAdded)
+                *OutAdded = true;
+            return true;
+        }
+
+        const int32 ElementSize =
+            AdditionalLevelStruct->GetPropertiesSize();
+        if (ElementSize <= 0 || ElementSize > 0x100 ||
+            !FAdditionalLevelStreamed::HasLevelName() ||
+            !FAdditionalLevelStreamed::HasbIsServerOnly() ||
+            !IsSaneReflectedArray(
+                StreamedLevels.Data,
+                StreamedLevels.Num(),
+                StreamedLevels.Max(),
+                ElementSize,
+                256))
+        {
+            return false;
+        }
+
+        for (int32 Index = 0;
+             Index < StreamedLevels.Num(); ++Index)
+        {
+            auto& Existing =
+                StreamedLevels.Get(Index, ElementSize);
+            if (Existing.LevelName == LevelName)
+                return true;
+        }
+
+        void* Memory = FMemory::Malloc(ElementSize);
+        if (!Memory)
+            return false;
+        memset(Memory, 0, ElementSize);
+
+        auto NewLevel =
+            static_cast<FAdditionalLevelStreamed*>(Memory);
+        FName MutableLevelName = LevelName;
+        NewLevel->LevelName = MutableLevelName;
+        NewLevel->bIsServerOnly = bServerOnly;
+        StreamedLevels.Add(*NewLevel, ElementSize);
+        FMemory::Free(Memory);
+        if (OutAdded)
+            *OutAdded = true;
+        return true;
+    }
+
+    bool MaintainManagedPlaylistLevels(
+        AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist,
+        bool bForceRequest)
+    {
+        UWorld* World = UWorld::GetWorld();
+        if (!World || !GameState || !Playlist)
+            return false;
+
+        auto ValidateSoftLevelArray =
+            [](const TArray<TSoftObjectPtr<UWorld>>& Levels)
+            {
+                return IsSaneReflectedArray(
+                    Levels.Data,
+                    Levels.Num(),
+                    Levels.Max(),
+                    static_cast<int32>(FSoftObjectPtr::Size()),
+                    128);
+            };
+
+        const bool bHasClientLevels =
+            Playlist->HasAdditionalLevels();
+        const bool bHasServerLevels =
+            Playlist->HasAdditionalLevelsServerOnly();
+        if ((bHasClientLevels &&
+             !ValidateSoftLevelArray(
+                 Playlist->AdditionalLevels)) ||
+            (bHasServerLevels &&
+             !ValidateSoftLevelArray(
+                 Playlist->AdditionalLevelsServerOnly)))
+        {
+            return false;
+        }
+
+        const int32 ClientLevelCount =
+            bHasClientLevels
+                ? Playlist->AdditionalLevels.Num()
+                : 0;
+        const int32 ServerLevelCount =
+            bHasServerLevels
+                ? Playlist->AdditionalLevelsServerOnly.Num()
+                : 0;
+        const int32 DeclaredLevelCount =
+            ClientLevelCount + ServerLevelCount;
+        if (DeclaredLevelCount == 0)
+            return true;
+
+        const TArray<FPlaylistStreamedLevelData>* Tracker = nullptr;
+        int32 TrackerElementSize = 0;
+        const bool bHasNativeTracker =
+            GetInternalPlaylistStreamingTracker(
+                GameState, &Tracker, &TrackerElementSize);
+
+        const bool bNewPlaylist =
+            GManagedPlaylistStreamingState.World != World ||
+            GManagedPlaylistStreamingState.Playlist != Playlist;
+        if (bNewPlaylist)
+        {
+            GManagedPlaylistStreamingState = {};
+            GManagedPlaylistStreamingState.World = World;
+            GManagedPlaylistStreamingState.Playlist = Playlist;
+            GManagedPlaylistStreamingState.FirstObservedTimeMs =
+                GetTickCount64();
+        }
+
+        const ULONGLONG CurrentTimeMs = GetTickCount64();
+        const bool bAllowExternalFallback =
+            std::fabs(
+                VersionInfo.FortniteVersion - 27.11) < 0.001;
+        const bool bFallbackGraceExpired =
+            CurrentTimeMs >=
+                GManagedPlaylistStreamingState
+                    .FirstObservedTimeMs + 8000ULL;
+        const bool bMayRequest =
+            bAllowExternalFallback &&
+            bFallbackGraceExpired &&
+            (bForceRequest ||
+             CurrentTimeMs >=
+                 GManagedPlaylistStreamingState
+                     .NextRetryTimeMs);
+        if (!bHasNativeTracker &&
+            !GManagedPlaylistStreamingState.bLoggedInvalidTracker)
+        {
+            GManagedPlaylistStreamingState.bLoggedInvalidTracker = true;
+            SDK::DbgLog(
+                "[PlaylistLevels] native tracker unavailable; "
+                "%s\n",
+                bAllowExternalFallback
+                    ? "waiting before isolated 27.11 fallback"
+                    : "leaving playlist streaming to Fortnite");
+        }
+        bool bNeedsRetry = false;
+        bool bAddedReplicatedLevel = false;
+        bool bAllRequestsReady = true;
+        int32 TrackerIndex = 0;
+
+        auto MaintainLevel =
+            [&](TSoftObjectPtr<UWorld>& Level,
+                bool bServerOnly)
+            {
+                const size_t MappingIndex =
+                    static_cast<size_t>(TrackerIndex++);
+                FName LevelName;
+                if (!TryGetPlaylistLevelName(Level, LevelName))
+                {
+                    bAllRequestsReady = false;
+                    bNeedsRetry = true;
+                    return;
+                }
+
+                if (GManagedPlaylistStreamingState
+                        .LevelNamesByTrackerIndex.size() <= MappingIndex)
+                {
+                    GManagedPlaylistStreamingState
+                        .LevelNamesByTrackerIndex.resize(MappingIndex + 1);
+                    GManagedPlaylistStreamingState
+                        .StreamingObjectsByTrackerIndex.resize(
+                            MappingIndex + 1, nullptr);
+                }
+                auto& TrackedLevelName =
+                    GManagedPlaylistStreamingState
+                        .LevelNamesByTrackerIndex[MappingIndex];
+                auto& ManagedStreamingLevel =
+                    GManagedPlaylistStreamingState
+                        .StreamingObjectsByTrackerIndex[MappingIndex];
+                if (!TrackedLevelName.IsValid() ||
+                    TrackedLevelName != LevelName)
+                {
+                    // This is DLL-owned fallback state only. Never clear or
+                    // repurpose Fortnite's engine-owned tracker entry.
+                    TrackedLevelName = LevelName;
+                    ManagedStreamingLevel = nullptr;
+                }
+
+                const UClass* StreamingClass =
+                    ULevelStreamingDynamic::StaticClass();
+                if (ManagedStreamingLevel &&
+                    (!StreamingClass ||
+                     !IsSaneObject(ManagedStreamingLevel) ||
+                     !ManagedStreamingLevel->IsA(StreamingClass)))
+                {
+                    ManagedStreamingLevel = nullptr;
+                }
+
+                ULevelStreamingDynamic* NativeStreamingLevel = nullptr;
+                if (bHasNativeTracker &&
+                    MappingIndex <
+                        static_cast<size_t>(Tracker->Num()))
+                {
+                    const auto& NativeEntry =
+                        Tracker->Get(
+                            static_cast<int32>(MappingIndex),
+                            TrackerElementSize);
+                    auto Candidate = NativeEntry.StreamingLevel;
+                    if (Candidate && StreamingClass &&
+                        IsSaneObject(Candidate) &&
+                        Candidate->IsA(StreamingClass))
+                    {
+                        NativeStreamingLevel = Candidate;
+                    }
+                }
+
+                auto StreamingLevel = NativeStreamingLevel
+                    ? NativeStreamingLevel
+                    : ManagedStreamingLevel;
+                if (!StreamingLevel && bMayRequest)
+                {
+                    if (!GManagedPlaylistStreamingState
+                             .bLoggedExternalFallback)
+                    {
+                        GManagedPlaylistStreamingState
+                            .bLoggedExternalFallback = true;
+                        SDK::DbgLog(
+                            "[PlaylistLevels] using isolated 27.11 "
+                            "streaming fallback after native grace period\n");
+                    }
+                    bool bSuccess = false;
+                    StreamingLevel =
+                        ULevelStreamingDynamic::
+                            LoadLevelInstanceBySoftObjectPtr(
+                                World,
+                                Level,
+                                FVector(),
+                                FRotator(),
+                                &bSuccess,
+                                FString(),
+                                nullptr);
+                    if (!bSuccess || !StreamingLevel ||
+                        !IsSaneObject(StreamingLevel))
+                    {
+                        StreamingLevel = nullptr;
+                        bNeedsRetry = true;
+                        SDK::DbgLog(
+                            "[PlaylistLevels] request failed: %s\n",
+                            LevelName.ToString().c_str());
+                    }
+                    ManagedStreamingLevel = StreamingLevel;
+                }
+
+                if (!StreamingLevel)
+                {
+                    // 18.40 and loader-backed legacy events stay entirely on
+                    // Fortnite's native/Blueprint pipeline. If a native entry
+                    // exists, the read-only visibility pass below will hold
+                    // readiness; otherwise event startup retries its actors.
+                    if (bAllowExternalFallback)
+                    {
+                        bAllRequestsReady = false;
+                        bNeedsRetry = true;
+                    }
+                    return;
+                }
+
+                if (!NativeStreamingLevel)
+                {
+                    bool bAdded = false;
+                    if (!EnsureReplicatedPlaylistLevel(
+                            GameState,
+                            LevelName,
+                            bServerOnly,
+                            &bAdded))
+                    {
+                        bAllRequestsReady = false;
+                        bNeedsRetry = true;
+                        return;
+                    }
+                    bAddedReplicatedLevel |= bAdded;
+                }
+
+                if (!StreamingLevel->HasLoadedLevel() ||
+                    !IsSaneObject(StreamingLevel->LoadedLevel) ||
+                    !StreamingLevel->LoadedLevel->HasbIsVisible() ||
+                    !StreamingLevel->LoadedLevel->bIsVisible)
+                {
+                    bAllRequestsReady = false;
+                }
+            };
+
+        if (bHasClientLevels)
+        {
+            for (int32 Index = 0;
+                 Index < ClientLevelCount; ++Index)
+            {
+                auto& Level =
+                    Playlist->AdditionalLevels.Get(
+                        Index,
+                        FSoftObjectPtr::Size());
+                MaintainLevel(Level, false);
+            }
+        }
+        if (bHasServerLevels)
+        {
+            for (int32 Index = 0;
+                 Index < ServerLevelCount; ++Index)
+            {
+                auto& Level =
+                    Playlist->AdditionalLevelsServerOnly.Get(
+                        Index,
+                        FSoftObjectPtr::Size());
+                MaintainLevel(Level, true);
+            }
+        }
+
+
+        GManagedPlaylistStreamingState
+            .LevelNamesByTrackerIndex.resize(
+                static_cast<size_t>(DeclaredLevelCount));
+        GManagedPlaylistStreamingState
+            .StreamingObjectsByTrackerIndex.resize(
+                static_cast<size_t>(DeclaredLevelCount));
+
+        if (bAddedReplicatedLevel)
+            GameState->ForceNetUpdate();
+        if (bNeedsRetry && bMayRequest)
+        {
+            GManagedPlaylistStreamingState.NextRetryTimeMs =
+                CurrentTimeMs + 1000ULL;
+        }
+        return bAllRequestsReady;
+    }
+
+    bool AreInternalPlaylistLevelsVisible(
+        AFortGameStateAthena* GameState,
+        bool bRequireTracker)
+    {
+        const TArray<FPlaylistStreamedLevelData>* Tracker = nullptr;
+        int32 ElementSize = 0;
+        if (!GetInternalPlaylistStreamingTracker(
+                GameState, &Tracker, &ElementSize))
+        {
+            return !bRequireTracker;
+        }
+
+        for (int32 Index = 0;
+             Index < Tracker->Num(); ++Index)
+        {
+            const auto& Entry = Tracker->Get(Index, ElementSize);
+            auto StreamingLevel = Entry.StreamingLevel;
+            if (!StreamingLevel ||
+                !IsSaneObject(StreamingLevel) ||
+                !StreamingLevel->HasLoadedLevel())
+            {
+                return false;
+            }
+
+            auto LoadedLevel = StreamingLevel->LoadedLevel;
+            bool bVisible =
+                LoadedLevel && IsSaneObject(LoadedLevel) &&
+                LoadedLevel->HasbIsVisible() &&
+                LoadedLevel->bIsVisible;
+            if (!bVisible)
+                return false;
+        }
+        return true;
+    }
+}
+
 void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Ret)
 {
     Stack.IncrementCode();
@@ -5501,6 +6236,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
         bool bHeistPlaylist = false;
         bool bNative1040LTMPlaylist = false;
+        bool bManagedPlaylistStreamingSetup = false;
         if (Playlist)
         {
             auto AdditionalPlaylistLevelsStreamed__Off = GameState->GetOffset("AdditionalPlaylistLevelsStreamed");
@@ -5582,59 +6318,63 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
             else if (AdditionalPlaylistLevelsStreamed__Off != -1)
             {
-                TArray<FPlaylistStreamedLevelData>& AdditionalPlaylistLevels
-                    = *(TArray<FPlaylistStreamedLevelData>*)(__int64(GameState) + AdditionalPlaylistLevelsStreamed__Off - 0x10);
-
-                AdditionalPlaylistLevels.Free();
-
-                if (Playlist->HasAdditionalLevels())
+                if (VersionInfo.EngineVersion < 4.24)
                 {
-                    for (auto& Level : Playlist->AdditionalLevels)
+                    TArray<FPlaylistStreamedLevelData>& AdditionalPlaylistLevels
+                        = *(TArray<FPlaylistStreamedLevelData>*)(__int64(GameState) + AdditionalPlaylistLevelsStreamed__Off - 0x10);
+
+                    AdditionalPlaylistLevels.Free();
+
+                    if (Playlist->HasAdditionalLevels())
                     {
-                        bool Success = false;
-                        // ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
-                        if (AdditionalLevelStruct)
+                        for (auto& Level : Playlist->AdditionalLevels)
                         {
-                            auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
-                            memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
-                            level->bIsServerOnly = false;
-                            level->LevelName = Level.ObjectID.AssetPathName;
-                            if (Success)
-                                GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
-                            free(level);
+                            bool Success = false;
+                            if (AdditionalLevelStruct)
+                            {
+                                auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
+                                memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
+                                level->bIsServerOnly = false;
+                                level->LevelName = Level.ObjectID.AssetPathName;
+                                if (Success)
+                                    GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
+                                free(level);
+                            }
+                            else
+                                GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
                         }
-                        else
-                            GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
+                    }
+
+                    if (Playlist->HasAdditionalLevelsServerOnly())
+                    {
+                        for (auto& Level : Playlist->AdditionalLevelsServerOnly)
+                        {
+                            bool Success = false;
+                            if (AdditionalLevelStruct)
+                            {
+                                auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
+                                memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
+                                level->bIsServerOnly = true;
+                                level->LevelName = Level.ObjectID.AssetPathName;
+                                if (Success)
+                                    GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
+                                free(level);
+                            }
+                            else
+                                GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
+                        }
                     }
                 }
-
-                if (Playlist->HasAdditionalLevelsServerOnly())
+                else
                 {
-                    for (auto& Level : Playlist->AdditionalLevelsServerOnly)
-                    {
-                        bool Success = false;
-                        // ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
-
-                        if (AdditionalLevelStruct)
-                        {
-
-                            auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
-                            memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
-                            level->bIsServerOnly = true;
-                            level->LevelName = Level.ObjectID.AssetPathName;
-                            if (Success)
-                                GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
-                            free(level);
-                        }
-                        else
-                            GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
-                    }
+                    bManagedPlaylistStreamingSetup = true;
                 }
             }
         }
 
         if (!FConfiguration::IsKnownS27CustomMapPlaylist() &&
-            !bHeistPlaylist)
+            !bHeistPlaylist &&
+            !bManagedPlaylistStreamingSetup)
             GameState->OnRep_AdditionalPlaylistLevelsStreamed();
 
         // misc C1 poi things
@@ -5918,7 +6658,13 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
         }
 
-        auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bEnableZones = true;
+
+        const auto Playlist =
+            VersionInfo.FortniteVersion >= 3.5 &&
+            GameMode->HasWarmupRequiredPlayerCount()
+                ? ResolveActivePlaylist(GameState)
+                : nullptr;
 
         if (Playlist && Playlist->HasbSkipWarmup())
             UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bSkipWarmup = Playlist->bSkipWarmup;
@@ -5941,30 +6687,19 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                         if (Event.EventVersion != VersionInfo.FortniteVersion)
                             continue;
 
-                        UObject* LoaderObject = nullptr;
-                        if (Event.LoaderClass)
-                            if (const UClass* LoaderClass = FindObject<UClass>(Event.LoaderClass))
-                            {
-                                TArray<AActor*> AllLoaders;
-                                Utils::GetAll(LoaderClass, AllLoaders);
-                                LoaderObject = AllLoaders.Num() > 0 ? AllLoaders[0] : nullptr;
-                                AllLoaders.Free();
-                            }
+                        // Use the same reflected, idempotent loader lifecycle
+                        // as the Start Event request. Calling the loader here
+                        // and again from the GUI used to race the streamed
+                        // Cattus level on 9.41.
+                        Events::PrepareEventContent();
 
-                        if (Event.LoaderFuncPath != nullptr && LoaderObject)
-                            if (const UFunction* LoaderFunction = FindObject<UFunction>(Event.LoaderFuncPath))
-                            {
-                                int Param = 1;
-                                LoaderObject->ProcessEvent(const_cast<UFunction*>(LoaderFunction), &Param);
-                                printf("[Events] Loaded event level!\n");
-                            }
-                            else
-                                printf("[Events] Failed to load event level!\n");
-
-                        if (GameMode->HasSafeZoneLocations())
-                            GameMode->SafeZoneLocations.Free();
-                        else
-                            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bEnableZones = false;
+                        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bEnableZones = false;
+                        SDK::DbgLog(
+                            "[Events] preserving native safe-zone locations count=%d FN=%.2f\n",
+                            GameMode->HasSafeZoneLocations()
+                                ? GameMode->SafeZoneLocations.Num()
+                                : -1,
+                            VersionInfo.FortniteVersion);
                         break;
                     }
 
@@ -6326,21 +7061,22 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
         auto VolumeManager = GameState->HasVolumeManager() ? GameState->VolumeManager : nullptr;
 
-        bool bAllLevelsFinishedStreaming = true;
-        if (GameState->HasAdditionalPlaylistLevelsStreamed())
-        {
-            TArray<FPlaylistStreamedLevelData>& AdditionalPlaylistLevels = *(TArray<FPlaylistStreamedLevelData>*) (__int64(GameState) + GameState->GetOffset("AdditionalPlaylistLevelsStreamed") - 0x10);
-            for (int i = 0; i < AdditionalPlaylistLevels.Num(); i++)
-            {
-                auto& AdditionalPlaylistLevel = AdditionalPlaylistLevels.Get(i, FPlaylistStreamedLevelData::Size());
-
-                if (!AdditionalPlaylistLevel.bIsFinishedStreaming || !AdditionalPlaylistLevel.StreamingLevel || !AdditionalPlaylistLevel.StreamingLevel->LoadedLevel->bIsVisible)
-                {
-                    bAllLevelsFinishedStreaming = false;
-                    break;
-                }
-            }
-        }
+        const UFortPlaylistAthena* ReadinessPlaylist =
+            GetPublishedPlaylist(GameState);
+        const bool bUsesManagedPlaylistStreaming =
+            ReadinessPlaylist &&
+            !FConfiguration::IsKnownS27CustomMapPlaylist() &&
+            !FFortAthenaHeistCompatibility::
+                IsHeistPlaylist(ReadinessPlaylist) &&
+            !FFortAthenaNativeLTMCompatibility::
+                IsTargetPlaylist(ReadinessPlaylist);
+        const bool bManagedRequestsReady =
+            !bUsesManagedPlaylistStreaming ||
+            MaintainManagedPlaylistLevels(
+                GameState, ReadinessPlaylist, false);
+        const bool bAllLevelsFinishedStreaming =
+            bManagedRequestsReady &&
+            AreInternalPlaylistLevelsVisible(GameState, false);
 
         static auto WaitingToStart = FName(L"WaitingToStart");
         const bool bPlaylistReady =
@@ -6391,10 +7127,79 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         if (!bNative1040LTMReady)
         {
             // Always call the 4.23 original first so the shipped playlist
-            // pipeline gets its normal initialization opportunity. Hold only
-            // the requested 10.40 LTMs in WaitingToStart until their active
-            // gameplay-modifier records and configured actors are verified.
+            // pipeline gets its normal initialization opportunity. Cattus
+            // content is owned solely by its idempotent Blueprint loader;
+            // duplicating it through the generic level-instance API crashes
+            // the native async loader.
             *Ret = false;
+        }
+
+        auto LegacyWorld = UWorld::GetWorld();
+        auto LegacyNetDriver =
+            LegacyWorld
+                ? static_cast<UNetDriver*>(LegacyWorld->NetDriver)
+                : nullptr;
+        const int32 LegacyConnectionCount =
+            LegacyNetDriver
+                ? LegacyNetDriver->ClientConnections.Num()
+                : 0;
+        int32 LegacyReadyPlayerCount = 0;
+        TArray<AFortPlayerControllerAthena*> LegacyPlayerList;
+        Utils::GetAll<AFortPlayerControllerAthena>(LegacyPlayerList);
+        for (auto PlayerController : LegacyPlayerList)
+        {
+            if (PlayerController && PlayerController->PlayerState &&
+                !PlayerController->PlayerState->bIsSpectator &&
+                PlayerController->bReadyToStartMatch)
+            {
+                ++LegacyReadyPlayerCount;
+            }
+        }
+        LegacyPlayerList.Free();
+
+        static UWorld* LoggedLegacyReadinessWorld = nullptr;
+        static int32 LoggedLegacyConnections = -1;
+        static int32 LoggedLegacyReadyPlayers = -1;
+        static int32 LoggedLegacyAlivePlayers = -1;
+        static int32 LoggedLegacyNativeResult = -1;
+        if (LoggedLegacyReadinessWorld != LegacyWorld)
+        {
+            LoggedLegacyReadinessWorld = LegacyWorld;
+            LoggedLegacyConnections = -1;
+            LoggedLegacyReadyPlayers = -1;
+            LoggedLegacyAlivePlayers = -1;
+            LoggedLegacyNativeResult = -1;
+        }
+        const int32 LegacyAlivePlayerCount =
+            GameMode->HasAlivePlayers()
+                ? GameMode->AlivePlayers.Num()
+                : -1;
+        const int32 LegacyNativeResult = *Ret ? 1 : 0;
+        if (LegacyConnectionCount > 0 &&
+            (LoggedLegacyConnections != LegacyConnectionCount ||
+                LoggedLegacyReadyPlayers != LegacyReadyPlayerCount ||
+                LoggedLegacyAlivePlayers != LegacyAlivePlayerCount ||
+                LoggedLegacyNativeResult != LegacyNativeResult))
+        {
+            LoggedLegacyConnections = LegacyConnectionCount;
+            LoggedLegacyReadyPlayers = LegacyReadyPlayerCount;
+            LoggedLegacyAlivePlayers = LegacyAlivePlayerCount;
+            LoggedLegacyNativeResult = LegacyNativeResult;
+            SDK::DbgLog(
+                "[JoinLifecycle] legacy readiness native=%d clients=%d "
+                "ready=%d alive=%d playlist=%p playlistLoaded=%d "
+                "matchState=%s FN=%.2f UE=%.2f\n",
+                LegacyNativeResult,
+                LegacyConnectionCount,
+                LegacyReadyPlayerCount,
+                LegacyAlivePlayerCount,
+                (void*)Native1040Playlist,
+                (int)(GameState->HasbPlaylistDataIsLoaded()
+                    ? GameState->bPlaylistDataIsLoaded
+                    : true),
+                GameMode->MatchState.ToString().c_str(),
+                VersionInfo.FortniteVersion,
+                VersionInfo.EngineVersion);
         }
 
         static auto WaitingToStartLegacy = FName(L"WaitingToStart");
@@ -6474,20 +7279,6 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
 
     if (!NewPlayer || !StartSpot)
         return;
-
-    if (auto AI = PlayerAIManager::FindByController(NewPlayer);
-        AI && (AI->bDeathHandled ||
-            AI->GetState() == EPlayerAIState::Dead))
-    {
-        if (Ret)
-            *Ret = nullptr;
-
-        SDK::DbgLog(
-            "[PlayerAI][Respawn] blocked SpawnDefaultPawnFor "
-            "for terminal controller=%p\n",
-            (void*)NewPlayer);
-        return;
-    }
 
     auto GameState = GameMode->GameState;
     AFortPlayerPawnAthena* Pawn = nullptr;
@@ -7482,9 +8273,7 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
 
     if (bRepairLateSeasonTeam)
     {
-        auto Playlist = GameState->HasCurrentPlaylistInfo()
-            ? GameState->CurrentPlaylistInfo.BasePlaylist
-            : GameState->CurrentPlaylistData;
+        auto Playlist = ResolveActivePlaylist(GameState);
         ReservedLateSeasonTeam =
             ReserveLateSeasonHumanTeam(
                 GameMode, NewPlayer, PlayerState, Playlist);
@@ -7568,9 +8357,7 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
         if (bAppliedTeam)
         {
             UpsertLateSeasonGameMemberInfo(GameState, PlayerState);
-            auto Playlist = GameState->HasCurrentPlaylistInfo()
-                ? GameState->CurrentPlaylistInfo.BasePlaylist
-                : GameState->CurrentPlaylistData;
+            auto Playlist = ResolveActivePlaylist(GameState);
             ApplyLateSeasonDBNOSettings(
                 GameMode, GameState, Playlist, "post-native");
         }
@@ -8522,49 +9309,17 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
         AFortPlayerControllerAthena::
             BeginAircraftInventoryCleanupForMatch(
                 GameState);
-    }
 
-    // Legacy native StartAircraftPhase owns every AlivePlayers entry: it can
-    // destroy/reset the warmup pawn before the PlayerAI EnterAircraft guard
-    // is reached. Temporarily park PlayerAI roster entries, then restore them
-    // unchanged after the native transition.
-    std::vector<AActor*> ParkedPlayerAIs;
-
-    for (int i = GameMode->AlivePlayers.Num() - 1; i >= 0; i--)
-    {
-        auto Controller =
-            (AFortPlayerControllerAthena*)GameMode->AlivePlayers[i];
-
-        if (Controller &&
-            MagnesiumPlayerAIIntegration::
-                IsPlayerAIController(Controller))
+        for (auto& Player : GameMode->AlivePlayers)
         {
-            ParkedPlayerAIs.push_back(GameMode->AlivePlayers[i]);
-            GameMode->AlivePlayers.Remove(i);
+            AFortPlayerControllerAthena::
+                ClearWarmupShieldForAircraft(
+                    (AFortPlayerControllerAthena*)Player,
+                    "legacy-phase-before");
         }
     }
 
     auto Ret = StartAircraftPhaseOG(GameMode, a2);
-
-    for (auto Controller : ParkedPlayerAIs)
-    {
-        bool bAlreadyPresent = false;
-
-        for (auto Existing : GameMode->AlivePlayers)
-        {
-            if (Existing == Controller)
-            {
-                bAlreadyPresent = true;
-                break;
-            }
-        }
-
-        if (!bAlreadyPresent)
-            GameMode->AlivePlayers.Add(Controller);
-    }
-
-    if (!ParkedPlayerAIs.empty())
-        VersionFeatureAdapter::SyncPlayersLeft(true);
 
     // A legacy console dispatch can be dropped or native setup can reject a
     // transient attempt. Do not publish StartedMatch or consume the release
@@ -8600,12 +9355,10 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             auto PlayerController =
                 (AFortPlayerControllerAthena*)Player;
 
-            if (MagnesiumPlayerAIIntegration::
-                IsPlayerAIController(PlayerController))
-            {
-                continue;
-            }
-
+            AFortPlayerControllerAthena::
+                ClearWarmupShieldForAircraft(
+                    PlayerController,
+                    "legacy-phase-after");
             AFortPlayerControllerAthena::
                 ClearDroppableInventoryForAircraft(
                     PlayerController,
@@ -8621,7 +9374,11 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
     if (VersionInfo.FortniteVersion < 7.00 && FConfiguration::bCustomSafeZone)
         EnsureLegacyLateGameSafeZoneLocations(GameMode);
     
-    auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount() ? (GameMode->GameState->HasCurrentPlaylistInfo() ? GameMode->GameState->CurrentPlaylistInfo.BasePlaylist : GameMode->GameState->CurrentPlaylistData) : nullptr;
+    const auto Playlist =
+        VersionInfo.FortniteVersion >= 3.5 &&
+        GameMode->HasWarmupRequiredPlayerCount()
+            ? ResolveActivePlaylist(GameState)
+            : nullptr;
     if constexpr (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)
     {
         auto curl = curl_easy_init();
@@ -8825,11 +9582,6 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
     auto GameMode = (AFortGameMode*)Context;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-    // PlayerAI must be off the aircraft's books before the native exit
-    // processing runs: its auto-jump rejects connectionless controllers
-    // and kills the AI as leftover passengers instead.
-    MagnesiumPlayerAIIntegration::OnAircraftDropZoneEnding();
-
     // A passenger that never sent the jump RPC is about to be ejected by the
     // native drop-zone path. Restrict this fallback to controllers still
     // aboard so players who jumped early and already looted are never wiped.
@@ -8838,8 +9590,6 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
         auto PlayerController =
             (AFortPlayerControllerAthena*)Player;
         if (PlayerController &&
-            !MagnesiumPlayerAIIntegration::IsPlayerAIController(
-                PlayerController) &&
             PlayerController->IsInAircraft())
         {
             AFortPlayerControllerAthena::
@@ -9612,7 +10362,7 @@ bool ReadyToStartMatch_Direct(AFortGameModeAthena* GameMode)
         AFortGameMode::TickSupplyDropSuppression(true);
         RtsmLog("[RTSM] post-GenerateStormCircles\n");
 
-        auto Playlist = GameState->HasCurrentPlaylistInfo() ? GameState->CurrentPlaylistInfo.BasePlaylist : GameState->CurrentPlaylistData;
+        auto Playlist = ResolveActivePlaylist(GameState);
         if (Playlist && Playlist->HasbSkipWarmup())
             UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bSkipWarmup = Playlist->bSkipWarmup;
         if (Playlist && Playlist->HasbSkipAircraft())

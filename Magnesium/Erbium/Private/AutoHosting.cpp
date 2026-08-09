@@ -3,7 +3,7 @@
 #include "../Public/Calendar.h"
 #include "../Public/Configuration.h"
 #include "../Public/GUI.h"
-#include "../PlayerAI/Public/MagnesiumPlayerAISettings.h"
+#include "../BotAI/Public/BotAI.h"
 #include "../../json.hpp"
 
 #include <ShlObj.h>
@@ -330,7 +330,10 @@ namespace AutoHosting
             };
 
             Preferences["bots"] = {
-                { "enable_ai_players", MagnesiumPlayerAISettings::bEnableAIs.load(std::memory_order_acquire) },
+                { "enable_bot_ai", BotAISettings::bEnabled.load(std::memory_order_acquire) },
+                { "bot_ai_seek_safe_zone", BotAISettings::bSeekSafeZone.load(std::memory_order_acquire) },
+                { "bot_ai_idle_flourishes", BotAISettings::bIdleFlourishes.load(std::memory_order_acquire) },
+                { "bot_ai_native_movement", BotAISettings::bNativeMovement.load(std::memory_order_acquire) },
                 { "health", FConfiguration::BotHealth.load(std::memory_order_acquire) },
                 { "shield", FConfiguration::BotShield.load(std::memory_order_acquire) },
                 { "use_custom_names", FConfiguration::UseCustomBotNames.load(std::memory_order_acquire) },
@@ -342,6 +345,9 @@ namespace AutoHosting
                 { "infinite_render", FConfiguration::bInfiniteRender.load(std::memory_order_acquire) },
                 { "randomize_arena_points", FConfiguration::RandomizeArenaPoints.load(std::memory_order_acquire) },
                 { "player_map_icons", FConfiguration::bPlayerMapIcons.load(std::memory_order_acquire) },
+                { "auto_god_mode", FConfiguration::bAutoGodMode.load(std::memory_order_acquire) },
+                { "auto_god_mode_type", FConfiguration::AutoGodModeType.load(std::memory_order_acquire) },
+                { "auto_god_mode_exclude_last_player", FConfiguration::bAutoGodModeExcludeLastPlayer.load(std::memory_order_acquire) },
                 { "randomize_kills", FConfiguration::RandomizeKills.load(std::memory_order_acquire) },
                 { "randomize_levels", FConfiguration::RandomizeLevels.load(std::memory_order_acquire) },
                 { "disable_jump_fatigue", FConfiguration::bDisableJumpFatigue.load(std::memory_order_acquire) },
@@ -486,6 +492,15 @@ namespace AutoHosting
             Trickshot["player_map_icons"] =
                 FConfiguration::bPlayerMapIcons.load(
                     std::memory_order_acquire);
+            Trickshot["auto_god_mode"] =
+                FConfiguration::bAutoGodMode.load(
+                    std::memory_order_acquire);
+            Trickshot["auto_god_mode_type"] =
+                FConfiguration::AutoGodModeType.load(
+                    std::memory_order_acquire);
+            Trickshot["auto_god_mode_exclude_last_player"] =
+                FConfiguration::bAutoGodModeExcludeLastPlayer.load(
+                    std::memory_order_acquire);
             Trickshot["randomize_kills"] =
                 FConfiguration::RandomizeKills.load(
                     std::memory_order_acquire);
@@ -543,6 +558,22 @@ namespace AutoHosting
             if (!Preferences.is_object())
                 return false;
 
+            const auto& Paths =
+                ReadObject(Preferences, "resolved_paths");
+            const std::string PlaylistPath =
+                ReadString(Paths, "playlist");
+            const std::string CreativePlotPath =
+                ReadString(Paths, "creative_plot");
+            const std::string CustomMapPath =
+                ReadString(Paths, "custom_map");
+            const std::wstring ResolvedPlaylistPath =
+                Utf8ToWide(PlaylistPath);
+            if (PlaylistPath.empty() ||
+                ResolvedPlaylistPath.empty())
+            {
+                return false;
+            }
+
             const auto& Selection =
                 ReadObject(Preferences, "selection");
             const int SelectedPlaylist = ClampValue(
@@ -572,22 +603,9 @@ namespace AutoHosting
             GUI::SelectedMap = SelectedMap;
             GUI::PublishSelectedPlaylist(SelectedPlaylist);
 
-            const auto& Paths =
-                ReadObject(Preferences, "resolved_paths");
-            const std::string PlaylistPath =
-                ReadString(Paths, "playlist");
-            const std::string CreativePlotPath =
-                ReadString(Paths, "creative_plot");
-            const std::string CustomMapPath =
-                ReadString(Paths, "custom_map");
-            if (PlaylistPath.empty())
-                return false;
-
-            GPlaylistPath = Utf8ToWide(PlaylistPath);
+            GPlaylistPath = ResolvedPlaylistPath;
             GCreativePlotPath = Utf8ToWide(CreativePlotPath);
             GCustomMapPath = Utf8ToWide(CustomMapPath);
-            if (GPlaylistPath.empty())
-                return false;
 
             FConfiguration::Playlist = GPlaylistPath.c_str();
             FConfiguration::CreativePlot =
@@ -927,11 +945,17 @@ namespace AutoHosting
 
             const auto& Bots =
                 ReadObject(Preferences, "bots");
-            MagnesiumPlayerAISettings::bEnableAIs.store(
-                ReadBool(
-                    Bots,
-                    "enable_ai_players",
-                    false),
+            BotAISettings::bEnabled.store(
+                ReadBool(Bots, "enable_bot_ai", false),
+                std::memory_order_release);
+            BotAISettings::bSeekSafeZone.store(
+                ReadBool(Bots, "bot_ai_seek_safe_zone", true),
+                std::memory_order_release);
+            BotAISettings::bIdleFlourishes.store(
+                ReadBool(Bots, "bot_ai_idle_flourishes", true),
+                std::memory_order_release);
+            BotAISettings::bNativeMovement.store(
+                ReadBool(Bots, "bot_ai_native_movement", true),
                 std::memory_order_release);
             FConfiguration::BotHealth.store(
                 ReadInt(Bots, "health", 21),
@@ -977,6 +1001,27 @@ namespace AutoHosting
                     "player_map_icons",
                     false),
                 std::memory_order_release);
+            FConfiguration::bAutoGodMode.store(
+                ReadBool(
+                    Trickshot,
+                    "auto_god_mode",
+                    false),
+                std::memory_order_release);
+            FConfiguration::AutoGodModeType.store(
+                ClampValue(
+                    ReadInt(
+                        Trickshot,
+                        "auto_god_mode_type",
+                        (int)FConfiguration::EAutoGodMode::Maximum),
+                    (int)FConfiguration::EAutoGodMode::Maximum,
+                    (int)FConfiguration::EAutoGodMode::Minimum),
+                std::memory_order_release);
+            FConfiguration::bAutoGodModeExcludeLastPlayer.store(
+                ReadBool(
+                    Trickshot,
+                    "auto_god_mode_exclude_last_player",
+                    false),
+                std::memory_order_release);
             FConfiguration::RandomizeKills.store(
                 ReadBool(
                     Trickshot,
@@ -1003,17 +1048,19 @@ namespace AutoHosting
                         std::memory_order_acquire)),
                 std::memory_order_release);
             FConfiguration::bVehicleBumpLaunch.store(
-                ReadBool(
-                    Trickshot,
-                    "vehicle_bump_launch",
-                    !FConfiguration::bEnableTrickshotTab.load(
-                        std::memory_order_acquire)),
+                VersionInfo.FortniteVersion >= 4.30 &&
+                    ReadBool(
+                        Trickshot,
+                        "vehicle_bump_launch",
+                        !FConfiguration::bEnableTrickshotTab.load(
+                            std::memory_order_acquire)),
                 std::memory_order_release);
             FConfiguration::bCannonLaunchAnimations.store(
-                ReadBool(
-                    Trickshot,
-                    "cannon_launch_animations",
-                    true),
+                VersionInfo.FortniteVersion < 8.00 ||
+                    ReadBool(
+                        Trickshot,
+                        "cannon_launch_animations",
+                        true),
                 std::memory_order_release);
             FConfiguration::CannonLaunchXMultiplier.store(
                 ClampValue(
@@ -1122,30 +1169,38 @@ namespace AutoHosting
                             AutoHostDelaySeconds.load(
                                 std::memory_order_acquire),
                         1, 60)
+                },
+                {
+                    "save_settings",
+                    FConfiguration::bSaveAutoHostSettings.load(
+                        std::memory_order_acquire)
                 }
             };
 
-            const bool bAutoHostEnabled =
-                FConfiguration::bAutoHost.load(
+            const bool bSaveSettings =
+                FConfiguration::bSaveAutoHostSettings.load(
                     std::memory_order_acquire);
             const bool bReadyToStart =
                 FConfiguration::bReadyToStart.load(
                     std::memory_order_acquire);
-            if (ForcePreferenceSnapshot ||
-                (bAutoHostEnabled && !bReadyToStart))
+            if (bSaveSettings)
             {
-                GStoredPreferences = CapturePreferences();
-            }
-            else if (bAutoHostEnabled)
-            {
-                RefreshPostStartPreferences();
-            }
+                if (ForcePreferenceSnapshot || !bReadyToStart)
+                    GStoredPreferences = CapturePreferences();
+                else
+                    RefreshPostStartPreferences();
 
-            if (GStoredPreferences.is_object() &&
-                !GStoredPreferences.empty())
+                if (GStoredPreferences.is_object() &&
+                    !GStoredPreferences.empty())
+                {
+                    Profile["preferences"] =
+                        GStoredPreferences;
+                }
+            }
+            else
             {
-                Profile["preferences"] =
-                    GStoredPreferences;
+                GStoredPreferences = nlohmann::json::object();
+                Profile.erase("preferences");
             }
 
             return Document;
@@ -1242,6 +1297,8 @@ namespace AutoHosting
     {
         FConfiguration::bAutoHost.store(
             false, std::memory_order_release);
+        FConfiguration::bSaveAutoHostSettings.store(
+            false, std::memory_order_release);
         FConfiguration::AutoHostDelaySeconds.store(
             FConfiguration::DefaultAutoHostDelaySeconds,
             std::memory_order_release);
@@ -1251,6 +1308,7 @@ namespace AutoHosting
             0, std::memory_order_release);
         GPostMatchShutdownDeadlineMs.store(
             0, std::memory_order_release);
+        GStoredPreferences = nlohmann::json::object();
 
         // These two defaults are version-owned by the Match UI. Seed them
         // before taking the pristine reset snapshot so Reset Preferences
@@ -1302,6 +1360,8 @@ namespace AutoHosting
                 ReadObject(Profile, "auto_host");
             const bool bEnabled =
                 ReadBool(AutoHost, "enabled", false);
+            const bool bSaveSettings =
+                ReadBool(AutoHost, "save_settings", false);
             const int DelaySeconds = ClampValue(
                 ReadInt(
                     AutoHost,
@@ -1312,35 +1372,34 @@ namespace AutoHosting
 
             FConfiguration::AutoHostDelaySeconds.store(
                 DelaySeconds, std::memory_order_release);
+            FConfiguration::bSaveAutoHostSettings.store(
+                bSaveSettings, std::memory_order_release);
 
             const auto& Preferences =
                 ReadObject(Profile, "preferences");
-            if (Preferences.is_object() &&
-                !Preferences.empty())
+            if (bSaveSettings && Preferences.is_object() &&
+                !Preferences.empty() &&
+                ApplyPreferences(Preferences))
             {
                 GStoredPreferences = Preferences;
+                GRestoredPreferences.store(
+                    true, std::memory_order_release);
             }
-
-            if (!bEnabled)
-                return;
-
-            // An enabled profile without a complete resolved playlist is not
-            // safe to auto-start. Leave Auto Host off and require the user to
-            // configure it again.
-            if (!ApplyPreferences(Preferences))
+            else if (bSaveSettings)
             {
                 SDK::DbgLog(
-                    "[AutoHosting] Enabled profile is incomplete; automatic startup was disabled\n");
-                return;
+                    "[AutoHosting] Saved preferences are incomplete; using launcher defaults\n");
+                GStoredPreferences = nlohmann::json::object();
             }
 
             FConfiguration::bAutoHost.store(
-                true, std::memory_order_release);
-            GRestoredPreferences.store(
-                true, std::memory_order_release);
+                bEnabled, std::memory_order_release);
             SDK::DbgLog(
-                "[AutoHosting] Restored %s; countdown ready for %d seconds\n",
+                "[AutoHosting] Loaded %s; autoHost=%d saveSettings=%d restoredPreferences=%d delay=%d\n",
                 CurrentProfileKey().c_str(),
+                bEnabled ? 1 : 0,
+                bSaveSettings ? 1 : 0,
+                GRestoredPreferences.load(std::memory_order_acquire) ? 1 : 0,
                 DelaySeconds);
         }
         catch (const std::exception& Error)
@@ -1353,6 +1412,8 @@ namespace AutoHosting
                 nlohmann::json::object();
             GLastSerializedDocument.clear();
             FConfiguration::bAutoHost.store(
+                false, std::memory_order_release);
+            FConfiguration::bSaveAutoHostSettings.store(
                 false, std::memory_order_release);
         }
     }
@@ -1545,6 +1606,8 @@ namespace AutoHosting
             0, std::memory_order_release);
         FConfiguration::bAutoHost.store(
             false, std::memory_order_release);
+        FConfiguration::bSaveAutoHostSettings.store(
+            false, std::memory_order_release);
         FConfiguration::AutoHostDelaySeconds.store(
             FConfiguration::DefaultAutoHostDelaySeconds,
             std::memory_order_release);
@@ -1565,9 +1628,12 @@ namespace AutoHosting
             }
         }
 
-        // Keep other Fortnite-version profiles intact. Only the profile for
-        // the running version is replaced by its pristine defaults.
-        GStoredPreferences = GDefaultPreferences;
+        // Reset Preferences is the explicit escape hatch for persistence.
+        // Remove every version profile so no older snapshot can reappear when
+        // the user launches a different Fortnite build later.
+        GDocument = nlohmann::json::object();
+        GStoredPreferences = nlohmann::json::object();
+        GLastSerializedDocument.clear();
         SaveInternal(false);
     }
 }
