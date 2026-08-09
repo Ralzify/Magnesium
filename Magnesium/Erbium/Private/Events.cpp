@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "../Public/Events.h"
 #include "../Public/Configuration.h"
+#include "../Support/Public/VersionFeatureAdapter.h"
+#include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include <limits>
@@ -109,6 +111,7 @@ namespace
 		double NextActivatorPollTime = 0.0;
 		double UnvaultDueTime = 0.0;
 		int32 ObservedPhaseIndex = UnobservedPhase;
+		int32 AuthoritativePhaseIndex = UnobservedPhase;
 		bool bAutoRequestIssued = false;
 		bool bMeshInitializationPending = false;
 		bool bActivatorGrantPending = false;
@@ -190,6 +193,62 @@ namespace
 			!(Item->GetFlags() & InvalidObjectFlags) &&
 			Object->Class &&
 			SDK::MemReadable(Object->Class, sizeof(UClass));
+	}
+
+	int32 SendDurianFinalPhaseCue()
+	{
+		auto World = UWorld::GetWorld();
+		if (!IsLiveEventObject(World) ||
+			!World->HasNetDriver() ||
+			!IsLiveEventObject(World->NetDriver))
+		{
+			return 0;
+		}
+
+		auto Driver = static_cast<UNetDriver*>(World->NetDriver);
+		if (!Driver->HasClientConnections())
+			return 0;
+
+		auto& Connections = Driver->ClientConnections;
+		if (Connections.Num() < 0 || Connections.Num() > 256 ||
+			Connections.Max() < Connections.Num() ||
+			Connections.Max() > 4096 ||
+			(Connections.Num() > 0 &&
+				!SDK::MemReadable(
+					Connections.GetData(),
+					sizeof(UNetConnection*) * Connections.Num())))
+		{
+			return 0;
+		}
+
+		auto ControllerClass =
+			AFortPlayerControllerAthena::StaticClass();
+		if (!IsLiveEventObject(ControllerClass))
+			return 0;
+
+		FString Cue(L"ATLAS_DURIAN_PHASE:5");
+		int32 RecipientCount = 0;
+		for (int32 Index = 0; Index < Connections.Num(); ++Index)
+		{
+			auto Connection = Connections[Index];
+			if (!IsLiveEventObject(Connection) ||
+				!Connection->HasPlayerController())
+			{
+				continue;
+			}
+
+			auto PlayerController = Connection->PlayerController;
+			if (!IsLiveEventObject(PlayerController) ||
+				!PlayerController->IsA(ControllerClass))
+			{
+				continue;
+			}
+
+			PlayerController->ClientMessage(Cue, FName(), 0.f);
+			++RecipientCount;
+		}
+		Cue.Free();
+		return RecipientCount;
 	}
 
 	bool TryGetEventObjectIdentity(
@@ -4089,8 +4148,21 @@ void ActivatePhase(
 	if (!IsLiveEventObject(Script))
 		return;
 
-	int32 OldPhaseIndex = -1;
-	ReadActivePhase(Script, OldPhaseIndex);
+	if (GEventState.Script != Script)
+	{
+		GEventState.Script = Script;
+		GEventState.AuthoritativePhaseIndex = UnobservedPhase;
+	}
+
+	int32 NativeOldPhaseIndex = UnobservedPhase;
+	const bool bHasNativeOldPhase =
+		ReadActivePhase(Script, NativeOldPhaseIndex) &&
+		NativeOldPhaseIndex >= 0;
+	int32 OldPhaseIndex = bHasNativeOldPhase
+		? NativeOldPhaseIndex
+		: GEventState.AuthoritativePhaseIndex;
+	if (OldPhaseIndex == UnobservedPhase)
+		OldPhaseIndex = -1;
 	if (VersionInfo.FortniteVersion < 23.0)
 	{
 		SDK::DbgLog(
@@ -4101,14 +4173,30 @@ void ActivatePhase(
 	}
 	else
 	{
-		ApplyPhaseDataLayers(
+		const bool bLayersApplied = ApplyPhaseDataLayers(
 			Script, OldPhaseIndex, IndexToActivate);
+		SDK::DbgLog(
+			"[Events] modern phase data layers old=%d new=%d applied=%d\n",
+			OldPhaseIndex,
+			IndexToActivate,
+			bLayersApplied ? 1 : 0);
+	}
+
+	if (fabs(VersionInfo.FortniteVersion - 27.11) < 0.001 &&
+		IndexToActivate == 5 && OldPhaseIndex != IndexToActivate)
+	{
+		const int32 RecipientCount = SendDurianFinalPhaseCue();
+		SDK::DbgLog(
+			"[Events] Durian final-phase cue sent recipients=%d\n",
+			RecipientCount);
 	}
 
 	if (ActivatePhaseOG)
 	{
 		ActivatePhaseOG(
 			Script, IndexToActivate, SequenceTimeOffset);
+		GEventState.AuthoritativePhaseIndex = IndexToActivate;
+		GEventState.ObservedPhaseIndex = IndexToActivate;
 
 		int32 NativePhaseIndex = UnobservedPhase;
 		if (ReadActivePhase(Script, NativePhaseIndex))
@@ -4137,9 +4225,10 @@ void ActivatePhase(
 			}
 			SDK::DbgLog(
 				"[Events] native phase activation completed requested=%d "
-				"active=%d\n",
+				"active=%d tracked=%d\n",
 				IndexToActivate,
-				NativePhaseIndex);
+				NativePhaseIndex,
+				GEventState.AuthoritativePhaseIndex);
 		}
 	}
 }
@@ -4147,6 +4236,27 @@ void ActivatePhase(
 void Events::Hook()
 {
 	InstallRiftTourMeshPredicateHooks();
+	if (fabs(VersionInfo.FortniteVersion - 27.11) < 0.001)
+	{
+		const auto ActivatePhaseAddress = FindActivatePhase();
+		if (ActivatePhaseAddress)
+		{
+			Utils::Hook(
+				ActivatePhaseAddress,
+				ActivatePhase,
+				ActivatePhaseOG);
+			SDK::DbgLog(
+				"[Events] Durian ActivatePhase hook installed RVA=0x%llX\n",
+				ActivatePhaseAddress - ImageBase);
+		}
+		else
+		{
+			SDK::DbgLog(
+				"[Events] Durian ActivatePhase hook target was not found\n");
+		}
+		return;
+	}
+
 	if (fabs(VersionInfo.FortniteVersion - 17.30) < 0.001)
 	{
 		constexpr uint64 ActivatePhaseAtIndexRva = 0x3DE5CE8;

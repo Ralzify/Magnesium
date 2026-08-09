@@ -137,6 +137,7 @@ struct FConfiguration
     static inline std::atomic_bool bUseWinLines{ true };
     static inline std::atomic_bool RandomizeArenaPoints{ false };
     static inline std::atomic_bool bPlayerMapIcons{ false };
+    static inline std::atomic_bool bAutoReloadOnWaypointTP{ false };
     // Auto god mode hands out the "god" command's protection the moment a
     // player leaves the bus, so a trickshot run never has to be typed for.
     // Maximum pins the health floor to max health - nothing lands at all;

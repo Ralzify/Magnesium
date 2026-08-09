@@ -4226,6 +4226,146 @@ FFortRangedWeaponStats* AFortInventory::CloneStats(const UFortWeaponItemDefiniti
     return NewStats;
 }
 
+int32 AFortInventory::ReloadAllWeaponAmmo(
+    AFortPlayerControllerAthena* PlayerController)
+{
+    if (!PlayerController || !PlayerController->WorldInventory)
+        return 0;
+
+    auto Inventory = PlayerController->WorldInventory;
+    struct FReloadTarget
+    {
+        UFortWeaponItemDefinition* WeaponDefinition = nullptr;
+        FGuid ItemGuid{};
+        int32 ItemLevel = 0;
+        int32 MaxLoadedAmmo = 0;
+    };
+
+    std::vector<FReloadTarget> Targets;
+    const int32 EntryCount =
+        Inventory->Inventory.ReplicatedEntries.Num();
+    if (EntryCount <= 0)
+        return 0;
+    Targets.reserve(static_cast<size_t>(EntryCount));
+
+    for (int32 Index = 0; Index < EntryCount; ++Index)
+    {
+        auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(
+            Index, FFortItemEntry::Size());
+        if (!Entry.ItemDefinition)
+            continue;
+
+        auto WeaponDefinition =
+            Entry.ItemDefinition->Cast<UFortWeaponItemDefinition>();
+        if (auto Gadget =
+            Entry.ItemDefinition->Cast<UFortGadgetItemDefinition>())
+        {
+            WeaponDefinition = Gadget->GetWeaponItemDefinition();
+        }
+        if (!WeaponDefinition)
+            continue;
+
+        int32 MaxLoadedAmmo = 0;
+        int32 RechargeAmount = 0;
+        double RechargeIntervalSeconds = 0.0;
+        if (!ResolveWeaponRechargeSettings(
+                WeaponDefinition,
+                Entry.Level,
+                MaxLoadedAmmo,
+                RechargeAmount,
+                RechargeIntervalSeconds))
+        {
+            auto Stats = GetStats(WeaponDefinition);
+            MaxLoadedAmmo = Stats ? Stats->ClipSize : 0;
+        }
+        if (MaxLoadedAmmo <= 0)
+            continue;
+
+        Targets.push_back({
+            WeaponDefinition,
+            Entry.ItemGuid,
+            Entry.Level,
+            MaxLoadedAmmo
+        });
+    }
+
+    int32 ReloadedWeaponCount = 0;
+    for (auto& Target : Targets)
+    {
+        auto ReplicatedEntry =
+            Inventory->Inventory.ReplicatedEntries.Search(
+                [&](FFortItemEntry& Candidate)
+                {
+                    return AreGuidsEqual(
+                        Candidate.ItemGuid, Target.ItemGuid);
+                },
+                FFortItemEntry::Size());
+        if (!ReplicatedEntry)
+            continue;
+
+        auto ItemInstance = Inventory->Inventory.ItemInstances.Search(
+            [&](UFortWorldItem* Candidate)
+            {
+                return Candidate &&
+                    AreGuidsEqual(
+                        Candidate->ItemEntry.ItemGuid,
+                        Target.ItemGuid);
+            });
+        const int32 PreviousLoadedAmmo =
+            ReplicatedEntry->LoadedAmmo;
+        bool bInventoryChanged = false;
+        if (ReplicatedEntry->LoadedAmmo != Target.MaxLoadedAmmo)
+        {
+            ReplicatedEntry->LoadedAmmo = Target.MaxLoadedAmmo;
+            bInventoryChanged = true;
+        }
+        if (ItemInstance && *ItemInstance &&
+            (*ItemInstance)->ItemEntry.LoadedAmmo !=
+                Target.MaxLoadedAmmo)
+        {
+            (*ItemInstance)->ItemEntry.LoadedAmmo =
+                Target.MaxLoadedAmmo;
+            (*ItemInstance)->ItemEntry.bIsDirty = true;
+            bInventoryChanged = true;
+        }
+
+        if (bInventoryChanged)
+            Inventory->UpdateEntry(*ReplicatedEntry);
+
+        ItemInstance = Inventory->Inventory.ItemInstances.Search(
+            [&](UFortWorldItem* Candidate)
+            {
+                return Candidate &&
+                    AreGuidsEqual(
+                        Candidate->ItemEntry.ItemGuid,
+                        Target.ItemGuid);
+            });
+        if (ItemInstance && *ItemInstance)
+            BroadcastWorldItemAmmoChanged(*ItemInstance);
+
+        SyncKnownWeaponAmmo(
+            PlayerController,
+            Target.WeaponDefinition,
+            Target.ItemGuid,
+            Target.MaxLoadedAmmo);
+        if (IsTrackedRechargingWeaponAmmo(
+                PlayerController, Target.ItemGuid))
+        {
+            ObserveRechargingWeaponAmmo(
+                PlayerController,
+                Target.WeaponDefinition,
+                Target.ItemGuid,
+                Target.ItemLevel,
+                PreviousLoadedAmmo,
+                Target.MaxLoadedAmmo);
+        }
+
+        ++ReloadedWeaponCount;
+    }
+
+    return ReloadedWeaponCount;
+}
+
 FFortItemEntry* AFortInventory::MakeItemEntry(const UFortItemDefinition* ItemDefinition, int32 Count, int32 Level)
 {
     auto ItemEntry = (FFortItemEntry*)malloc(FFortItemEntry::Size());

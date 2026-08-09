@@ -345,6 +345,7 @@ namespace AutoHosting
                 { "infinite_render", FConfiguration::bInfiniteRender.load(std::memory_order_acquire) },
                 { "randomize_arena_points", FConfiguration::RandomizeArenaPoints.load(std::memory_order_acquire) },
                 { "player_map_icons", FConfiguration::bPlayerMapIcons.load(std::memory_order_acquire) },
+                { "auto_reload_on_waypoint_tp", FConfiguration::bAutoReloadOnWaypointTP.load(std::memory_order_acquire) },
                 { "auto_god_mode", FConfiguration::bAutoGodMode.load(std::memory_order_acquire) },
                 { "auto_god_mode_type", FConfiguration::AutoGodModeType.load(std::memory_order_acquire) },
                 { "auto_god_mode_exclude_last_player", FConfiguration::bAutoGodModeExcludeLastPlayer.load(std::memory_order_acquire) },
@@ -491,6 +492,9 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Trickshot["player_map_icons"] =
                 FConfiguration::bPlayerMapIcons.load(
+                    std::memory_order_acquire);
+            Trickshot["auto_reload_on_waypoint_tp"] =
+                FConfiguration::bAutoReloadOnWaypointTP.load(
                     std::memory_order_acquire);
             Trickshot["auto_god_mode"] =
                 FConfiguration::bAutoGodMode.load(
@@ -1000,6 +1004,13 @@ namespace AutoHosting
                     Trickshot,
                     "player_map_icons",
                     false),
+                std::memory_order_release);
+            FConfiguration::bAutoReloadOnWaypointTP.store(
+                ReadBool(
+                    Trickshot,
+                    "auto_reload_on_waypoint_tp",
+                    FConfiguration::bEnableTrickshotTab.load(
+                        std::memory_order_acquire)),
                 std::memory_order_release);
             FConfiguration::bAutoGodMode.store(
                 ReadBool(

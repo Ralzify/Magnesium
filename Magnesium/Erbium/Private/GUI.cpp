@@ -5192,6 +5192,8 @@ static void ApplyInitialTrickshotDefaults()
         std::memory_order_release);
     FConfiguration::bAutoGodMode.store(
         true, std::memory_order_release);
+    FConfiguration::bAutoReloadOnWaypointTP.store(
+        true, std::memory_order_release);
     FConfiguration::bAutoPauseTODM.store(
         false, std::memory_order_release);
 
@@ -9850,17 +9852,20 @@ void GUI::Init()
             SectionHeader("Trickshot Customization", SectionWidth);
             BeginSectionBody();
 
-            if (gsStatus < Joinable)
-            {
+            const bool bBeforeJoinable =
+                gsStatus.load(std::memory_order_acquire) < Joinable;
+
+            AtomicCheckbox(
+                "Toggle Swag Lines",
+                FConfiguration::bUseWinLines);
+
+            if (VersionInfo.FortniteVersion <= 23.50)
                 AtomicCheckbox(
-                    "Toggle Swag Lines",
-                    FConfiguration::bUseWinLines);
+                    "Toggle Infinite Render",
+                    FConfiguration::bInfiniteRender);
 
-                if (VersionInfo.FortniteVersion <= 23.50)
-                    AtomicCheckbox(
-                        "Toggle Infinite Render",
-                        FConfiguration::bInfiniteRender);
-
+            if (bBeforeJoinable)
+            {
                 if ((IsArenaPlaylist() ||
                         IsTournamentPlaylist()) &&
                     FConfiguration::bLateGame &&
@@ -9872,7 +9877,14 @@ void GUI::Init()
                 AtomicCheckbox(
                     "Player Map Icons",
                     FConfiguration::bPlayerMapIcons);
+            }
 
+            AtomicCheckbox(
+                "Auto Reload on Waypoint TP",
+                FConfiguration::bAutoReloadOnWaypointTP);
+
+            if (bBeforeJoinable)
+            {
                 AtomicCheckbox(
                     "Auto God Mode",
                     FConfiguration::bAutoGodMode);
@@ -9914,17 +9926,18 @@ void GUI::Init()
                 AtomicCheckbox(
                     "Randomize Levels",
                     FConfiguration::RandomizeLevels);
+            }
 
+            AtomicCheckbox(
+                "Disable Jump Fatigue",
+                FConfiguration::bDisableJumpFatigue);
+
+            if (bBeforeJoinable &&
+                !FConfiguration::bReadyToStart)
+            {
                 AtomicCheckbox(
-                    "Disable Jump Fatigue",
-                    FConfiguration::bDisableJumpFatigue);
-
-                if (!FConfiguration::bReadyToStart)
-                {
-                    AtomicCheckbox(
-                        "Disable Supply Drops",
-                        FConfiguration::bDisableSupplyDrops);
-                }
+                    "Disable Supply Drops",
+                    FConfiguration::bDisableSupplyDrops);
             }
 
             //ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);

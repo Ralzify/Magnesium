@@ -243,7 +243,7 @@ void Main()
 
     SDK::DbgLog("Main: start pressed\n");
 
-    if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
+    if (fabs(VersionInfo.FortniteVersion - 27.11) < 0.001)
         FConfiguration::bEnableIris = false;
 
     if (VersionInfo.FortniteVersion <= 2.50)

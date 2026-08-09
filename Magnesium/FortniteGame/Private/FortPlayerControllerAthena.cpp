@@ -18393,6 +18393,19 @@ static void RegenerateMinimumGodHealthAfterWaypoint(
 	HealthPawn->ForceNetUpdate();
 }
 
+static void ApplyWaypointTeleportEffects(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	RegenerateMinimumGodHealthAfterWaypoint(
+		PlayerController, Pawn);
+	if (FConfiguration::bAutoReloadOnWaypointTP.load(
+			std::memory_order_acquire))
+	{
+		AFortInventory::ReloadAllWeaponAmmo(PlayerController);
+	}
+}
+
 static void (*ServerAddMapMarkerOG)(UObject*, FFrame&) = nullptr;
 static int32 MarkerWorldPositionOffset = -2;
 
@@ -19486,8 +19499,13 @@ static int32 GiveItemForCommand(
 		MaxStackSize = 999;
 	const int32 GrantedCount =
 		(std::min)(RequestedCount, MaxStackSize);
+	auto GrantEntry = AFortInventory::MakeItemEntry(
+		ItemDefinition, GrantedCount, 0);
+	if (!GrantEntry)
+		return 0;
 	auto GrantedItem = PlayerController->WorldInventory->GiveItem(
-		ItemDefinition, GrantedCount, 0, 0, true, true);
+		*GrantEntry, GrantedCount, true, true);
+	free(GrantEntry);
 	if (!GrantedItem)
 		return 0;
 
@@ -19511,10 +19529,15 @@ static int32 GiveItemForCommand(
 
 	SDK::DbgLog(
 		"[ServerCheat] direct inventory grant controller=%p "
-		"definition=%s count=%d requested=%d animated=%d FN=%.2f\n",
+		"definition=%s count=%d requested=%d loadedAmmo=%d "
+		"phantomReserve=%d animated=%d FN=%.2f\n",
 		(void*)PlayerController,
-		ItemDefinition->Name.ToString().c_str(),
+		GrantedItem->ItemEntry.ItemDefinition->Name.ToString().c_str(),
 		GrantedCount, RequestedCount,
+		GrantedItem->ItemEntry.LoadedAmmo,
+		GrantedItem->ItemEntry.HasPhantomReserveAmmo()
+			? GrantedItem->ItemEntry.PhantomReserveAmmo
+			: 0,
 		(int)bPickupAnimationStaged,
 		VersionInfo.FortniteVersion);
 	return GrantedCount;
@@ -26598,7 +26621,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					{
 						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 						Pawn->CharacterMovement->Velocity = FVector{};
-						RegenerateMinimumGodHealthAfterWaypoint(
+						ApplyWaypointTeleportEffects(
 							PlayerController, Pawn);
 						PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
 					}
@@ -26623,7 +26646,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 					{
 						Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 						Pawn->CharacterMovement->Velocity = FVector{};
-						RegenerateMinimumGodHealthAfterWaypoint(
+						ApplyWaypointTeleportEffects(
 							PlayerController, Pawn);
 						PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
 					}
@@ -28412,7 +28435,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						{
 							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 							Pawn->CharacterMovement->Velocity = FVector{};
-							RegenerateMinimumGodHealthAfterWaypoint(
+							ApplyWaypointTeleportEffects(
 								PlayerController, Pawn);
 							PlayerController->ClientMessage(FString(L"Teleported to previous waypoint!"), FName(), 1.f);
 						}
@@ -28437,7 +28460,7 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						{
 							Pawn->K2_TeleportTo(Destination, Pawn->K2_GetActorRotation(), false, true);
 							Pawn->CharacterMovement->Velocity = FVector{};
-							RegenerateMinimumGodHealthAfterWaypoint(
+							ApplyWaypointTeleportEffects(
 								PlayerController, Pawn);
 							PlayerController->ClientMessage(FString(L"Teleported to waypoint!"), FName(), 1.f);
 						}

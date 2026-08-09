@@ -586,6 +586,8 @@ public:
     static FFortItemEntry* MakeItemEntry(const UFortItemDefinition*, int32, int32);
     static FFortRangedWeaponStats* GetStats(const UFortWeaponItemDefinition*);
     static FFortRangedWeaponStats* CloneStats(const UFortWeaponItemDefinition* Def);
+    static int32 ReloadAllWeaponAmmo(
+        AFortPlayerControllerAthena*);
     static bool IsPrimaryQuickbar(const UFortItemDefinition*);
     static void TickRegeneratingItems();
     static bool BeginTrackedRechargeEquip(
