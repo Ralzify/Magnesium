@@ -9,11 +9,12 @@
 #include "../../FortniteGame/Public/FortGameMode.h"
 #include "../../FortniteGame/Public/FortAthenaMutator.h"
 #include "../../FortniteGame/Public/FortInventory.h"
+#include "../../FortniteGame/Public/FortMinigame.h"
 #include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
 #include "../../FortniteGame/Public/FortVehicleMods.h"
 #include "../../FortniteGame/Public/FortWeapon.h"
 #include "../Public/AbilitySystemComponent.h"
-#include "../../Erbium/BotAI/Public/BotAI.h"
+#include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1755,6 +1756,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
 		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
+		AFortMinigame::TickCreativeMinigames();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -1786,8 +1788,9 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 	TickAuthoritativeMatchLifecycle(Driver);
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
-	// Drives the bots created by the spawnbot command (native AI untouched).
-	BotAI::OnServerTick(Driver, DeltaSeconds);
+	// Shared version-adapter upkeep: work budget, cheat-bot cosmetic queue
+	// and deferred players-left replication.
+	VersionFeatureAdapter::TickServerFrame(Driver);
 
 	// Finalize invalid health states after every custom gameplay producer and
 	// immediately before this path's replication send.
@@ -1912,6 +1915,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
 		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
+		AFortMinigame::TickCreativeMinigames();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -1930,8 +1934,9 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 
 	TickAuthoritativeMatchLifecycle(Driver);
 
-	// Drives the bots created by the spawnbot command (native AI untouched).
-	BotAI::OnServerTick(Driver, DeltaSeconds);
+	// Shared version-adapter upkeep: work budget, cheat-bot cosmetic queue
+	// and deferred players-left replication.
+	VersionFeatureAdapter::TickServerFrame(Driver);
 
 	if (Driver->ReplicationDriver)
 		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
@@ -2106,6 +2111,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		FortVehicleMods::TickPendingConstruction();
 		FortVehicleBump::Tick();
 		AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
+		AFortMinigame::TickCreativeMinigames();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
@@ -2148,8 +2154,9 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-NukeRockets\n", _tf);
 
-	// Drives the bots created by the spawnbot command (native AI untouched).
-	BotAI::OnServerTick(Driver, DeltaSeconds);
+	// Shared version-adapter upkeep: work budget, cheat-bot cosmetic queue
+	// and deferred players-left replication.
+	VersionFeatureAdapter::TickServerFrame(Driver);
 	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OnServerTick\n", _tf);
 
 	// Finalize invalid health states after every custom gameplay producer and

@@ -598,6 +598,31 @@ bool VersionFeatureAdapter::IsLiveActor(const AActor* Actor)
     return PlayerAIIsLiveSupportActor(Actor);
 }
 
+// Tracks the world this layer's caches belong to. A new world invalidates
+// every cached class, offset and pending cosmetic commit.
+static const void* GSupportWorldToken = nullptr;
+
+void VersionFeatureAdapter::TickServerFrame(const UNetDriver* Driver)
+{
+    auto World = UWorld::GetWorld();
+
+    if (!World || !Driver || Driver != World->NetDriver)
+        return;
+
+    if (GSupportWorldToken != World)
+    {
+        GSupportWorldToken = World;
+        ResetCaches();
+    }
+
+    BeginServerTick(GetTimeSeconds());
+
+    // Cheat-spawned bots share this version-aware cosmetic cache, so it has to
+    // keep running whether or not anything else is using the adapter.
+    TickCosmeticCache();
+    RetryPendingPlayersLeftReplication();
+}
+
 struct FPlayerAIClassLookupCache
 {
     const UClass* Class = nullptr;

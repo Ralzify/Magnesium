@@ -18,20 +18,11 @@ public:
     UCLASS_COMMON_MEMBERS(UCharacterMovementComponent);
 
     DEFINE_PROP(Velocity, FVector);
-    // Input the component accumulated for this move. Zero here while a move
-    // target is set means the component is not consuming pawn input at all.
-    DEFINE_PROP(Acceleration, FVector);
-    DEFINE_PROP(MovementMode, uint8);
-    DEFINE_PROP(MaxWalkSpeed, float);
-    DEFINE_PROP(MaxSwimSpeed, float);
-    DEFINE_PROP(MaxAcceleration, float);
 
     DEFINE_BITFIELD_PROP(bCheatFlying, bool);
-    DEFINE_BITFIELD_PROP(bRunPhysicsWithNoController, bool);
 
     DEFINE_FUNC(SetMovementMode, void);
     DEFINE_FUNC(IsMovingOnGround, bool);
-    DEFINE_FUNC(IsSwimming, bool);
     DEFINE_FUNC(IsFalling, bool);
 };
 
@@ -166,15 +157,10 @@ public:
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
     DEFINE_PROP(VehicleInputComponent, UObject*);
 
-    // Used by the bot AI system (server-driven player-bot movement).
+    // Server-driven player-bot movement.
     DEFINE_PROP(CurrentMovementStyle, uint8);
     DEFINE_PROP(RemoteViewPitch, uint8); // replicated aim pitch clients render
     DEFINE_FUNC(AddMovementInput, void);
-    DEFINE_FUNC(IsSprinting, bool);
-    // True only when the possessing controller is a local controller, which is
-    // exactly the condition UCharacterMovementComponent requires before it
-    // will run a move for this pawn.
-    DEFINE_FUNC(IsLocallyControlled, bool);
     DEFINE_FUNC(Jump, void);
     DEFINE_FUNC(StopJumping, void);
     DEFINE_FUNC(Crouch, void);
