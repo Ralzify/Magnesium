@@ -88,6 +88,89 @@ namespace
     uint64_t GetGuiObjectIdentityGuarded(
         const UObject* Object) noexcept;
 
+    int CountConnectedPlayersForDisplay(UWorld* World)
+    {
+        if (!GetGuiObjectIdentityGuarded(World) ||
+            !World->HasNetDriver() ||
+            !GetGuiObjectIdentityGuarded(World->NetDriver))
+        {
+            return 0;
+        }
+
+        auto Driver = static_cast<UNetDriver*>(World->NetDriver);
+        if (!Driver->HasClientConnections())
+            return 0;
+
+        auto& Connections = Driver->ClientConnections;
+        if (Connections.Num() < 0 ||
+            Connections.Max() < Connections.Num() ||
+            Connections.Max() > 4096 ||
+            (Connections.Num() > 0 &&
+             (!Connections.Data ||
+              !SDK::MemReadable(
+                  Connections.Data,
+                  static_cast<size_t>(Connections.Num()) *
+                      sizeof(UNetConnection*)))))
+        {
+            return 0;
+        }
+
+        std::vector<AFortPlayerControllerAthena*> Players;
+        auto AddConnection =
+            [&](UNetConnection* Connection)
+            {
+                if (!GetGuiObjectIdentityGuarded(Connection))
+                    return;
+
+                auto PlayerController = Connection->PlayerController;
+                if (GetGuiObjectIdentityGuarded(PlayerController) &&
+                    std::find(
+                        Players.begin(), Players.end(),
+                        PlayerController) == Players.end())
+                {
+                    Players.push_back(PlayerController);
+                }
+
+                if (!Connection->HasChildren())
+                    return;
+                auto& Children = Connection->Children;
+                if (Children.Num() < 0 ||
+                    Children.Max() < Children.Num() ||
+                    Children.Max() > 256 ||
+                    (Children.Num() > 0 &&
+                     (!Children.Data ||
+                      !SDK::MemReadable(
+                          Children.Data,
+                          static_cast<size_t>(Children.Num()) *
+                              sizeof(UNetConnection*)))))
+                {
+                    return;
+                }
+                for (int32 ChildIndex = 0;
+                     ChildIndex < Children.Num(); ++ChildIndex)
+                {
+                    auto Child = Children[ChildIndex];
+                    if (!GetGuiObjectIdentityGuarded(Child))
+                        continue;
+                    auto ChildController = Child->PlayerController;
+                    if (GetGuiObjectIdentityGuarded(ChildController) &&
+                        std::find(
+                            Players.begin(), Players.end(),
+                            ChildController) == Players.end())
+                    {
+                        Players.push_back(ChildController);
+                    }
+                }
+            };
+
+        for (int32 ConnectionIndex = 0;
+             ConnectionIndex < Connections.Num(); ++ConnectionIndex)
+        {
+            AddConnection(Connections[ConnectionIndex]);
+        }
+        return static_cast<int>(Players.size());
+    }
+
     class FPlayerNameCacheSharedLock final
     {
     public:
@@ -6861,6 +6944,10 @@ void GUI::Init()
 
                 if (GameMode)
                     AliveCount = GameMode->AlivePlayers.Num();
+
+                AliveCount = (std::max)(
+                    AliveCount,
+                    CountConnectedPlayersForDisplay(World));
 
                 ImGui::Text("- Players: %d", AliveCount);
 

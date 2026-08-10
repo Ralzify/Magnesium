@@ -28,6 +28,61 @@ uint32_t ClientVisibleLevelNamesOffset = 0;
 
 std::unordered_map<UNetConnection*, TArray<FNetViewer*>> ViewerMap;
 
+namespace
+{
+	bool IsLiveReplicationObject(const UObject* Object)
+	{
+		if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
+			return false;
+
+		const int32 ObjectIndex = Object->Index;
+		if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
+			return false;
+
+		auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+		const int32 InvalidObjectFlags =
+			Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+		return Item && Item->GetObject() == Object &&
+			!(Item->GetFlags() & InvalidObjectFlags) &&
+			Object->Class &&
+			SDK::MemReadable(Object->Class, sizeof(UClass));
+	}
+
+	bool IsActorInDriverWorld(const AActor* Actor, const UNetDriver* Driver)
+	{
+		if (!IsLiveReplicationObject(Actor) ||
+			!IsLiveReplicationObject(Driver) ||
+			!Driver->HasWorld())
+		{
+			return false;
+		}
+
+		auto World = Driver->World;
+		if (!IsLiveReplicationObject(World))
+			return false;
+
+		const UObject* Outer = Actor->Outer;
+		for (uint8 Depth = 0; Outer && Depth < 8; ++Depth)
+		{
+			if (!IsLiveReplicationObject(Outer))
+				return false;
+			if (Outer == World)
+				return true;
+
+			if (Outer->Class == ULevel::StaticClass())
+			{
+				auto Level = static_cast<const ULevel*>(Outer);
+				if (Level->HasOwningWorld())
+					return Level->OwningWorld == World;
+			}
+
+			Outer = Outer->Outer;
+		}
+
+		return false;
+	}
+}
+
 
 const ULevel* GetLevel(const AActor* Actor)
 {
@@ -158,7 +213,7 @@ bool IsLevelInitializedForActor(const UNetDriver* NetDriver, const AActor* InAct
 
 struct FPrioActor
 {
-	FNetworkObjectInfo* ActorInfo;
+	AActor* Actor;
 	UActorChannel* Channel;
 	float Priority;
 	bool bIsRelevant;
@@ -211,18 +266,25 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 		// if (/*!ActorInfo->bPendingNetUpdate && */TimeSeconds <= ActorInfo->NextUpdateTime)
 		//	continue;
 
-		auto Actor = ActorInfo->Actor;
-
-		if (!Actor || /*!Actor->bActorInitialized || */ Actor->NetDriverName != Driver->NetDriverName)
+		auto NetworkActorInfo = ActorInfo.Get();
+		if (!NetworkActorInfo ||
+			!SDK::MemReadable(NetworkActorInfo, sizeof(FNetworkObjectInfo)))
 		{
 			continue;
 		}
 
-		auto Outer = Actor->Outer;
-		if (Actor->bActorIsBeingDestroyed || (TUObjectArray::GetItemByIndex(Actor->Index)->Flags & ((1 << 29) | (1 << 21))) || Actor->RemoteRole == 0
+		auto Actor = NetworkActorInfo->Actor;
+
+		if (!IsActorInDriverWorld(Actor, Driver) ||
+			/*!Actor->bActorInitialized || */ Actor->NetDriverName != Driver->NetDriverName)
+		{
+			continue;
+		}
+
+		if (Actor->bActorIsBeingDestroyed || Actor->RemoteRole == 0
 			|| ((Actor->HasbNetStartup() ? Actor->bNetStartup : false) && Actor->NetDormancy == 4))
 		{
-			ActorInfo->NextUpdateTime = 43857458734643857485478534.f; // never gonna update lol
+			NetworkActorInfo->NextUpdateTime = 43857458734643857485478534.f; // never gonna update lol
 			// RemoveNetworkActor(&NetworkObjectList, Actor);
 			continue;
 		}
@@ -239,7 +301,9 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 
 			for (auto& Chan : Conn->OpenChannels)
 			{
-				if (Chan->Class != UActorChannel::StaticClass() || Chan->Actor != Actor)
+				if (!IsLiveReplicationObject(Chan) ||
+					Chan->Class != UActorChannel::StaticClass() ||
+					Chan->Actor != Actor)
 					continue;
 
 				Channel = Chan;
@@ -275,12 +339,12 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 			{
 				if (VersionInfo.FortniteVersion == 1.72 || VersionInfo.FortniteVersion == 0.00)
 				{
-					auto& DormantConnections = *(TSet<TWeakObjectPtr<UNetConnection>>*)(__int64(ActorInfo.Get()) + 0x28);
+					auto& DormantConnections = *(TSet<TWeakObjectPtr<UNetConnection>>*)(__int64(NetworkActorInfo) + 0x28);
 
 					if (DormantConnections.Contains(Conn))
 						continue;
 				}
-				else if (ActorInfo->DormantConnections.Contains(Conn))
+				else if (NetworkActorInfo->DormantConnections.Contains(Conn))
 					continue;
 
 				static auto FlushDormancy = FindFlushDormancy();
@@ -340,7 +404,7 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 						Priority = -(std::numeric_limits<float>::max)();
 
 				auto& PriorityList = PriorityLists[Conn];
-				PriorityList.push_back({ ActorInfo.Get(), Channel, Priority, bIsRelevant, bLevelInitializedForActor });
+				PriorityList.push_back({ Actor, Channel, Priority, bIsRelevant, bLevelInitializedForActor });
 			}
 
 			if (Channel && !bIsRecentlyRelevant && (Actor->bTearOff || !bLevelInitializedForActor || !(Actor->HasbNetStartup() ? Actor->bNetStartup : false)))
@@ -451,14 +515,21 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 
 		for (auto& PriorityActor : PriorityActors)
 		{
-			auto ActorInfo = PriorityActor.ActorInfo;
+			auto Actor = PriorityActor.Actor;
+			if (!IsActorInDriverWorld(Actor, Driver))
+				continue;
 
 			UActorChannel* Channel = PriorityActor.Channel;
+			if (Channel &&
+				(!IsLiveReplicationObject(Channel) ||
+					Channel->Class != UActorChannel::StaticClass() ||
+					Channel->Actor != Actor))
+			{
+				continue;
+			}
 
 			if (!Channel || Channel->Actor)
 			{
-				auto Actor = ActorInfo->Actor;
-
 				if (!Channel)
 				{
 					if (VersionInfo.FortniteVersion >= 20)
@@ -466,11 +537,14 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 					else
 						Channel = ((UActorChannel * (*)(UNetConnection*, int, bool, int32_t)) FindCreateChannel())(Conn, 2, true, -1);
 
-					if (Channel)
+					if (IsLiveReplicationObject(Channel))
 						((void (*)(UActorChannel*, AActor*, uint8_t))FindSetChannelActor())(Channel, Actor, 0);
 				}
 
-				if (Channel)
+				if (Channel &&
+					IsLiveReplicationObject(Channel) &&
+					Channel->Actor == Actor &&
+					IsActorInDriverWorld(Actor, Driver))
 				{
 					if (PriorityActor.bIsRelevant)
 						Channel->GetRelevantTime() = Driver->GetTime() + 0.5 * ((float)rand() / 32767.f);

@@ -92,6 +92,12 @@ namespace
 		FActiveGameplayEffectHandle Handle{};
 	};
 
+	struct FTrackedGameplayCue
+	{
+		FEventObjectIdentity AbilitySystemIdentity{};
+		FEventObjectIdentity PawnIdentity{};
+	};
+
 	struct FEventRuntimeState
 	{
 		UWorld* World = nullptr;
@@ -107,6 +113,8 @@ namespace
 		double NextRiftTourRepairTime = 0.0;
 		double NextRiftTourRepairLogTime = 0.0;
 		double RiftTourPhaseEnteredTime = 0.0;
+		double NextKiwiPlayerSetupTime = 0.0;
+		double NextKiwiSetupLogTime = 0.0;
 		double NextMeshPollTime = 0.0;
 		double NextActivatorPollTime = 0.0;
 		double UnvaultDueTime = 0.0;
@@ -133,6 +141,10 @@ namespace
 		std::vector<FEventObjectIdentity> RiftTourStarsFloatingPlayers;
 		std::vector<FEventObjectIdentity> RiftTourBubblePlayers;
 		std::vector<FTrackedGameplayEffect> RiftTourStarsEffects;
+		std::vector<FTrackedGameplayEffect> KiwiLowGravityEffects;
+		std::vector<FTrackedGameplayCue> KiwiLowGravityCues;
+		std::vector<FEventObjectIdentity> KiwiBackpackPlayers;
+		std::vector<FEventObjectIdentity> KiwiPrisonPlayers;
 		FEventObjectIdentity RiftTourStarsFallbackGoal{};
 	};
 
@@ -772,6 +784,16 @@ namespace
 				L"/Buffet/Gameplay/Blueprints/Buffet_SpecialEventScript.Buffet_SpecialEventScript_C") == 0;
 	}
 
+	bool UsesKiwi1750Compatibility(const FEvent* Event)
+	{
+		return Event &&
+			fabs(Event->EventVersion - 17.50) < 0.001 &&
+			Event->ScriptingClass &&
+			wcscmp(
+				Event->ScriptingClass,
+				L"/Kiwi/Gameplay/Kiwi_EventScript.Kiwi_EventScript_C") == 0;
+	}
+
 	bool RiftTourMeshPredicateTrue()
 	{
 		return true;
@@ -1212,6 +1234,88 @@ namespace
 		return true;
 	}
 
+	bool InvokeObjectInputReturningTransform(
+		UObject* Target,
+		UFunction* Function,
+		UObject* InputValue,
+		FTransform& OutValue)
+	{
+		OutValue = {};
+		if (!IsLiveEventObject(Target) ||
+			!IsLiveEventObject(InputValue) ||
+			!ValidateParameterBuffer(Function))
+		{
+			return false;
+		}
+
+		const int32 TransformSize = FTransform::Size();
+		if (TransformSize <= 0 ||
+			TransformSize > static_cast<int32>(sizeof(FTransform)))
+		{
+			return false;
+		}
+
+		const auto Parameters = Function->GetParamsNamed();
+		uint32 InputOffset = InvalidParamOffset;
+		uint32 ReturnOffset = InvalidParamOffset;
+		int32 InputCount = 0;
+		int32 ReturnCount = 0;
+		for (const auto& Parameter : Parameters.NameOffsetMap)
+		{
+			if (Parameter.PropertyFlags & CPF_ReturnParm)
+			{
+				++ReturnCount;
+				if (Parameter.ElementSize != TransformSize ||
+					!HasParameterPropertyType(
+						Function, Parameter,
+						CastClassStructProperty))
+				{
+					return false;
+				}
+				ReturnOffset = Parameter.Offset;
+				continue;
+			}
+			if (IsInputParameter(Parameter))
+			{
+				++InputCount;
+				if (Parameter.ElementSize != sizeof(UObject*) ||
+					!HasParameterPropertyType(
+						Function, Parameter,
+						CastClassObjectProperty))
+				{
+					return false;
+				}
+				InputOffset = Parameter.Offset;
+				continue;
+			}
+			if (Parameter.PropertyFlags & CPF_Parm)
+				return false;
+		}
+		if (InputCount != 1 || ReturnCount != 1 ||
+			InputOffset == InvalidParamOffset ||
+			ReturnOffset == InvalidParamOffset ||
+			Parameters.Size == 0)
+		{
+			return false;
+		}
+
+		void* Memory = FMemory::Malloc(Parameters.Size);
+		if (!Memory)
+			return false;
+		memset(Memory, 0, Parameters.Size);
+		memcpy(reinterpret_cast<uint8*>(Memory) + InputOffset,
+			&InputValue, sizeof(InputValue));
+		Target->ProcessEvent(Function, Memory);
+		memcpy(&OutValue,
+			reinterpret_cast<uint8*>(Memory) + ReturnOffset,
+			TransformSize);
+		FMemory::Free(Memory);
+		return
+			FPlatformMath::IsFinite(OutValue.Translation.X) &&
+			FPlatformMath::IsFinite(OutValue.Translation.Y) &&
+			FPlatformMath::IsFinite(OutValue.Translation.Z);
+	}
+
 	bool InvokeFloatNoInput(
 		UObject* Target,
 		UFunction* Function,
@@ -1468,6 +1572,612 @@ namespace
 				Component,
 				Component->GetFunction("Deactivate"));
 		}
+	}
+
+	bool ResolveKiwiComponentClasses(
+		const UClass*& OutControllerComponentClass,
+		const UClass*& OutPawnComponentClass)
+	{
+		OutControllerComponentClass = nullptr;
+		OutPawnComponentClass = nullptr;
+
+		auto Mutator = FindLiveActor(
+			L"/Script/KiwiPlaylistRuntime.FortAthenaMutator_Kiwi");
+		if (!IsLiveEventObject(Mutator))
+		{
+			Mutator = FindLiveActor(
+				L"/Script/KiwiRuntime.FortAthenaMutator_Kiwi");
+		}
+		if (!IsLiveEventObject(Mutator))
+		{
+			Mutator = FindLiveActor(
+				L"/Script/FortniteGame.FortAthenaMutator_Kiwi");
+		}
+		if (IsLiveEventObject(Mutator))
+		{
+			ReadEventProperty(
+				Mutator,
+				"KiwiControllerComponentClass",
+				CastClassObjectProperty,
+				OutControllerComponentClass);
+			ReadEventProperty(
+				Mutator,
+				"KiwiPawnComponentClass",
+				CastClassObjectProperty,
+				OutPawnComponentClass);
+		}
+
+		if (!IsLiveEventObject(OutControllerComponentClass))
+		{
+			constexpr const wchar_t* ControllerClassPaths[] =
+			{
+				L"/Script/KiwiPlaylistRuntime.KiwiControllerComponent",
+				L"/Script/KiwiRuntime.KiwiControllerComponent",
+				L"/Script/FortniteGame.KiwiControllerComponent",
+			};
+			for (const auto ClassPath : ControllerClassPaths)
+			{
+				OutControllerComponentClass =
+					FindObject<UClass>(ClassPath);
+				if (IsLiveEventObject(OutControllerComponentClass))
+					break;
+			}
+		}
+		if (!IsLiveEventObject(OutPawnComponentClass))
+		{
+			constexpr const wchar_t* PawnClassPaths[] =
+			{
+				L"/Script/KiwiPlaylistRuntime.KiwiPawnComponent",
+				L"/Script/KiwiRuntime.KiwiPawnComponent",
+				L"/Script/FortniteGame.KiwiPawnComponent",
+			};
+			for (const auto ClassPath : PawnClassPaths)
+			{
+				OutPawnComponentClass = FindObject<UClass>(ClassPath);
+				if (IsLiveEventObject(OutPawnComponentClass))
+					break;
+			}
+		}
+
+		return IsLiveEventObject(OutControllerComponentClass) &&
+			IsLiveEventObject(OutPawnComponentClass);
+	}
+
+	bool EnsureKiwiPlayerComponents(
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn,
+		const UClass* ControllerComponentClass,
+		const UClass* PawnComponentClass)
+	{
+		if (!IsLiveEventObject(PlayerController) ||
+			!IsLiveEventObject(Pawn) ||
+			!IsLiveEventObject(ControllerComponentClass) ||
+			!IsLiveEventObject(PawnComponentClass))
+		{
+			return false;
+		}
+
+		auto ControllerComponent = EnsureRiftTourComponent(
+			PlayerController, ControllerComponentClass);
+		auto PawnComponent = EnsureRiftTourComponent(
+			Pawn, PawnComponentClass);
+		if (!IsLiveEventObject(ControllerComponent) ||
+			!IsLiveEventObject(PawnComponent))
+		{
+			return false;
+		}
+
+		SetRiftTourComponentEnabled(ControllerComponent, true);
+		SetRiftTourComponentEnabled(PawnComponent, true);
+		return true;
+	}
+
+	bool TryGetKiwiPrisonStartTag(
+		AActor* SquadStart,
+		FGameplayTag& OutBlockTag)
+	{
+		OutBlockTag = {};
+		FGameplayTagContainer Tags{};
+		if (!ReadEventProperty(
+				SquadStart,
+				"GameplayTags",
+				CastClassStructProperty,
+				Tags) ||
+			!IsSaneArray(
+				Tags.GameplayTags.Data,
+				Tags.GameplayTags.Num(),
+				Tags.GameplayTags.Max(),
+				FGameplayTag::Size(),
+				64))
+		{
+			return false;
+		}
+
+		bool bIsPrisonStart = false;
+		for (int32 TagIndex = 0;
+			 TagIndex < Tags.GameplayTags.Num(); ++TagIndex)
+		{
+			const auto& Tag = Tags.GameplayTags.Get(
+				TagIndex, FGameplayTag::Size());
+			const std::string TagName =
+				Tag.TagName.ToString().c_str();
+			if (TagName == "Kiwi.Prison.Start")
+			{
+				bIsPrisonStart = true;
+			}
+			else if (TagName.rfind("Kiwi.Prison.Block.", 0) == 0)
+			{
+				OutBlockTag = Tag;
+			}
+		}
+		return bIsPrisonStart &&
+			OutBlockTag.TagName.ToString().rfind(
+				"Kiwi.Prison.Block.", 0) == 0;
+	}
+
+	bool CollectKiwiPrisonStarts(
+		const UClass* SquadStartClass,
+		std::vector<AActor*>& OutStarts)
+	{
+		OutStarts.clear();
+		if (!IsLiveEventObject(SquadStartClass))
+			return false;
+
+		TArray<AActor*> Starts;
+		Utils::GetAll(SquadStartClass, Starts);
+		if (IsSaneArray(
+			Starts.Data, Starts.Num(), Starts.Max(),
+			sizeof(AActor*), 1024))
+		{
+			for (int32 StartIndex = 0;
+				 StartIndex < Starts.Num(); ++StartIndex)
+			{
+				auto Start = Starts[StartIndex];
+				FGameplayTag BlockTag{};
+				if (IsLiveEventObject(Start) &&
+					Start->IsA(SquadStartClass) &&
+					TryGetKiwiPrisonStartTag(Start, BlockTag))
+				{
+					OutStarts.push_back(Start);
+				}
+			}
+		}
+		Starts.Free();
+		std::sort(
+			OutStarts.begin(), OutStarts.end(),
+			[](const AActor* Left, const AActor* Right)
+			{
+				return Left->Name.ToString() < Right->Name.ToString();
+			});
+		return !OutStarts.empty();
+	}
+
+	bool EnsureKiwiPrisonStart(
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn,
+		const UClass* ControllerComponentClass,
+		int32 PlayerIndex,
+		bool bPlaceInChamber)
+	{
+		if (!IsLiveEventObject(PlayerController) ||
+			!IsLiveEventObject(Pawn) ||
+			!IsLiveEventObject(ControllerComponentClass))
+		{
+			return false;
+		}
+
+		auto ControllerComponent = FindRiftTourComponent(
+			PlayerController, ControllerComponentClass);
+		auto SquadStartClass = FindObject<UClass>(
+			L"/Script/FortniteGame.FortSquadStart");
+		if (!IsLiveEventObject(ControllerComponent) ||
+			!IsLiveEventObject(SquadStartClass))
+		{
+			return false;
+		}
+
+		UObject* ExistingStart = nullptr;
+		ReadEventProperty(
+			ControllerComponent,
+			"PrisonTeleportSquadStart",
+			CastClassObjectProperty,
+			ExistingStart);
+		AActor* SelectedStart =
+			IsLiveEventObject(ExistingStart) &&
+			ExistingStart->IsA(SquadStartClass)
+				? static_cast<AActor*>(ExistingStart)
+				: nullptr;
+
+		bool bAssignedStart = false;
+		if (!SelectedStart)
+		{
+			std::vector<AActor*> PrisonStarts;
+			if (!CollectKiwiPrisonStarts(
+					SquadStartClass, PrisonStarts))
+			{
+				return false;
+			}
+			const size_t StartIndex =
+				static_cast<size_t>(PlayerIndex >= 0 ? PlayerIndex : 0) %
+				PrisonStarts.size();
+			SelectedStart = PrisonStarts[StartIndex];
+			UObject* SelectedStartObject = SelectedStart;
+			bAssignedStart = WriteEventProperty(
+				ControllerComponent,
+				"PrisonTeleportSquadStart",
+				CastClassObjectProperty,
+				SelectedStartObject);
+			if (!bAssignedStart)
+				return false;
+		}
+
+		FGameplayTag BlockTag{};
+		if (TryGetKiwiPrisonStartTag(SelectedStart, BlockTag))
+		{
+			WriteEventProperty(
+				ControllerComponent,
+				"PrisonBlockIdentificationTag",
+				CastClassStructProperty,
+				BlockTag);
+		}
+
+		if (bAssignedStart)
+		{
+			SDK::DbgLog(
+				"[Events] Kiwi authored prison start assigned "
+				"controller=%p component=%p start=%s block=%s\n",
+				static_cast<void*>(PlayerController),
+				static_cast<void*>(ControllerComponent),
+				SelectedStart->Name.ToString().c_str(),
+				BlockTag.TagName.ToString().c_str());
+		}
+
+		if (!bPlaceInChamber)
+			return true;
+
+		FEventObjectIdentity PawnIdentity{};
+		if (!TryGetEventObjectIdentity(Pawn, PawnIdentity))
+			return false;
+		if (HasTrackedIdentity(
+			GEventState.KiwiPrisonPlayers, PawnIdentity))
+		{
+			return true;
+		}
+
+		FTransform PlayerStartTransform{};
+		if (!InvokeObjectInputReturningTransform(
+				SelectedStart,
+				SelectedStart->GetFunction("GetPlayerStartTransform"),
+				PlayerController,
+				PlayerStartTransform))
+		{
+			return false;
+		}
+
+		const bool bPlaced = Pawn->K2_TeleportTo(
+			PlayerStartTransform.Translation,
+			PlayerStartTransform.Rotation.Rotator());
+		if (!bPlaced)
+			return false;
+
+		InvokeZeroed(Pawn, Pawn->GetFunction("ForceNetUpdate"));
+		InvokeZeroed(
+			PlayerController,
+			PlayerController->GetFunction("ForceNetUpdate"));
+		GEventState.KiwiPrisonPlayers.push_back(PawnIdentity);
+		SDK::DbgLog(
+			"[Events] Kiwi player placed at authored chamber "
+			"controller=%p pawn=%p start=%s location="
+			"(%.3f, %.3f, %.3f)\n",
+			static_cast<void*>(PlayerController),
+			static_cast<void*>(Pawn),
+			SelectedStart->Name.ToString().c_str(),
+			static_cast<double>(PlayerStartTransform.Translation.X),
+			static_cast<double>(PlayerStartTransform.Translation.Y),
+			static_cast<double>(PlayerStartTransform.Translation.Z));
+		return true;
+	}
+
+	FGameplayTag GetKiwiLowGravityCueTag()
+	{
+		FGameplayTag CueTag{};
+		CueTag.TagName = FName(
+			L"GameplayCue.Skyfire.Phase.Arena.LowGrav.Trail");
+		return CueTag;
+	}
+
+	bool InvokeKiwiGameplayCueOperation(
+		UAbilitySystemComponent* AbilitySystemComponent,
+		const char* FunctionName,
+		const FGameplayTag& CueTag,
+		const FGameplayEffectContextHandle* EffectContext)
+	{
+		if (!IsLiveEventObject(AbilitySystemComponent) ||
+			!FunctionName)
+		{
+			return false;
+		}
+
+		auto Function =
+			AbilitySystemComponent->GetFunction(FunctionName);
+		if (!ValidateParameterBuffer(Function))
+			return false;
+
+		const auto Parameters = Function->GetParamsNamed();
+		uint32 CueTagOffset = InvalidParamOffset;
+		uint32 CueTagSize = 0;
+		uint32 EffectContextOffset = InvalidParamOffset;
+		uint32 EffectContextSize = 0;
+		int32 InputCount = 0;
+		for (const auto& Parameter : Parameters.NameOffsetMap)
+		{
+			if (!IsInputParameter(Parameter))
+				continue;
+			++InputCount;
+
+			if (Parameter.Name.find("GameplayCueTag") !=
+					std::string::npos &&
+				Parameter.ElementSize <= sizeof(FGameplayTag) &&
+				HasParameterPropertyType(
+					Function,
+					Parameter,
+					CastClassStructProperty))
+			{
+				if (CueTagOffset != InvalidParamOffset)
+					return false;
+				CueTagOffset = Parameter.Offset;
+				CueTagSize = Parameter.ElementSize;
+				continue;
+			}
+
+			if (EffectContext &&
+				Parameter.Name.find("EffectContext") !=
+					std::string::npos &&
+				Parameter.ElementSize <=
+					sizeof(FGameplayEffectContextHandle) &&
+				HasParameterPropertyType(
+					Function,
+					Parameter,
+					CastClassStructProperty))
+			{
+				if (EffectContextOffset != InvalidParamOffset)
+					return false;
+				EffectContextOffset = Parameter.Offset;
+				EffectContextSize = Parameter.ElementSize;
+				continue;
+			}
+
+			return false;
+		}
+
+		const int32 ExpectedInputs = EffectContext ? 2 : 1;
+		if (InputCount != ExpectedInputs ||
+			CueTagOffset == InvalidParamOffset ||
+			CueTagSize == 0 ||
+			(EffectContext &&
+				(EffectContextOffset == InvalidParamOffset ||
+				 EffectContextSize == 0)) ||
+			Parameters.Size == 0)
+		{
+			return false;
+		}
+
+		void* Memory = FMemory::Malloc(Parameters.Size);
+		if (!Memory)
+			return false;
+		memset(Memory, 0, Parameters.Size);
+		memcpy(
+			reinterpret_cast<uint8*>(Memory) + CueTagOffset,
+			&CueTag,
+			CueTagSize);
+		if (EffectContext)
+		{
+			memcpy(
+				reinterpret_cast<uint8*>(Memory) +
+					EffectContextOffset,
+				EffectContext,
+				EffectContextSize);
+		}
+		AbilitySystemComponent->ProcessEvent(Function, Memory);
+		FMemory::Free(Memory);
+		return true;
+	}
+
+	bool RemoveKiwiLowGravityCue(
+		UAbilitySystemComponent* AbilitySystemComponent)
+	{
+		const FGameplayTag CueTag = GetKiwiLowGravityCueTag();
+		return InvokeKiwiGameplayCueOperation(
+			AbilitySystemComponent,
+			"RemoveGameplayCue",
+			CueTag,
+			nullptr);
+	}
+
+	bool EnsureKiwiLowGravityCue(
+		UAbilitySystemComponent* AbilitySystemComponent,
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn,
+		const FEventObjectIdentity& AbilitySystemIdentity)
+	{
+		FEventObjectIdentity PawnIdentity{};
+		if (!TryGetEventObjectIdentity(Pawn, PawnIdentity))
+			return false;
+
+		for (auto Cue = GEventState.KiwiLowGravityCues.begin();
+			 Cue != GEventState.KiwiLowGravityCues.end();)
+		{
+			if (!(Cue->AbilitySystemIdentity == AbilitySystemIdentity))
+			{
+				++Cue;
+				continue;
+			}
+			if (Cue->PawnIdentity == PawnIdentity)
+				return true;
+
+			RemoveKiwiLowGravityCue(AbilitySystemComponent);
+			Cue = GEventState.KiwiLowGravityCues.erase(Cue);
+		}
+
+		auto CueClass = FindObject<UClass>(
+			L"/Skyfire/GameplayCues/GCN_Skyfire_LowGravity."
+			L"GCN_Skyfire_LowGravity_C");
+		if (!IsLiveEventObject(CueClass))
+			return false;
+
+		FGameplayEffectContextHandle EffectContext =
+			AbilitySystemComponent->MakeEffectContext();
+		EffectContext.Instigator = PlayerController;
+		EffectContext.Causer = Pawn;
+		EffectContext.AddSourceObject(Pawn);
+		const FGameplayTag CueTag = GetKiwiLowGravityCueTag();
+		if (!InvokeKiwiGameplayCueOperation(
+				AbilitySystemComponent,
+				"AddGameplayCue",
+				CueTag,
+				&EffectContext))
+		{
+			return false;
+		}
+
+		GEventState.KiwiLowGravityCues.push_back(
+			{ AbilitySystemIdentity, PawnIdentity });
+		SDK::DbgLog(
+			"[Events] Kiwi island low gravity trail added "
+			"controller=%p pawn=%p cueClass=%p\n",
+			static_cast<void*>(PlayerController),
+			static_cast<void*>(Pawn),
+			static_cast<const void*>(CueClass));
+		return true;
+	}
+
+	bool ApplyKiwiLowGravity(
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		if (!IsLiveEventObject(PlayerController) ||
+			!IsLiveEventObject(Pawn) ||
+			!IsLiveEventObject(PlayerController->PlayerState) ||
+			!IsLiveEventObject(
+				PlayerController->PlayerState->AbilitySystemComponent))
+		{
+			return false;
+		}
+
+		auto AbilitySystemComponent =
+			PlayerController->PlayerState->AbilitySystemComponent;
+		FEventObjectIdentity AbilitySystemIdentity{};
+		if (!TryGetEventObjectIdentity(
+				AbilitySystemComponent, AbilitySystemIdentity))
+		{
+			return false;
+		}
+		const bool bHasGravityEffect = std::find_if(
+				GEventState.KiwiLowGravityEffects.begin(),
+				GEventState.KiwiLowGravityEffects.end(),
+				[&AbilitySystemIdentity](
+					const FTrackedGameplayEffect& Effect)
+				{
+					return Effect.AbilitySystemIdentity ==
+						AbilitySystemIdentity;
+				}) != GEventState.KiwiLowGravityEffects.end();
+		if (bHasGravityEffect)
+			return EnsureKiwiLowGravityCue(
+				AbilitySystemComponent,
+				PlayerController,
+				Pawn,
+				AbilitySystemIdentity);
+
+		auto GameplayEffect = FindObject<UClass>(
+			L"/Game/Abilities/GameplayModifiers/Mutations/Misc/"
+			L"GE_GM_SpeedUp_LowGravity."
+			L"GE_GM_SpeedUp_LowGravity_C");
+		if (!IsLiveEventObject(GameplayEffect))
+			return false;
+
+		FGameplayEffectContextHandle EffectContext =
+			AbilitySystemComponent->MakeEffectContext();
+		EffectContext.Instigator = PlayerController;
+		EffectContext.Causer = Pawn;
+		EffectContext.AddSourceObject(Pawn);
+		const FActiveGameplayEffectHandle Handle =
+			AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(
+				GameplayEffect, 1.0f, EffectContext);
+		if (Handle.Handle <= 0)
+			return false;
+
+		GEventState.KiwiLowGravityEffects.push_back(
+			{ AbilitySystemIdentity, Handle });
+		const bool bCueApplied = EnsureKiwiLowGravityCue(
+			AbilitySystemComponent,
+			PlayerController,
+			Pawn,
+			AbilitySystemIdentity);
+		SDK::DbgLog(
+			"[Events] Kiwi island low gravity applied "
+			"controller=%p pawn=%p handle=%d cue=%d\n",
+			static_cast<void*>(PlayerController),
+			static_cast<void*>(Pawn),
+			Handle.Handle,
+			bCueApplied ? 1 : 0);
+		return bCueApplied;
+	}
+
+	void CleanupKiwiLowGravity()
+	{
+		int32 RemovedCues = 0;
+		for (const auto& TrackedCue :
+			 GEventState.KiwiLowGravityCues)
+		{
+			auto AbilitySystemObject = ResolveEventObjectIdentity(
+				TrackedCue.AbilitySystemIdentity);
+			if (IsLiveEventObject(AbilitySystemObject) &&
+				RemoveKiwiLowGravityCue(
+					static_cast<UAbilitySystemComponent*>(
+						AbilitySystemObject)))
+			{
+				++RemovedCues;
+			}
+		}
+		GEventState.KiwiLowGravityCues.clear();
+
+		int32 RemovedEffects = 0;
+		for (const auto& TrackedEffect :
+			 GEventState.KiwiLowGravityEffects)
+		{
+			auto AbilitySystemObject = ResolveEventObjectIdentity(
+				TrackedEffect.AbilitySystemIdentity);
+			if (!IsLiveEventObject(AbilitySystemObject) ||
+				TrackedEffect.Handle.Handle <= 0)
+			{
+				continue;
+			}
+
+			auto AbilitySystemComponent =
+				static_cast<UAbilitySystemComponent*>(
+					AbilitySystemObject);
+			auto RemoveFunction = AbilitySystemComponent->GetFunction(
+				"RemoveActiveGameplayEffect");
+			if (IsLiveEventObject(RemoveFunction) &&
+				AbilitySystemComponent->Call<bool>(
+					RemoveFunction,
+					TrackedEffect.Handle,
+					-1))
+			{
+				++RemovedEffects;
+			}
+		}
+		if (!GEventState.KiwiLowGravityEffects.empty() ||
+			RemovedCues > 0)
+		{
+			SDK::DbgLog(
+				"[Events] Kiwi island low gravity removed "
+				"effects=%d cues=%d tracked=%zu\n",
+				RemovedEffects,
+				RemovedCues,
+				GEventState.KiwiLowGravityEffects.size());
+		}
+		GEventState.KiwiLowGravityEffects.clear();
 	}
 
 	void DestroyRiftTourComponent(UObject* Component)
@@ -2971,6 +3681,344 @@ namespace
 			Expected == Context.Playlist;
 	}
 
+	bool CollectConnectedEventPlayers(
+		UWorld* World,
+		AFortGameMode* GameMode,
+		std::vector<AFortPlayerControllerAthena*>& OutPlayers)
+	{
+		OutPlayers.clear();
+		const UClass* ControllerClass =
+			AFortPlayerControllerAthena::StaticClass();
+		if (!IsLiveEventObject(ControllerClass))
+			return false;
+
+		auto AddPlayer =
+			[&](AFortPlayerControllerAthena* PlayerController)
+			{
+				if (!IsLiveEventObject(PlayerController) ||
+					!PlayerController->IsA(ControllerClass) ||
+					std::find(
+						OutPlayers.begin(), OutPlayers.end(),
+						PlayerController) != OutPlayers.end())
+				{
+					return;
+				}
+				OutPlayers.push_back(PlayerController);
+			};
+
+		auto AddConnection =
+			[&](UNetConnection* Connection)
+			{
+				if (!IsLiveEventObject(Connection))
+					return;
+
+				AddPlayer(Connection->PlayerController);
+				if (!Connection->HasChildren())
+					return;
+
+				auto& Children = Connection->Children;
+				if (!IsSaneArray(
+						Children.Data, Children.Num(), Children.Max(),
+						sizeof(UNetConnection*), 256))
+				{
+					return;
+				}
+				for (int32 ChildIndex = 0;
+					 ChildIndex < Children.Num(); ++ChildIndex)
+				{
+					auto ChildConnection = Children[ChildIndex];
+					if (IsLiveEventObject(ChildConnection))
+						AddPlayer(ChildConnection->PlayerController);
+				}
+			};
+
+		if (IsLiveEventObject(World) &&
+			World->HasNetDriver() &&
+			IsLiveEventObject(World->NetDriver))
+		{
+			auto Driver = static_cast<UNetDriver*>(World->NetDriver);
+			if (Driver->HasClientConnections())
+			{
+				auto& Connections = Driver->ClientConnections;
+				if (IsSaneArray(
+						Connections.Data,
+						Connections.Num(),
+						Connections.Max(),
+						sizeof(UNetConnection*),
+						256))
+				{
+					for (int32 ConnectionIndex = 0;
+						 ConnectionIndex < Connections.Num();
+						 ++ConnectionIndex)
+					{
+						AddConnection(Connections[ConnectionIndex]);
+					}
+				}
+			}
+		}
+
+		if (IsLiveEventObject(GameMode) &&
+			GameMode->HasAlivePlayers())
+		{
+			auto& AlivePlayers = GameMode->AlivePlayers;
+			if (IsSaneArray(
+					AlivePlayers.Data,
+					AlivePlayers.Num(),
+					AlivePlayers.Max(),
+					sizeof(AActor*),
+					256))
+			{
+				for (int32 PlayerIndex = 0;
+					 PlayerIndex < AlivePlayers.Num(); ++PlayerIndex)
+				{
+					AddPlayer(static_cast<
+						AFortPlayerControllerAthena*>(
+							AlivePlayers[PlayerIndex]));
+				}
+			}
+		}
+
+		return !OutPlayers.empty();
+	}
+
+	bool EquipKiwiBackpack(
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn);
+
+	bool TickKiwiPlayerSetup(
+		const FEventContext& Context, double Now)
+	{
+		const FEvent* Event = UsesKiwi1750Compatibility(
+			GEventState.Event)
+			? GEventState.Event
+			: FindCurrentEvent();
+		if (!UsesKiwi1750Compatibility(Event) ||
+			Now < GEventState.NextKiwiPlayerSetupTime)
+		{
+			return false;
+		}
+		GEventState.NextKiwiPlayerSetupTime = Now + 0.5;
+
+		if (!PlaylistMatchesEvent(*Event, Context) ||
+			!IsLiveEventObject(Context.GameMode))
+		{
+			return false;
+		}
+
+		std::vector<AFortPlayerControllerAthena*> Players;
+		if (!CollectConnectedEventPlayers(
+				Context.World, Context.GameMode, Players))
+		{
+			return false;
+		}
+
+		const UClass* ControllerComponentClass = nullptr;
+		const UClass* PawnComponentClass = nullptr;
+		if (!ResolveKiwiComponentClasses(
+				ControllerComponentClass,
+				PawnComponentClass))
+		{
+			if (Now >= GEventState.NextKiwiSetupLogTime)
+			{
+				GEventState.NextKiwiSetupLogTime = Now + 2.0;
+				SDK::DbgLog(
+					"[Events] Kiwi player setup waiting for native "
+					"component classes controller=%p pawn=%p\n",
+					static_cast<const void*>(ControllerComponentClass),
+					static_cast<const void*>(PawnComponentClass));
+			}
+			return false;
+		}
+
+		int32 KiwiPhase = GEventState.AuthoritativePhaseIndex;
+		if (KiwiPhase == UnobservedPhase)
+			KiwiPhase = GEventState.ObservedPhaseIndex;
+		const bool bPrisonPhase =
+			KiwiPhase != UnobservedPhase && KiwiPhase >= 1;
+		if (bPrisonPhase &&
+			(!GEventState.KiwiLowGravityEffects.empty() ||
+			 !GEventState.KiwiLowGravityCues.empty()))
+		{
+			CleanupKiwiLowGravity();
+		}
+		int32 TargetPlayers = 0;
+		int32 ConfiguredPlayers = 0;
+		for (size_t PlayerIndex = 0;
+			 PlayerIndex < Players.size(); ++PlayerIndex)
+		{
+			auto PlayerController = Players[PlayerIndex];
+			if (!IsLiveEventObject(PlayerController) ||
+				!IsLiveEventObject(PlayerController->MyFortPawn))
+			{
+				continue;
+			}
+
+			++TargetPlayers;
+			auto Pawn = PlayerController->MyFortPawn;
+			const bool bHadControllerComponent =
+				IsLiveEventObject(FindRiftTourComponent(
+					PlayerController,
+					ControllerComponentClass));
+			const bool bHadPawnComponent =
+				IsLiveEventObject(FindRiftTourComponent(
+					Pawn, PawnComponentClass));
+			if (!EnsureKiwiPlayerComponents(
+					PlayerController,
+					Pawn,
+					ControllerComponentClass,
+					PawnComponentClass))
+			{
+				continue;
+			}
+
+			++ConfiguredPlayers;
+			EnsureKiwiPrisonStart(
+				PlayerController,
+				Pawn,
+				ControllerComponentClass,
+				static_cast<int32>(PlayerIndex),
+				bPrisonPhase);
+			if (bPrisonPhase)
+			{
+				EquipKiwiBackpack(PlayerController, Pawn);
+			}
+			else
+			{
+				ApplyKiwiLowGravity(PlayerController, Pawn);
+			}
+			if (!bHadControllerComponent || !bHadPawnComponent)
+			{
+				InvokeZeroed(
+					Pawn, Pawn->GetFunction("ForceNetUpdate"));
+				InvokeZeroed(
+					PlayerController,
+					PlayerController->GetFunction("ForceNetUpdate"));
+				SDK::DbgLog(
+					"[Events] Kiwi player components restored "
+					"controller=%p pawn=%p controllerComponent=%d "
+					"pawnComponent=%d\n",
+					static_cast<void*>(PlayerController),
+					static_cast<void*>(Pawn),
+					bHadControllerComponent ? 0 : 1,
+					bHadPawnComponent ? 0 : 1);
+			}
+		}
+
+		return TargetPlayers > 0 &&
+			ConfiguredPlayers == TargetPlayers;
+	}
+
+	bool EquipKiwiBackpack(
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		if (!IsLiveEventObject(PlayerController) ||
+			!IsLiveEventObject(Pawn))
+		{
+			return false;
+		}
+
+		FEventObjectIdentity PawnIdentity{};
+		if (!TryGetEventObjectIdentity(Pawn, PawnIdentity))
+			return false;
+		if (HasTrackedIdentity(
+				GEventState.KiwiBackpackPlayers,
+				PawnIdentity))
+		{
+			return true;
+		}
+
+		auto Backpack = const_cast<UObject*>(FindObject<UObject>(
+			L"/Kiwi/Gameplay/Blueprints/Backpack/"
+			L"CP_Backpack_Kiwi.CP_Backpack_Kiwi"));
+		if (!IsLiveEventObject(Backpack) ||
+			!IsLiveEventObject(Pawn->GetFunction("ServerChoosePart")))
+		{
+			return false;
+		}
+
+		constexpr uint8 BackpackPartType = 3;
+		Pawn->ServerChoosePart(BackpackPartType, Backpack);
+		InvokeZeroed(
+			Pawn,
+			Pawn->GetFunction("OnCharacterPartsReinitialized"));
+		if (IsLiveEventObject(PlayerController->PlayerState))
+		{
+			InvokeZeroed(
+				PlayerController->PlayerState,
+				PlayerController->PlayerState->GetFunction(
+					"OnRep_CharacterParts"));
+			InvokeZeroed(
+				PlayerController->PlayerState,
+				PlayerController->PlayerState->GetFunction(
+					"ForceNetUpdate"));
+		}
+		InvokeZeroed(Pawn, Pawn->GetFunction("ForceNetUpdate"));
+		InvokeZeroed(
+			PlayerController,
+			PlayerController->GetFunction("ForceNetUpdate"));
+		GEventState.KiwiBackpackPlayers.push_back(PawnIdentity);
+		SDK::DbgLog(
+			"[Events] Kiwi event backpack equipped "
+			"controller=%p pawn=%p part=%p\n",
+			static_cast<void*>(PlayerController),
+			static_cast<void*>(Pawn),
+			static_cast<void*>(Backpack));
+		return true;
+	}
+
+	void PrepareKiwiPrisonPlayers(bool bPlaceInAuthoredChamber)
+	{
+		if (!UsesKiwi1750Compatibility(FindCurrentEvent()) ||
+			!IsLiveEventObject(GEventState.World) ||
+			!IsLiveEventObject(GEventState.GameMode))
+		{
+			return;
+		}
+
+		std::vector<AFortPlayerControllerAthena*> Players;
+		if (!CollectConnectedEventPlayers(
+				GEventState.World, GEventState.GameMode, Players))
+		{
+			return;
+		}
+
+		const UClass* ControllerComponentClass = nullptr;
+		const UClass* PawnComponentClass = nullptr;
+		if (!ResolveKiwiComponentClasses(
+				ControllerComponentClass,
+				PawnComponentClass))
+		{
+			return;
+		}
+
+		CleanupKiwiLowGravity();
+		for (size_t PlayerIndex = 0;
+			 PlayerIndex < Players.size(); ++PlayerIndex)
+		{
+			auto PlayerController = Players[PlayerIndex];
+			if (!IsLiveEventObject(PlayerController) ||
+				!IsLiveEventObject(PlayerController->MyFortPawn))
+			{
+				continue;
+			}
+
+			auto Pawn = PlayerController->MyFortPawn;
+			EnsureKiwiPlayerComponents(
+				PlayerController,
+				Pawn,
+				ControllerComponentClass,
+				PawnComponentClass);
+			EnsureKiwiPrisonStart(
+				PlayerController,
+				Pawn,
+				ControllerComponentClass,
+				static_cast<int32>(PlayerIndex),
+				bPlaceInAuthoredChamber);
+			EquipKiwiBackpack(PlayerController, Pawn);
+		}
+	}
+
 	bool TryInvokeLoader(const FEvent& Event)
 	{
 		const auto Actors = ResolveEventActors(Event);
@@ -3932,6 +4980,7 @@ void Events::Tick()
 	}
 
 	const double Now = UGameplayStatics::GetTimeSeconds(Context.World);
+	TickKiwiPlayerSetup(Context, Now);
 	if (FConfiguration::bAutoStartEvent.load(
 			std::memory_order_acquire) &&
 		!FConfiguration::bEventStarted.load(
@@ -4163,6 +5212,11 @@ void ActivatePhase(
 		: GEventState.AuthoritativePhaseIndex;
 	if (OldPhaseIndex == UnobservedPhase)
 		OldPhaseIndex = -1;
+	const bool bKiwiPrisonTransition =
+		UsesKiwi1750Compatibility(FindCurrentEvent()) &&
+		IndexToActivate == 1 && OldPhaseIndex != IndexToActivate;
+	if (bKiwiPrisonTransition)
+		PrepareKiwiPrisonPlayers(false);
 	if (VersionInfo.FortniteVersion < 23.0)
 	{
 		SDK::DbgLog(
@@ -4195,6 +5249,8 @@ void ActivatePhase(
 	{
 		ActivatePhaseOG(
 			Script, IndexToActivate, SequenceTimeOffset);
+		if (bKiwiPrisonTransition)
+			PrepareKiwiPrisonPlayers(true);
 		GEventState.AuthoritativePhaseIndex = IndexToActivate;
 		GEventState.ObservedPhaseIndex = IndexToActivate;
 
