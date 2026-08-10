@@ -92,10 +92,13 @@ namespace
 		FActiveGameplayEffectHandle Handle{};
 	};
 
-	struct FTrackedGameplayCue
+	struct FKiwiVortexState
 	{
-		FEventObjectIdentity AbilitySystemIdentity{};
 		FEventObjectIdentity PawnIdentity{};
+		FVector LastGroundedLocation{};
+		float IslandSurfaceZ = 0.f;
+		bool bHasGroundedLocation = false;
+		bool bActive = false;
 	};
 
 	struct FEventRuntimeState
@@ -114,10 +117,12 @@ namespace
 		double NextRiftTourRepairLogTime = 0.0;
 		double RiftTourPhaseEnteredTime = 0.0;
 		double NextKiwiPlayerSetupTime = 0.0;
+		double NextKiwiVortexUpdateTime = 0.0;
 		double NextKiwiSetupLogTime = 0.0;
 		double NextMeshPollTime = 0.0;
 		double NextActivatorPollTime = 0.0;
 		double UnvaultDueTime = 0.0;
+		float KiwiIslandSurfaceZ = 0.f;
 		int32 ObservedPhaseIndex = UnobservedPhase;
 		int32 AuthoritativePhaseIndex = UnobservedPhase;
 		bool bAutoRequestIssued = false;
@@ -142,7 +147,7 @@ namespace
 		std::vector<FEventObjectIdentity> RiftTourBubblePlayers;
 		std::vector<FTrackedGameplayEffect> RiftTourStarsEffects;
 		std::vector<FTrackedGameplayEffect> KiwiLowGravityEffects;
-		std::vector<FTrackedGameplayCue> KiwiLowGravityCues;
+		std::vector<FKiwiVortexState> KiwiVortexPlayers;
 		std::vector<FEventObjectIdentity> KiwiBackpackPlayers;
 		std::vector<FEventObjectIdentity> KiwiPrisonPlayers;
 		FEventObjectIdentity RiftTourStarsFallbackGoal{};
@@ -1878,11 +1883,10 @@ namespace
 		return true;
 	}
 
-	FGameplayTag GetKiwiLowGravityCueTag()
+	FGameplayTag MakeKiwiGameplayCueTag(const wchar_t* TagName)
 	{
 		FGameplayTag CueTag{};
-		CueTag.TagName = FName(
-			L"GameplayCue.Skyfire.Phase.Arena.LowGrav.Trail");
+		CueTag.TagName = FName(TagName);
 		return CueTag;
 	}
 
@@ -1983,71 +1987,145 @@ namespace
 		return true;
 	}
 
-	bool RemoveKiwiLowGravityCue(
-		UAbilitySystemComponent* AbilitySystemComponent)
+	bool RemoveKiwiInjectedCue(
+		UAbilitySystemComponent* AbilitySystemComponent,
+		const wchar_t* TagName)
 	{
-		const FGameplayTag CueTag = GetKiwiLowGravityCueTag();
-		return InvokeKiwiGameplayCueOperation(
+		const bool bRemoved = InvokeKiwiGameplayCueOperation(
 			AbilitySystemComponent,
 			"RemoveGameplayCue",
-			CueTag,
+			MakeKiwiGameplayCueTag(TagName),
 			nullptr);
+		if (bRemoved && AbilitySystemComponent->HasOwnerActor() &&
+			IsLiveEventObject(AbilitySystemComponent->OwnerActor))
+		{
+			AbilitySystemComponent->OwnerActor->ForceNetUpdate();
+		}
+		return bRemoved;
 	}
 
-	bool EnsureKiwiLowGravityCue(
-		UAbilitySystemComponent* AbilitySystemComponent,
-		AFortPlayerControllerAthena* PlayerController,
-		AFortPlayerPawnAthena* Pawn,
-		const FEventObjectIdentity& AbilitySystemIdentity)
+	int32 RemoveKiwiLegacyLowGravityLayers(
+		UAbilitySystemComponent* AbilitySystemComponent)
 	{
-		FEventObjectIdentity PawnIdentity{};
-		if (!TryGetEventObjectIdentity(Pawn, PawnIdentity))
-			return false;
+		if (!IsLiveEventObject(AbilitySystemComponent))
+			return 0;
 
-		for (auto Cue = GEventState.KiwiLowGravityCues.begin();
-			 Cue != GEventState.KiwiLowGravityCues.end();)
+		RemoveKiwiInjectedCue(
+			AbilitySystemComponent,
+			L"GameplayCue.Skyfire.Phase.Arena.LowGrav.Trail");
+		RemoveKiwiInjectedCue(
+			AbilitySystemComponent,
+			L"GameplayCue.Athena.Alpaca.Loop");
+
+		const auto LegacyEffectClass = FindObject<UClass>(
+			L"/Game/Abilities/GameplayModifiers/Mutations/Misc/"
+			L"GE_GM_SpeedUp_LowGravity."
+			L"GE_GM_SpeedUp_LowGravity_C");
+		if (!IsLiveEventObject(LegacyEffectClass) ||
+			!AbilitySystemComponent->HasActiveGameplayEffects())
 		{
-			if (!(Cue->AbilitySystemIdentity == AbilitySystemIdentity))
+			return 0;
+		}
+
+		auto& ActiveEffects =
+			AbilitySystemComponent->ActiveGameplayEffects;
+		if (!ActiveEffects.HasGameplayEffects_Internal())
+			return 0;
+
+		std::vector<FActiveGameplayEffectHandle> HandlesToRemove;
+		auto& Effects = ActiveEffects.GameplayEffects_Internal;
+		const int32 EffectCount = Effects.Num();
+		if (EffectCount < 0 || EffectCount >= 100000)
+			return 0;
+
+		for (int32 EffectIndex = 0;
+			 EffectIndex < EffectCount; ++EffectIndex)
+		{
+			auto& Effect = Effects.Get(
+				EffectIndex, FActiveGameplayEffect::Size());
+			if (!Effect.HasSpec() || !Effect.Spec.HasDef())
+				continue;
+			if (!Effect.Spec.Def ||
+				!Effect.Spec.Def->IsA(LegacyEffectClass))
 			{
-				++Cue;
 				continue;
 			}
-			if (Cue->PawnIdentity == PawnIdentity)
-				return true;
 
-			RemoveKiwiLowGravityCue(AbilitySystemComponent);
-			Cue = GEventState.KiwiLowGravityCues.erase(Cue);
+			const auto Handle =
+				*reinterpret_cast<FActiveGameplayEffectHandle*>(
+					reinterpret_cast<uint8*>(&Effect) + 0xc);
+			if (Handle.Handle > 0)
+				HandlesToRemove.push_back(Handle);
 		}
 
-		auto CueClass = FindObject<UClass>(
-			L"/Skyfire/GameplayCues/GCN_Skyfire_LowGravity."
-			L"GCN_Skyfire_LowGravity_C");
-		if (!IsLiveEventObject(CueClass))
-			return false;
+		auto RemoveFunction = AbilitySystemComponent->GetFunction(
+			"RemoveActiveGameplayEffect");
+		if (!IsLiveEventObject(RemoveFunction))
+			return 0;
 
-		FGameplayEffectContextHandle EffectContext =
-			AbilitySystemComponent->MakeEffectContext();
-		EffectContext.Instigator = PlayerController;
-		EffectContext.Causer = Pawn;
-		EffectContext.AddSourceObject(Pawn);
-		const FGameplayTag CueTag = GetKiwiLowGravityCueTag();
-		if (!InvokeKiwiGameplayCueOperation(
-				AbilitySystemComponent,
-				"AddGameplayCue",
-				CueTag,
-				&EffectContext))
+		int32 RemovedEffects = 0;
+		for (const auto& Handle : HandlesToRemove)
 		{
+			if (AbilitySystemComponent->Call<bool>(
+					RemoveFunction, Handle, -1))
+			{
+				++RemovedEffects;
+			}
+		}
+		return RemovedEffects;
+	}
+
+	bool SetKiwiVortexActive(
+		FKiwiVortexState& State,
+		AFortPlayerPawnAthena* Pawn,
+		bool bActive)
+	{
+		if (State.bActive == bActive)
+			return true;
+
+		if (!IsLiveEventObject(Pawn))
+		{
+			auto PawnObject = ResolveEventObjectIdentity(
+				State.PawnIdentity);
+			if (IsLiveEventObject(PawnObject) &&
+				PawnObject->IsA(AFortPlayerPawnAthena::StaticClass()))
+			{
+				Pawn = static_cast<AFortPlayerPawnAthena*>(PawnObject);
+			}
+		}
+		if (!IsLiveEventObject(Pawn) ||
+			!IsLiveEventObject(Pawn->GetFunction("SetInVortex")))
+		{
+			if (!bActive)
+				State.bActive = false;
 			return false;
 		}
 
-		GEventState.KiwiLowGravityCues.push_back(
-			{ AbilitySystemIdentity, PawnIdentity });
+		if (bActive &&
+			IsLiveEventObject(Pawn->CharacterMovement) &&
+			Pawn->CharacterMovement->Velocity.Z < 0.f)
+		{
+			Pawn->CharacterMovement->Velocity.Z = 0.f;
+		}
+		Pawn->SetInVortex(bActive);
+		if (!bActive)
+		{
+			const bool bStillSkydiving =
+				(Pawn->HasbIsSkydiving() && Pawn->bIsSkydiving) ||
+				(Pawn->HasbIsSkydivingFromBus() &&
+				 Pawn->bIsSkydivingFromBus);
+			if (bStillSkydiving)
+				InvokeZeroed(
+					Pawn, Pawn->GetFunction("EndSkydiving"));
+		}
+		Pawn->ForceNetUpdate();
+		State.bActive = bActive;
 		SDK::DbgLog(
-			"[Events] Kiwi island low gravity trail added "
-			"controller=%p pawn=%p cueClass=%p\n",
-			static_cast<void*>(PlayerController),
+			"[Events] Kiwi island vortex skydive %s pawn=%p "
+			"surfaceZ=%.1f\n",
+			bActive ? "enabled" : "disabled",
 			static_cast<void*>(Pawn),
-			static_cast<const void*>(CueClass));
+			static_cast<double>(State.IslandSurfaceZ));
 		return true;
 	}
 
@@ -2082,16 +2160,16 @@ namespace
 						AbilitySystemIdentity;
 				}) != GEventState.KiwiLowGravityEffects.end();
 		if (bHasGravityEffect)
-			return EnsureKiwiLowGravityCue(
-				AbilitySystemComponent,
-				PlayerController,
-				Pawn,
-				AbilitySystemIdentity);
+			return true;
+
+		const int32 RemovedLegacyEffects =
+			RemoveKiwiLegacyLowGravityLayers(
+				AbilitySystemComponent);
 
 		auto GameplayEffect = FindObject<UClass>(
-			L"/Game/Abilities/GameplayModifiers/Mutations/Misc/"
-			L"GE_GM_SpeedUp_LowGravity."
-			L"GE_GM_SpeedUp_LowGravity_C");
+			L"/MotherGameplay/Items/Alpaca/"
+			L"GE_Alpaca_LowGrav_NoJump."
+			L"GE_Alpaca_LowGrav_NoJump_C");
 		if (!IsLiveEventObject(GameplayEffect))
 			return false;
 
@@ -2108,38 +2186,28 @@ namespace
 
 		GEventState.KiwiLowGravityEffects.push_back(
 			{ AbilitySystemIdentity, Handle });
-		const bool bCueApplied = EnsureKiwiLowGravityCue(
-			AbilitySystemComponent,
-			PlayerController,
-			Pawn,
-			AbilitySystemIdentity);
 		SDK::DbgLog(
 			"[Events] Kiwi island low gravity applied "
-			"controller=%p pawn=%p handle=%d cue=%d\n",
+			"controller=%p pawn=%p handle=%d effect=%p "
+			"removedLegacy=%d\n",
 			static_cast<void*>(PlayerController),
 			static_cast<void*>(Pawn),
 			Handle.Handle,
-			bCueApplied ? 1 : 0);
-		return bCueApplied;
+			static_cast<const void*>(GameplayEffect),
+			RemovedLegacyEffects);
+		return true;
 	}
 
 	void CleanupKiwiLowGravity()
 	{
-		int32 RemovedCues = 0;
-		for (const auto& TrackedCue :
-			 GEventState.KiwiLowGravityCues)
+		int32 DisabledVortexes = 0;
+		for (auto& VortexState : GEventState.KiwiVortexPlayers)
 		{
-			auto AbilitySystemObject = ResolveEventObjectIdentity(
-				TrackedCue.AbilitySystemIdentity);
-			if (IsLiveEventObject(AbilitySystemObject) &&
-				RemoveKiwiLowGravityCue(
-					static_cast<UAbilitySystemComponent*>(
-						AbilitySystemObject)))
-			{
-				++RemovedCues;
-			}
+			if (VortexState.bActive &&
+				SetKiwiVortexActive(VortexState, nullptr, false))
+				++DisabledVortexes;
 		}
-		GEventState.KiwiLowGravityCues.clear();
+		GEventState.KiwiVortexPlayers.clear();
 
 		int32 RemovedEffects = 0;
 		for (const auto& TrackedEffect :
@@ -2156,6 +2224,8 @@ namespace
 			auto AbilitySystemComponent =
 				static_cast<UAbilitySystemComponent*>(
 					AbilitySystemObject);
+			RemoveKiwiLegacyLowGravityLayers(
+				AbilitySystemComponent);
 			auto RemoveFunction = AbilitySystemComponent->GetFunction(
 				"RemoveActiveGameplayEffect");
 			if (IsLiveEventObject(RemoveFunction) &&
@@ -2168,13 +2238,13 @@ namespace
 			}
 		}
 		if (!GEventState.KiwiLowGravityEffects.empty() ||
-			RemovedCues > 0)
+			DisabledVortexes > 0)
 		{
 			SDK::DbgLog(
 				"[Events] Kiwi island low gravity removed "
-				"effects=%d cues=%d tracked=%zu\n",
+				"effects=%d vortexes=%d tracked=%zu\n",
 				RemovedEffects,
-				RemovedCues,
+				DisabledVortexes,
 				GEventState.KiwiLowGravityEffects.size());
 		}
 		GEventState.KiwiLowGravityEffects.clear();
@@ -3781,6 +3851,178 @@ namespace
 		return !OutPlayers.empty();
 	}
 
+	float ResolveKiwiIslandSurfaceZ(
+		AFortPlayerPawnAthena* FallbackPawn)
+	{
+		if (FPlatformMath::IsFinite(GEventState.KiwiIslandSurfaceZ) &&
+			fabs(GEventState.KiwiIslandSurfaceZ) > 1.f)
+		{
+			return GEventState.KiwiIslandSurfaceZ;
+		}
+
+		auto KiwiLevelScript = FindLiveActor(
+			L"/Kiwi/Levels/Kiwi_P.Kiwi_P_C");
+		FTransform FarmTransform{};
+		if (IsLiveEventObject(KiwiLevelScript) &&
+			ReadEventProperty(
+				KiwiLevelScript,
+				"FarmPOITransform",
+				CastClassStructProperty,
+				FarmTransform) &&
+			FPlatformMath::IsFinite(FarmTransform.Translation.Z) &&
+			fabs(FarmTransform.Translation.Z) > 1.f)
+		{
+			GEventState.KiwiIslandSurfaceZ =
+				FarmTransform.Translation.Z;
+			return GEventState.KiwiIslandSurfaceZ;
+		}
+
+		return IsLiveEventObject(FallbackPawn)
+			? FallbackPawn->K2_GetActorLocation().Z
+			: 0.f;
+	}
+
+	bool TickKiwiIslandVortex(
+		const FEventContext& Context, double Now)
+	{
+		const FEvent* Event = UsesKiwi1750Compatibility(
+			GEventState.Event)
+			? GEventState.Event
+			: FindCurrentEvent();
+		if (!UsesKiwi1750Compatibility(Event) ||
+			Now < GEventState.NextKiwiVortexUpdateTime)
+		{
+			return false;
+		}
+		GEventState.NextKiwiVortexUpdateTime = Now + 0.1;
+
+		if (!PlaylistMatchesEvent(*Event, Context) ||
+			!IsLiveEventObject(Context.GameMode))
+		{
+			return false;
+		}
+
+		int32 KiwiPhase = GEventState.AuthoritativePhaseIndex;
+		if (KiwiPhase == UnobservedPhase)
+			KiwiPhase = GEventState.ObservedPhaseIndex;
+		if (KiwiPhase != UnobservedPhase && KiwiPhase >= 1)
+		{
+			for (auto& State : GEventState.KiwiVortexPlayers)
+				if (State.bActive)
+					SetKiwiVortexActive(State, nullptr, false);
+			return false;
+		}
+
+		std::vector<AFortPlayerControllerAthena*> Players;
+		if (!CollectConnectedEventPlayers(
+				Context.World, Context.GameMode, Players))
+		{
+			return false;
+		}
+
+		std::vector<FEventObjectIdentity> CurrentPawns;
+		bool bAnyActive = false;
+		for (auto PlayerController : Players)
+		{
+			if (!IsLiveEventObject(PlayerController) ||
+				!IsLiveEventObject(PlayerController->MyFortPawn))
+			{
+				continue;
+			}
+
+			auto Pawn = PlayerController->MyFortPawn;
+			FEventObjectIdentity PawnIdentity{};
+			if (!TryGetEventObjectIdentity(Pawn, PawnIdentity))
+				continue;
+			CurrentPawns.push_back(PawnIdentity);
+
+			auto State = std::find_if(
+				GEventState.KiwiVortexPlayers.begin(),
+				GEventState.KiwiVortexPlayers.end(),
+				[&PawnIdentity](const FKiwiVortexState& Candidate)
+				{
+					return Candidate.PawnIdentity == PawnIdentity;
+				});
+			if (State == GEventState.KiwiVortexPlayers.end())
+			{
+				FKiwiVortexState NewState{};
+				NewState.PawnIdentity = PawnIdentity;
+				NewState.IslandSurfaceZ =
+					ResolveKiwiIslandSurfaceZ(Pawn);
+				GEventState.KiwiVortexPlayers.push_back(NewState);
+				State = GEventState.KiwiVortexPlayers.end() - 1;
+			}
+
+			const FVector Location = Pawn->K2_GetActorLocation();
+			if (!FPlatformMath::IsFinite(State->IslandSurfaceZ) ||
+				fabs(State->IslandSurfaceZ) <= 1.f)
+			{
+				State->IslandSurfaceZ = Location.Z;
+			}
+			const bool bGrounded =
+				IsLiveEventObject(Pawn->CharacterMovement) &&
+				Pawn->CharacterMovement->IsMovingOnGround();
+			if (!State->bActive && bGrounded &&
+				FPlatformMath::IsFinite(Location.Z))
+			{
+				State->IslandSurfaceZ = Location.Z;
+				State->LastGroundedLocation = FVector(
+					Location.X, Location.Y, Location.Z);
+				State->bHasGroundedLocation = true;
+			}
+			const bool bFalling =
+				IsLiveEventObject(Pawn->CharacterMovement) &&
+				Pawn->CharacterMovement->IsFalling();
+			const bool bDescending =
+				bFalling &&
+				Pawn->CharacterMovement->Velocity.Z < -50.f;
+			const double GroundDeltaX =
+				Location.X - State->LastGroundedLocation.X;
+			const double GroundDeltaY =
+				Location.Y - State->LastGroundedLocation.Y;
+			const bool bOutsideIslandFootprint =
+				!State->bHasGroundedLocation ||
+				GroundDeltaX * GroundDeltaX +
+					GroundDeltaY * GroundDeltaY >=
+					250000.0;
+			const bool bBelowIsland =
+				Location.Z <= State->IslandSurfaceZ - 750.f;
+			const bool bReachedLandingHeight =
+				State->bActive &&
+				IsLiveEventObject(Pawn->CharacterMovement) &&
+				Pawn->CharacterMovement->Velocity.Z > 0.f &&
+				Location.Z >= State->IslandSurfaceZ - 150.f;
+			const bool bLandedOnIsland =
+				bGrounded &&
+				Location.Z >= State->IslandSurfaceZ - 500.f;
+
+			if (!State->bActive && bBelowIsland &&
+				bDescending && bOutsideIslandFootprint)
+			{
+				SetKiwiVortexActive(*State, Pawn, true);
+			}
+			else if (State->bActive &&
+				(bReachedLandingHeight || bLandedOnIsland))
+				SetKiwiVortexActive(*State, Pawn, false);
+
+			bAnyActive = bAnyActive || State->bActive;
+		}
+
+		for (auto State = GEventState.KiwiVortexPlayers.begin();
+			 State != GEventState.KiwiVortexPlayers.end();)
+		{
+			if (HasTrackedIdentity(CurrentPawns, State->PawnIdentity))
+			{
+				++State;
+				continue;
+			}
+			if (State->bActive)
+				SetKiwiVortexActive(*State, nullptr, false);
+			State = GEventState.KiwiVortexPlayers.erase(State);
+		}
+		return bAnyActive;
+	}
+
 	bool EquipKiwiBackpack(
 		AFortPlayerControllerAthena* PlayerController,
 		AFortPlayerPawnAthena* Pawn);
@@ -3837,7 +4079,7 @@ namespace
 			KiwiPhase != UnobservedPhase && KiwiPhase >= 1;
 		if (bPrisonPhase &&
 			(!GEventState.KiwiLowGravityEffects.empty() ||
-			 !GEventState.KiwiLowGravityCues.empty()))
+			 !GEventState.KiwiVortexPlayers.empty()))
 		{
 			CleanupKiwiLowGravity();
 		}
@@ -4980,6 +5222,7 @@ void Events::Tick()
 	}
 
 	const double Now = UGameplayStatics::GetTimeSeconds(Context.World);
+	TickKiwiIslandVortex(Context, Now);
 	TickKiwiPlayerSetup(Context, Now);
 	if (FConfiguration::bAutoStartEvent.load(
 			std::memory_order_acquire) &&
