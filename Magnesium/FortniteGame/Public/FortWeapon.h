@@ -22,6 +22,7 @@ public:
 
     DEFINE_PROP(ItemEntryGuid, FGuid);
     DEFINE_PROP(WeaponData, UFortWeaponItemDefinition*);
+    DEFINE_PROP(WeaponLevel, int32);
     DEFINE_PROP(AmmoCount, int32);
     DEFINE_PROP(ContextTrapItemDefinition, UFortItemDefinition*);
     DEFINE_PROP(PrimaryAbilitySpecHandle, FGameplayAbilitySpecHandle);

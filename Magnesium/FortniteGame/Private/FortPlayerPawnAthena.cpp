@@ -30,6 +30,7 @@ namespace
 	constexpr float HealthStateEpsilon = 0.01f;
 	constexpr size_t MaxTrackedHealthStates = 256;
 	constexpr size_t MaxMinimumHealthGodStates = 256;
+	constexpr size_t MaxFullHealthGodStates = 256;
 
 	struct FTrackedHealthState
 	{
@@ -51,14 +52,37 @@ namespace
 		bool bCapturedPreviousMinimum = false;
 	};
 
+	enum class EFullHealthGodMechanism : uint8
+	{
+		None,
+		DamageFlag,
+		MinimumFloor,
+	};
+
+	struct FFullHealthGodState
+	{
+		TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+		TWeakObjectPtr<AFortPlayerPawnAthena> AppliedPawn;
+		TWeakObjectPtr<UFortHealthSet> AppliedHealthSet;
+		EFullHealthGodMechanism Mechanism =
+			EFullHealthGodMechanism::None;
+		bool PreviousCanBeDamaged = true;
+		float PreviousMinimum = 0.f;
+		float AppliedMinimum = 0.f;
+	};
+
 	std::array<FTrackedHealthState, MaxTrackedHealthStates>
 		GTrackedHealthStates{};
 	std::array<FMinimumHealthGodState, MaxMinimumHealthGodStates>
 		GMinimumHealthGodStates{};
+	std::array<FFullHealthGodState, MaxFullHealthGodStates>
+		GFullHealthGodStates{};
 	size_t GTrackedHealthStateCursor = 0;
 	size_t GMinimumHealthGodStateCursor = 0;
+	size_t GFullHealthGodStateCursor = 0;
 	TWeakObjectPtr<UWorld> GTrackedHealthStateWorld;
 	TWeakObjectPtr<UWorld> GMinimumHealthGodStateWorld;
+	TWeakObjectPtr<UWorld> GFullHealthGodStateWorld;
 	uint32 GShieldRepairLogCount = 0;
 	thread_local uint32 GReviveCompatDepth = 0;
 	constexpr uint32
@@ -1881,6 +1905,266 @@ namespace
 			Pawn->IsA(AFortPlayerPawnAthena::StaticClass())
 				? Pawn
 				: nullptr;
+	}
+
+	void ResetFullHealthGodStatesForWorld(UWorld* World)
+	{
+		if (GFullHealthGodStateWorld.Get() == World)
+			return;
+
+		GFullHealthGodStates = {};
+		GFullHealthGodStateCursor = 0;
+		GFullHealthGodStateWorld =
+			TWeakObjectPtr<UWorld>(World);
+	}
+
+	FFullHealthGodState* FindFullHealthGodState(
+		const AFortPlayerControllerAthena* Controller)
+	{
+		if (!Controller)
+			return nullptr;
+
+		for (auto& State : GFullHealthGodStates)
+		{
+			if (State.Controller.Get() == Controller)
+				return &State;
+		}
+		return nullptr;
+	}
+
+	void ClearFullHealthGodApplication(
+		FFullHealthGodState& State)
+	{
+		State.AppliedPawn = {};
+		State.AppliedHealthSet = {};
+		State.Mechanism = EFullHealthGodMechanism::None;
+		State.PreviousCanBeDamaged = true;
+		State.PreviousMinimum = 0.f;
+		State.AppliedMinimum = 0.f;
+	}
+
+	bool IsFullHealthGodStateApplied(
+		const FFullHealthGodState& State)
+	{
+		auto Pawn = State.AppliedPawn.Get();
+		if (!IsLiveHealthStateObject(Pawn))
+			return false;
+
+		switch (State.Mechanism)
+		{
+		case EFullHealthGodMechanism::DamageFlag:
+			return Pawn->HasbCanBeDamaged() &&
+				!Pawn->bCanBeDamaged;
+
+		case EFullHealthGodMechanism::MinimumFloor:
+		{
+			auto HealthSet = State.AppliedHealthSet.Get();
+			if (!IsLiveHealthStateObject(HealthSet) ||
+				!HealthSet->HasHealth() ||
+				!FFortGameplayAttributeData::StaticStruct() ||
+				!FFortGameplayAttributeData::HasMinimum())
+			{
+				return false;
+			}
+
+			const float CurrentMinimum =
+				HealthSet->Health.Minimum;
+			return FPlatformMath::IsFinite(CurrentMinimum) &&
+				FPlatformMath::IsFinite(State.AppliedMinimum) &&
+				std::abs(
+					CurrentMinimum - State.AppliedMinimum) <=
+					HealthStateEpsilon;
+		}
+
+		default:
+			return false;
+		}
+	}
+
+	void RestoreFullHealthGodState(
+		FFullHealthGodState& State)
+	{
+		auto Pawn = State.AppliedPawn.Get();
+		bool bRestored = false;
+
+		if (IsLiveHealthStateObject(Pawn))
+		{
+			switch (State.Mechanism)
+			{
+			case EFullHealthGodMechanism::DamageFlag:
+				// Only undo the exact false value we installed. If another
+				// policy changed it while God was active, that newer owner wins.
+				if (Pawn->HasbCanBeDamaged() &&
+					!Pawn->bCanBeDamaged)
+				{
+					Pawn->bCanBeDamaged =
+						State.PreviousCanBeDamaged;
+					bRestored = true;
+				}
+				break;
+
+			case EFullHealthGodMechanism::MinimumFloor:
+			{
+				auto HealthSet = State.AppliedHealthSet.Get();
+				if (IsLiveHealthStateObject(HealthSet) &&
+					HealthSet->HasHealth() &&
+					FFortGameplayAttributeData::StaticStruct() &&
+					FFortGameplayAttributeData::HasMinimum())
+				{
+					auto& Health = HealthSet->Health;
+					// Compare with the value applied at grant time, not today's
+					// MaxHealth. A later max-health change must not make our
+					// ownership check fail or capture an unrelated floor.
+					if (FPlatformMath::IsFinite(Health.Minimum) &&
+						FPlatformMath::IsFinite(
+							State.AppliedMinimum) &&
+						std::abs(
+							Health.Minimum -
+								State.AppliedMinimum) <=
+							HealthStateEpsilon)
+					{
+						Health.Minimum = State.PreviousMinimum;
+						bRestored = true;
+					}
+				}
+				break;
+			}
+
+			default:
+				break;
+			}
+		}
+
+		if (bRestored)
+			Pawn->ForceNetUpdate();
+		ClearFullHealthGodApplication(State);
+	}
+
+	FFullHealthGodState& AddFullHealthGodState(
+		AFortPlayerControllerAthena* Controller)
+	{
+		size_t EmptyIndex = MaxFullHealthGodStates;
+		for (size_t Index = 0;
+			Index < GFullHealthGodStates.size(); ++Index)
+		{
+			auto ExistingController =
+				GFullHealthGodStates[Index].Controller.Get();
+			if (ExistingController == Controller)
+				return GFullHealthGodStates[Index];
+			if (!ExistingController &&
+				EmptyIndex == MaxFullHealthGodStates)
+			{
+				EmptyIndex = Index;
+			}
+		}
+
+		const size_t TargetIndex =
+			EmptyIndex < MaxFullHealthGodStates
+				? EmptyIndex
+				: GFullHealthGodStateCursor++ %
+					MaxFullHealthGodStates;
+		auto& State = GFullHealthGodStates[TargetIndex];
+		RestoreFullHealthGodState(State);
+		State = {};
+		State.Controller =
+			TWeakObjectPtr<AFortPlayerControllerAthena>(
+				Controller);
+		return State;
+	}
+
+	bool ApplyFullHealthGodState(
+		FFullHealthGodState& State,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		if (!IsLiveHealthStateObject(Pawn))
+			return false;
+
+		if (State.Mechanism !=
+				EFullHealthGodMechanism::None)
+		{
+			if (State.AppliedPawn.Get() == Pawn)
+			{
+				// Repeated calls are idempotent. Do not reclaim a value that
+				// an external system changed after our original grant.
+				if (IsFullHealthGodStateApplied(State))
+					return true;
+
+				ClearFullHealthGodApplication(State);
+				return false;
+			}
+
+			RestoreFullHealthGodState(State);
+		}
+
+		State.AppliedPawn =
+			TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+
+		if (VersionInfo.FortniteVersion >= 21 &&
+			Pawn->HasbCanBeDamaged())
+		{
+			// A pre-existing false belongs to the playlist, an event, or
+			// another system. Never adopt it as Magnesium-owned God mode.
+			if (!Pawn->bCanBeDamaged)
+			{
+				ClearFullHealthGodApplication(State);
+				return false;
+			}
+
+			State.Mechanism =
+				EFullHealthGodMechanism::DamageFlag;
+			State.PreviousCanBeDamaged =
+				Pawn->bCanBeDamaged;
+			Pawn->bCanBeDamaged = false;
+			Pawn->ForceNetUpdate();
+			return true;
+		}
+
+		UFortHealthSet* HealthSet = nullptr;
+		FFortGameplayAttributeData* Health = nullptr;
+		if (ResolveMinimumHealthGodAttribute(
+				Pawn, HealthSet, Health))
+		{
+			float MaxHealth = Pawn->GetMaxHealth();
+			if (!FPlatformMath::IsFinite(MaxHealth) ||
+				MaxHealth <= 1.f ||
+				!FPlatformMath::IsFinite(Health->Minimum) ||
+				std::abs(Health->Minimum - MaxHealth) <=
+					HealthStateEpsilon)
+			{
+				ClearFullHealthGodApplication(State);
+				return false;
+			}
+
+			State.AppliedHealthSet =
+				TWeakObjectPtr<UFortHealthSet>(HealthSet);
+			State.Mechanism =
+				EFullHealthGodMechanism::MinimumFloor;
+			State.PreviousMinimum = Health->Minimum;
+			State.AppliedMinimum = MaxHealth;
+			Health->Minimum = MaxHealth;
+			Pawn->ForceNetUpdate();
+			return true;
+		}
+
+		if (Pawn->HasbCanBeDamaged())
+		{
+			if (!Pawn->bCanBeDamaged)
+			{
+				ClearFullHealthGodApplication(State);
+				return false;
+			}
+
+			State.Mechanism =
+				EFullHealthGodMechanism::DamageFlag;
+			State.PreviousCanBeDamaged =
+				Pawn->bCanBeDamaged;
+			Pawn->bCanBeDamaged = false;
+			Pawn->ForceNetUpdate();
+			return true;
+		}
+
+		ClearFullHealthGodApplication(State);
+		return false;
 	}
 
 	bool IsWritableObjectMemory(void* Address, size_t Size)
@@ -4014,13 +4298,18 @@ bool AFortPlayerPawnAthena::SetMinimumHealthGodMode(
 		return true;
 	}
 
+	// Restore only a Magnesium-owned full-God mutation before the one-health
+	// floor captures its previous value. Authored immunity is not touched.
+	SetFullHealthGodMode(
+		Controller, GetMinimumHealthGodPawn(Controller), false);
+	auto Pawn = GetMinimumHealthGodPawn(Controller);
+	if (!Pawn || HasFullHealthGodMode(Pawn))
+		return false;
+
 	auto& State = ExistingState
 		? *ExistingState
 		: AddMinimumHealthGodState(Controller);
-	auto Pawn = GetMinimumHealthGodPawn(Controller);
-	return Pawn
-		? ApplyMinimumHealthGodState(State, Pawn)
-		: false;
+	return ApplyMinimumHealthGodState(State, Pawn);
 }
 
 bool AFortPlayerPawnAthena::HasMinimumHealthGodMode(
@@ -4054,6 +4343,67 @@ bool AFortPlayerPawnAthena::HasMinimumHealthGodMode(
 	return false;
 }
 
+bool AFortPlayerPawnAthena::SetFullHealthGodMode(
+	AFortPlayerControllerAthena* Controller,
+	AFortPlayerPawnAthena* Pawn,
+	bool bEnabled)
+{
+	auto World = UWorld::GetWorld();
+	ResetFullHealthGodStatesForWorld(World);
+	if (!World || !IsLiveHealthStateObject(Controller))
+		return false;
+
+	auto ExistingState = FindFullHealthGodState(Controller);
+	if (!bEnabled)
+	{
+		if (!ExistingState)
+			return true;
+
+		RestoreFullHealthGodState(*ExistingState);
+		*ExistingState = {};
+		return true;
+	}
+
+	// The two Magnesium-owned modes are mutually exclusive. This restores the
+	// exact floor that existed before minimum God before full God captures it.
+	SetMinimumHealthGodMode(Controller, false);
+
+	auto ControlledPawn = GetMinimumHealthGodPawn(Controller);
+	if (!Pawn)
+		Pawn = ControlledPawn;
+	if (!IsLiveHealthStateObject(Pawn) ||
+		(ControlledPawn && ControlledPawn != Pawn))
+	{
+		return false;
+	}
+
+	auto& State = ExistingState
+		? *ExistingState
+		: AddFullHealthGodState(Controller);
+	const bool bApplied =
+		ApplyFullHealthGodState(State, Pawn);
+	if (!bApplied &&
+		State.Mechanism == EFullHealthGodMechanism::None)
+	{
+		State = {};
+	}
+	return bApplied;
+}
+
+bool AFortPlayerPawnAthena::HasFullHealthGodMode(
+	const AFortPlayerControllerAthena* Controller)
+{
+	ResetFullHealthGodStatesForWorld(UWorld::GetWorld());
+	auto State = FindFullHealthGodState(Controller);
+	if (!State || !IsFullHealthGodStateApplied(*State))
+		return false;
+
+	auto ControlledPawn = GetMinimumHealthGodPawn(
+		const_cast<AFortPlayerControllerAthena*>(Controller));
+	return ControlledPawn &&
+		State->AppliedPawn.Get() == ControlledPawn;
+}
+
 bool AFortPlayerPawnAthena::HasFullHealthGodMode(
 	const AFortPlayerPawnAthena* Pawn)
 {
@@ -4082,6 +4432,42 @@ bool AFortPlayerPawnAthena::HasFullHealthGodMode(
 		FPlatformMath::IsFinite(Minimum) &&
 		std::abs(Minimum - MaxHealth) <=
 			HealthStateEpsilon;
+}
+
+bool AFortPlayerPawnAthena::DisableGodModes(
+	AFortPlayerControllerAthena* Controller,
+	AFortPlayerPawnAthena* Pawn)
+{
+	auto World = UWorld::GetWorld();
+	ResetMinimumHealthGodStatesForWorld(World);
+	ResetFullHealthGodStatesForWorld(World);
+	if (!World || !IsLiveHealthStateObject(Controller))
+		return false;
+
+	const bool bHadMinimumState =
+		FindMinimumHealthGodState(Controller) != nullptr;
+	auto FullState = FindFullHealthGodState(Controller);
+	const bool bHadFullState = FullState &&
+		FullState->Mechanism !=
+			EFullHealthGodMechanism::None;
+
+	// Restore in reverse grant order. This also unwinds an old/accidental
+	// minimum-then-full stack: full restores the one-health floor first, then
+	// minimum can recognize and restore its own predecessor.
+	SetFullHealthGodMode(Controller, Pawn, false);
+	SetMinimumHealthGodMode(Controller, false);
+
+	if (!Pawn)
+		Pawn = GetMinimumHealthGodPawn(Controller);
+
+	SDK::DbgLog(
+		"[GodMode] disabled owned modes controller=%p pawn=%p "
+		"minimumTracked=%d fullTracked=%d FN=%.2f\n",
+		(void*)Controller, (void*)Pawn,
+		bHadMinimumState ? 1 : 0,
+		bHadFullState ? 1 : 0,
+		VersionInfo.FortniteVersion);
+	return bHadMinimumState || bHadFullState;
 }
 
 void AFortPlayerPawnAthena::TickHealthStateRepair(
@@ -5557,14 +5943,8 @@ void AFortPlayerPawnAthena::OnCapsuleBeginOverlap_(UObject* Context, FFrame& Sta
 }
 
 
-void AFortPlayerPawnAthena::MovingEmoteStopped(UObject* Context, FFrame& Stack)
+static void ClearMovingEmoteState(AFortPlayerPawnAthena* Pawn)
 {
-	Stack.IncrementCode();
-	auto Pawn = (AFortPlayerPawnAthena*)Context;
-
-	if (Pawn->HasbIsPlayingEmote() && Pawn->bIsPlayingEmote)
-		return;
-
 	static auto HasbMovingEmote = Pawn->HasbMovingEmote();
 	if (HasbMovingEmote)
 		Pawn->bMovingEmote = false;
@@ -5576,6 +5956,17 @@ void AFortPlayerPawnAthena::MovingEmoteStopped(UObject* Context, FFrame& Stack)
 	static auto HasbMovingEmoteFollowingOnly = Pawn->HasbMovingEmoteFollowingOnly();
 	if (HasbMovingEmoteFollowingOnly)
 		Pawn->bMovingEmoteFollowingOnly = false;
+}
+
+void AFortPlayerPawnAthena::MovingEmoteStopped(UObject* Context, FFrame& Stack)
+{
+	Stack.IncrementCode();
+	auto Pawn = (AFortPlayerPawnAthena*)Context;
+
+	if (Pawn->HasbIsPlayingEmote() && Pawn->bIsPlayingEmote)
+		return;
+
+	ClearMovingEmoteState(Pawn);
 
 	if (Pawn->HasLastReplicatedEmoteExecuted())
 	{
@@ -5737,6 +6128,9 @@ void AFortPlayerPawnAthena::EmoteStopped_(UObject* Context, FFrame& Stack)
 		auto OldEmote = Pawn->LastReplicatedEmoteExecuted;
 		Pawn->LastReplicatedEmoteExecuted = nullptr;
 		Pawn->OnRep_LastReplicatedEmoteExecuted(OldEmote);
+		ClearMovingEmoteState(Pawn);
+		if (Pawn->HasbIsPlayingEmote())
+			Pawn->bIsPlayingEmote = false;
 	}
 
 	return callOG(Pawn, Stack.GetCurrentNativeFunction(), EmoteStopped, MontageItemDef);
@@ -5791,11 +6185,13 @@ void AFortPlayerPawnAthena::EndSkydiving(AFortPlayerPawnAthena* Pawn)
 	AFortPlayerControllerAthena::FinalizeRespawnAfterLanding(PlayerController, Pawn);
 
 	if (PlayerController && Pawn->bIsSkydiving)
-		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetLand(), 1, Pawn);
+		UFortQuestManager::TrySendStatEvent(PlayerController,
+			EFortQuestObjectiveStatEvent::GetLand(), 1, true, Pawn);
 
 	if (PlayerController && Pawn && Pawn->bIsSkydivingFromBus)
 	{
-		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetVisit(), 1, Pawn);
+		UFortQuestManager::TrySendStatEvent(PlayerController,
+			EFortQuestObjectiveStatEvent::GetVisit(), 1, true, Pawn);
 	}
 }
 

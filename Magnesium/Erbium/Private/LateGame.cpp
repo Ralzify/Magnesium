@@ -2487,21 +2487,23 @@ void LateGame::EquipLoadout(AFortPlayerControllerAthena* PlayerController)
         Slots = LateGame::GetLoadout();
     }
 
-    // Never erase the current gameplay inventory for a versionized roll that
-    // cannot produce even one loadable primary item. This also protects future
-    // builds whose content paths have not yet been added to the version table.
-    if (bUsingVersionizedLoadout &&
-        !HasResolvableLateGamePrimaryItem(Slots))
+    // Never erase the current gameplay inventory for a roll that cannot
+    // produce even one loadable primary item. This protects future builds and
+    // invalid custom loadouts. Versionized rolls get one compatibility retry.
+    if (!HasResolvableLateGamePrimaryItem(Slots))
     {
-        SDK::DbgLog(
-            "[LateGame] no resolvable versionized primary item on FN %.2f; trying compatibility loadout\n",
-            VersionInfo.FortniteVersion);
-        Slots = LateGame::GetLoadout();
+        if (bUsingVersionizedLoadout)
+        {
+            SDK::DbgLog(
+                "[LateGame] no resolvable versionized primary item on FN %.2f; trying compatibility loadout\n",
+                VersionInfo.FortniteVersion);
+            Slots = LateGame::GetLoadout();
+        }
 
         if (!HasResolvableLateGamePrimaryItem(Slots))
         {
             SDK::DbgLog(
-                "[LateGame] compatibility loadout is also empty on FN %.2f; preserving inventory\n",
+                "[LateGame] selected loadout has no compatible primary item on FN %.2f; preserving inventory\n",
                 VersionInfo.FortniteVersion);
             return;
         }

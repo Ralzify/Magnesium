@@ -2,6 +2,7 @@
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/FortGameMode.h"
 #include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
+#include "../../Erbium/Support/Public/FaultGuard.h"
 #include "../Public/FortWeapon.h"
 #include "../Public/BuildingSMActor.h"
 #include "../Public/FortKismetLibrary.h"
@@ -54,6 +55,390 @@ static bool UsesLegacyDirectForcedRespawn(
 	AFortGameMode* GameMode,
 	AFortPlayerControllerAthena* PlayerController,
 	AFortPlayerStateAthena* PlayerState);
+
+static const wchar_t* const GReactiveKillStatName = L"AthenaKills";
+
+uint8 ResolveStatMod(EStatMod Mod)
+{
+	static int64 Resolved[3] = { -2, -2, -2 };
+	static const char* const Names[3] = { "Delta", "Set", "Maximum" };
+
+	const auto Index = static_cast<uint8>(Mod);
+	if (Index >= 3)
+		return static_cast<uint8>(Mod);
+
+	if (Resolved[Index] == -2)
+	{
+		auto StatModEnum = SDK::FindEnum("EStatMod");
+		Resolved[Index] = StatModEnum
+			? StatModEnum->GetValue(Names[Index])
+			: -1;
+	}
+
+	return Resolved[Index] >= 0
+		? static_cast<uint8>(Resolved[Index])
+		: static_cast<uint8>(Mod);
+}
+
+bool AFortPlayerControllerAthena::TryModifyStat(
+	const wchar_t* StatName,
+	int32 Amount,
+	EStatMod ModType,
+	bool bForceStatSave) const
+{
+	if (!this || !StatName)
+		return false;
+
+	if (!ServerModifyStat__Initialized)
+	{
+		ServerModifyStat__Initialized = true;
+		ServerModifyStat__Ptr = GetFunction("ServerModifyStat");
+	}
+
+	if (!ServerModifyStat__Ptr || !HasStatManager() ||
+		!IsUsableDeathObject(StatManager))
+		return false;
+
+	const FName ResolvedStatName(StatName);
+	const uint8 ResolvedModType = ResolveStatMod(ModType);
+	const auto Parameters = ServerModifyStat__Ptr->GetParamsNamed();
+	const bool bEncryptedParameterMetadata =
+		VersionInfo.FortniteVersion >= 32.00;
+	const size_t BufferSize = bEncryptedParameterMetadata
+		? 0x1000 : static_cast<size_t>(Parameters.Size);
+	if (!BufferSize || BufferSize > 0x1000 ||
+		Parameters.NameOffsetMap.size() != 4)
+	{
+		return false;
+	}
+
+	uint32 StatNameOffset = UINT32_MAX;
+	uint32 AmountOffset = UINT32_MAX;
+	uint32 ModTypeOffset = UINT32_MAX;
+	uint32 ForceSaveOffset = UINT32_MAX;
+	for (const auto& Parameter : Parameters.NameOffsetMap)
+	{
+		uint32* Destination = nullptr;
+		size_t ExpectedSize = 0;
+		if (Parameter.Name == "StatName")
+		{
+			Destination = &StatNameOffset;
+			ExpectedSize = sizeof(FName);
+		}
+		else if (Parameter.Name == "Amount")
+		{
+			Destination = &AmountOffset;
+			ExpectedSize = sizeof(Amount);
+		}
+		else if (Parameter.Name == "ModType")
+		{
+			Destination = &ModTypeOffset;
+			ExpectedSize = sizeof(ResolvedModType);
+		}
+		else if (Parameter.Name == "bForceStatSave")
+		{
+			Destination = &ForceSaveOffset;
+			ExpectedSize = sizeof(bForceStatSave);
+		}
+		else
+		{
+			return false;
+		}
+
+		if (*Destination != UINT32_MAX ||
+			Parameter.Offset >= BufferSize ||
+			(!bEncryptedParameterMetadata &&
+			 Parameter.ElementSize != ExpectedSize))
+		{
+			return false;
+		}
+		*Destination = Parameter.Offset;
+	}
+	if (StatNameOffset == UINT32_MAX || AmountOffset == UINT32_MAX ||
+		ModTypeOffset == UINT32_MAX || ForceSaveOffset == UINT32_MAX)
+	{
+		return false;
+	}
+
+	std::vector<uint8> Buffer(BufferSize, 0);
+	const uint32 Offsets[] = {
+		StatNameOffset, AmountOffset, ModTypeOffset, ForceSaveOffset };
+	auto CopyParameter = [&](uint32 Offset, const void* Value,
+		size_t ValueSize, size_t MinimumSize)
+	{
+		size_t Capacity = BufferSize - Offset;
+		for (uint32 OtherOffset : Offsets)
+		{
+			if (OtherOffset > Offset)
+				Capacity = (std::min)(Capacity,
+					static_cast<size_t>(OtherOffset - Offset));
+		}
+		if (Capacity < MinimumSize)
+			return false;
+		memcpy(Buffer.data() + Offset, Value,
+			(std::min)(Capacity, ValueSize));
+		return true;
+	};
+	if (!CopyParameter(StatNameOffset, &ResolvedStatName,
+			sizeof(ResolvedStatName), sizeof(int32)) ||
+		!CopyParameter(AmountOffset, &Amount,
+			sizeof(Amount), sizeof(Amount)) ||
+		!CopyParameter(ModTypeOffset, &ResolvedModType,
+			sizeof(ResolvedModType), sizeof(ResolvedModType)) ||
+		!CopyParameter(ForceSaveOffset, &bForceStatSave,
+			sizeof(bForceStatSave), sizeof(bForceStatSave)))
+	{
+		return false;
+	}
+
+	ProcessEvent(ServerModifyStat__Ptr, Buffer.data());
+	return true;
+}
+
+static bool TryGetReactiveStatValue(
+	AFortPlayerControllerAthena* PlayerController,
+	const FName& StatName,
+	uint8 Period,
+	int32& OutValue)
+{
+	if (!PlayerController)
+		return false;
+	if (!AFortPlayerControllerAthena::GetStatValue__Initialized)
+	{
+		AFortPlayerControllerAthena::GetStatValue__Initialized = true;
+		AFortPlayerControllerAthena::GetStatValue__Ptr =
+			PlayerController->GetFunction("GetStatValue");
+	}
+	auto Function = AFortPlayerControllerAthena::GetStatValue__Ptr;
+	if (!Function)
+		return false;
+
+	const auto Parameters = Function->GetParamsNamed();
+	const bool bEncryptedParameterMetadata =
+		VersionInfo.FortniteVersion >= 32.00;
+	const size_t BufferSize = bEncryptedParameterMetadata
+		? 0x1000 : static_cast<size_t>(Parameters.Size);
+	if (!BufferSize || BufferSize > 0x1000 ||
+		Parameters.NameOffsetMap.size() != 3)
+	{
+		return false;
+	}
+
+	uint32 NameOffset = UINT32_MAX;
+	uint32 PeriodOffset = UINT32_MAX;
+	uint32 ReturnOffset = UINT32_MAX;
+	for (const auto& Parameter : Parameters.NameOffsetMap)
+	{
+		uint32* Destination = nullptr;
+		size_t ExpectedSize = 0;
+		if (Parameter.Name == "StatName")
+		{
+			Destination = &NameOffset;
+			ExpectedSize = sizeof(FName);
+		}
+		else if (Parameter.Name == "Period")
+		{
+			Destination = &PeriodOffset;
+			ExpectedSize = sizeof(Period);
+		}
+		else if (Parameter.Name == "ReturnValue")
+		{
+			Destination = &ReturnOffset;
+			ExpectedSize = sizeof(OutValue);
+		}
+		else
+		{
+			return false;
+		}
+		if (*Destination != UINT32_MAX ||
+			Parameter.Offset >= BufferSize ||
+			(!bEncryptedParameterMetadata &&
+			 Parameter.ElementSize != ExpectedSize))
+		{
+			return false;
+		}
+		*Destination = Parameter.Offset;
+	}
+	if (NameOffset == UINT32_MAX || PeriodOffset == UINT32_MAX ||
+		ReturnOffset == UINT32_MAX ||
+		BufferSize < sizeof(OutValue) ||
+		ReturnOffset > BufferSize - sizeof(OutValue))
+	{
+		return false;
+	}
+
+	std::vector<uint8> Buffer(BufferSize, 0);
+	const uint32 Offsets[] = { NameOffset, PeriodOffset, ReturnOffset };
+	auto CopyParameter = [&](uint32 Offset, const void* Value,
+		size_t ValueSize, size_t MinimumSize)
+	{
+		size_t Capacity = BufferSize - Offset;
+		for (uint32 OtherOffset : Offsets)
+		{
+			if (OtherOffset > Offset)
+				Capacity = (std::min)(Capacity,
+					static_cast<size_t>(OtherOffset - Offset));
+		}
+		if (Capacity < MinimumSize)
+			return false;
+		memcpy(Buffer.data() + Offset, Value,
+			(std::min)(Capacity, ValueSize));
+		return true;
+	};
+	if (!CopyParameter(NameOffset, &StatName,
+			sizeof(StatName), sizeof(int32)) ||
+		!CopyParameter(PeriodOffset, &Period,
+			sizeof(Period), sizeof(Period)))
+	{
+		return false;
+	}
+
+	PlayerController->ProcessEvent(Function, Buffer.data());
+	memcpy(&OutValue, Buffer.data() + ReturnOffset, sizeof(OutValue));
+	return true;
+}
+
+static void LogReactiveStatState(
+	AFortPlayerControllerAthena* PlayerController,
+	int32 ExpectedValue)
+{
+	if (!PlayerController)
+		return;
+
+	const FName StatName(GReactiveKillStatName);
+	int32 MapValue = -1;
+	int32 PersistentValue = -1;
+	TryGetReactiveStatValue(
+		PlayerController, StatName, static_cast<uint8>(4), MapValue);
+	TryGetReactiveStatValue(
+		PlayerController, StatName, static_cast<uint8>(6),
+		PersistentValue);
+	auto Pawn = PlayerController->MyFortPawn;
+
+	int32 ObservedNum = -1;
+	int32 ObservedKills = -1;
+	int32 bHasManager = -1;
+	if (Pawn && Pawn->HasClientObservedStats())
+	{
+		auto& Observed = Pawn->ClientObservedStats;
+		if (FFortClientObservedStatArray::HasMyStatManager())
+			bHasManager = Observed.MyStatManager ? 1 : 0;
+
+		if (FFortClientObservedStatArray::HasObservedStats())
+		{
+			auto& Stats = Observed.ObservedStats;
+			ObservedNum = Stats.Num();
+			const FName WantedName(GReactiveKillStatName);
+			for (int32 i = 0; i < Stats.Num(); ++i)
+			{
+				auto& Entry = Stats.Get(
+					i, FFortClientObservedStat::Size());
+				if (Entry.StatName.ComparisonIndex ==
+					WantedName.ComparisonIndex)
+				{
+					ObservedKills = Entry.StatValue;
+					break;
+				}
+			}
+		}
+	}
+
+	SDK::DbgLog(
+		"[ReactiveCosmetics] pushed controller=%p expected=%d "
+		"getStatValueFn=%p statMap=%d statPersistent=%d pawn=%p "
+		"observedNum=%d observedKills=%d observedManager=%d\n",
+		(void*)PlayerController,
+		ExpectedValue,
+		(void*)AFortPlayerControllerAthena::GetStatValue__Ptr,
+		MapValue,
+		PersistentValue,
+		(void*)Pawn,
+		ObservedNum,
+		ObservedKills,
+		bHasManager);
+}
+
+bool AFortPlayerControllerAthena::SyncReactiveKillStat(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController || !PlayerController->PlayerState)
+		return false;
+
+	const int32 KillCount =
+		PlayerController->PlayerState->GetEffectiveKillScore();
+	const bool bPushed = PlayerController->TryModifyStat(
+		GReactiveKillStatName,
+		KillCount,
+		EStatMod::Set,
+		true);
+
+	static UWorld* TrackedWorld = nullptr;
+	static std::unordered_set<AFortPlayerControllerAthena*>
+		LoggedControllers;
+	auto World = UWorld::GetWorld();
+	if (TrackedWorld != World)
+	{
+		TrackedWorld = World;
+		LoggedControllers.clear();
+	}
+
+	if (!bPushed && LoggedControllers.insert(PlayerController).second)
+	{
+		SDK::DbgLog(
+			"[ReactiveCosmetics] stat push unavailable controller=%p "
+			"func=%p statManager=%d kills=%d FN=%.2f\n",
+			(void*)PlayerController,
+			(void*)ServerModifyStat__Ptr,
+			PlayerController->HasStatManager()
+				? (PlayerController->StatManager ? 1 : 0)
+				: -1,
+			KillCount,
+			VersionInfo.FortniteVersion);
+	}
+
+	// Keep the expensive reflected diagnostics bounded. Stat pushes themselves
+	// still occur after every credited kill and possession.
+	static UWorld* LoggedSuccessWorld = nullptr;
+	static std::unordered_set<AFortPlayerControllerAthena*>
+		LoggedSuccessfulControllers;
+	if (LoggedSuccessWorld != World)
+	{
+		LoggedSuccessWorld = World;
+		LoggedSuccessfulControllers.clear();
+	}
+	if (bPushed &&
+		LoggedSuccessfulControllers.insert(PlayerController).second)
+	{
+		LogReactiveStatState(PlayerController, KillCount);
+	}
+	return bPushed;
+}
+
+int32 AFortPlayerStateAthena::GetEffectiveKillScore() const
+{
+	if (!this)
+		return 0;
+	return HasKillScore() ? KillScore : (HasKills() ? Kills : 0);
+}
+
+void AFortPlayerStateAthena::ApplyKillScore(int32 NewScore)
+{
+	if (!this)
+		return;
+
+	if (HasKillScore())
+		KillScore = NewScore;
+	else if (HasKills())
+		Kills = NewScore;
+	OnRep_Kills();
+
+	auto PlayerController = HasOwner() && Owner
+		? Owner->Cast<AFortPlayerControllerAthena>()
+		: nullptr;
+	if (PlayerController)
+		AFortPlayerControllerAthena::SyncReactiveKillStat(
+			PlayerController);
+}
 
 bool AFortPlayerControllerAthena::ClientStreamingReadiness(
 	AFortPlayerControllerAthena* PlayerController)
@@ -6309,11 +6694,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				std::uniform_int_distribution<int> RandomAmount(8, 31);
 
 				int RandomKills = RandomAmount(rng);
-
-				if (PlayerState->HasKillScore())
-					PlayerState->KillScore = RandomKills;
-				else
-					PlayerState->Kills = RandomKills;
+				PlayerState->ApplyKillScore(RandomKills);
 			}
 		}
 	}
@@ -6401,6 +6782,10 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			SetMinimumHealthGodMode(
 				PlayerController, true);
 	}
+
+	// Reactive cosmetics observe stats replicated by the possessed pawn, so
+	// republish the current kill count whenever a new pawn is ready.
+	SyncReactiveKillStat(PlayerController);
 
 	// This player is now genuinely in the world, which is the first point a
 	// snow change can reach them. Re-send the Calendar tab's value; the push
@@ -6537,33 +6922,13 @@ static FFortGameplayAttributeData* GetGodModeHealthAttribute(
 
 // Full god: immunity where the build has it, a health floor pinned to max
 // health otherwise. False means this build exposes neither mechanism.
-static bool ApplyFullGodMode(AFortPlayerPawnAthena* Pawn, bool bEnable)
+static bool ApplyFullGodMode(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	bool bEnable)
 {
-	if (!Pawn)
-		return false;
-
-	auto Health = GetGodModeHealthAttribute(Pawn);
-
-	if (VersionInfo.FortniteVersion >= 21 &&
-		Pawn->HasbCanBeDamaged())
-	{
-		Pawn->bCanBeDamaged = !bEnable;
-		return true;
-	}
-
-	if (Health)
-	{
-		Health->Minimum = bEnable ? Pawn->GetMaxHealth() : 0.f;
-		return true;
-	}
-
-	if (Pawn->HasbCanBeDamaged())
-	{
-		Pawn->bCanBeDamaged = !bEnable;
-		return true;
-	}
-
-	return false;
+	return AFortPlayerPawnAthena::SetFullHealthGodMode(
+		PlayerController, Pawn, bEnable);
 }
 
 // Minimum god: damage keeps landing, health just stops at 1 HP. Callers own the
@@ -6576,22 +6941,85 @@ static bool ApplyMinimumGodMode(
 	if (!PlayerController || !Health)
 		return false;
 
-	// Switching from full god must make the pawn damageable. The one-health
-	// floor, rather than immunity, now prevents the lethal transition.
-	if (Pawn->HasbCanBeDamaged() && !Pawn->bCanBeDamaged)
-		Pawn->bCanBeDamaged = true;
-
-	const float MaxHealth = Pawn->GetMaxHealth();
-	if (FPlatformMath::IsFinite(Health->Minimum) &&
-		FPlatformMath::IsFinite(MaxHealth) &&
-		MaxHealth > 1.f &&
-		std::abs(Health->Minimum - MaxHealth) <= 0.01f)
-	{
-		Health->Minimum = 0.f;
-	}
-
+	// SetMinimum restores only a full-God mutation owned by Magnesium before
+	// it captures and installs the one-health floor. Authored immunity remains
+	// untouched and therefore cannot be accidentally claimed by this mode.
 	return AFortPlayerPawnAthena::SetMinimumHealthGodMode(
 		PlayerController, true);
+}
+
+namespace
+{
+	constexpr size_t MaxAutoGodProcessedPawns = 256;
+	struct FAutoGodProcessedPawn
+	{
+		TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+		TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+	};
+
+	std::array<FAutoGodProcessedPawn, MaxAutoGodProcessedPawns>
+		GAutoGodProcessedPawns{};
+	size_t GAutoGodProcessedPawnCursor = 0;
+	TWeakObjectPtr<UWorld> GAutoGodProcessedWorld;
+
+	void ResetAutoGodProcessedPawnsForWorld(UWorld* World)
+	{
+		if (GAutoGodProcessedWorld.Get() == World)
+			return;
+
+		GAutoGodProcessedPawns = {};
+		GAutoGodProcessedPawnCursor = 0;
+		GAutoGodProcessedWorld = TWeakObjectPtr<UWorld>(World);
+	}
+
+	bool WasAutoGodProcessed(
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		ResetAutoGodProcessedPawnsForWorld(UWorld::GetWorld());
+		for (const auto& Entry : GAutoGodProcessedPawns)
+		{
+			if (Entry.Controller.Get() == PlayerController &&
+				Entry.Pawn.Get() == Pawn)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void MarkAutoGodProcessed(
+		AFortPlayerControllerAthena* PlayerController,
+		AFortPlayerPawnAthena* Pawn)
+	{
+		ResetAutoGodProcessedPawnsForWorld(UWorld::GetWorld());
+		size_t EmptyIndex = MaxAutoGodProcessedPawns;
+		for (size_t Index = 0;
+			Index < GAutoGodProcessedPawns.size(); ++Index)
+		{
+			auto& Entry = GAutoGodProcessedPawns[Index];
+			if (Entry.Controller.Get() == PlayerController &&
+				Entry.Pawn.Get() == Pawn)
+			{
+				return;
+			}
+			if (!Entry.Controller.Get() &&
+				EmptyIndex == MaxAutoGodProcessedPawns)
+			{
+				EmptyIndex = Index;
+			}
+		}
+
+		const size_t TargetIndex =
+			EmptyIndex < MaxAutoGodProcessedPawns
+				? EmptyIndex
+				: GAutoGodProcessedPawnCursor++ %
+					MaxAutoGodProcessedPawns;
+		GAutoGodProcessedPawns[TargetIndex] = {
+			TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController),
+			TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn)
+		};
+	}
 }
 
 // Auto god mode arms a player the instant they leave the bus, which is the
@@ -6628,7 +7056,7 @@ static void ApplyAutoGodModeOnAircraftJump(
 	auto Pawn = PlayerController->MyFortPawn
 		? PlayerController->MyFortPawn
 		: PlayerController->Pawn;
-	if (!Pawn)
+	if (!Pawn || WasAutoGodProcessed(PlayerController, Pawn))
 		return;
 
 	const bool bUseMinimum =
@@ -6645,9 +7073,8 @@ static void ApplyAutoGodModeOnAircraftJump(
 	{
 		// The minimum-health floor is controller scoped, so a stale one
 		// outlives the pawn swap and would fight the full floor below.
-		AFortPlayerPawnAthena::SetMinimumHealthGodMode(
-			PlayerController, false);
-		bApplied = ApplyFullGodMode(Pawn, true);
+		bApplied = ApplyFullGodMode(
+			PlayerController, Pawn, true);
 	}
 
 	if (!bApplied)
@@ -6660,6 +7087,14 @@ static void ApplyAutoGodModeOnAircraftJump(
 		return;
 	}
 
+	// Keep this exact pawn generation consumed even if the user later disables
+	// God manually. A duplicate aircraft-jump RPC must not silently reapply it.
+	MarkAutoGodProcessed(PlayerController, Pawn);
+	SDK::DbgLog(
+		"[GodMode] auto applied controller=%p pawn=%p mode=%s FN=%.2f\n",
+		(void*)PlayerController, (void*)Pawn,
+		bUseMinimum ? "minimum" : "maximum",
+		VersionInfo.FortniteVersion);
 	PlayGodModeCue(PlayerController);
 	Pawn->ForceNetUpdate();
 	PlayerController->ClientMessage(
@@ -7108,16 +7543,35 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 
 	UFortWorldItem* Item = nullptr;
 	auto Resource = UFortKismetLibrary::K2_GetResourceItemDefinition(((ABuildingSMActor*)BuildingClass->GetDefaultObj())->ResourceType);
-	if (!FConfiguration::bInfiniteMats)
+	const bool bInfiniteMaterials =
+		FConfiguration::bInfiniteMats.load(
+			std::memory_order_acquire);
+	if (!bInfiniteMaterials)
 	{
 		auto CanAffordToPlaceBuildableClass = (bool(*)(AFortPlayerControllerAthena*, FBuildingClassData)) CanAffordToPlaceBuildableClass_;
 
 		if (CanAffordToPlaceBuildableClass)
 		{
-			if (!CanAffordToPlaceBuildableClass(PlayerController, BuildingClassData))
+			const bool bOverrideBuildFree =
+				PlayerController->HasbBuildFree() &&
+				PlayerController->bBuildFree;
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = false;
+				PlayerController->bBuildFree = bBuildFree;
+			}
+			const bool bCanAfford =
+				CanAffordToPlaceBuildableClass(
+					PlayerController, BuildingClassData);
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = true;
+				PlayerController->bBuildFree = bBuildFree;
+			}
+			if (!bCanAfford)
 				return;
 		}
-		else if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
+		else
 		{
 			auto ItemP = PlayerController->WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
 				{ return entry->ItemEntry.ItemDefinition == Resource; });
@@ -7180,13 +7634,27 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 
 	Building->bPlayerPlaced = true;
 
-	if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
+	if (!bInfiniteMaterials)
 	{
 		auto PayBuildableClassPlacementCost = (int(*)(AFortPlayerControllerAthena*, FBuildingClassData)) PayBuildableClassPlacementCost_;
 
 		if (PayBuildableClassPlacementCost)
 		{
-			PayBuildableClassPlacementCost(PlayerController, BuildingClassData);
+			const bool bOverrideBuildFree =
+				PlayerController->HasbBuildFree() &&
+				PlayerController->bBuildFree;
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = false;
+				PlayerController->bBuildFree = bBuildFree;
+			}
+			PayBuildableClassPlacementCost(
+				PlayerController, BuildingClassData);
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = true;
+				PlayerController->bBuildFree = bBuildFree;
+			}
 		}
 		else if (Item)
 		{
@@ -7205,7 +7673,8 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 		//Interface->GetOwnedGameplayTags(&TargetTags);
 	}
 
-	PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetBuild(), 1, Building);
+	UFortQuestManager::TrySendStatEvent(PlayerController,
+		EFortQuestObjectiveStatEvent::GetBuild(), 1, true, Building);
 
 	TargetTags.GameplayTags.Free();
 	TargetTags.ParentTags.Free();
@@ -9112,13 +9581,26 @@ void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFra
 		PlayerController, Building,
 		true, false);
 
-	SetEditingPlayer(Building, nullptr);
-
-	// End the tool session while the old actor is still live. The replacement
-	// RPC destroys that actor, so waiting for the later client End RPC can
-	// otherwise strand the blueprint/map in the player's hands.
-	ClearEditingToolActor(
-		PlayerController, Building);
+	// Modern ReplaceBuildingActor consumes the active editing relationship
+	// while handing the old actor's structural-grid entry to its replacement.
+	// Early builds expected the caller to clear it first; keep that legacy
+	// ordering only where it is required.
+	const bool bPreserveEditRelationshipDuringReplacement =
+		VersionInfo.FortniteVersion >= 11.0;
+	if (!bPreserveEditRelationshipDuringReplacement)
+	{
+		SetEditingPlayer(Building, nullptr);
+		ClearEditingToolActor(PlayerController, Building);
+	}
+	if (!ReplaceBuildingActor_)
+	{
+		if (bPreserveEditRelationshipDuringReplacement)
+		{
+			SetEditingPlayer(Building, nullptr);
+			ClearEditingToolActor(PlayerController, Building);
+		}
+		return;
+	}
 
 	auto ReplaceBuildingActor = (ABuildingSMActor * (*&)(ABuildingSMActor*, unsigned int, TSubclassOf<AActor>, unsigned int, int, bool, AFortPlayerControllerAthena*)) ReplaceBuildingActor_;
 	auto ReplaceBuildingActor__New = (ABuildingSMActor * (*&)(ABuildingSMActor*, unsigned int, TSubclassOf<AActor>&, unsigned int, int, bool, AFortPlayerControllerAthena*)) ReplaceBuildingActor_;
@@ -9129,6 +9611,21 @@ void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFra
 		NewBuild = ReplaceBuildingActor(Building, 1, NewClass, Building->CurrentBuildingLevel, RotationIterations, bMirrored, PlayerController);
 	else
 		NewBuild = ReplaceBuildingActor__New(Building, 1, NewClass, Building->CurrentBuildingLevel, RotationIterations, bMirrored, PlayerController);
+
+	if (bPreserveEditRelationshipDuringReplacement)
+	{
+		if (NewBuild &&
+			NewBuild->EditingPlayer == PlayerController->PlayerState)
+		{
+			SetEditingPlayer(NewBuild, nullptr);
+		}
+		else if (IsUsableDeathObject(Building) &&
+			Building->EditingPlayer == PlayerController->PlayerState)
+		{
+			SetEditingPlayer(Building, nullptr);
+		}
+		ClearEditingToolActor(PlayerController, Building);
+	}
 
 	/*else
 	{
@@ -9389,6 +9886,20 @@ public:
 
 extern uint64_t ConstructAbilitySpec;
 uint64_t GiveAbilityAndActivateOnce;
+
+static void ClearPendingMovingEmoteState(
+	AFortPlayerPawnAthena* Pawn)
+{
+	if (!Pawn)
+		return;
+	if (Pawn->HasbMovingEmote())
+		Pawn->bMovingEmote = false;
+	if (Pawn->HasbMovingEmoteForwardOnly())
+		Pawn->bMovingEmoteForwardOnly = false;
+	if (Pawn->HasbMovingEmoteFollowingOnly())
+		Pawn->bMovingEmoteFollowingOnly = false;
+}
+
 void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame& Stack)
 {
 	UObject* Asset;
@@ -9398,21 +9909,24 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
-	if (!PlayerController || !PlayerController->MyFortPawn || !Asset)
+	if (!PlayerController || !PlayerController->MyFortPawn || !Asset ||
+		!PlayerController->PlayerState)
 		return;
 
 	auto AbilitySystemComponent = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->AbilitySystemComponent;
 
+	if (PlayerController->Pawn)
 	if (auto CharacterVehicle = PlayerController->Pawn->Cast<AFortCharacterVehicle>())
 		AbilitySystemComponent = CharacterVehicle->OverrideAbilitySystemComponent;
 
 	UObject* AbilityToUse = nullptr;
 
 	static auto SprayClass = FindClass("AthenaSprayItemDefinition");
-	if (Asset->IsA(SprayClass))
+	if (SprayClass && Asset->IsA(SprayClass))
 	{
 		static auto SprayAbilityClass = FindObject<UClass>(L"/Game/Abilities/Sprays/GAB_Spray_Generic.GAB_Spray_Generic_C");
-		AbilityToUse = SprayAbilityClass->GetDefaultObj();
+		AbilityToUse = SprayAbilityClass
+			? SprayAbilityClass->GetDefaultObj() : nullptr;
 
 		// Do not emulate cosmetic quest progress here. Inline quest-objective
 		// layouts vary between versions, and walking a mismatched TagConditions
@@ -9420,7 +9934,10 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 	}
 	else if (auto ToyAsset = Asset->Cast<UAthenaToyItemDefinition>())
 	{
-		AbilityToUse = ToyAsset->ToySpawnAbility->GetDefaultObj();
+		auto ToyAbilityClass = ToyAsset->HasToySpawnAbility()
+			? ToyAsset->ToySpawnAbility.Get() : nullptr;
+		AbilityToUse = ToyAbilityClass
+			? ToyAbilityClass->GetDefaultObj() : nullptr;
 	}
 	else if (auto DanceAsset = Asset->Cast<UAthenaDanceItemDefinition>())
 	{
@@ -9447,14 +9964,22 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 		else
 		{
 			static auto EmoteAbilityClass = FindObject<UClass>(L"/Game/Abilities/Emotes/GAB_Emote_Generic.GAB_Emote_Generic_C");
-			AbilityToUse = EmoteAbilityClass->GetDefaultObj();
+			AbilityToUse = EmoteAbilityClass
+				? EmoteAbilityClass->GetDefaultObj() : nullptr;
 		}
 
 	}
 
-	if (AbilityToUse)
+	if (AbilityToUse && AbilitySystemComponent &&
+		GiveAbilityAndActivateOnce)
 	{
 		auto Spec = (FGameplayAbilitySpec*)malloc(FGameplayAbilitySpec::Size());
+		if (!Spec)
+		{
+			ClearPendingMovingEmoteState(
+				PlayerController->MyFortPawn);
+			return;
+		}
 		memset(PBYTE(Spec), 0, FGameplayAbilitySpec::Size());
 
 		if (ConstructAbilitySpec)
@@ -9479,7 +10004,8 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 		{
 			auto Pawn = PlayerController->MyFortPawn;
 
-			Pawn->bIsPlayingEmote = true;
+			if (Pawn->HasbIsPlayingEmote())
+				Pawn->bIsPlayingEmote = true;
 
 			auto OldEmote = Pawn->LastReplicatedEmoteExecuted;
 			Pawn->LastReplicatedEmoteExecuted = Asset;
@@ -9487,36 +10013,47 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 			Pawn->OnRep_LastReplicatedEmoteExecuted(OldEmote);
 
 			Pawn->ForceNetUpdate();
-
-			Pawn->EmoteStopped(false);
-			Pawn->bMovingEmote = false;
+			// Keep traversal state alive until the emote actually stops. Clearing
+			// it here happens before ForceNetUpdate can replicate the flags.
 		}
+	}
+	else
+	{
+		// Some builds (notably 32.11) do not expose the native activation
+		// helper. Fail closed instead of calling through zero or leaving a
+		// traversal flag installed without an emote that can stop it.
+		ClearPendingMovingEmoteState(PlayerController->MyFortPawn);
 	}
 }
 
 void AFortPlayerControllerAthena::PlayEmoteInternal(AFortPlayerControllerAthena* PC, UObject* Asset)
 {
-	if (!PC || !PC->MyFortPawn || !Asset)
+	if (!PC || !PC->MyFortPawn || !Asset || !PC->PlayerState)
 		return;
 
 	auto AbilitySystemComponent = ((AFortPlayerStateAthena*)PC->PlayerState)->AbilitySystemComponent;
 
+	if (PC->Pawn)
 	if (auto CharacterVehicle = PC->Pawn->Cast<AFortCharacterVehicle>())
 		AbilitySystemComponent = CharacterVehicle->OverrideAbilitySystemComponent;
 
 	UObject* AbilityToUse = nullptr;
 
 	static auto SprayClass = FindClass("AthenaSprayItemDefinition");
-	if (Asset->IsA(SprayClass))
+	if (SprayClass && Asset->IsA(SprayClass))
 	{
 		static auto SprayAbilityClass = FindObject<UClass>(L"/Game/Abilities/Sprays/GAB_Spray_Generic.GAB_Spray_Generic_C");
-		AbilityToUse = SprayAbilityClass->GetDefaultObj();
+		AbilityToUse = SprayAbilityClass
+			? SprayAbilityClass->GetDefaultObj() : nullptr;
 
 		//PC->GetQuestManager(1)->SendStatEvent(PC, EFortQuestObjectiveStatEvent::GetSpray(), 1, true, nullptr);
 	}
 	else if (auto ToyAsset = Asset->Cast<UAthenaToyItemDefinition>())
 	{
-		AbilityToUse = ToyAsset->ToySpawnAbility->GetDefaultObj();
+		auto ToyAbilityClass = ToyAsset->HasToySpawnAbility()
+			? ToyAsset->ToySpawnAbility.Get() : nullptr;
+		AbilityToUse = ToyAbilityClass
+			? ToyAbilityClass->GetDefaultObj() : nullptr;
 		//PC->GetQuestManager(1)->SendStatEvent(PC, EFortQuestObjectiveStatEvent::GetToy(), 1, true, nullptr);
 	}
 	else if (auto DanceAsset = Asset->Cast<UAthenaDanceItemDefinition>())
@@ -9544,15 +10081,22 @@ void AFortPlayerControllerAthena::PlayEmoteInternal(AFortPlayerControllerAthena*
 		else
 		{
 			static auto EmoteAbilityClass = FindObject<UClass>(L"/Game/Abilities/Emotes/GAB_Emote_Generic.GAB_Emote_Generic_C");
-			AbilityToUse = EmoteAbilityClass->GetDefaultObj();
+			AbilityToUse = EmoteAbilityClass
+				? EmoteAbilityClass->GetDefaultObj() : nullptr;
 		}
 
 		//PC->GetQuestManager(1)->SendStatEvent(PC, EFortQuestObjectiveStatEvent::GetEmote(), 1, true, nullptr);
 	}
 
-	if (AbilityToUse)
+	if (AbilityToUse && AbilitySystemComponent &&
+		GiveAbilityAndActivateOnce)
 	{
 		auto Spec = (FGameplayAbilitySpec*)malloc(FGameplayAbilitySpec::Size());
+		if (!Spec)
+		{
+			ClearPendingMovingEmoteState(PC->MyFortPawn);
+			return;
+		}
 		memset(PBYTE(Spec), 0, FGameplayAbilitySpec::Size());
 
 		if (ConstructAbilitySpec)
@@ -9577,7 +10121,8 @@ void AFortPlayerControllerAthena::PlayEmoteInternal(AFortPlayerControllerAthena*
 		{
 			auto Pawn = PC->MyFortPawn;
 
-			Pawn->bIsPlayingEmote = true;
+			if (Pawn->HasbIsPlayingEmote())
+				Pawn->bIsPlayingEmote = true;
 
 			auto OldEmote = Pawn->LastReplicatedEmoteExecuted;
 			Pawn->LastReplicatedEmoteExecuted = Asset;
@@ -9585,10 +10130,13 @@ void AFortPlayerControllerAthena::PlayEmoteInternal(AFortPlayerControllerAthena*
 			Pawn->OnRep_LastReplicatedEmoteExecuted(OldEmote);
 
 			Pawn->ForceNetUpdate();
-
-			Pawn->EmoteStopped(false);
-			Pawn->bMovingEmote = false;
+			// ServerPlayEmoteItem_ owns the matching explanation: the stop hook
+			// clears these flags when the emote really ends.
 		}
+	}
+	else
+	{
+		ClearPendingMovingEmoteState(PC->MyFortPawn);
 	}
 
 	PC->ForceNetUpdate();
@@ -13098,7 +13646,6 @@ static void ResetConfiguredRespawnPolicyTracking(
 			GameState->ForceNetUpdate();
 		}
 	}
-
 	GConfiguredRespawnPlaylistSnapshots.clear();
 	GConfiguredRespawnCheatCaptured = false;
 	GConfiguredRespawnOriginalCheat = false;
@@ -16644,11 +17191,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					(AFortPlayerPawnAthena*)
 						PlayerController->Pawn))
 		{
-			if (KillerPlayerState->HasKillScore())
-				KillerPlayerState->KillScore++;
-			else
-				KillerPlayerState->Kills++;
-			KillerPlayerState->OnRep_Kills();
+			KillerPlayerState->ApplyKillScore(
+				KillerPlayerState->GetEffectiveKillScore() + 1);
 			if (KillerPlayerState->HasTeamKillScore())
 			{
 				KillerPlayerState->TeamKillScore++;
@@ -16677,7 +17221,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 						//Interface->GetOwnedGameplayTags(&TargetTags);
 					}
 
-					DamagerController->GetQuestManager(1)->SendStatEvent(DamagerController, EFortQuestObjectiveStatEvent::GetKillContribution(), 1, false, PlayerController->Pawn, TargetTags);
+					UFortQuestManager::TrySendStatEvent(DamagerController,
+						EFortQuestObjectiveStatEvent::GetKillContribution(),
+						1, false, PlayerController->Pawn, TargetTags);
 
 					TargetTags.GameplayTags.Free();
 					TargetTags.ParentTags.Free();
@@ -16694,7 +17240,9 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 				//Interface->GetOwnedGameplayTags(&TargetTags);
 			}
 
-				KillerPlayerController->GetQuestManager(1)->SendStatEvent(KillerPlayerController, EFortQuestObjectiveStatEvent::GetKill(), 1, false, PlayerController->Pawn, TargetTags);
+				UFortQuestManager::TrySendStatEvent(KillerPlayerController,
+					EFortQuestObjectiveStatEvent::GetKill(), 1, false,
+					PlayerController->Pawn, TargetTags);
 
 				TargetTags.GameplayTags.Free();
 				TargetTags.ParentTags.Free();
@@ -18152,8 +18700,9 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 				//Interface->GetOwnedGameplayTags(&TargetTags);
 			}
 
-			if (auto QuestManager = GetQuestManager(1))
-				QuestManager->SendStatEvent(this, EFortQuestObjectiveStatEvent::GetCollect(), Count, true, (UObject*)PickupEntry->ItemDefinition, TargetTags);
+			UFortQuestManager::TrySendStatEvent(this,
+				EFortQuestObjectiveStatEvent::GetCollect(), Count, true,
+				(UObject*)PickupEntry->ItemDefinition, TargetTags);
 
 			TargetTags.GameplayTags.Free();
 			TargetTags.ParentTags.Free();
@@ -18349,8 +18898,35 @@ void AFortPlayerControllerAthena::InternalPickup(FFortItemEntry* PickupEntry)
 		GiveOrSwap();
 }
 
-std::unordered_map<std::string, std::vector<FVector>> Waypoints;
+AFortPlayerControllerAthena::FWaypointMap Waypoints;
+TWeakObjectPtr<UWorld> WaypointWorld;
 std::unordered_set<AFortPlayerControllerAthena*> MarkToTeleportPlayers;
+
+static void EnsureWaypointWorld(UWorld* CurrentWorld)
+{
+	if (WaypointWorld.Get() == CurrentWorld)
+		return;
+	Waypoints.clear();
+	WaypointWorld = TWeakObjectPtr<UWorld>(CurrentWorld);
+}
+
+AFortPlayerControllerAthena::FWaypointMap
+AFortPlayerControllerAthena::SnapshotWaypoints()
+{
+	// Game-thread only. Copying the plain-value dictionary gives preset saving
+	// a coherent snapshot without exposing the live command map.
+	EnsureWaypointWorld(UWorld::GetWorld());
+	return Waypoints;
+}
+
+void AFortPlayerControllerAthena::ReplaceWaypoints(
+	FWaypointMap NewWaypoints)
+{
+	// Game-thread only. The caller constructs and validates the replacement
+	// first; swap makes publication atomic with respect to command execution.
+	EnsureWaypointWorld(UWorld::GetWorld());
+	Waypoints.swap(NewWaypoints);
+}
 
 static void RegenerateMinimumGodHealthAfterWaypoint(
 	AFortPlayerControllerAthena* PlayerController,
@@ -18827,6 +19403,48 @@ static const UClass* FindActorClassByCommandArg(const std::string& ClassArg)
 
 	auto NormalizedArg = NormalizePlayerCommandString(TrimmedArg);
 
+	// The functional Tower tire was introduced after some supported builds.
+	// Resolve this optional alias behind SEH so a missing package cannot fault
+	// before we get a chance to use the legacy decorative tire fallback.
+	if (NormalizedArg == "tire")
+	{
+		auto TryOptionalTireClass = [](const wchar_t* Path) -> const UClass*
+		{
+			if (!Path || !*Path || !UClass::StaticClass())
+				return nullptr;
+
+			const UObject* Result = nullptr;
+			++GGuardedNativeCallDepth;
+			__try
+			{
+				if (SDK::Offsets::StaticFindObject)
+					Result = SDK::StaticFindObject(
+						Path, UClass::StaticClass());
+				if (!Result && SDK::Offsets::StaticLoadObject)
+					Result = SDK::StaticLoadObject(
+						Path, UClass::StaticClass());
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				Result = nullptr;
+			}
+			--GGuardedNativeCallDepth;
+
+			return Result && Result->IsA(UClass::StaticClass())
+				? static_cast<const UClass*>(Result) : nullptr;
+		};
+
+		if (auto Class = TryOptionalTireClass(
+				L"/Game/Athena/Items/Consumables/TowerGrenade/"
+				L"Prop_TirePile_Tower.Prop_TirePile_Tower_C"))
+		{
+			return Class;
+		}
+		return TryOptionalTireClass(
+			L"/Game/Building/ActorBlueprints/Prop/"
+			L"Prop_TirePile_04.Prop_TirePile_04_C");
+	}
+
 	auto TryFindClass = [](const std::string& Value) -> const UClass*
 	{
 		if (Value.empty())
@@ -18875,6 +19493,7 @@ static const UClass* FindActorClassByCommandArg(const std::string& ClassArg)
 	{
 		if (auto Class = TryFindClass(ShortName->second))
 			return Class;
+
 	}
 
 	return nullptr;
@@ -23536,6 +24155,7 @@ void AFortPlayerControllerAthena::ServerCheat(UObject* Context, FFrame& Stack)
 	{
 		return;
 	}
+	EnsureWaypointWorld(World);
 
 	auto GameMode = (AFortGameMode*)World->AuthorityGameMode;
 	if (!SDK::MemReadable(GameMode, sizeof(AFortGameMode)) ||
@@ -23957,8 +24577,8 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					if (bTrackedMinimum)
 					{
 						AFortPlayerPawnAthena::
-							SetMinimumHealthGodMode(
-								PlayerController, false);
+							DisableGodModes(
+								PlayerController, Pawn);
 						PlayerController->ClientMessage(
 							FString(
 								L"Minimum-health god mode "
@@ -24023,21 +24643,25 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					return;
 				}
 
-				// Plain "god" switches minimum mode to full mode in one
-				// command instead of first leaving the player unprotected.
-				const bool bSwitchingFromMinimum =
-					bTrackedMinimum;
-				if (bTrackedMinimum)
+				const bool bFullGodEnabled =
+					AFortPlayerPawnAthena::HasFullHealthGodMode(
+						PlayerController);
+				// Plain "god" is a mode-agnostic toggle. If either protection
+				// layer is active, remove both; otherwise enable full God. This
+				// prevents AutoGod Minimum from being silently converted into
+				// full immunity when the user intended to turn it off.
+				if (bTrackedMinimum || bFullGodEnabled)
 				{
 					AFortPlayerPawnAthena::
-						SetMinimumHealthGodMode(
-							PlayerController, false);
+						DisableGodModes(PlayerController, Pawn);
+					PlayerController->ClientMessage(
+						FString(L"God mode disabled."),
+						FName(), 1.f);
+					return;
 				}
 
-				const bool bEnableFull =
-					bSwitchingFromMinimum ||
-					!HasFullGodMode();
-				if (!ApplyFullGodMode(Pawn, bEnableFull))
+				if (!ApplyFullGodMode(
+						PlayerController, Pawn, true))
 				{
 					PlayerController->ClientMessage(
 						FString(
@@ -24047,14 +24671,10 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					return;
 				}
 
-				if (bEnableFull)
-					RefillAndPlayCue();
+				RefillAndPlayCue();
 				Pawn->ForceNetUpdate();
 				PlayerController->ClientMessage(
-					FString(
-						bEnableFull
-							? L"Full god mode enabled."
-							: L"God mode disabled."),
+					FString(L"Full god mode enabled."),
 					FName(), 1.f);
 			}
 			else if (command == "godall")
@@ -24090,86 +24710,44 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					if (!PC || !PC->Pawn || !PC->MyFortPawn)
 						continue;
 
-					AFortPlayerPawnAthena::
-						SetMinimumHealthGodMode(PC, false);
-
-					auto Pawn = PC->Pawn;
-					auto PS = PC->PlayerState;
+					auto Pawn = PC->MyFortPawn
+						? PC->MyFortPawn
+						: PC->Pawn;
+					if (!Pawn)
+						continue;
 
 					float MaxHealth = Pawn->GetMaxHealth();
 					float MaxShield = Pawn->GetMaxShield();
 
-					if (VersionInfo.FortniteVersion >= 21)
+					const bool bWasGodded =
+						AFortPlayerPawnAthena::
+							HasMinimumHealthGodMode(PC) ||
+						AFortPlayerPawnAthena::
+							HasFullHealthGodMode(PC);
+					if (bWasGodded)
 					{
-						Pawn->bCanBeDamaged ^= 1;
-
-						if (Pawn->bCanBeDamaged == 0)
-						{
-							Pawn->SetHealth(MaxHealth);
-							Pawn->SetShield(MaxShield);
-
-							if (PS && PS->AbilitySystemComponent)
-							{
-								auto Handle = PS->AbilitySystemComponent->MakeEffectContext();
-								FGameplayTag Tag;
-								static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
-								Tag.TagName = Cue;
-								auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-								memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-								free(PredictionKey);
-							}
-						}
-					}
-					else
-					{
-						auto HealthSet =
-							PC->MyFortPawn->HasHealthSet()
-								? PC->MyFortPawn->HealthSet
-								: nullptr;
-						if (!HealthSet ||
-							!HealthSet->HasHealth() ||
-							!FFortGameplayAttributeData::
-								StaticStruct() ||
-							!FFortGameplayAttributeData::
-								HasMinimum())
-						{
-							continue;
-						}
-
-						auto& Health = HealthSet->Health;
-						float MinValue = Pawn->GetMaxHealth();
-
-						if (Health.Minimum != MinValue)
-						{
-							Health.Minimum = MinValue;
-							Pawn->ForceNetUpdate();
-
-							Pawn->SetHealth(MaxHealth);
-							Pawn->SetShield(MaxShield);
-
-							if (PS && PS->AbilitySystemComponent)
-							{
-								auto Handle = PS->AbilitySystemComponent->MakeEffectContext();
-								FGameplayTag Tag;
-								static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
-								Tag.TagName = Cue;
-								auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
-								memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-								PS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
-								free(PredictionKey);
-							}
-						}
-						else
-						{
-							Health.Minimum = 0.f;
-							Pawn->ForceNetUpdate();
-						}
+						AFortPlayerPawnAthena::DisableGodModes(
+							PC, Pawn);
+						++GodCount;
+						continue;
 					}
 
-					GodCount++;
+					if (!ApplyFullGodMode(PC, Pawn, true))
+						continue;
+
+					if (FPlatformMath::IsFinite(MaxHealth) &&
+						MaxHealth > 0.f)
+					{
+						Pawn->SetHealth(MaxHealth);
+					}
+					if (FPlatformMath::IsFinite(MaxShield) &&
+						MaxShield >= 0.f)
+					{
+						Pawn->SetShield(MaxShield);
+					}
+					PlayGodModeCue(PC);
+					Pawn->ForceNetUpdate();
+					++GodCount;
 				}
 
 				auto msg = L"Toggled god mode for " + std::to_wstring(GodCount) + L" player(s)!";
@@ -25028,16 +25606,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					catch (...) {}
 				}
 
-				if (PlayerState->HasKillScore())
-				{
-					PlayerState->KillScore = Count;
-				}
-				else
-				{
-					PlayerState->Kills = Count;
-				}
-
-				PlayerState->OnRep_Kills();
+				PlayerState->ApplyKillScore(Count);
 				PlayerController->ClientMessage(FString(L"Set kills!"), FName(), 1.f);
 			}
 			else if (command == "setpoints" || command == "setarenapoints")
@@ -25090,21 +25659,12 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 				TArray<AActor*> Actors;
 
-				auto ActorClass = FindObject<UClass>(UEAllocatedWString(args[1].begin(), args[1].end()).c_str());
-
-				if (!ActorClass)
-					ActorClass = FindClass(args[1].c_str());
+				const std::string DestroyClassArg(args[1].c_str());
+				const UClass* ActorClass =
+					FindActorClassByCommandArg(DestroyClassArg);
 
 				if (args[1].contains("pickup"))
 					ActorClass = AFortPickupAthena::StaticClass();
-
-				if (!ActorClass)
-				{
-					auto ShortNames = Misc::ObjectNames.find(args[1].c_str());
-
-					if (ShortNames != Misc::ObjectNames.end())
-						ActorClass = FindObject<UClass>(UEAllocatedWString(ShortNames->second.begin(), ShortNames->second.end()).c_str());
-				}
 
 				if (args[1].contains("volume"))
 				{
@@ -27374,13 +27934,33 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 				}
 
 				int AmountSpawned = 0;
+				std::string TrickshotClassPath;
+				if (FConfiguration::bEnableTrickshotTab.load(
+						std::memory_order_acquire) &&
+					FConfiguration::bSaveAndTrackSpawnedObjects.load(
+						std::memory_order_acquire) &&
+					!TryBuildSpawnableActorClassPath(
+						Class, TrickshotClassPath))
+				{
+					SDK::DbgLog(
+						"[TrickshotSpawn] could not canonicalize class=%p name=%s; actor will not be saved\n",
+						Class,
+						Class ? Class->Name.ToString().c_str() : "none");
+				}
+				static const FName TrickshotTireClassName(
+					L"Prop_TirePile_Tower_C");
+				AActor* SpawnOwner = Class &&
+					Class->Name == TrickshotTireClassName
+					? static_cast<AActor*>(PlayerController)
+					: nullptr;
 
 				for (int i = 0; i < Count; i++)
 				{
 					FQuat SpawnQuat = FRotator(Rotation.Pitch, Rotation.Yaw, Rotation.Roll).Quaternion();
 					auto SpawnScale = SummonScale;
 					FTransform SpawnTransform(Loc, SpawnQuat, SpawnScale);
-					auto Actor = UWorld::SpawnActor(Class, SpawnTransform);
+					auto Actor = UWorld::SpawnActor(
+						Class, SpawnTransform, SpawnOwner);
 
 					if (!Actor)
 						continue;
@@ -27395,6 +27975,12 @@ cheat nuke <projectile/path> <s[size]> <h[meters]> <nodmg> <player name> - Spawn
 						TryApplySummonHealth(Actor, SummonHealth);
 
 					Actor->ForceNetUpdate();
+					if (!TrickshotClassPath.empty())
+					{
+						GUI::RegisterTrickshotSpawnedActor(
+							Actor, PlayerController,
+							TrickshotClassPath);
+					}
 					AmountSpawned++;
 				}
 
@@ -30762,7 +31348,9 @@ void AFortPlayerControllerAthena::ServerAttemptInteract_(UObject* Context, FFram
 			//Interface->GetOwnedGameplayTags(&TargetTags);
 		}
 
-		PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetInteract(), 1, false, ReceivingActor, TargetTags);
+		UFortQuestManager::TrySendStatEvent(PlayerController,
+			EFortQuestObjectiveStatEvent::GetInteract(), 1, false,
+			ReceivingActor, TargetTags);
 
 		//TargetTags.GameplayTags.Free();
 		//TargetTags.ParentTags.Free();
@@ -31651,8 +32239,19 @@ void AFortPlayerControllerAthena::ServerGiveCreativeItem(UObject* Context, FFram
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
+	if (!CreativeItem->ItemDefinition)
+	{
+		free(CreativeItem);
+		return;
+	}
+
 	if (auto WeaponDef = CreativeItem->ItemDefinition->Cast<UFortWeaponItemDefinition>())
-		CreativeItem->LoadedAmmo = AFortInventory::GetStats(WeaponDef)->ClipSize;
+	{
+		// Creative props and devices can be weapon definitions without ranged
+		// stats, so a missing row means there is no clip to preload.
+		if (auto Stats = AFortInventory::GetStats(WeaponDef))
+			CreativeItem->LoadedAmmo = Stats->ClipSize;
+	}
 
 	PlayerController->InternalPickup(CreativeItem);
 	free(CreativeItem);
@@ -33258,8 +33857,12 @@ void AFortPlayerControllerAthena::ServerAwardVehicleTrickPoints_(UObject* Contex
 	}
 
 	auto RealAirTime = (float)InAirTimeX1000 * 0.001f;
-	PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetEarnVehicleTrickPoints(), InPoints, false, PlayerController, TargetTags);
-	PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetVehicleAirTime(), (int)RealAirTime, false, PlayerController, TargetTags);
+	UFortQuestManager::TrySendStatEvent(PlayerController,
+		EFortQuestObjectiveStatEvent::GetEarnVehicleTrickPoints(),
+		InPoints, false, PlayerController, TargetTags);
+	UFortQuestManager::TrySendStatEvent(PlayerController,
+		EFortQuestObjectiveStatEvent::GetVehicleAirTime(),
+		(int)RealAirTime, false, PlayerController, TargetTags);
 
 	TargetTags.GameplayTags.Free();
 	TargetTags.ParentTags.Free();

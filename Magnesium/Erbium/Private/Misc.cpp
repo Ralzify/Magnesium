@@ -487,7 +487,7 @@ const std::unordered_map<std::string, std::string> Misc::ObjectNames = {
 	{ "dumpster", "/Game/Athena/Items/EnvironmentalItems/HidingProps/Props/B_HidingProp_Dumpster.B_HidingProp_Dumpster_C" },
 	{ "trash", "/Game/Athena/Items/EnvironmentalItems/HidingProps/Props/B_HidingProp_Dumpster.B_HidingProp_Dumpster_C" },
 	{ "trashbin", "/Game/Athena/Items/EnvironmentalItems/HidingProps/Props/B_HidingProp_Dumpster.B_HidingProp_Dumpster_C" },
-	{ "tire", "/Game/Building/ActorBlueprints/Prop/Prop_TirePile_04.Prop_TirePile_04_C" },
+	{ "tire", "/Game/Athena/Items/Consumables/TowerGrenade/Prop_TirePile_Tower.Prop_TirePile_Tower_C" },
 	{ "llama", "/Game/Athena/SupplyDrops/Llama/AthenaSupplyDrop_Llama.AthenaSupplyDrop_Llama_C" },
 	{ "paf", "/Game/Athena/Items/Consumables/TowerGrenade/Prop_TirePile_Tower.Prop_TirePile_Tower_C" },
 	{ "airvent", "/Game/Athena/Environments/Blueprints/DUDEBRO/BGA_HVAC.BGA_HVAC_C" },
@@ -741,8 +741,35 @@ float Misc::GetMaxTickRate(UEngine* Engine, float DeltaTime, bool bAllowFrameRat
 			}
 		}
 	}
+	const float ConfiguredTickRate =
+		FConfiguration::GetClampedMaxTickRate();
+	const float EngineTickRate =
+		VersionInfo.FortniteVersion >= 20.00 &&
+		UNetDriver::HasValidatedLoopbackConnection()
+			? (ConfiguredTickRate >
+					FConfiguration::LoopbackFlushTickRate
+					? ConfiguredTickRate
+					: FConfiguration::LoopbackFlushTickRate)
+			: ConfiguredTickRate;
+	if (VersionInfo.FortniteVersion >= 20.00)
+	{
+		auto World = UWorld::GetWorld();
+		auto NetDriver = World
+			? static_cast<UNetDriver*>(World->NetDriver)
+			: nullptr;
+		if (NetDriver)
+		{
+			int32 NetworkTickRate =
+				static_cast<int32>(ConfiguredTickRate);
+			if (NetDriver->NetServerMaxTickRate != NetworkTickRate)
+			{
+				NetDriver->NetServerMaxTickRate = NetworkTickRate;
+			}
+		}
+	}
+
 	// improper, DS is supposed to do hitching differently
-	return FConfiguration::MaxTickRate;
+	return EngineTickRate;
 	//return std::clamp(1.f / DeltaTime, 1.f, FConfiguration::MaxTickRate);
 }
 
@@ -1104,7 +1131,10 @@ bool Listen()
 		return false;
 
 	if (VersionInfo.FortniteVersion >= 20)
-		NetDriver->NetServerMaxTickRate = 30;
+	{
+		NetDriver->NetServerMaxTickRate = static_cast<int32>(
+			FConfiguration::GetClampedMaxTickRate());
+	}
 
 	NetDriver->NetDriverName = NetDriverName;
 	NetDriver->World = World;

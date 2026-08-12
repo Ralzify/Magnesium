@@ -15,6 +15,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <limits>
 #include <map>
@@ -500,6 +501,7 @@ namespace
     FHeistCompatibilityState GHeistCompatibilityState;
     FNativeLTMCompatibilityState GNativeLTMCompatibilityState;
     FDeepFriedArenaState GDeepFriedArenaState;
+    std::atomic_bool GFoodFightWallDropRequested{false};
     FAuthoredNativeLTMPhaseState
         GAuthoredNativeLTMPhaseState;
     FArsenalCompatibilityState GArsenalCompatibilityState;
@@ -573,6 +575,8 @@ namespace
         const UFortPlaylistAthena* Playlist = nullptr,
         const FNativeLTMPlaylistDescriptor* Descriptor = nullptr)
     {
+        GFoodFightWallDropRequested.store(
+            false, std::memory_order_release);
         GDeepFriedArenaState = {};
         GDeepFriedArenaState.World = World;
         GAuthoredNativeLTMPhaseState = {};
@@ -12256,6 +12260,13 @@ bool FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(
         FindExactNativeLTMDescriptor(Playlist) != nullptr;
 }
 
+void FFortAthenaNativeLTMCompatibility::
+    RequestFoodFightWallDrop()
+{
+    GFoodFightWallDropRequested.store(
+        true, std::memory_order_release);
+}
+
 bool FFortAthenaNativeLTMCompatibility::IsReadyForMatch(
     AFortGameStateAthena* GameState,
     const UFortPlaylistAthena* Playlist)
@@ -13567,6 +13578,7 @@ namespace
     constexpr float DeepFriedLegacyMapCenterY = -25744.0f;
     constexpr uint8 DeepFriedBurgerTeam = 3;
     constexpr uint8 DeepFriedTomatoTeam = 4;
+    constexpr uint8 DeepFriedBarrierStateComingDown = 1;
     constexpr uint8 DeepFriedBarrierStateDown = 2;
     constexpr uint8 DeepFriedObjectiveDamageStateMax = 9;
 
@@ -15741,6 +15753,125 @@ namespace
         }
     }
 
+    bool ProcessRequestedFoodFightWallDrop()
+    {
+        if (!GFoodFightWallDropRequested.load(
+                std::memory_order_acquire))
+        {
+            return false;
+        }
+
+        UWorld* World = UWorld::GetWorld();
+        auto& Arena = GDeepFriedArenaState;
+        if (!World || Arena.World != World ||
+            !IsLiveObject(Arena.Barrier))
+        {
+            return false;
+        }
+
+        if (!IsLiveObject(Arena.Wall) &&
+            Arena.Barrier->HasBigBaseWall() &&
+            IsLiveObject(Arena.Barrier->BigBaseWall))
+        {
+            Arena.Wall = Arena.Barrier->BigBaseWall;
+        }
+        if (!IsLiveObject(Arena.Wall))
+            return false;
+
+        if (!Arena.Wall->HasBarrierState())
+        {
+            GFoodFightWallDropRequested.exchange(
+                false, std::memory_order_acq_rel);
+            SDK::DbgLog(
+                "[FoodFight] manual divider drop unavailable: "
+                "BarrierState is not reflected on wall=%p\n",
+                static_cast<void*>(Arena.Wall));
+            return false;
+        }
+
+        const uint8 PreviousState = Arena.Wall->BarrierState;
+        if (PreviousState != DeepFriedBarrierStateDown &&
+            PreviousState != DeepFriedBarrierStateComingDown)
+        {
+            float AppliedGravity = 0.0f;
+            bool bAppliedGravity = false;
+            if (Arena.Wall->HasWallGravity())
+            {
+                AppliedGravity = Arena.Wall->WallGravity;
+                if (Arena.Barrier->HasWallGravity())
+                {
+                    const float AuthoredGravity =
+                        Arena.Barrier->WallGravity.Evaluate();
+                    if (std::isfinite(AuthoredGravity) &&
+                        std::fabs(AuthoredGravity) > 0.01f)
+                    {
+                        AppliedGravity = AuthoredGravity;
+                    }
+                }
+
+                if (std::isfinite(AppliedGravity) &&
+                    std::fabs(AppliedGravity) > 0.01f)
+                {
+                    Arena.Wall->WallGravity = AppliedGravity;
+                    bAppliedGravity = true;
+                    if (UFunction* OnRepWallGravity =
+                            Arena.Wall->GetFunction(
+                                "OnRep_WallGravity"))
+                    {
+                        Arena.Wall->Call<void>(
+                            OnRepWallGravity);
+                    }
+                }
+            }
+
+            if (Arena.Wall->HasTimeUntilWallComesDown())
+            {
+                Arena.Wall->TimeUntilWallComesDown = 0.0f;
+                if (UFunction* OnRepWallTime =
+                        Arena.Wall->GetFunction(
+                            "OnRep_TimeUntilWallComesDown"))
+                {
+                    Arena.Wall->Call<void>(OnRepWallTime);
+                }
+            }
+
+            // Reflected property setters take a mutable lvalue in this SDK.
+            uint8 BarrierState =
+                DeepFriedBarrierStateComingDown;
+            Arena.Wall->BarrierState = BarrierState;
+            if (UFunction* OnRepBarrierState =
+                    Arena.Wall->GetFunction(
+                        "OnRep_BarrierState"))
+            {
+                Arena.Wall->Call<void>(OnRepBarrierState);
+            }
+            if (Arena.Wall->GetFunction("FlushNetDormancy"))
+                Arena.Wall->FlushNetDormancy();
+            Arena.Wall->ForceNetUpdate();
+            Arena.Barrier->ForceNetUpdate();
+
+            SDK::DbgLog(
+                "[FoodFight] manual divider native transition "
+                "gravity=%.2f applied=%d countdown=%d\n",
+                AppliedGravity,
+                static_cast<int>(bAppliedGravity),
+                static_cast<int>(
+                    Arena.Wall->HasTimeUntilWallComesDown()));
+        }
+
+        GFoodFightWallDropRequested.exchange(
+            false, std::memory_order_acq_rel);
+
+        SDK::DbgLog(
+            "[FoodFight] manual divider drop applied "
+            "wall=%p state=%u->%u\n",
+            static_cast<void*>(Arena.Wall),
+            static_cast<unsigned>(PreviousState),
+            static_cast<unsigned>(
+                Arena.Wall->BarrierState));
+        return true;
+    }
+
     AAthenaBarrierFlag* SpawnDeepFriedFlag(
         UWorld* World,
         AFortAthenaMutator_Barrier* Barrier,
@@ -16901,6 +17032,7 @@ namespace
                 World, GameState, Barrier);
         }
 
+        ProcessRequestedFoodFightWallDrop();
         RefreshDeepFriedArenaBindings();
     }
 
@@ -16981,6 +17113,7 @@ namespace
         // objective/grid/lava prerequisites below. Poll every frame once the
         // wall exists so a deferred base placement cannot hide the short
         // ComingDown transition.
+        ProcessRequestedFoodFightWallDrop();
         RefreshDeepFriedArenaBindings();
 
         const bool bNeedsPlacement =

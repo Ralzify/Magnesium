@@ -82,6 +82,7 @@ public:
     UCLASS_COMMON_MEMBERS(AFortDecoTool_ContextTrap);
 
     DEFINE_PROP(ContextTrapItemDefinition, UFortContextTrapItemDefinition*);
+    DEFINE_FUNC(SetContextTrapItemDefinition, void);
 
     DefUHookOg(ServerSpawnDeco_Implementation);
 };
@@ -109,6 +110,8 @@ public:
     DEFINE_PROP(TeamIndex, uint8);
     DEFINE_PROP(OwnerPersistentID, int16);
     DEFINE_PROP(EditingPlayer, AFortPlayerStateAthena*);
+    DEFINE_PROP(BuildingAttributeSet, UObject*);
+    DEFINE_PROP(ReplicatedBuildingAttributeSet, UObject*);
     DEFINE_BITFIELD_PROP(bDestroyed);
     DEFINE_PROP(CurrentBuildingLevel, int32);
     DEFINE_BITFIELD_PROP(bAllowResourceDrop);
@@ -118,7 +121,16 @@ public:
     DEFINE_PROP(BuildingReplacementType, uint8_t);
     DEFINE_PROP(ReplacementDestructionReason, uint8_t);
     DEFINE_PROP(OnReplacementDestruction, TMulticastInlineDelegate<void(uint8_t, ABuildingSMActor*)>);
+    DEFINE_BITFIELD_PROP(bMirrored);
+    DEFINE_BITFIELD_PROP(bSupportedDirectly);
+    DEFINE_BITFIELD_PROP(bForciblyStructurallySupported);
+    DEFINE_BITFIELD_PROP(bRegisterWithStructuralGrid);
+    DEFINE_PROP(SavedDirectlySupportedStatus, uint8);
+    DEFINE_PROP(BuildingAttachmentSlot, uint8);
+    DEFINE_PROP(BuildingAttachmentType, uint8);
+    DEFINE_PROP(ParentActorToAttachTo, ABuildingSMActor*);
     DEFINE_PROP(AttachedBuildingActors, TArray<ABuildingSMActor*>);
+    DEFINE_PROP(BuildingActorsAttachedTo, TArray<ABuildingSMActor*>);
     DEFINE_BITFIELD_PROP(bHiddenDueToTrapPlacement);
     DEFINE_PROP(BuildingType, uint8);
     DEFINE_PROP(EditModePatternData, UObject*);
@@ -135,6 +147,10 @@ public:
     DEFINE_FUNC(GetHealth, float);
     DEFINE_FUNC(GetMaxHealth, float);
     DEFINE_FUNC(SetMirrored, void);
+    DEFINE_FUNC(IsSupportedByWorld, bool);
+    DEFINE_FUNC(IsStructurallySupported, bool);
+    DEFINE_FUNC(ForceIntoStructuralGridDuringRuntime, void);
+    DEFINE_FUNC(MarkConnectedBuildingsForStructuralIntegrityCheck, void);
     DEFINE_FUNC(InitializeKismetSpawnedBuildingActor, void);
     DEFINE_FUNC(GetHealthPercent, float);
     DEFINE_FUNC(RepairBuilding, void);
@@ -146,14 +162,44 @@ public:
 
     static ABuildingSMActor* SpawnSavedTrap(UClass* TrapClass, const FVector& Location, const FRotator& Rotation,
         ABuildingSMActor* AttachedActor, uint8 AttachmentType, AFortPlayerControllerAthena* PlayerController,
-        const wchar_t* ItemDefinitionPath = nullptr);
-    static void RegisterTrapDefinition(UClass* TrapClass, UFortDecoItemDefinition* ItemDefinition);
+        const wchar_t* ItemDefinitionPath = nullptr, int32 AttachmentSlot = -1,
+        int32 TrapLevel = -1, int32 OriginalTrapLevel = -1,
+        UFortDecoItemDefinition* ResolvedItemDefinition = nullptr,
+        bool bRecoverDeferredPlacement = false,
+        bool bFinalPlacementSweep = false,
+        const std::vector<TWeakObjectPtr<ABuildingSMActor>>*
+            ExcludedActors = nullptr,
+        const std::vector<TWeakObjectPtr<ABuildingSMActor>>*
+            BaselineActors = nullptr);
+    static void RegisterTrapDefinition(UClass* TrapClass, UFortDecoItemDefinition* ItemDefinition,
+        ABuildingSMActor* TrapActor = nullptr);
     static UFortDecoItemDefinition* GetTrapDefinition(UClass* TrapClass);
+    static UFortDecoItemDefinition* GetTrapDefinition(ABuildingSMActor* TrapActor);
+    static UFortDecoItemDefinition* ResolveTrapDefinitionForAttachment(
+        UFortDecoItemDefinition* ItemDefinition, uint8 AttachmentType,
+        UClass* ExpectedTrapClass = nullptr);
+    static void TickSavedTrapAttachments();
 
     DefHookOg(void, OnDamageServer, ABuildingSMActor*, float, FGameplayTagContainer, FVector, __int64, AActor*, AActor*, __int64);
     DefUHookOg(ServerSpawnDeco_Implementation);
 
     InitPostLoadHooks;
+};
+
+class ABuildingTrap : public ABuildingSMActor
+{
+public:
+    UCLASS_COMMON_MEMBERS(ABuildingTrap);
+
+    DEFINE_PROP(TrapData, UFortTrapItemDefinition*);
+    DEFINE_PROP(TrapLevel, int32);
+    DEFINE_PROP(OriginalTrapLevel, int32);
+    DEFINE_PROP(AttachedTo, ABuildingSMActor*);
+
+    DEFINE_FUNC(SpawnedFromItemDefinition, void);
+    DEFINE_FUNC(GetTrapLevel, int32);
+    DEFINE_FUNC(SetAttachedTo, void);
+    DEFINE_FUNC(GetBuildingAttachedTo, ABuildingSMActor*);
 };
 
 class AFortWeap_EditingTool : public AActor

@@ -185,7 +185,6 @@
     <ClInclude Include="Erbium\Public\MinHook.h" />
     <ClInclude Include="Erbium\Public\Misc.h" />
     <ClInclude Include="Erbium\Public\Utils.h" />
-    <ClInclude Include="Erbium\BotAI\Public\BotAI.h" />
     <ClInclude Include="Erbium\Support\Public\AIDebugLogger.h" />
     <ClInclude Include="Erbium\Support\Public\AINameGenerator.h" />
     <ClInclude Include="Erbium\Support\Public\AISkillProfile.h" />
@@ -252,7 +251,6 @@
     <ClCompile Include="Erbium\Private\PlayerLoadout.cpp" />
     <ClCompile Include="Erbium\Private\LateGame.cpp" />
     <ClCompile Include="Erbium\Private\Misc.cpp" />
-    <ClCompile Include="Erbium\BotAI\Private\BotAI.cpp" />
     <ClCompile Include="Erbium\Support\Private\VersionFeatureAdapter.cpp" />
     <ClCompile Include="FortniteGame\Private\BattleRoyaleGamePhaseLogic.cpp" />
     <ClCompile Include="FortniteGame\Private\BuildingFoundation.cpp" />

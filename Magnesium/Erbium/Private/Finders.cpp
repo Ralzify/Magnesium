@@ -1839,6 +1839,9 @@ uint64 FindRemoveFromAlivePlayers()
         if (!sRef)
             sRef = Memcury::Scanner::FindStringRef(L"FortGameModeAthena::RemoveFromAlivePlayers: Player [%s] PC [%s] removed from alive players list (Team [%d]).  Player count is now [%d]. PlayerBots count is now [%d]. Team count is now [%d].", true, 0, VersionInfo.FortniteVersion >= 16).Get();
 
+		if (!sRef)
+			return 0;
+
         for (int i = 0; i < 0x1200; i++)
         {
             if (*(uint8_t*)(sRef - i) == 0x4C && *(uint8_t*)(sRef - i + 1) == 0x89 && *(uint8_t*)(sRef - i + 2) == 0x4C)

@@ -87,7 +87,6 @@ public:
     DEFINE_PROP(ItemDescription, FText);
     DEFINE_PROP(Rarity, uint8);
     DEFINE_BITFIELD_PROP(bSupportsQuickbarFocus);
-
     DEFINE_FUNC(CreateTemporaryItemInstanceBP, UFortItem*);
     DEFINE_FUNC(GetItemComponentByClass, UObject*);
     DEFINE_FUNC(GetRichDescription, FText);

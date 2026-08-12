@@ -6169,7 +6169,10 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 return;
             }
             if (VersionInfo.FortniteVersion >= 20 && NetDriver)
-                NetDriver->NetServerMaxTickRate = 30;
+            {
+                NetDriver->NetServerMaxTickRate = static_cast<int32>(
+                    FConfiguration::GetClampedMaxTickRate());
+            }
 
             NetDriver->NetDriverName = NetDriverName;
             NetDriver->World = World;
@@ -8250,7 +8253,8 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
         {
             auto PlayerController = (AFortPlayerControllerAthena*)UncastedPlayer;
 
-            PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetStormPhase(), 1, false);
+            UFortQuestManager::TrySendStatEvent(PlayerController,
+                EFortQuestObjectiveStatEvent::GetStormPhase(), 1, false);
         }
     }
 }
@@ -9848,7 +9852,8 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
             {
                 auto PlayerController = (AFortPlayerControllerAthena*)UncastedPlayer;
 
-                PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetStormPhase(), 1, false);
+                UFortQuestManager::TrySendStatEvent(PlayerController,
+                    EFortQuestObjectiveStatEvent::GetStormPhase(), 1, false);
             }
     }
 }

@@ -18,20 +18,11 @@ public:
     UCLASS_COMMON_MEMBERS(UCharacterMovementComponent);
 
     DEFINE_PROP(Velocity, FVector);
-    // Input the component accumulated for this move. Zero here while a move
-    // target is set means the component is not consuming pawn input at all.
-    DEFINE_PROP(Acceleration, FVector);
-    DEFINE_PROP(MovementMode, uint8);
-    DEFINE_PROP(MaxWalkSpeed, float);
-    DEFINE_PROP(MaxSwimSpeed, float);
-    DEFINE_PROP(MaxAcceleration, float);
 
     DEFINE_BITFIELD_PROP(bCheatFlying, bool);
-    DEFINE_BITFIELD_PROP(bRunPhysicsWithNoController, bool);
 
     DEFINE_FUNC(SetMovementMode, void);
     DEFINE_FUNC(IsMovingOnGround, bool);
-    DEFINE_FUNC(IsSwimming, bool);
     DEFINE_FUNC(IsFalling, bool);
 };
 
@@ -112,6 +103,24 @@ public:
     FGameplayTagContainer SourceTags;
 };
 
+struct FFortClientObservedStat : public SDK::FFastArraySerializerItem
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FFortClientObservedStat);
+
+    DEFINE_STRUCT_PROP(StatName, FName);
+    DEFINE_STRUCT_PROP(StatValue, int32);
+};
+
+struct FFortClientObservedStatArray : public SDK::FFastArraySerializer
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FFortClientObservedStatArray);
+
+    DEFINE_STRUCT_PROP(ObservedStats, TArray<FFortClientObservedStat>);
+    DEFINE_STRUCT_PROP(MyStatManager, UObject*);
+};
+
 class UNetDriver;
 class AController;
 
@@ -152,6 +161,7 @@ public:
     DEFINE_PROP(bShouldDropItemsOnDeath, bool);
     DEFINE_PROP(MoveSoundStimulusBroadcastInterval, uint16_t);
     DEFINE_PROP(Damagers, TArray<FDamagerInfo>);
+    DEFINE_PROP(ClientObservedStats, FFortClientObservedStatArray);
     // Native damage timestamp inherited from FortPawn. The health-state
     // watchdog uses it to distinguish a lethal hit from scripted zero-health
     // possession/form transitions.
@@ -166,15 +176,10 @@ public:
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
     DEFINE_PROP(VehicleInputComponent, UObject*);
 
-    // Used by the bot AI system (server-driven player-bot movement).
+    // Server-driven player-bot movement.
     DEFINE_PROP(CurrentMovementStyle, uint8);
     DEFINE_PROP(RemoteViewPitch, uint8); // replicated aim pitch clients render
     DEFINE_FUNC(AddMovementInput, void);
-    DEFINE_FUNC(IsSprinting, bool);
-    // True only when the possessing controller is a local controller, which is
-    // exactly the condition UCharacterMovementComponent requires before it
-    // will run a move for this pawn.
-    DEFINE_FUNC(IsLocallyControlled, bool);
     DEFINE_FUNC(Jump, void);
     DEFINE_FUNC(StopJumping, void);
     DEFINE_FUNC(Crouch, void);
@@ -809,8 +814,25 @@ public:
         const AFortPlayerControllerAthena* Controller);
     static bool HasMinimumHealthGodMode(
         const AFortPlayerPawnAthena* Pawn);
+    // Full God is ownership tracked as well: disabling it restores only the
+    // exact flag/floor that Magnesium changed and leaves authored immunity
+    // alone. Unlike minimum God, it remains attached to this pawn generation.
+    static bool SetFullHealthGodMode(
+        AFortPlayerControllerAthena* Controller,
+        AFortPlayerPawnAthena* Pawn,
+        bool bEnabled);
+    static bool HasFullHealthGodMode(
+        const AFortPlayerControllerAthena* Controller);
+    // Observational overload used only when callers need to identify any
+    // full-immunity shape, including policies not owned by Magnesium.
     static bool HasFullHealthGodMode(
         const AFortPlayerPawnAthena* Pawn);
+    // Removes every God-mode mechanism Magnesium can apply. This is kept as
+    // one operation so a minimum-health grant and a full-immunity grant can
+    // never leave each other hidden behind a misleading "disabled" state.
+    static bool DisableGodModes(
+        AFortPlayerControllerAthena* Controller,
+        AFortPlayerPawnAthena* Pawn);
 
     InitPostLoadHooks;
 };

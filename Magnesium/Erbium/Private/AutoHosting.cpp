@@ -3,7 +3,6 @@
 #include "../Public/Calendar.h"
 #include "../Public/Configuration.h"
 #include "../Public/GUI.h"
-#include "../BotAI/Public/BotAI.h"
 #include "../../json.hpp"
 
 #include <ShlObj.h>
@@ -245,6 +244,7 @@ namespace AutoHosting
                 { "one_kill_ends_game", FConfiguration::AutoEndGame.load(std::memory_order_acquire) },
                 { "show_trickshot_tab", FConfiguration::bEnableTrickshotTab.load(std::memory_order_acquire) },
                 { "max_tick_rate", FConfiguration::MaxTickRate.load(std::memory_order_acquire) },
+                { "max_tick_rate_user_override", FConfiguration::bMaxTickRateUserOverride.load(std::memory_order_acquire) },
                 { "port", FConfiguration::Port.load(std::memory_order_acquire) },
                 { "player_has_pickaxe", FConfiguration::bHasPickaxe.load(std::memory_order_acquire) }
             };
@@ -330,10 +330,6 @@ namespace AutoHosting
             };
 
             Preferences["bots"] = {
-                { "enable_bot_ai", BotAISettings::bEnabled.load(std::memory_order_acquire) },
-                { "bot_ai_seek_safe_zone", BotAISettings::bSeekSafeZone.load(std::memory_order_acquire) },
-                { "bot_ai_idle_flourishes", BotAISettings::bIdleFlourishes.load(std::memory_order_acquire) },
-                { "bot_ai_native_movement", BotAISettings::bNativeMovement.load(std::memory_order_acquire) },
                 { "health", FConfiguration::BotHealth.load(std::memory_order_acquire) },
                 { "shield", FConfiguration::BotShield.load(std::memory_order_acquire) },
                 { "use_custom_names", FConfiguration::UseCustomBotNames.load(std::memory_order_acquire) },
@@ -341,6 +337,8 @@ namespace AutoHosting
             };
 
             Preferences["trickshot"] = {
+                { "save_and_track_spawned_objects", FConfiguration::bSaveAndTrackSpawnedObjects.load(std::memory_order_acquire) },
+                { "save_waypoints", FConfiguration::bSaveWaypoints.load(std::memory_order_acquire) },
                 { "swag_lines", FConfiguration::bUseWinLines.load(std::memory_order_acquire) },
                 { "infinite_render", FConfiguration::bInfiniteRender.load(std::memory_order_acquire) },
                 { "randomize_arena_points", FConfiguration::RandomizeArenaPoints.load(std::memory_order_acquire) },
@@ -409,6 +407,9 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Match["max_tick_rate"] =
                 FConfiguration::MaxTickRate.load(
+                    std::memory_order_acquire);
+            Match["max_tick_rate_user_override"] =
+                FConfiguration::bMaxTickRateUserOverride.load(
                     std::memory_order_acquire);
             Match["port"] =
                 FConfiguration::Port.load(
@@ -481,6 +482,12 @@ namespace AutoHosting
             auto& Trickshot = GStoredPreferences["trickshot"];
             if (!Trickshot.is_object())
                 Trickshot = nlohmann::json::object();
+            Trickshot["save_and_track_spawned_objects"] =
+                FConfiguration::bSaveAndTrackSpawnedObjects.load(
+                    std::memory_order_acquire);
+            Trickshot["save_waypoints"] =
+                FConfiguration::bSaveWaypoints.load(
+                    std::memory_order_acquire);
             Trickshot["swag_lines"] =
                 FConfiguration::bUseWinLines.load(
                     std::memory_order_acquire);
@@ -644,16 +651,43 @@ namespace AutoHosting
                     "one_kill_ends_game",
                     false),
                 std::memory_order_release);
-            FConfiguration::bEnableTrickshotTab.store(
+            FConfiguration::SetTrickshotTabEnabled(
                 ReadBool(
                     Match,
                     "show_trickshot_tab",
-                    false),
+                    false));
+            const auto MaxTickRateIt =
+                Match.find("max_tick_rate");
+            const bool bHasSavedMaxTickRate =
+                MaxTickRateIt != Match.end() &&
+                MaxTickRateIt->is_number();
+            const float SavedMaxTickRate =
+                FConfiguration::ClampMaxTickRate(
+                    ReadFloat(
+                        Match,
+                        "max_tick_rate",
+                        FConfiguration::GetDefaultMaxTickRate()));
+            const auto MaxTickRateOverrideIt =
+                Match.find("max_tick_rate_user_override");
+            const bool bHasMaxTickRateOverrideMarker =
+                MaxTickRateOverrideIt != Match.end() &&
+                MaxTickRateOverrideIt->is_boolean();
+            // Schema-1 profiles predate the override marker. Their stored 30
+            // was the launcher default, while any other value was necessarily
+            // selected or supplied by a playlist preset and must survive.
+            const bool bMaxTickRateUserOverride =
+                bHasMaxTickRateOverrideMarker
+                    ? MaxTickRateOverrideIt->get<bool>()
+                    : bHasSavedMaxTickRate &&
+                        SavedMaxTickRate !=
+                            FConfiguration::LegacyMaxTickRate;
+            FConfiguration::bMaxTickRateUserOverride.store(
+                bMaxTickRateUserOverride,
                 std::memory_order_release);
             FConfiguration::MaxTickRate.store(
-                ClampValue(
-                    ReadFloat(Match, "max_tick_rate", 30.f),
-                    5.f, 180.f),
+                bMaxTickRateUserOverride
+                    ? SavedMaxTickRate
+                    : FConfiguration::GetDefaultMaxTickRate(),
                 std::memory_order_release);
             FConfiguration::Port.store(
                 ClampValue(
@@ -949,18 +983,6 @@ namespace AutoHosting
 
             const auto& Bots =
                 ReadObject(Preferences, "bots");
-            BotAISettings::bEnabled.store(
-                ReadBool(Bots, "enable_bot_ai", false),
-                std::memory_order_release);
-            BotAISettings::bSeekSafeZone.store(
-                ReadBool(Bots, "bot_ai_seek_safe_zone", true),
-                std::memory_order_release);
-            BotAISettings::bIdleFlourishes.store(
-                ReadBool(Bots, "bot_ai_idle_flourishes", true),
-                std::memory_order_release);
-            BotAISettings::bNativeMovement.store(
-                ReadBool(Bots, "bot_ai_native_movement", true),
-                std::memory_order_release);
             FConfiguration::BotHealth.store(
                 ReadInt(Bots, "health", 21),
                 std::memory_order_release);
@@ -981,6 +1003,18 @@ namespace AutoHosting
 
             const auto& Trickshot =
                 ReadObject(Preferences, "trickshot");
+            FConfiguration::bSaveAndTrackSpawnedObjects.store(
+                ReadBool(
+                    Trickshot,
+                    "save_and_track_spawned_objects",
+                    true),
+                std::memory_order_release);
+            FConfiguration::bSaveWaypoints.store(
+                ReadBool(
+                    Trickshot,
+                    "save_waypoints",
+                    true),
+                std::memory_order_release);
             FConfiguration::bUseWinLines.store(
                 ReadBool(
                     Trickshot,
@@ -1123,6 +1157,12 @@ namespace AutoHosting
                         7.f),
                     0.f, 24.f),
                 std::memory_order_release);
+
+            if (!FConfiguration::bEnableTrickshotTab.load(
+                    std::memory_order_acquire))
+            {
+                FConfiguration::ResetTrickshotSettings();
+            }
 
             // Profiles are per Fortnite version, so a stored snow value always
             // belongs to the model the running build uses.
@@ -1313,6 +1353,11 @@ namespace AutoHosting
         FConfiguration::AutoHostDelaySeconds.store(
             FConfiguration::DefaultAutoHostDelaySeconds,
             std::memory_order_release);
+        FConfiguration::MaxTickRate.store(
+            FConfiguration::GetDefaultMaxTickRate(),
+            std::memory_order_release);
+        FConfiguration::bMaxTickRateUserOverride.store(
+            false, std::memory_order_release);
         GRestoredPreferences.store(
             false, std::memory_order_release);
         GCountdownDeadlineMs.store(

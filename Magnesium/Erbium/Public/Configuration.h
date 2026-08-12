@@ -37,7 +37,41 @@ struct FConfiguration
     static inline std::atomic<float> SnowValue{ 0.f };
 
     static inline std::atomic_bool bReadyToStart{ false };
-    static inline std::atomic<float> MaxTickRate{ 30.f };
+    static inline constexpr float LegacyMaxTickRate = 30.f;
+    static inline constexpr float ModernMaxTickRate = 30.f;
+    // The historical uncapped loop let a local client's control traffic and
+    // acknowledgements flush more often than actor replication. Keep that
+    // low-latency behavior separate from the user-facing server tick rate.
+    static inline constexpr float LoopbackFlushTickRate = 120.f;
+    static inline constexpr float MinimumMaxTickRate = 5.f;
+    static inline constexpr float MaximumMaxTickRate = 180.f;
+    // VersionInfo is populated by SDK::Init, after static initialization, so
+    // AutoHosting::Initialize publishes the version-aware default before the
+    // GUI or server start gate can observe this fallback value.
+    static inline std::atomic<float> MaxTickRate{ LegacyMaxTickRate };
+    static inline std::atomic_bool bMaxTickRateUserOverride{ false };
+
+    static inline float GetDefaultMaxTickRate()
+    {
+        return VersionInfo.FortniteVersion >= 20.00
+            ? ModernMaxTickRate
+            : LegacyMaxTickRate;
+    }
+
+    static inline float ClampMaxTickRate(float Value)
+    {
+        if (Value < MinimumMaxTickRate)
+            return MinimumMaxTickRate;
+        if (Value > MaximumMaxTickRate)
+            return MaximumMaxTickRate;
+        return Value;
+    }
+
+    static inline float GetClampedMaxTickRate()
+    {
+        return ClampMaxTickRate(
+            MaxTickRate.load(std::memory_order_acquire));
+    }
     static inline std::atomic_int Port{ 7777 };
     static inline std::atomic_bool bAutoHost{ false };
     static inline std::atomic_bool bSaveAutoHostSettings{ false };
@@ -119,7 +153,7 @@ struct FConfiguration
     // vehicles from the driver's ServerMove instead of simulating them, so the
     // native contact that triggers that launch never happens server side -
     // FortVehicleBump reproduces it from the replicated linear velocity.
-    static inline std::atomic_bool bVehicleBumpLaunch{ true };
+    static inline std::atomic_bool bVehicleBumpLaunch{ false };
     // Below this the vehicle just nudges past you, as in the retail game.
     static inline std::atomic<float> VehicleBumpMinSpeedKmh{ 10.f };
     // Compensates for how much of the launch survives the trip to the client.
@@ -134,7 +168,12 @@ struct FConfiguration
     static inline std::atomic_bool bVehicleBumpDamage{ true };
 
     static inline std::atomic_bool bEnableTrickshotTab{ false };
-    static inline std::atomic_bool bUseWinLines{ true };
+    // Command-spawned actors are registered for preset persistence only when
+    // both the Trickshot tab and this user-facing switch are enabled.
+    static inline std::atomic_bool bSaveAndTrackSpawnedObjects{ true };
+    // Waypoints can be shared independently of tracked scene geometry.
+    static inline std::atomic_bool bSaveWaypoints{ true };
+    static inline std::atomic_bool bUseWinLines{ false };
     static inline std::atomic_bool RandomizeArenaPoints{ false };
     static inline std::atomic_bool bPlayerMapIcons{ false };
     static inline std::atomic_bool bAutoReloadOnWaypointTP{ false };
@@ -171,12 +210,54 @@ struct FConfiguration
     static inline std::atomic<float> CannonLaunchXMultiplier{ 1.f };
     static inline std::atomic<float> CannonLaunchYMultiplier{ 1.f };
     static inline std::atomic<float> CannonLaunchZMultiplier{ 1.f };
-    static inline std::atomic_bool bCrownSlomo{ true };
+    static inline std::atomic_bool bCrownSlomo{ false };
     static inline std::atomic_bool bDisableJumpFatigue{ false };
     static inline std::atomic_bool bCancelVelocityOnWin{ false };
     static inline std::atomic_bool bDisableSupplyDrops{ false };
     static inline std::atomic_bool bAutoPauseTODM{ false };
     static inline std::atomic<float> TODMTime{ 7.f };
+
+    static inline void ResetTrickshotSettings()
+    {
+        bUseWinLines.store(false, std::memory_order_release);
+        RandomizeArenaPoints.store(false, std::memory_order_release);
+        bPlayerMapIcons.store(false, std::memory_order_release);
+        bAutoReloadOnWaypointTP.store(false, std::memory_order_release);
+        bAutoGodMode.store(false, std::memory_order_release);
+        AutoGodModeType.store(
+            (int)EAutoGodMode::Maximum,
+            std::memory_order_release);
+        bAutoGodModeExcludeLastPlayer.store(
+            false, std::memory_order_release);
+        RandomizeKills.store(false, std::memory_order_release);
+        RandomizeLevels.store(false, std::memory_order_release);
+        bInfiniteRender.store(false, std::memory_order_release);
+        bRideableProjectiles.store(false, std::memory_order_release);
+        bFModCannon.store(false, std::memory_order_release);
+        bCannonLaunchAnimations.store(true, std::memory_order_release);
+        CannonLaunchXMultiplier.store(1.f, std::memory_order_release);
+        CannonLaunchYMultiplier.store(1.f, std::memory_order_release);
+        CannonLaunchZMultiplier.store(1.f, std::memory_order_release);
+        bCrownSlomo.store(false, std::memory_order_release);
+        bDisableJumpFatigue.store(false, std::memory_order_release);
+        bCancelVelocityOnWin.store(false, std::memory_order_release);
+        bDisableSupplyDrops.store(false, std::memory_order_release);
+        bAutoPauseTODM.store(false, std::memory_order_release);
+        TODMTime.store(7.f, std::memory_order_release);
+        bVehicleBumpLaunch.store(false, std::memory_order_release);
+        VehicleBumpMinSpeedKmh.store(10.f, std::memory_order_release);
+        VehicleBumpForceMultiplier.store(5.f, std::memory_order_release);
+        bVehicleBumpDamage.store(true, std::memory_order_release);
+    }
+
+    static inline void SetTrickshotTabEnabled(bool bEnabled)
+    {
+        if (!bEnabled)
+            ResetTrickshotSettings();
+
+        bEnableTrickshotTab.store(
+            bEnabled, std::memory_order_release);
+    }
 
     static inline std::atomic_bool bInfiniteMats{ true };
     static inline std::atomic_bool bInfiniteAmmo{ true };

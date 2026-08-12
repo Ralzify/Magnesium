@@ -124,6 +124,9 @@ public:
     DEFINE_FUNC(ClientReportTournamentStatUpdate, void);
     DEFINE_FUNC(GetPingInMilliseconds, float);
 
+    void ApplyKillScore(int32 NewScore);
+    int32 GetEffectiveKillScore() const;
+
     FString& GetSavedNetworkAddress()
     {
         static auto SavedNetworkAddressOffset = GetOffset("SavedNetworkAddress");

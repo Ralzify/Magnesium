@@ -52,15 +52,6 @@
     <Filter Include="Magnesium\Hex">
       <UniqueIdentifier>{c0b9cd8c-373d-4cf3-9008-8cd5ebbbf2d6}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Magnesium\BotAI">
-      <UniqueIdentifier>{9ac9c90d-0bb6-43d3-9997-b0f955aa0f15}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Magnesium\BotAI\Public">
-      <UniqueIdentifier>{54b400bd-254e-4f27-83ed-73a25d014b7d}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Magnesium\BotAI\Private">
-      <UniqueIdentifier>{c3c96822-f4ea-49f8-badd-906f3db08896}</UniqueIdentifier>
-    </Filter>
     <Filter Include="Magnesium\Support">
       <UniqueIdentifier>{0271fb7e-848d-496b-96f9-fd31e6cb58b9}</UniqueIdentifier>
     </Filter>
@@ -406,9 +397,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Erbium\BotAI\Public\BotAI.h">
-      <Filter>Magnesium\BotAI\Public</Filter>
-    </ClInclude>
     <ClInclude Include="Erbium\Support\Public\AIDebugLogger.h">
       <Filter>Magnesium\Support\Public</Filter>
     </ClInclude>
@@ -429,9 +417,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Erbium\BotAI\Private\BotAI.cpp">
-      <Filter>Magnesium\BotAI\Private</Filter>
-    </ClCompile>
     <ClCompile Include="Erbium\Support\Private\VersionFeatureAdapter.cpp">
       <Filter>Magnesium\Support\Private</Filter>
     </ClCompile>

@@ -11,14 +11,18 @@
 #include "../Public/Events.h"
 #include "../Public/Misc.h"
 #include "../Public/PlayerLoadout.h"
+#include "../Support/Public/FaultGuard.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/FortAthenaMutator.h"
 #include "../../FortniteGame/Public/BuildingSMActor.h"
 #include "../../FortniteGame/Public/GameplayTagContainer.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../FortniteGame/Public/FortPhysicsPawn.h"
+#include "../../FortniteGame/Public/FortVehicleMods.h"
 #include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
-#include "../BotAI/Public/BotAI.h"
+#include "../../FortniteGame/Public/FortPlayerStateAthena.h"
+#include "../../FortniteGame/Public/FortGameStateAthena.h"
+#include "../../FortniteGame/Public/FortGameMode.h"
 #include "../../Engine/Public/Texture.h"
 #include <sstream>
 #include <fstream>
@@ -54,6 +58,15 @@ UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 
 static std::atomic<ULONGLONG> GServerJoinableAtMs{ 0 };
 static unsigned int GPreferenceEditorGeneration = 0;
+
+namespace TrickshotManager
+{
+    void GameThreadTick();
+    void RegisterSpawnedActor(
+        AActor* Actor,
+        AFortPlayerControllerAthena* Controller,
+        const std::string& CanonicalClassPath);
+}
 
 namespace
 {
@@ -370,13 +383,28 @@ namespace
         return TryCopyFStringUtf8(Value, 512, OutName);
     }
 
+    bool GuardedInvokePlayerNameFunction(
+        AFortPlayerStateAthena* PlayerState,
+        UFunction* Function,
+        void* Parameters) noexcept
+    {
+        __try
+        {
+            PlayerState->ProcessEvent(Function, Parameters);
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
     bool TryReadPlayerNameFunction(
         AFortPlayerStateAthena* PlayerState,
         std::string& OutName)
     {
         OutName.clear();
         if (!PlayerState ||
-            VersionInfo.FortniteVersion >= 32.0f ||
             !SDK::MemReadable(PlayerState, sizeof(UObject)))
         {
             return false;
@@ -390,54 +418,116 @@ namespace
         if (!Function)
             return false;
 
-        // The no-argument Call<T> fast path places the return value at byte
-        // zero. Prove that exact ABI before invoking it; a same-named function
-        // with parameters must never be called through a guessed stack layout.
+        // GetPlayerName is stable semantically, but its reflected return offset
+        // is not guaranteed to be byte zero across UProperty/FField layouts.
+        // Resolve the sole named return and invoke a bounded parameter buffer
+        // instead of relying on UObject::Call's iteration-order ABI.
         const auto Parameters = Function->GetParamsNamed();
-        int32 ParameterCount = 0;
-        bool HasExactReturn = false;
+        uint32 ReturnValueOffset = UINT32_MAX;
+        uint32 ReturnValueSize = 0;
+        uint64 ReturnValueFlags = 0;
         for (const auto& Parameter : Parameters.NameOffsetMap)
         {
-            if ((Parameter.PropertyFlags & 0x80) == 0)
-                continue;
-            ++ParameterCount;
-            HasExactReturn = HasExactReturn ||
-                ((Parameter.PropertyFlags & 0x400) != 0 &&
-                 Parameter.Offset == 0 &&
-                 Parameter.ElementSize == sizeof(FString));
+            if (Parameter.Name == "ReturnValue")
+            {
+                ReturnValueOffset = Parameter.Offset;
+                ReturnValueSize = Parameter.ElementSize;
+                ReturnValueFlags = Parameter.PropertyFlags;
+            }
         }
-        if (Parameters.Size != sizeof(FString) ||
-            ParameterCount != 1 || !HasExactReturn)
+
+        constexpr uint64 CPF_Parm = 0x80;
+        constexpr uint64 CPF_OutParm = 0x100;
+        constexpr uint64 CPF_ReturnParm = 0x400;
+        const bool bEncryptedPropertyMetadata =
+            VersionInfo.FortniteVersion >= 32.0f;
+        const uint32 BufferSize = bEncryptedPropertyMetadata
+            ? 0x1000u : Parameters.Size;
+        const bool bReturnFits =
+            ReturnValueOffset != UINT32_MAX &&
+            ReturnValueOffset <= BufferSize &&
+            sizeof(FString) <= BufferSize - ReturnValueOffset;
+        if (Parameters.NameOffsetMap.size() != 1 ||
+            BufferSize == 0 || BufferSize > 0x1000 ||
+            !bReturnFits ||
+            (!bEncryptedPropertyMetadata &&
+             (ReturnValueSize != sizeof(FString) ||
+              !(ReturnValueFlags & CPF_Parm) ||
+              !(ReturnValueFlags & CPF_OutParm) ||
+              !(ReturnValueFlags & CPF_ReturnParm))))
         {
             return false;
         }
 
-        FString Value = PlayerState->Call<FString>(Function);
+        void* Memory = FMemory::Malloc(BufferSize);
+        if (!Memory)
+            return false;
+        memset(Memory, 0, BufferSize);
+        const bool bInvoked = GuardedInvokePlayerNameFunction(
+            PlayerState, Function, Memory);
+        FString Value{};
+        if (bInvoked)
+        {
+            memcpy(
+                &Value,
+                reinterpret_cast<uint8*>(Memory) + ReturnValueOffset,
+                sizeof(Value));
+        }
         const bool Copied =
-            TryCopyFStringUtf8(&Value, 512, OutName);
+            bInvoked && TryCopyFStringUtf8(&Value, 512, OutName);
         // ProcessEvent constructs the return FString for the caller. The SDK's
         // TArray destructor is intentionally non-owning, so release this one
         // explicitly after copying instead of leaking it every cache refresh.
-        Value.Free();
+        if (bInvoked && Value.Data &&
+            Value.NumElements >= 0 &&
+            Value.MaxElements >= Value.NumElements &&
+            Value.MaxElements <= 4096 &&
+            SDK::MemReadable(Value.Data, sizeof(wchar_t)))
+        {
+            Value.Free();
+        }
+        FMemory::Free(Memory);
         return Copied;
     }
+
+    bool IsGenericPlayerNamePlaceholder(const std::string& Name);
 
     std::string ResolveAuthoritativePlayerName(
         AFortPlayerStateAthena* PlayerState)
     {
         std::string Name;
+        std::string Provisional;
         // Use Fortnite's displayed PlayerState name before any connection URL
         // identity. FN30 can put an opaque launcher/profile alias in the join
         // URL even while GetPlayerName returns the correct in-game label.
-        if (TryReadPlayerNameFunction(PlayerState, Name) ||
-            TryReadReflectedPlayerName(
-                PlayerState, "PlayerNamePrivate", Name) ||
-            TryReadReflectedPlayerName(
+        if (TryReadPlayerNameFunction(PlayerState, Name))
+        {
+            if (!IsGenericPlayerNamePlaceholder(Name))
+                return Name;
+            Provisional = Name;
+        }
+        if (TryReadReflectedPlayerName(
+                PlayerState, "PlayerNamePrivate", Name))
+        {
+            if (!IsGenericPlayerNamePlaceholder(Name))
+                return Name;
+            if (Provisional.empty())
+                Provisional = Name;
+        }
+        // PlayerNamePrivate can legitimately contain the same temporary
+        // "Player N" placeholder as GetPlayerName while the public replicated
+        // field has already received the canonical label. Probe both fields
+        // independently instead of letting a successful placeholder read
+        // short-circuit the second capability.
+        if (TryReadReflectedPlayerName(
                 PlayerState, "PlayerName", Name))
         {
-            return Name;
+            if (!IsGenericPlayerNamePlaceholder(Name))
+                return Name;
+            if (Provisional.empty())
+                Provisional = Name;
         }
-        return {};
+        return Provisional;
     }
 
     bool TryCopyConnectionPlayerNameUnsafe(
@@ -453,7 +543,11 @@ namespace
 
         const std::string Name =
             GUI::GetPlayerNameFromConnection(Connection);
-        if (Name.empty() || Name.size() >= OutCapacity)
+        // A transient engine-generated "Player N" is not an identity. Leaving
+        // this refresh unresolved preserves any prior canonical cache entry and
+        // lets the next replicated PlayerName update replace the UI fallback.
+        if (Name.empty() || IsGenericPlayerNamePlaceholder(Name) ||
+            Name.size() >= OutCapacity)
             return false;
         memcpy(OutName, Name.data(), Name.size());
         OutName[Name.size()] = '\0';
@@ -482,6 +576,33 @@ namespace
         }
     }
 
+    bool IsGenericPlayerNamePlaceholder(const std::string& Name)
+    {
+        static constexpr char Prefix[] = "player";
+        if (Name.size() <= std::size(Prefix) - 1)
+            return false;
+        for (size_t Index = 0; Index < std::size(Prefix) - 1; ++Index)
+        {
+            char Character = Name[Index];
+            if (Character >= 'A' && Character <= 'Z')
+                Character = static_cast<char>(Character - 'A' + 'a');
+            if (Character != Prefix[Index])
+                return false;
+        }
+
+        size_t Index = std::size(Prefix) - 1;
+        while (Index < Name.size() && Name[Index] == ' ')
+            ++Index;
+        if (Index == Name.size())
+            return false;
+        for (; Index < Name.size(); ++Index)
+        {
+            if (Name[Index] < '0' || Name[Index] > '9')
+                return false;
+        }
+        return true;
+    }
+
     bool TryCopyResolvedPlayerNameUnsafe(
         AFortPlayerStateAthena* PlayerState,
         UNetConnection* Connection,
@@ -494,21 +615,30 @@ namespace
         OutName[0] = '\0';
         *OutLength = 0;
 
-        // Preserve the working pre-cache behavior: the join URL carries the
-        // player's plaintext connection name on builds whose PlayerState name
-        // is still encoded. Only use reflected PlayerState data as a fallback.
-        std::array<char, 1025> ConnectionName{};
-        size_t ConnectionNameLength = 0;
-        TryCopyConnectionPlayerNameGuarded(
-            Connection,
-            ConnectionName.data(),
-            ConnectionName.size(),
-            &ConnectionNameLength);
-        std::string Name(
-            ConnectionName.data(), ConnectionNameLength);
-        if (Name.empty())
-            Name = ResolveAuthoritativePlayerName(PlayerState);
-        if (Name.empty() || Name.size() >= OutCapacity)
+        // Prefer the authoritative replicated PlayerState label. RequestURL is
+        // only a compatibility fallback: its private connection offset is not
+        // stable on UE5 and may be unavailable while profile registration is
+        // still settling for a late joiner.
+        std::string Name = ResolveAuthoritativePlayerName(PlayerState);
+        if (Name.empty() || IsGenericPlayerNamePlaceholder(Name))
+        {
+            std::array<char, 1025> ConnectionName{};
+            size_t ConnectionNameLength = 0;
+            TryCopyConnectionPlayerNameGuarded(
+                Connection,
+                ConnectionName.data(),
+                ConnectionName.size(),
+                &ConnectionNameLength);
+            if (ConnectionNameLength > 0)
+            {
+                std::string ConnectionLabel(
+                    ConnectionName.data(), ConnectionNameLength);
+                if (Name.empty() || ConnectionLabel != Name)
+                    Name = std::move(ConnectionLabel);
+            }
+        }
+        if (Name.empty() || IsGenericPlayerNamePlaceholder(Name) ||
+            Name.size() >= OutCapacity)
             return false;
 
         memcpy(OutName, Name.data(), Name.size());
@@ -1190,9 +1320,8 @@ namespace
                     PlayerStateIdentity, CombatStats);
             }
 
-            // Keep the historical connection-first resolution order.  The
-            // guarded PlayerState lookup remains available as a fallback for
-            // clients whose URL omits Name=.
+            // Resolve the authoritative PlayerState label on the game thread;
+            // the connection URL remains a guarded compatibility fallback.
             std::array<char, 1025> Resolved{};
             size_t ResolvedLength = 0;
             TryCopyResolvedPlayerNameGuarded(
@@ -5042,6 +5171,8 @@ void GUI::SafeZoneMapGameTick()
     Events::Tick();
     SafeZoneMap::GameThreadTick();
     PlayerLoadout::GameThreadTick();
+    TrickshotManager::GameThreadTick();
+    ABuildingSMActor::TickSavedTrapAttachments();
     AFortPlayerPawnAthena::TickPendingPlayerMapIcons();
 }
 
@@ -5244,18 +5375,12 @@ static bool AtomicCheckbox(
 
 static void ApplyInitialTrickshotDefaults()
 {
-    // Seed the historical Trickshot preset only on its first activation.
-    // Later checkbox edits and hide/show cycles remain user-owned.
-    static bool bInitialized = false;
-    static unsigned int LastResetGeneration =
-        GPreferenceEditorGeneration;
-    if (LastResetGeneration != GPreferenceEditorGeneration)
-    {
-        bInitialized = false;
-        LastResetGeneration = GPreferenceEditorGeneration;
-    }
-    if (bInitialized)
-        return;
+    FConfiguration::ResetTrickshotSettings();
+
+    FConfiguration::bUseWinLines.store(
+        true, std::memory_order_release);
+    FConfiguration::bCrownSlomo.store(
+        true, std::memory_order_release);
 
     if (FConfiguration::bLateGame.load(
         std::memory_order_acquire))
@@ -5286,24 +5411,22 @@ static void ApplyInitialTrickshotDefaults()
         FConfiguration::RandomizeArenaPoints.store(
             true, std::memory_order_release);
     }
-
-    bInitialized = true;
 }
 
 static bool TrickshotTabCheckbox(const char* Label)
 {
-    const bool bWasEnabled =
+    bool bEnabled =
         FConfiguration::bEnableTrickshotTab.load(
             std::memory_order_acquire);
-    const bool bChanged = AtomicCheckbox(
-        Label, FConfiguration::bEnableTrickshotTab);
-    if (bChanged && !bWasEnabled &&
-        FConfiguration::bEnableTrickshotTab.load(
-            std::memory_order_acquire))
-    {
+
+    if (!ImGui::Checkbox(Label, &bEnabled))
+        return false;
+
+    FConfiguration::SetTrickshotTabEnabled(bEnabled);
+    if (bEnabled)
         ApplyInitialTrickshotDefaults();
-    }
-    return bChanged;
+
+    return true;
 }
 
 static bool AtomicLabeledSliderInt(
@@ -6054,9 +6177,1206 @@ auto WindowHeight = 600;
 
 inline std::vector<std::pair<AFortPlayerControllerAthena*, UNetConnection*>> AllControllers;
 
+void GUI::RegisterTrickshotSpawnedActor(
+    AActor* Actor,
+    AFortPlayerControllerAthena* Controller,
+    const std::string& CanonicalClassPath)
+{
+    TrickshotManager::RegisterSpawnedActor(
+        Actor, Controller, CanonicalClassPath);
+}
+
 namespace TrickshotManager
 {
     namespace fs = std::filesystem;
+
+    struct FTrackedSpawnedActor
+    {
+        TWeakObjectPtr<UWorld> World;
+        TWeakObjectPtr<AActor> Actor;
+        TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+        std::string ClassPath;
+    };
+
+    std::vector<FTrackedSpawnedActor> GTrackedSpawnedActors;
+
+    void ForgetTrackedSpawnedActor(AActor* Actor)
+    {
+        if (!Actor)
+            return;
+        std::erase_if(
+            GTrackedSpawnedActors,
+            [&](const FTrackedSpawnedActor& Entry)
+            {
+                return Entry.Actor.Get() == Actor;
+            });
+    }
+
+    enum class EAsyncOperation : uint8
+    {
+        None,
+        Save,
+        Load
+    };
+
+    enum class EAsyncState : int
+    {
+        Idle,
+        Publishing,
+        Pending,
+        Running,
+        Completed
+    };
+
+    constexpr size_t kAsyncNameCapacity = 256;
+    constexpr size_t kAsyncMessageCapacity = 1024;
+    std::atomic<int> GAsyncState{
+        static_cast<int>(EAsyncState::Idle) };
+    EAsyncOperation GAsyncOperation = EAsyncOperation::None;
+    EAsyncOperation GAsyncResultOperation = EAsyncOperation::None;
+    bool GAsyncResultSucceeded = false;
+    char GAsyncName[kAsyncNameCapacity]{};
+    char GAsyncResultName[kAsyncNameCapacity]{};
+    char GAsyncResultMessage[kAsyncMessageCapacity]{};
+
+    constexpr const char* kTrickshotTireClassPath =
+        "/Game/Athena/Items/Consumables/TowerGrenade/"
+        "Prop_TirePile_Tower.Prop_TirePile_Tower_C";
+    constexpr const wchar_t* kTrickshotTireClassPathWide =
+        L"/Game/Athena/Items/Consumables/TowerGrenade/"
+        L"Prop_TirePile_Tower.Prop_TirePile_Tower_C";
+    constexpr size_t kMaximumTrickshotSpawnedObjects = 2048;
+    constexpr size_t kMaximumTrickshotWaypoints = 256;
+    constexpr size_t kMaximumTrickshotWaypointHistory = 16;
+    constexpr size_t kMaximumTrickshotWaypointPhraseBytes = 128;
+    constexpr double kMaximumTrickshotCoordinate = 10000000.0;
+
+    struct FPendingTrickshotBuild
+    {
+        TWeakObjectPtr<UClass> Class;
+        FVector Location;
+        FRotator Rotation;
+        int Level = 0;
+        int Parent = -1;
+        uint8 AttachmentType = 0;
+        int AttachmentSlot = -1;
+        bool Mirrored = false;
+        int TrapLevel = -1;
+        int OriginalTrapLevel = -1;
+        bool IsTrap = false;
+        bool SupportAnchor = false;
+        bool HasSavedSupportAnchor = false;
+        bool HasExternalParent = false;
+        FVector ExternalParentLocation;
+        FRotator ExternalParentRotation;
+        int ExternalParentBuildingType = -1;
+        std::string ClassPath;
+        std::string ItemDefinition;
+        std::string ExternalParentClassPath;
+        std::string ExternalParentActorPath;
+        TWeakObjectPtr<UFortDecoItemDefinition> ResolvedItemDefinition;
+        TWeakObjectPtr<UFortDecoItemDefinition> ResolvedConcreteDefinition;
+        TWeakObjectPtr<ABuildingSMActor> ResolvedExternalParent;
+    };
+
+    struct FPendingTrickshotProp
+    {
+        TWeakObjectPtr<UClass> Class;
+        FVector Location;
+        FRotator Rotation;
+        FVector Scale{ 1.0, 1.0, 1.0 };
+        std::string ClassPath;
+    };
+
+    enum class ELoadPhase : uint8
+    {
+        Cleanup,
+        Structures,
+        ReleaseStructuralSupport,
+        StructureSettle,
+        TrapPlacement
+    };
+
+    enum class ELoadPumpResult : uint8
+    {
+        Running,
+        Succeeded,
+        Failed
+    };
+
+    struct FTrickshotLoadJob
+    {
+        bool Active = false;
+        std::string Name;
+        TWeakObjectPtr<UWorld> World;
+        TWeakObjectPtr<AFortPlayerControllerAthena> Controller;
+        std::vector<FPendingTrickshotBuild> Pending;
+        std::vector<FPendingTrickshotProp> PendingProps;
+        std::vector<int> StructuralOrder;
+        std::vector<TWeakObjectPtr<ABuildingSMActor>> SpawnedBuilds;
+        std::vector<TWeakObjectPtr<AActor>> SpawnedProps;
+        std::vector<TWeakObjectPtr<UClass>> TrackedPropClasses;
+        // Exact command-spawned actor instances owned by the current preset.
+        // Arbitrary class-wide cleanup would destroy natural map actors and
+        // objects spawned by another player.
+        std::vector<TWeakObjectPtr<AActor>> ExistingTrackedProps;
+        // Exact pre-load building identities. Deferred legacy trap recovery
+        // must never adopt, mutate, or destroy natural/foreign actors that
+        // already occupied an external support before this transaction.
+        std::vector<TWeakObjectPtr<ABuildingSMActor>>
+            BaselineBuildingActors;
+        bool LegacyTireProps = false;
+        std::vector<TWeakObjectPtr<UObject>> TemporaryRootedAssets;
+        bool RestoreWaypoints = false;
+        AFortPlayerControllerAthena::FWaypointMap PendingWaypoints;
+        size_t NextStructural = 0;
+        uint8 TrapPlacementPass = 0;
+        ELoadPhase Phase = ELoadPhase::Cleanup;
+        ULONGLONG NextAdvanceMs = 0;
+        int LoadedBuilds = 0;
+        int LoadedTraps = 0;
+        int LoadedProps = 0;
+        int Skipped = 0;
+        int FailedTrapPlacements = 0;
+        int FailedPropPlacements = 0;
+        std::string FailureMessage;
+    };
+
+    FTrickshotLoadJob GLoadJob;
+    bool GTrickshotPackageFindDisabled = false;
+    bool GTrickshotPackageLoadDisabled = false;
+
+    constexpr int32 kTrickshotRootSetFlag = 1 << 30;
+
+    bool IsTrickshotAssetRooted(const UObject* Object)
+    {
+        if (!Object || !SDK::MemReadable(Object, 0x40))
+            return false;
+        if (Object->Index < 0 || Object->Index >= TUObjectArray::Num())
+            return false;
+        auto Item = TUObjectArray::GetItemByIndex(Object->Index);
+        return Item && Item->GetObject() == Object &&
+            (Item->GetFlags() & kTrickshotRootSetFlag) != 0;
+    }
+
+    void RemoveTrickshotAssetRoot(UObject* Object)
+    {
+        if (!Object || !SDK::MemReadable(Object, 0x40))
+            return;
+        if (Object->Index < 0 || Object->Index >= TUObjectArray::Num())
+            return;
+        auto Item = TUObjectArray::GetItemByIndex(Object->Index);
+        if (!Item || Item->GetObject() != Object)
+            return;
+        if (SDK::Offsets::bEncryptedObjects)
+        {
+            *reinterpret_cast<int32*>(
+                reinterpret_cast<uint8*>(Item) + 0x4) &=
+                ~kTrickshotRootSetFlag;
+        }
+        else
+        {
+            Item->Flags &= ~kTrickshotRootSetFlag;
+        }
+    }
+
+    void ReleaseTrickshotAssetRoots(
+        std::vector<TWeakObjectPtr<UObject>>& Assets)
+    {
+        for (auto It = Assets.rbegin(); It != Assets.rend(); ++It)
+        {
+            if (auto Object = It->Get())
+                RemoveTrickshotAssetRoot(Object);
+        }
+        Assets.clear();
+    }
+
+    struct FScopedTrickshotAssetRoots
+    {
+        std::vector<TWeakObjectPtr<UObject>> Assets;
+
+        FScopedTrickshotAssetRoots() = default;
+        FScopedTrickshotAssetRoots(
+            const FScopedTrickshotAssetRoots&) = delete;
+        FScopedTrickshotAssetRoots& operator=(
+            const FScopedTrickshotAssetRoots&) = delete;
+
+        ~FScopedTrickshotAssetRoots()
+        {
+            ReleaseTrickshotAssetRoots(Assets);
+        }
+
+        void Root(UObject* Object)
+        {
+            if (!Object || IsTrickshotAssetRooted(Object))
+                return;
+            Object->AddToRoot();
+            if (IsTrickshotAssetRooted(Object))
+                Assets.emplace_back(Object);
+        }
+
+        std::vector<TWeakObjectPtr<UObject>> Commit()
+        {
+            std::vector<TWeakObjectPtr<UObject>> Result;
+            Result.swap(Assets);
+            return Result;
+        }
+    };
+
+    inline bool Save(const char* Name, std::string& Message);
+    inline bool Load(const std::string& Name, std::string& Message);
+    inline ELoadPumpResult PumpLoad(std::string& Message);
+
+    struct FStructuralCellKey
+    {
+        int64 X = 0;
+        int64 Y = 0;
+        int64 Z = 0;
+        uint8 BuildingType = 0;
+
+        bool operator==(const FStructuralCellKey& Other) const
+        {
+            return X == Other.X && Y == Other.Y && Z == Other.Z &&
+                BuildingType == Other.BuildingType;
+        }
+    };
+
+    struct FStructuralCellKeyHash
+    {
+        size_t operator()(const FStructuralCellKey& Key) const
+        {
+            size_t Result = std::hash<int64>{}(Key.X);
+            Result ^= std::hash<int64>{}(Key.Y) +
+                0x9e3779b97f4a7c15ULL + (Result << 6) + (Result >> 2);
+            Result ^= std::hash<int64>{}(Key.Z) +
+                0x9e3779b97f4a7c15ULL + (Result << 6) + (Result >> 2);
+            Result ^= std::hash<uint8>{}(Key.BuildingType) +
+                0x9e3779b97f4a7c15ULL + (Result << 6) + (Result >> 2);
+            return Result;
+        }
+    };
+
+    int CountConnectedHumanControllers()
+    {
+        int Count = 0;
+        auto World = UWorld::GetWorld();
+        auto Driver = World
+            ? static_cast<UNetDriver*>(World->NetDriver) : nullptr;
+        if (!Driver)
+            return Count;
+        for (auto Connection : Driver->ClientConnections)
+        {
+            auto Controller = Connection && Connection->PlayerController
+                ? Connection->PlayerController->Cast<
+                    AFortPlayerControllerAthena>() : nullptr;
+            if (!Controller)
+                continue;
+            auto PlayerState = Controller->PlayerState;
+            if (PlayerState && PlayerState->HasbIsABot() &&
+                PlayerState->bIsABot)
+            {
+                continue;
+            }
+            ++Count;
+        }
+        return Count;
+    }
+
+    bool IsPresetOwnedPlayerBuild(
+        const ABuildingSMActor* Build,
+        const AFortPlayerControllerAthena* Controller = nullptr)
+    {
+        if (!Build || !Build->bPlayerPlaced || Build->bDestroyed ||
+            (Build->HasbActorIsBeingDestroyed() &&
+             Build->bActorIsBeingDestroyed) ||
+            (Build->HasbNetStartup() && Build->bNetStartup))
+        {
+            return false;
+        }
+
+        if (!Controller || !Controller->PlayerState)
+            return false;
+        auto PlayerState = static_cast<const AFortPlayerStateAthena*>(
+            Controller->PlayerState);
+        if (Build->HasOwnerPersistentID() &&
+            PlayerState->HasWorldPlayerId())
+        {
+            return Build->OwnerPersistentID ==
+                PlayerState->WorldPlayerId;
+        }
+
+        // Some old builds do not expose persistent ownership. Prefer a native
+        // Owner relationship where available and adopt unattributed player
+        // builds only when there is no second human they could belong to.
+        if (Build->HasOwner() && Build->Owner)
+        {
+            if (Build->Owner == Controller ||
+                Build->Owner == Controller->Pawn ||
+                Build->Owner == Controller->MyFortPawn)
+            {
+                return true;
+            }
+            if (SDK::MemReadable(Build->Owner, 0x40) &&
+                Build->Owner->Index >= 0 &&
+                Build->Owner->Index < TUObjectArray::Num() &&
+                TUObjectArray::GetObjectByIndex(
+                    Build->Owner->Index) == Build->Owner)
+            {
+                if (auto OwnerController =
+                    Build->Owner->Cast<AFortPlayerControllerAthena>())
+                {
+                    return OwnerController == Controller;
+                }
+                if (auto OwnerPawn =
+                    Build->Owner->Cast<AFortPlayerPawnAthena>())
+                {
+                    return OwnerPawn->Controller == Controller;
+                }
+            }
+        }
+        return CountConnectedHumanControllers() <= 1;
+    }
+
+    bool TryGetStructuralCellKey(
+        const ABuildingSMActor* Build, FStructuralCellKey& OutKey)
+    {
+        if (!Build || !Build->HasBuildingType())
+            return false;
+        const FVector Location = Build->K2_GetActorLocation();
+        if (!std::isfinite(Location.X) || !std::isfinite(Location.Y) ||
+            !std::isfinite(Location.Z))
+        {
+            return false;
+        }
+        OutKey.X = static_cast<int64>(std::llround(Location.X));
+        OutKey.Y = static_cast<int64>(std::llround(Location.Y));
+        OutKey.Z = static_cast<int64>(std::llround(Location.Z));
+        OutKey.BuildingType = Build->BuildingType;
+        return true;
+    }
+
+    bool TryGetStructuralCellKey(
+        const FPendingTrickshotBuild& SavedBuild,
+        FStructuralCellKey& OutKey)
+    {
+        auto SavedClass = SavedBuild.Class.Get();
+        auto DefaultBuild = SavedClass
+            ? static_cast<ABuildingSMActor*>(SavedClass->GetDefaultObj())
+            : nullptr;
+        if (!DefaultBuild || !DefaultBuild->HasBuildingType() ||
+            !std::isfinite(SavedBuild.Location.X) ||
+            !std::isfinite(SavedBuild.Location.Y) ||
+            !std::isfinite(SavedBuild.Location.Z))
+        {
+            return false;
+        }
+        OutKey.X = static_cast<int64>(std::llround(SavedBuild.Location.X));
+        OutKey.Y = static_cast<int64>(std::llround(SavedBuild.Location.Y));
+        OutKey.Z = static_cast<int64>(std::llround(SavedBuild.Location.Z));
+        OutKey.BuildingType = DefaultBuild->BuildingType;
+        return true;
+    }
+
+    bool IsPortableSupportAnchor(ABuildingSMActor* Build)
+    {
+        if (!Build)
+            return false;
+        if ((Build->HasbSupportedDirectly() && Build->bSupportedDirectly) ||
+            (Build->HasbForciblyStructurallySupported() &&
+             Build->bForciblyStructurallySupported) ||
+            (Build->HasSavedDirectlySupportedStatus() &&
+             Build->SavedDirectlySupportedStatus == 1))
+        {
+            return true;
+        }
+        return Build->GetFunction("IsSupportedByWorld") &&
+            Build->IsSupportedByWorld();
+    }
+
+    int CanonicalizePendingStructuralCells(
+        std::vector<FPendingTrickshotBuild>& Pending)
+    {
+        const int Count = static_cast<int>(Pending.size());
+        std::vector<int> Alias(Count);
+        std::vector<bool> Keep(Count, true);
+        for (int Index = 0; Index < Count; ++Index)
+            Alias[Index] = Index;
+
+        std::unordered_map<FStructuralCellKey, int,
+            FStructuralCellKeyHash> LatestByCell;
+        int Removed = 0;
+        for (int Index = 0; Index < Count; ++Index)
+        {
+            if (Pending[Index].IsTrap)
+                continue;
+            FStructuralCellKey Key;
+            if (!TryGetStructuralCellKey(Pending[Index], Key))
+                continue;
+            auto Existing = LatestByCell.find(Key);
+            if (Existing != LatestByCell.end())
+            {
+                const int Previous = Existing->second;
+                Keep[Previous] = false;
+                Alias[Previous] = Index;
+                Existing->second = Index;
+                ++Removed;
+                SDK::DbgLog(
+                    "[TrickshotLoad] duplicate structural cell old=%d new=%d oldClass=%s newClass=%s\n",
+                    Previous, Index, Pending[Previous].ClassPath.c_str(),
+                    Pending[Index].ClassPath.c_str());
+            }
+            else
+            {
+                LatestByCell.emplace(Key, Index);
+            }
+        }
+        if (!Removed)
+            return 0;
+
+        auto ResolveAlias = [&](int Index)
+        {
+            int Guard = 0;
+            while (Index >= 0 && Index < Count && Alias[Index] != Index &&
+                Guard++ < Count)
+            {
+                Index = Alias[Index];
+            }
+            return Index;
+        };
+
+        std::vector<int> OldToNew(Count, -1);
+        int NewCount = 0;
+        for (int Index = 0; Index < Count; ++Index)
+        {
+            if (Keep[Index])
+                OldToNew[Index] = NewCount++;
+        }
+
+        std::vector<FPendingTrickshotBuild> Canonical;
+        Canonical.reserve(NewCount);
+        for (int Index = 0; Index < Count; ++Index)
+        {
+            if (!Keep[Index])
+                continue;
+            auto SavedBuild = std::move(Pending[Index]);
+            if (SavedBuild.IsTrap && !SavedBuild.HasExternalParent &&
+                SavedBuild.Parent >= 0 && SavedBuild.Parent < Count)
+            {
+                const int CanonicalParent = ResolveAlias(SavedBuild.Parent);
+                SavedBuild.Parent = CanonicalParent >= 0 &&
+                    CanonicalParent < Count
+                    ? OldToNew[CanonicalParent] : SavedBuild.Parent;
+            }
+            Canonical.push_back(std::move(SavedBuild));
+        }
+        Pending = std::move(Canonical);
+        return Removed;
+    }
+
+    void EnsurePortableSupportAnchors(
+        std::vector<FPendingTrickshotBuild>& Pending)
+    {
+        std::unordered_map<uint64, double> MinimumZByColumn;
+        auto ColumnKey = [](const FVector& Location)
+        {
+            const auto X = static_cast<uint32>(
+                static_cast<int32>(std::llround(Location.X)));
+            const auto Y = static_cast<uint32>(
+                static_cast<int32>(std::llround(Location.Y)));
+            return (static_cast<uint64>(X) << 32) |
+                static_cast<uint64>(Y);
+        };
+        for (const auto& SavedBuild : Pending)
+        {
+            if (SavedBuild.IsTrap || SavedBuild.HasSavedSupportAnchor)
+                continue;
+            auto [It, Inserted] = MinimumZByColumn.try_emplace(
+                ColumnKey(SavedBuild.Location), SavedBuild.Location.Z);
+            if (!Inserted)
+                It->second = (std::min)(It->second, SavedBuild.Location.Z);
+        }
+
+        int AddedAnchors = 0;
+        for (auto& SavedBuild : Pending)
+        {
+            if (SavedBuild.IsTrap || SavedBuild.HasSavedSupportAnchor)
+                continue;
+            const auto It = MinimumZByColumn.find(
+                ColumnKey(SavedBuild.Location));
+            if (It != MinimumZByColumn.end() &&
+                std::abs(SavedBuild.Location.Z - It->second) <= 1.0)
+            {
+                SavedBuild.SupportAnchor = true;
+                ++AddedAnchors;
+            }
+        }
+        if (AddedAnchors > 0)
+        {
+            SDK::DbgLog(
+                "[TrickshotLoad] retained portable support for %d legacy structural records\n",
+                AddedAnchors);
+        }
+    }
+
+    double RotationDelta(double Left, double Right)
+    {
+        double Delta = std::fmod(std::abs(Left - Right), 360.0);
+        return Delta > 180.0 ? 360.0 - Delta : Delta;
+    }
+
+    ABuildingSMActor* ResolveExternalTrickshotParent(
+        const FPendingTrickshotBuild& SavedBuild,
+        const std::vector<ABuildingSMActor*>& Candidates)
+    {
+        ABuildingSMActor* ExactMatch = nullptr;
+        ABuildingSMActor* FallbackMatch = nullptr;
+        int FallbackMatches = 0;
+        for (auto Candidate : Candidates)
+        {
+            if (!Candidate ||
+                (Candidate->bPlayerPlaced &&
+                 !(Candidate->HasbNetStartup() &&
+                   Candidate->bNetStartup)) ||
+                Candidate->bDestroyed ||
+                (Candidate->HasbActorIsBeingDestroyed() &&
+                 Candidate->bActorIsBeingDestroyed) ||
+                Candidate->Cast<ABuildingTrap>())
+            {
+                continue;
+            }
+
+            if (SavedBuild.ExternalParentBuildingType >= 0 &&
+                (!Candidate->HasBuildingType() ||
+                 Candidate->BuildingType !=
+                    static_cast<uint8>(
+                        SavedBuild.ExternalParentBuildingType)))
+            {
+                continue;
+            }
+
+            const FVector Location = Candidate->K2_GetActorLocation();
+            const double DX = Location.X - SavedBuild.ExternalParentLocation.X;
+            const double DY = Location.Y - SavedBuild.ExternalParentLocation.Y;
+            const double DZ = Location.Z - SavedBuild.ExternalParentLocation.Z;
+            if (DX * DX + DY * DY + DZ * DZ > 4.0)
+                continue;
+
+            const FRotator Rotation = Candidate->K2_GetActorRotation();
+            if (RotationDelta(Rotation.Pitch,
+                    SavedBuild.ExternalParentRotation.Pitch) > 1.0 ||
+                RotationDelta(Rotation.Yaw,
+                    SavedBuild.ExternalParentRotation.Yaw) > 1.0 ||
+                RotationDelta(Rotation.Roll,
+                    SavedBuild.ExternalParentRotation.Roll) > 1.0)
+            {
+                continue;
+            }
+
+            const std::string ClassPath = FStringToStdString(
+                UKismetSystemLibrary::GetPathName(Candidate->Class));
+            if (ClassPath != SavedBuild.ExternalParentClassPath)
+                continue;
+
+            if (!SavedBuild.ExternalParentActorPath.empty())
+            {
+                const std::string ActorPath = FStringToStdString(
+                    UKismetSystemLibrary::GetPathName(Candidate));
+                if (ActorPath == SavedBuild.ExternalParentActorPath)
+                {
+                    if (ExactMatch && ExactMatch != Candidate)
+                        return nullptr;
+                    ExactMatch = Candidate;
+                    continue;
+                }
+            }
+
+            ++FallbackMatches;
+            if (FallbackMatches == 1)
+                FallbackMatch = Candidate;
+        }
+        if (ExactMatch)
+            return ExactMatch;
+        return FallbackMatches == 1 ? FallbackMatch : nullptr;
+    }
+
+    bool IsLiveTrickshotAsset(
+        const UObject* Object, const UClass* ExpectedClass)
+    {
+        if (!Object || !ExpectedClass ||
+            !SDK::MemReadable(Object, 0x40))
+        {
+            return false;
+        }
+        const int32 ObjectIndex = static_cast<int32>(Object->Index);
+        if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num() ||
+            TUObjectArray::GetObjectByIndex(ObjectIndex) != Object)
+        {
+            return false;
+        }
+        return Object->IsA(ExpectedClass);
+    }
+
+    bool IsLiveTrackedSpawnedActor(
+        AActor* Actor, UWorld* ExpectedWorld)
+    {
+        if (!ExpectedWorld ||
+            !IsLiveTrickshotAsset(Actor, AActor::StaticClass()) ||
+            (Actor->HasbActorIsBeingDestroyed() &&
+             Actor->bActorIsBeingDestroyed))
+        {
+            return false;
+        }
+        if (auto Build = Actor->Cast<ABuildingSMActor>())
+        {
+            if (Build->HasbDestroyed() && Build->bDestroyed)
+                return false;
+        }
+        return true;
+    }
+
+    std::string GetCanonicalTrackedClassPath(UClass* Class)
+    {
+        if (!Class)
+            return {};
+        if (VersionInfo.FortniteVersion < 32.00)
+        {
+            return FStringToStdString(
+                UKismetSystemLibrary::GetPathName(Class));
+        }
+        auto Outer = Class->Outer;
+        if (!Outer)
+            return {};
+        const auto OuterName = Outer->Name.ToString();
+        const auto ClassName = Class->Name.ToString();
+        if (OuterName.empty() || ClassName.empty())
+            return {};
+        return std::string(OuterName.c_str()) + "." +
+            std::string(ClassName.c_str());
+    }
+
+    bool IsUnsafeTrickshotLifecycleClass(UClass* Class)
+    {
+        auto DefaultActor = Class
+            ? static_cast<AActor*>(Class->GetDefaultObj()) : nullptr;
+        return !DefaultActor ||
+            !DefaultActor->IsA(AActor::StaticClass()) ||
+            DefaultActor->IsA(
+                AFortPlayerControllerAthena::StaticClass()) ||
+            DefaultActor->IsA(
+                AFortPlayerPawnAthena::StaticClass()) ||
+            DefaultActor->IsA(
+                AFortPlayerStateAthena::StaticClass()) ||
+            DefaultActor->IsA(AFortGameMode::StaticClass()) ||
+            DefaultActor->IsA(AFortGameStateAthena::StaticClass());
+    }
+
+    void PruneTrackedSpawnedActors(UWorld* CurrentWorld)
+    {
+        std::erase_if(
+            GTrackedSpawnedActors,
+            [&](const FTrackedSpawnedActor& Entry)
+            {
+                return Entry.World.Get() != CurrentWorld ||
+                    !IsLiveTrackedSpawnedActor(
+                        Entry.Actor.Get(), CurrentWorld) ||
+                    !Entry.Controller.Get() || Entry.ClassPath.empty();
+            });
+    }
+
+    bool RegisterSpawnedActorInternal(
+        AActor* Actor,
+        AFortPlayerControllerAthena* Controller,
+        const std::string& CanonicalClassPath,
+        bool RequireEnabledTab)
+    {
+        // Both UI switches are sampled at successful command-spawn time.
+        // Turning either off later does not silently forget an existing setup.
+        if ((RequireEnabledTab &&
+             !FConfiguration::bEnableTrickshotTab.load(
+                 std::memory_order_acquire)) ||
+            (RequireEnabledTab &&
+             !FConfiguration::bSaveAndTrackSpawnedObjects.load(
+                 std::memory_order_acquire)) ||
+            !Actor || !Controller || CanonicalClassPath.empty())
+        {
+            return false;
+        }
+
+        auto World = UWorld::GetWorld();
+        if (!IsLiveTrackedSpawnedActor(Actor, World) ||
+            !IsLiveTrickshotAsset(
+                Controller,
+                AFortPlayerControllerAthena::StaticClass()))
+        {
+            return false;
+        }
+        if (IsUnsafeTrickshotLifecycleClass(Actor->Class))
+        {
+            SDK::DbgLog(
+                "[TrickshotSpawn] rejected lifecycle actor=%p class=%s\n",
+                Actor, CanonicalClassPath.c_str());
+            return false;
+        }
+        if (CanonicalClassPath.find('\0') != std::string::npos ||
+            GetCanonicalTrackedClassPath(Actor->Class) !=
+                CanonicalClassPath)
+        {
+            SDK::DbgLog(
+                "[TrickshotSpawn] rejected noncanonical class actor=%p class=%s\n",
+                Actor, CanonicalClassPath.c_str());
+            return false;
+        }
+
+        PruneTrackedSpawnedActors(World);
+        for (auto& Entry : GTrackedSpawnedActors)
+        {
+            if (Entry.Actor.Get() == Actor)
+            {
+                Entry.World = TWeakObjectPtr<UWorld>(World);
+                Entry.Controller =
+                    TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
+                Entry.ClassPath = CanonicalClassPath;
+                return true;
+            }
+        }
+        const size_t OwnedActorCount = static_cast<size_t>(std::count_if(
+            GTrackedSpawnedActors.begin(), GTrackedSpawnedActors.end(),
+            [&](const FTrackedSpawnedActor& Entry)
+            {
+                return Entry.World.Get() == World &&
+                    Entry.Controller.Get() == Controller;
+            }));
+        if (OwnedActorCount >= kMaximumTrickshotSpawnedObjects)
+        {
+            SDK::DbgLog(
+                "[TrickshotSpawn] tracking limit reached controller=%p limit=%zu class=%s\n",
+                Controller, kMaximumTrickshotSpawnedObjects,
+                CanonicalClassPath.c_str());
+            return false;
+        }
+        GTrackedSpawnedActors.push_back({
+            TWeakObjectPtr<UWorld>(World),
+            TWeakObjectPtr<AActor>(Actor),
+            TWeakObjectPtr<AFortPlayerControllerAthena>(Controller),
+            CanonicalClassPath });
+        SDK::DbgLog(
+            "[TrickshotSpawn] registered actor=%p controller=%p class=%s\n",
+            Actor, Controller, CanonicalClassPath.c_str());
+        return true;
+    }
+
+    void RegisterSpawnedActor(
+        AActor* Actor,
+        AFortPlayerControllerAthena* Controller,
+        const std::string& CanonicalClassPath)
+    {
+        (void)RegisterSpawnedActorInternal(
+            Actor, Controller, CanonicalClassPath, true);
+    }
+
+    const UObject* FindTrickshotAssetGuarded(
+        const wchar_t* Path, const UClass* ExpectedClass)
+    {
+        if (GTrickshotPackageFindDisabled || !Path || !*Path ||
+            !ExpectedClass || !SDK::Offsets::StaticFindObject)
+        {
+            return nullptr;
+        }
+
+        ++GGuardedNativeCallDepth;
+        const UObject* Result = nullptr;
+        bool bFaulted = false;
+        __try
+        {
+            Result = SDK::StaticFindObject(Path, ExpectedClass);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            Result = nullptr;
+            bFaulted = true;
+        }
+        --GGuardedNativeCallDepth;
+        if (bFaulted)
+        {
+            GTrickshotPackageFindDisabled = true;
+            SDK::DbgLog(
+                "[TrickshotLoad] StaticFindObject(%ls) faulted; resident lookup disabled\n",
+                Path);
+        }
+        return IsLiveTrickshotAsset(Result, ExpectedClass)
+            ? Result : nullptr;
+    }
+
+    const UObject* LoadTrickshotAssetGuarded(
+        const wchar_t* Path, const UClass* ExpectedClass)
+    {
+        if (GTrickshotPackageLoadDisabled || !Path || !*Path ||
+            !ExpectedClass || !SDK::Offsets::StaticLoadObject)
+        {
+            return nullptr;
+        }
+
+        ++GGuardedNativeCallDepth;
+        const UObject* Result = nullptr;
+        bool bFaulted = false;
+        __try
+        {
+            Result = SDK::StaticLoadObject(Path, ExpectedClass);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            Result = nullptr;
+            bFaulted = true;
+        }
+        --GGuardedNativeCallDepth;
+        if (bFaulted)
+        {
+            GTrickshotPackageLoadDisabled = true;
+            SDK::DbgLog(
+                "[TrickshotLoad] StaticLoadObject(%ls) faulted; package fallback disabled\n",
+                Path);
+        }
+        else if (!IsLiveTrickshotAsset(Result, ExpectedClass))
+        {
+            SDK::DbgLog(
+                "[TrickshotLoad] StaticLoadObject returned no valid asset path=%ls expected=%p\n",
+                Path, ExpectedClass);
+        }
+        return IsLiveTrickshotAsset(Result, ExpectedClass)
+            ? Result : nullptr;
+    }
+
+    UClass* ResolveTrickshotTireClass(bool bAllowPackageLoad)
+    {
+        auto ClassObject = const_cast<UObject*>(
+            FindTrickshotAssetGuarded(
+                kTrickshotTireClassPathWide,
+                UClass::StaticClass()));
+        if (!ClassObject && bAllowPackageLoad)
+        {
+            ClassObject = const_cast<UObject*>(
+                LoadTrickshotAssetGuarded(
+                    kTrickshotTireClassPathWide,
+                    UClass::StaticClass()));
+        }
+        auto Class = IsLiveTrickshotAsset(
+            ClassObject, UClass::StaticClass())
+            ? static_cast<UClass*>(ClassObject) : nullptr;
+        auto DefaultActor = Class
+            ? static_cast<AActor*>(Class->GetDefaultObj()) : nullptr;
+        return DefaultActor && DefaultActor->IsA(AActor::StaticClass())
+            ? Class : nullptr;
+    }
+
+    bool IsTrackedTrickshotPropClass(
+        UClass* Class,
+        const std::vector<TWeakObjectPtr<UClass>>& TrackedClasses)
+    {
+        if (!Class)
+            return false;
+        for (const auto& Tracked : TrackedClasses)
+        {
+            if (Tracked.Get() == Class)
+                return true;
+        }
+        return false;
+    }
+
+    bool IsOwnedTrickshotTire(
+        AActor* Actor,
+        UClass* TireClass,
+        AFortPlayerControllerAthena* Controller)
+    {
+        if (!Actor || Actor->Class != TireClass ||
+            (Actor->HasbActorIsBeingDestroyed() &&
+             Actor->bActorIsBeingDestroyed) ||
+            (Actor->HasbNetStartup() && Actor->bNetStartup))
+        {
+            return false;
+        }
+
+        if (!Controller)
+            return false;
+
+        auto ResolveOwner = [&](AActor* Candidate)
+        {
+            for (int Depth = 0; Candidate && Depth < 6; ++Depth)
+            {
+                if (!IsLiveTrickshotAsset(
+                        Candidate, AActor::StaticClass()))
+                {
+                    return 0;
+                }
+                if (Candidate == Controller ||
+                    Candidate == Controller->Pawn ||
+                    Candidate == Controller->MyFortPawn)
+                {
+                    return 1;
+                }
+                if (auto OwnerController =
+                    Candidate->Cast<AFortPlayerControllerAthena>())
+                {
+                    return OwnerController == Controller ? 1 : -1;
+                }
+                if (auto OwnerPawn =
+                    Candidate->Cast<AFortPlayerPawnAthena>())
+                {
+                    if (OwnerPawn->Controller)
+                        return OwnerPawn->Controller == Controller ? 1 : -1;
+                }
+                Candidate = Candidate->HasOwner()
+                    ? Candidate->Owner : nullptr;
+            }
+            return 0;
+        };
+
+        const int OwnerResult = ResolveOwner(
+            Actor->HasOwner() ? Actor->Owner : nullptr);
+        if (OwnerResult != 0)
+            return OwnerResult > 0;
+        const int InstigatorResult = ResolveOwner(
+            Actor->HasInstigator() ? Actor->Instigator : nullptr);
+        if (InstigatorResult != 0)
+            return InstigatorResult > 0;
+
+        // Older command-spawned tires have no ownership metadata. They are
+        // safe to adopt only in a one-human session; in multiplayer an
+        // unowned tire cannot be attributed without risking another player.
+        return CountConnectedHumanControllers() <= 1;
+    }
+
+    void CleanupPartialLoad()
+    {
+        if (!GLoadJob.Active ||
+            GLoadJob.World.Get() != UWorld::GetWorld())
+        {
+            return;
+        }
+
+        // Free-standing spawned objects may overlap or depend on the restored
+        // structure, so remove them before attached children and supports.
+        for (auto It = GLoadJob.SpawnedProps.rbegin();
+            It != GLoadJob.SpawnedProps.rend(); ++It)
+        {
+            auto Actor = It->Get();
+            if (Actor &&
+                !(Actor->HasbActorIsBeingDestroyed() &&
+                  Actor->bActorIsBeingDestroyed))
+            {
+                ForgetTrackedSpawnedActor(Actor);
+                Actor->K2_DestroyActor();
+            }
+        }
+
+        // Traps and other attached children must die before their supports so
+        // a native parent cascade cannot make this snapshot revisit a child.
+        for (int Index = 0;
+            Index < static_cast<int>(GLoadJob.Pending.size()); ++Index)
+        {
+            if (!GLoadJob.Pending[Index].IsTrap)
+                continue;
+            auto Actor = GLoadJob.SpawnedBuilds[Index].Get();
+            if (Actor && !Actor->bDestroyed &&
+                !(Actor->HasbActorIsBeingDestroyed() &&
+                  Actor->bActorIsBeingDestroyed))
+                Actor->SilentDie(true);
+        }
+        for (auto It = GLoadJob.StructuralOrder.rbegin();
+            It != GLoadJob.StructuralOrder.rend(); ++It)
+        {
+            const int Index = *It;
+            auto Actor = GLoadJob.SpawnedBuilds[Index].Get();
+            if (Actor && !Actor->bDestroyed &&
+                !(Actor->HasbActorIsBeingDestroyed() &&
+                  Actor->bActorIsBeingDestroyed))
+                Actor->SilentDie(true);
+        }
+    }
+
+    void PublishResult(
+        EAsyncOperation Operation,
+        bool Succeeded,
+        const std::string& Name,
+        const std::string& Message)
+    {
+        GAsyncResultOperation = Operation;
+        GAsyncResultSucceeded = Succeeded;
+        strncpy_s(
+            GAsyncResultName, Name.c_str(), _TRUNCATE);
+        strncpy_s(
+            GAsyncResultMessage, Message.c_str(), _TRUNCATE);
+        GAsyncState.store(
+            static_cast<int>(EAsyncState::Completed),
+            std::memory_order_release);
+    }
+
+    void PumpActiveLoad()
+    {
+        const std::string Name = GLoadJob.Name;
+        std::string ResultMessage;
+        ELoadPumpResult Result = ELoadPumpResult::Failed;
+        try
+        {
+            Result = PumpLoad(ResultMessage);
+        }
+        catch (const std::exception& Error)
+        {
+            ResultMessage =
+                std::string("Failed to load trickshot: ") +
+                Error.what();
+        }
+        catch (...)
+        {
+            ResultMessage = "Failed to load trickshot.";
+        }
+
+        if (Result == ELoadPumpResult::Running)
+            return;
+
+        const bool Succeeded =
+            Result == ELoadPumpResult::Succeeded;
+        if (!Succeeded)
+            CleanupPartialLoad();
+        ReleaseTrickshotAssetRoots(GLoadJob.TemporaryRootedAssets);
+        GLoadJob = FTrickshotLoadJob{};
+        PublishResult(
+            EAsyncOperation::Load, Succeeded,
+            Name, ResultMessage);
+    }
+
+    bool RequestOperation(
+        EAsyncOperation Operation,
+        const char* Name,
+        std::string& ImmediateMessage)
+    {
+        int Expected = static_cast<int>(EAsyncState::Idle);
+        if (!GAsyncState.compare_exchange_strong(
+                Expected,
+                static_cast<int>(EAsyncState::Publishing),
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+            ImmediateMessage =
+                "A trickshot save or load is already in progress.";
+            return false;
+        }
+
+        GAsyncOperation = Operation;
+        strncpy_s(GAsyncName, Name ? Name : "", _TRUNCATE);
+        GAsyncState.store(
+            static_cast<int>(EAsyncState::Pending),
+            std::memory_order_release);
+        ImmediateMessage = Operation == EAsyncOperation::Save
+            ? "Saving trickshot..."
+            : "Loading trickshot...";
+        return true;
+    }
+
+    bool RequestSave(
+        const char* Name,
+        std::string& ImmediateMessage)
+    {
+        return RequestOperation(
+            EAsyncOperation::Save, Name, ImmediateMessage);
+    }
+
+    bool RequestLoad(
+        const std::string& Name,
+        std::string& ImmediateMessage)
+    {
+        return RequestOperation(
+            EAsyncOperation::Load, Name.c_str(), ImmediateMessage);
+    }
+
+    bool IsBusy()
+    {
+        return GAsyncState.load(std::memory_order_acquire) !=
+            static_cast<int>(EAsyncState::Idle);
+    }
+
+    bool ConsumeResult(
+        EAsyncOperation& Operation,
+        bool& Succeeded,
+        std::string& Name,
+        std::string& Message)
+    {
+        if (GAsyncState.load(std::memory_order_acquire) !=
+            static_cast<int>(EAsyncState::Completed))
+        {
+            return false;
+        }
+
+        Operation = GAsyncResultOperation;
+        Succeeded = GAsyncResultSucceeded;
+        Name = GAsyncResultName;
+        Message = GAsyncResultMessage;
+        GAsyncState.store(
+            static_cast<int>(EAsyncState::Idle),
+            std::memory_order_release);
+        return true;
+    }
+
+    void GameThreadTick()
+    {
+        const int CurrentState =
+            GAsyncState.load(std::memory_order_acquire);
+        if (CurrentState == static_cast<int>(EAsyncState::Running))
+        {
+            if (GAsyncOperation == EAsyncOperation::Load &&
+                GLoadJob.Active)
+            {
+                PumpActiveLoad();
+            }
+            return;
+        }
+
+        int Expected = static_cast<int>(EAsyncState::Pending);
+        if (!GAsyncState.compare_exchange_strong(
+                Expected,
+                static_cast<int>(EAsyncState::Running),
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+            return;
+        }
+
+        const EAsyncOperation Operation = GAsyncOperation;
+        const std::string Name = GAsyncName;
+        std::string ResultMessage;
+        bool Succeeded = false;
+        try
+        {
+            if (Operation == EAsyncOperation::Save)
+                Succeeded = Save(Name.c_str(), ResultMessage);
+            else if (Operation == EAsyncOperation::Load)
+            {
+                Succeeded = Load(Name, ResultMessage);
+                if (Succeeded && GLoadJob.Active)
+                {
+                    // Cleanup is the first staged phase. Keeping the state at
+                    // Running prevents the render thread from publishing a
+                    // result or accepting another operation between layers.
+                    PumpActiveLoad();
+                    return;
+                }
+            }
+            else
+                ResultMessage = "Invalid trickshot operation.";
+        }
+        catch (const std::exception& Error)
+        {
+            ResultMessage =
+                std::string("Trickshot operation failed: ") +
+                Error.what();
+        }
+        catch (...)
+        {
+            ResultMessage = "Trickshot operation failed.";
+        }
+
+        PublishResult(
+            Operation, Succeeded, Name, ResultMessage);
+    }
 
     inline fs::path GetDirectory()
     {
@@ -6105,6 +7425,134 @@ namespace TrickshotManager
                 return static_cast<AFortPlayerControllerAthena*>(Connection->PlayerController);
         }
         return nullptr;
+    }
+
+    bool IsValidSavedWaypointLocation(const FVector& Location)
+    {
+        return std::isfinite(Location.X) &&
+            std::isfinite(Location.Y) &&
+            std::isfinite(Location.Z) &&
+            std::abs(Location.X) <= kMaximumTrickshotCoordinate &&
+            std::abs(Location.Y) <= kMaximumTrickshotCoordinate &&
+            std::abs(Location.Z) <= kMaximumTrickshotCoordinate;
+    }
+
+    bool SerializeWaypoints(
+        nlohmann::json& Root,
+        size_t& SavedWaypointCount,
+        std::string& Error)
+    {
+        SavedWaypointCount = 0;
+        auto Snapshot =
+            AFortPlayerControllerAthena::SnapshotWaypoints();
+        if (Snapshot.size() > kMaximumTrickshotWaypoints)
+        {
+            Error = "There are too many saved waypoints (maximum 256).";
+            return false;
+        }
+
+        std::vector<std::string> Phrases;
+        Phrases.reserve(Snapshot.size());
+        for (const auto& [Phrase, History] : Snapshot)
+            Phrases.push_back(Phrase);
+        std::sort(Phrases.begin(), Phrases.end());
+
+        nlohmann::json Saved = nlohmann::json::array();
+        for (const auto& Phrase : Phrases)
+        {
+            const auto Existing = Snapshot.find(Phrase);
+            if (Existing == Snapshot.end())
+                continue;
+            const auto& History = Existing->second;
+            if (Phrase.empty() ||
+                Phrase.size() > kMaximumTrickshotWaypointPhraseBytes ||
+                Phrase.find('\0') != std::string::npos ||
+                History.empty() ||
+                History.size() > kMaximumTrickshotWaypointHistory)
+            {
+                Error = "A saved waypoint name or history is invalid.";
+                return false;
+            }
+
+            nlohmann::json Locations = nlohmann::json::array();
+            for (const auto& Location : History)
+            {
+                if (!IsValidSavedWaypointLocation(Location))
+                {
+                    Error = "A saved waypoint location is invalid.";
+                    return false;
+                }
+                Locations.push_back({
+                    Location.X, Location.Y, Location.Z });
+            }
+            Saved.push_back({
+                { "phrase", Phrase },
+                { "locations", std::move(Locations) }
+            });
+            ++SavedWaypointCount;
+        }
+        Root["waypoints"] = std::move(Saved);
+        return true;
+    }
+
+    AFortPlayerControllerAthena::FWaypointMap ParseSavedWaypoints(
+        const nlohmann::json& Saved)
+    {
+        if (!Saved.is_array() ||
+            Saved.size() > kMaximumTrickshotWaypoints)
+        {
+            throw std::runtime_error("invalid trickshot waypoints");
+        }
+
+        AFortPlayerControllerAthena::FWaypointMap Result;
+        Result.reserve(Saved.size());
+        for (const auto& Record : Saved)
+        {
+            if (!Record.is_object() ||
+                !Record.contains("phrase") ||
+                !Record["phrase"].is_string() ||
+                !Record.contains("locations") ||
+                !Record["locations"].is_array())
+            {
+                throw std::runtime_error("invalid trickshot waypoint");
+            }
+            const std::string Phrase =
+                Record["phrase"].get<std::string>();
+            const auto& Locations = Record["locations"];
+            if (Phrase.empty() ||
+                Phrase.size() > kMaximumTrickshotWaypointPhraseBytes ||
+                Phrase.find('\0') != std::string::npos ||
+                Locations.empty() ||
+                Locations.size() > kMaximumTrickshotWaypointHistory ||
+                Result.contains(Phrase))
+            {
+                throw std::runtime_error("invalid trickshot waypoint");
+            }
+
+            AFortPlayerControllerAthena::FWaypointHistory History;
+            History.reserve(Locations.size());
+            for (const auto& SavedLocation : Locations)
+            {
+                if (!SavedLocation.is_array() ||
+                    SavedLocation.size() != 3)
+                {
+                    throw std::runtime_error(
+                        "invalid trickshot waypoint location");
+                }
+                FVector Location(
+                    SavedLocation[0].get<double>(),
+                    SavedLocation[1].get<double>(),
+                    SavedLocation[2].get<double>());
+                if (!IsValidSavedWaypointLocation(Location))
+                {
+                    throw std::runtime_error(
+                        "invalid trickshot waypoint location");
+                }
+                History.push_back(Location);
+            }
+            Result.emplace(Phrase, std::move(History));
+        }
+        return Result;
     }
 
     inline uint8 GuessAttachmentType(const std::string& ClassPath)
@@ -6172,65 +7620,477 @@ namespace TrickshotManager
     {
         const std::string SafeName = SanitizeName(Name);
         const auto Directory = GetDirectory();
-        if (SafeName.empty() || Directory.empty() || !UWorld::GetWorld())
+        auto Controller = GetHostController();
+        if (SafeName.empty() || Directory.empty() || !UWorld::GetWorld() ||
+            !Controller)
         {
-            Message = SafeName.empty() ? "Enter a trickshot name." : "Unable to access the trickshot folder or world.";
+            Message = SafeName.empty() ? "Enter a trickshot name." :
+                !Controller ? "A connected player is required to save builds." :
+                "Unable to access the trickshot folder or world.";
             return false;
         }
 
         nlohmann::json Root;
-        Root["version"] = 1;
+        Root["version"] = 7;
+        Root["fortnite"] = VersionInfo.FortniteVersion;
         Root["name"] = SafeName;
         Root["map"] = GetCurrentMapPath();
         Root["builds"] = nlohmann::json::array();
+        Root["props"] = nlohmann::json::array();
+
+        // The functional Tower tire is a free-standing gameplay prop. Keep it
+        // out of the structural/trap graph and persist its world transform in
+        // a dedicated allowlisted collection.
+        auto TireClass = ResolveTrickshotTireClass(false);
+
+        auto CurrentWorld = UWorld::GetWorld();
+        PruneTrackedSpawnedActors(CurrentWorld);
+        const bool bSaveSpawnedObjects =
+            FConfiguration::bSaveAndTrackSpawnedObjects.load(
+                std::memory_order_acquire);
+
+        // A Tower/Port-a-Fort deployment creates its functional tire from
+        // Blueprint rather than through the cheat summon command, so it never
+        // reaches RegisterTrickshotSpawnedActor. Adopt only this exact,
+        // allowlisted runtime class at save time. Ownership/net-startup checks
+        // keep natural map tires and another player's objects out, while the
+        // one-human fallback covers old versions that leave deployed tires
+        // unowned. Once adopted, later cleanup remains instance-based.
+        if (bSaveSpawnedObjects &&
+            FConfiguration::bEnableTrickshotTab.load(
+                std::memory_order_acquire) &&
+            TireClass)
+        {
+            TArray<AActor*> DeployedTires;
+            Utils::GetAll<AActor>(TireClass, DeployedTires);
+            for (auto Tire : DeployedTires)
+            {
+                if (!IsOwnedTrickshotTire(
+                        Tire, TireClass, Controller))
+                {
+                    continue;
+                }
+                (void)RegisterSpawnedActorInternal(
+                    Tire, Controller, kTrickshotTireClassPath, false);
+            }
+            DeployedTires.Free();
+        }
+
+        std::vector<FTrackedSpawnedActor*> TrackedProps;
+        std::unordered_set<AActor*> TrackedPropActors;
+        for (auto& Entry : GTrackedSpawnedActors)
+        {
+            auto Actor = Entry.Actor.Get();
+            if (Entry.World.Get() != CurrentWorld ||
+                Entry.Controller.Get() != Controller ||
+                !IsLiveTrackedSpawnedActor(Actor, CurrentWorld))
+            {
+                continue;
+            }
+            if (bSaveSpawnedObjects)
+                TrackedProps.push_back(&Entry);
+            TrackedPropActors.insert(Actor);
+        }
 
         TArray<ABuildingSMActor*> Builds;
         Utils::GetAll<ABuildingSMActor>(Builds);
         std::vector<ABuildingSMActor*> SavedBuilds;
+        std::unordered_map<ABuildingSMActor*, ABuildingSMActor*> AttachedParents;
 
-        // Traps and other decos are represented as actors attached to a supporting
-        // build. Trickshot files intentionally persist structural player builds only.
-        std::unordered_set<ABuildingSMActor*> AttachedActors;
+        auto RememberAttachment = [&](ABuildingSMActor* Parent, ABuildingSMActor* Child, bool bAuthoritative = false)
+        {
+            if (!Child || Child->bDestroyed ||
+                (Child->HasbActorIsBeingDestroyed() &&
+                 Child->bActorIsBeingDestroyed))
+                return;
+
+            if (bAuthoritative)
+            {
+                if (Parent && Parent != Child)
+                    AttachedParents[Child] = Parent;
+                else
+                    AttachedParents.erase(Child);
+            }
+            else if (Parent && Parent != Child)
+                AttachedParents.try_emplace(Child, Parent);
+        };
+
+        // Capture parent-side arrays as a compatibility fallback. They can retain
+        // stale children on some versions, so child-side links override them below.
         for (auto Build : Builds)
         {
-            if (!Build || !Build->HasAttachedBuildingActors())
+            if (!Build)
                 continue;
-            for (auto Attached : Build->AttachedBuildingActors)
-                if (Attached)
-                    AttachedActors.insert(Attached);
+
+            if (Build->HasAttachedBuildingActors())
+            {
+                for (auto Attached : Build->AttachedBuildingActors)
+                    RememberAttachment(Build, Attached);
+            }
         }
+
+        // ParentActorToAttachTo is the child-side structural relationship, while
+        // ABuildingTrap::AttachedTo is the trap's authoritative supporting build.
         for (auto Build : Builds)
         {
-            if (!Build || !Build->bPlayerPlaced || Build->bDestroyed || AttachedActors.contains(Build))
+            if (!Build)
                 continue;
 
+            if (Build->HasParentActorToAttachTo())
+                RememberAttachment(Build->ParentActorToAttachTo, Build, true);
+            if (auto Trap = Build->Cast<ABuildingTrap>())
+            {
+                if (Trap->HasAttachedTo())
+                    RememberAttachment(Trap->AttachedTo, Trap, true);
+            }
+        }
+
+        std::vector<ABuildingSMActor*> CandidateBuilds;
+        std::unordered_map<FStructuralCellKey, ABuildingSMActor*,
+            FStructuralCellKeyHash> CanonicalBuildByCell;
+        for (auto Build : Builds)
+        {
+            if (!IsPresetOwnedPlayerBuild(Build, Controller) ||
+                Build->Cast<ABuildingTrap>() ||
+                (TireClass && Build->Class == TireClass) ||
+                TrackedPropActors.contains(Build))
+                continue;
+
+            // ParentActorToAttachTo is also used by some edited structural
+            // pieces. Only exclude a child from the root list when it is an
+            // actual deco/trap; otherwise the save silently drops that build.
+            if (AttachedParents.contains(Build) &&
+                ABuildingSMActor::GetTrapDefinition(Build))
+                continue;
+
+            CandidateBuilds.push_back(Build);
+            FStructuralCellKey Key;
+            if (TryGetStructuralCellKey(Build, Key))
+                CanonicalBuildByCell[Key] = Build;
+        }
+        for (auto Build : CandidateBuilds)
+        {
+            FStructuralCellKey Key;
+            if (TryGetStructuralCellKey(Build, Key))
+            {
+                auto Canonical = CanonicalBuildByCell.find(Key);
+                if (Canonical != CanonicalBuildByCell.end() &&
+                    Canonical->second != Build)
+                {
+                    SDK::DbgLog(
+                        "[TrickshotSave] skipped stale duplicate actor=%p canonical=%p cell=(%lld,%lld,%lld) type=%u\n",
+                        Build, Canonical->second, Key.X, Key.Y, Key.Z,
+                        static_cast<unsigned>(Key.BuildingType));
+                    continue;
+                }
+            }
             SavedBuilds.push_back(Build);
         }
 
+        std::unordered_map<ABuildingSMActor*, int> SavedIndices;
         for (auto Build : SavedBuilds)
         {
-
             const FVector Location = Build->K2_GetActorLocation();
             const FRotator Rotation = Build->K2_GetActorRotation();
             const std::string ClassPath = FStringToStdString(UKismetSystemLibrary::GetPathName(Build->Class));
+            const int SavedIndex = static_cast<int>(Root["builds"].size());
+            SavedIndices.emplace(Build, SavedIndex);
             Root["builds"].push_back({
+                { "kind", "build" },
                 { "class", ClassPath },
                 { "location", { Location.X, Location.Y, Location.Z } },
                 { "rotation", { Rotation.Pitch, Rotation.Yaw, Rotation.Roll } },
                 { "level", Build->CurrentBuildingLevel },
+                { "mirrored", Build->HasbMirrored() && Build->bMirrored },
+                { "supportAnchor", IsPortableSupportAnchor(Build) },
                 { "parent", -1 }
             });
         }
+
+        int SavedTraps = 0;
+        bool bUnresolvedTrapDefinition = false;
+        bool bUnsupportedTrapParent = false;
+        std::unordered_set<ABuildingSMActor*> SerializedAttachments;
+        auto SerializeTrap = [&](ABuildingSMActor* Trap, ABuildingSMActor* Parent)
+        {
+            if (!Trap || !Parent ||
+                !IsPresetOwnedPlayerBuild(Trap, Controller) ||
+                (TireClass && Trap->Class == TireClass) ||
+                TrackedPropActors.contains(Trap) ||
+                Trap->bDestroyed ||
+                (Trap->HasbActorIsBeingDestroyed() &&
+                 Trap->bActorIsBeingDestroyed) ||
+                SerializedAttachments.contains(Trap))
+            {
+                return;
+            }
+
+            auto ParentIndex = SavedIndices.find(Parent);
+            if (ParentIndex == SavedIndices.end() &&
+                IsPresetOwnedPlayerBuild(Parent, Controller))
+            {
+                FStructuralCellKey ParentKey;
+                if (TryGetStructuralCellKey(Parent, ParentKey))
+                {
+                    auto Canonical = CanonicalBuildByCell.find(ParentKey);
+                    if (Canonical != CanonicalBuildByCell.end())
+                        ParentIndex = SavedIndices.find(Canonical->second);
+                }
+            }
+            const bool bExternalParent =
+                ParentIndex == SavedIndices.end() &&
+                (!Parent->bPlayerPlaced ||
+                 (Parent->HasbNetStartup() && Parent->bNetStartup)) &&
+                !Parent->bDestroyed &&
+                !(Parent->HasbActorIsBeingDestroyed() &&
+                  Parent->bActorIsBeingDestroyed);
+            if (ParentIndex == SavedIndices.end() && !bExternalParent)
+            {
+                bUnsupportedTrapParent = true;
+                SDK::DbgLog(
+                    "[TrickshotSave] trap=%p has unsupported parent=%p\n",
+                    Trap, Parent);
+                return;
+            }
+
+            auto BuildingTrap = Trap->Cast<ABuildingTrap>();
+            auto ItemDefinition =
+                ABuildingSMActor::GetTrapDefinition(Trap);
+            if (!BuildingTrap && !ItemDefinition)
+                return;
+            // Native trap placement needs the concrete definition, and its path
+            // is also what lets a later process recover a non-resident class.
+            if (!ItemDefinition)
+            {
+                bUnresolvedTrapDefinition = true;
+                return;
+            }
+
+            const FVector Location = Trap->K2_GetActorLocation();
+            const FRotator Rotation = Trap->K2_GetActorRotation();
+            const std::string ClassPath = FStringToStdString(
+                UKismetSystemLibrary::GetPathName(Trap->Class));
+            const std::string ItemDefinitionPath = ItemDefinition
+                ? FStringToStdString(
+                    UKismetSystemLibrary::GetPathName(ItemDefinition))
+                : std::string{};
+            if (ItemDefinitionPath.empty())
+            {
+                bUnresolvedTrapDefinition = true;
+                return;
+            }
+            const uint8 AttachmentType = Trap->HasBuildingAttachmentType()
+                ? Trap->BuildingAttachmentType
+                : GuessAttachmentType(ClassPath);
+            const int AttachmentSlot = Trap->HasBuildingAttachmentSlot()
+                ? static_cast<int>(Trap->BuildingAttachmentSlot) : -1;
+            int TrapLevel = -1;
+            int OriginalTrapLevel = -1;
+            if (BuildingTrap)
+            {
+                if (BuildingTrap->HasTrapLevel())
+                    TrapLevel = BuildingTrap->TrapLevel;
+                else if (BuildingTrap->GetFunction("GetTrapLevel"))
+                    TrapLevel = BuildingTrap->GetTrapLevel();
+                if (BuildingTrap->HasOriginalTrapLevel())
+                    OriginalTrapLevel = BuildingTrap->OriginalTrapLevel;
+            }
+
+            nlohmann::json SavedTrap = {
+                { "kind", "trap" },
+                { "class", ClassPath },
+                { "location", { Location.X, Location.Y, Location.Z } },
+                { "rotation", { Rotation.Pitch, Rotation.Yaw, Rotation.Roll } },
+                { "level", Trap->CurrentBuildingLevel },
+                { "parent", bExternalParent ? -1 : ParentIndex->second },
+                { "attachmentType", AttachmentType },
+                { "attachmentSlot", AttachmentSlot },
+                { "itemDefinition", ItemDefinitionPath }
+            };
+            if (bExternalParent)
+            {
+                const FVector ParentLocation =
+                    Parent->K2_GetActorLocation();
+                const FRotator ParentRotation =
+                    Parent->K2_GetActorRotation();
+                SavedTrap["externalParent"] = {
+                    { "actorPath", FStringToStdString(
+                        UKismetSystemLibrary::GetPathName(Parent)) },
+                    { "class", FStringToStdString(
+                        UKismetSystemLibrary::GetPathName(Parent->Class)) },
+                    { "location", {
+                        ParentLocation.X, ParentLocation.Y,
+                        ParentLocation.Z } },
+                    { "rotation", {
+                        ParentRotation.Pitch, ParentRotation.Yaw,
+                        ParentRotation.Roll } },
+                    { "buildingType", Parent->HasBuildingType()
+                        ? static_cast<int>(Parent->BuildingType) : -1 }
+                };
+            }
+            if (TrapLevel >= 0)
+                SavedTrap["trapLevel"] = TrapLevel;
+            if (OriginalTrapLevel >= 0)
+                SavedTrap["originalTrapLevel"] = OriginalTrapLevel;
+            Root["builds"].push_back(std::move(SavedTrap));
+            SerializedAttachments.insert(Trap);
+            ++SavedTraps;
+        };
+
+        for (auto Build : Builds)
+        {
+            auto Parent = AttachedParents.find(Build);
+            if (Parent != AttachedParents.end())
+                SerializeTrap(Build, Parent->second);
+        }
+        // A child can be present in the parent's array before it appears in the
+        // global actor snapshot. Include that valid relationship as well.
+        for (auto Parent : SavedBuilds)
+        {
+            if (!Parent->HasAttachedBuildingActors())
+                continue;
+            for (auto Attached : Parent->AttachedBuildingActors)
+            {
+                auto KnownParent = AttachedParents.find(Attached);
+                if (KnownParent != AttachedParents.end() &&
+                    KnownParent->second != Parent)
+                {
+                    continue;
+                }
+                SerializeTrap(Attached, Parent);
+            }
+        }
         Builds.Free();
 
-        std::ofstream File(Directory / (SafeName + ".json"), std::ios::trunc);
+        int SavedProps = 0;
+        std::unordered_set<AActor*> SerializedProps;
+        auto SerializeSpawnedObject = [&](
+            AActor* Actor, const std::string& ClassPath)
+        {
+            if (!Actor || ClassPath.empty() ||
+                !SerializedProps.insert(Actor).second ||
+                !IsLiveTrackedSpawnedActor(Actor, CurrentWorld))
+            {
+                return;
+            }
+
+            const FTransform Transform = Actor->GetTransform();
+            const FVector Location = Transform.Translation;
+            const FRotator Rotation = Transform.Rotation.Rotator();
+            const FVector Scale = Transform.Scale3D;
+            if (!std::isfinite(Location.X) ||
+                !std::isfinite(Location.Y) ||
+                !std::isfinite(Location.Z) ||
+                !std::isfinite(Rotation.Pitch) ||
+                !std::isfinite(Rotation.Yaw) ||
+                !std::isfinite(Rotation.Roll) ||
+                !std::isfinite(Scale.X) ||
+                !std::isfinite(Scale.Y) ||
+                !std::isfinite(Scale.Z))
+            {
+                return;
+            }
+
+            Root["props"].push_back({
+                { "kind", "spawnedActor" },
+                { "class", ClassPath },
+                { "location", {
+                    Location.X, Location.Y, Location.Z } },
+                { "rotation", {
+                    Rotation.Pitch, Rotation.Yaw, Rotation.Roll } },
+                { "scale", { Scale.X, Scale.Y, Scale.Z } }
+            });
+            ++SavedProps;
+        };
+        for (auto Tracked : TrackedProps)
+        {
+            auto Actor = Tracked ? Tracked->Actor.Get() : nullptr;
+            SerializeSpawnedObject(Actor, Tracked->ClassPath);
+        }
+
+        if (SavedBuilds.empty() && SavedProps == 0)
+        {
+            Message =
+                "There are no player-built structures or spawned objects to save.";
+            return false;
+        }
+        if (SavedProps >
+            static_cast<int>(kMaximumTrickshotSpawnedObjects))
+        {
+            Message =
+                "There are too many spawned objects to save (maximum 2048).";
+            return false;
+        }
+
+        if (bUnsupportedTrapParent)
+        {
+            Message = "Could not save because an attached trap belongs to a different player's unsupported build.";
+            return false;
+        }
+        if (bUnresolvedTrapDefinition)
+        {
+            Message = "Could not save because an attached trap's item definition is unavailable.";
+            return false;
+        }
+
+        size_t SavedWaypointCount = 0;
+        if (FConfiguration::bSaveWaypoints.load(
+                std::memory_order_acquire) &&
+            !SerializeWaypoints(
+                Root, SavedWaypointCount, Message))
+        {
+            return false;
+        }
+
+        const fs::path FinalPath = Directory / (SafeName + ".json");
+        const fs::path TemporaryPath = Directory /
+            (SafeName + ".json.tmp." +
+             std::to_string(GetCurrentProcessId()) + "." +
+             std::to_string(GetTickCount64()));
+        const std::string SerializedPreset = Root.dump(4);
+        std::ofstream File(
+            TemporaryPath,
+            std::ios::binary | std::ios::trunc);
         if (!File)
         {
             Message = "Could not create the trickshot file.";
             return false;
         }
-        File << Root.dump(4);
-        Message = "Saved " + std::to_string(Root["builds"].size()) + " player builds.";
+        File.write(
+            SerializedPreset.data(),
+            static_cast<std::streamsize>(SerializedPreset.size()));
+        File.flush();
+        const bool WriteSucceeded = File.good();
+        File.close();
+        if (!WriteSucceeded || File.fail())
+        {
+            std::error_code RemoveError;
+            fs::remove(TemporaryPath, RemoveError);
+            Message =
+                "Could not finish writing the trickshot file; the previous save was kept.";
+            return false;
+        }
+        if (!MoveFileExW(
+                TemporaryPath.c_str(),
+                FinalPath.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            std::error_code RemoveError;
+            fs::remove(TemporaryPath, RemoveError);
+            Message =
+                "Could not publish the trickshot file; the previous save was kept.";
+            return false;
+        }
+        Message = "Saved " + std::to_string(SavedBuilds.size()) +
+            " player builds, " + std::to_string(SavedTraps) +
+            " traps, and " + std::to_string(SavedProps) +
+            " spawned objects";
+        if (Root.contains("waypoints"))
+        {
+            Message += ", plus " +
+                std::to_string(SavedWaypointCount) + " waypoints";
+        }
+        Message += ".";
         return true;
     }
 
@@ -6259,137 +8119,697 @@ namespace TrickshotManager
                 Message = "This trickshot was saved on a different map.";
                 return false;
             }
-
-            struct PendingBuild { UClass* Class; FVector Location; FRotator Rotation; int Level; int Parent; uint8 AttachmentType; std::string ItemDefinition; };
-            std::vector<PendingBuild> Pending;
-            for (const auto& SavedBuild : Root["builds"])
+            if (Root.contains("props") && !Root["props"].is_array())
+                throw std::runtime_error("invalid trickshot props");
+            if (Root.contains("waypoints") &&
+                !Root["waypoints"].is_array())
+                throw std::runtime_error("invalid trickshot waypoints");
+            const int SchemaVersion = Root.value("version", 1);
+            if (SchemaVersion < 1 || SchemaVersion > 7)
+                throw std::runtime_error("unsupported trickshot schema");
+            if (SchemaVersion < 7 &&
+                Root.contains("waypoints"))
             {
-                // Backward compatibility: silently ignore traps/decos from earlier
-                // experimental save files. Only structural builds are restored.
-                if (SavedBuild.value("parent", -1) >= 0)
-                    continue;
+                throw std::runtime_error(
+                    "waypoint state requires trickshot schema 7");
+            }
+
+            // Attachment enums have changed between Fortnite releases. New
+            // presets record their source version so a raw attachment value is
+            // never reinterpreted by a different build of the game.
+            if (SchemaVersion >= 3 && !Root.contains("fortnite"))
+                throw std::runtime_error("missing Fortnite version");
+            if (Root.contains("fortnite"))
+            {
+                double SavedFortniteVersion = 0.0;
+                if (Root["fortnite"].is_number())
+                    SavedFortniteVersion = Root["fortnite"].get<double>();
+                else if (Root["fortnite"].is_string())
+                    SavedFortniteVersion = std::stod(
+                        Root["fortnite"].get<std::string>());
+                else
+                    throw std::runtime_error("invalid Fortnite version");
+
+                if (!std::isfinite(SavedFortniteVersion))
+                    throw std::runtime_error("invalid Fortnite version");
+
+                if (std::abs(
+                        SavedFortniteVersion -
+                        VersionInfo.FortniteVersion) > 0.001)
+                {
+                    Message = "This trickshot was saved on a different Fortnite version.";
+                    return false;
+                }
+            }
+
+            std::vector<FPendingTrickshotBuild> Pending;
+            std::vector<FPendingTrickshotProp> PendingProps;
+            bool RestoreWaypoints = false;
+            AFortPlayerControllerAthena::FWaypointMap PendingWaypoints;
+            if (SchemaVersion >= 7 &&
+                FConfiguration::bSaveWaypoints.load(
+                    std::memory_order_acquire) &&
+                Root.contains("waypoints"))
+            {
+                PendingWaypoints =
+                    ParseSavedWaypoints(Root["waypoints"]);
+                RestoreWaypoints = true;
+            }
+            std::vector<TWeakObjectPtr<UClass>> TrackedPropClasses;
+            FScopedTrickshotAssetRoots AssetRoots;
+            UClass* TireClass = nullptr;
+            const bool LegacyTireProps = SchemaVersion <= 5;
+            if (LegacyTireProps)
+            {
+                TireClass = ResolveTrickshotTireClass(false);
+                if (TireClass)
+                {
+                    AssetRoots.Root(TireClass);
+                    TrackedPropClasses.emplace_back(TireClass);
+                }
+            }
+            const auto SavedProps = Root.find("props");
+            if (SavedProps != Root.end() && !SavedProps->empty())
+            {
+                constexpr size_t kMaximumClassPathLength = 2048;
+                if (SavedProps->size() >
+                    kMaximumTrickshotSpawnedObjects)
+                    throw std::runtime_error(
+                        "too many trickshot spawned objects");
+
+                if (LegacyTireProps)
+                {
+                    if (!TireClass)
+                        TireClass = ResolveTrickshotTireClass(true);
+                }
+                if (LegacyTireProps && !TireClass)
+                {
+                    Message = std::string(
+                        "Required tire asset is unavailable: ") +
+                        kTrickshotTireClassPath +
+                        ". The current trickshot was left unchanged.";
+                    return false;
+                }
+
+                PendingProps.reserve(SavedProps->size());
+                for (const auto& SavedProp : *SavedProps)
+                {
+                    if (!SavedProp.is_object() ||
+                        !SavedProp.contains("class") ||
+                        !SavedProp["class"].is_string())
+                    {
+                        throw std::runtime_error("invalid trickshot prop");
+                    }
+                    const std::string ClassPath =
+                        SavedProp["class"].get<std::string>();
+                    if (ClassPath.empty() ||
+                        ClassPath.size() > kMaximumClassPathLength ||
+                        ClassPath.find('\0') != std::string::npos)
+                        throw std::runtime_error(
+                            "invalid trickshot prop class path");
+                    if (LegacyTireProps &&
+                        ClassPath != kTrickshotTireClassPath)
+                        throw std::runtime_error(
+                            "unsupported legacy trickshot prop class");
+                    if (!LegacyTireProps &&
+                        SavedProp.value("kind", "") != "spawnedActor")
+                        throw std::runtime_error(
+                            "invalid trickshot prop kind");
+
+                    UClass* PropClass = TireClass;
+                    if (!LegacyTireProps)
+                    {
+                        UEAllocatedWString WideClassPath(
+                            ClassPath.begin(), ClassPath.end());
+                        auto ClassObject = const_cast<UObject*>(
+                            FindTrickshotAssetGuarded(
+                                WideClassPath.c_str(),
+                                UClass::StaticClass()));
+                        if (!IsLiveTrickshotAsset(
+                                ClassObject, UClass::StaticClass()))
+                        {
+                            ClassObject = const_cast<UObject*>(
+                                LoadTrickshotAssetGuarded(
+                                    WideClassPath.c_str(),
+                                    UClass::StaticClass()));
+                        }
+                        PropClass = IsLiveTrickshotAsset(
+                            ClassObject, UClass::StaticClass())
+                            ? static_cast<UClass*>(ClassObject) : nullptr;
+                        if (IsUnsafeTrickshotLifecycleClass(PropClass))
+                        {
+                            PropClass = nullptr;
+                        }
+                        if (PropClass &&
+                            GetCanonicalTrackedClassPath(PropClass) !=
+                                ClassPath)
+                        {
+                            PropClass = nullptr;
+                        }
+                    }
+                    if (!PropClass)
+                    {
+                        Message = "Required spawned object class is unavailable: " +
+                            ClassPath +
+                            ". The current trickshot was left unchanged.";
+                        return false;
+                    }
+                    AssetRoots.Root(PropClass);
+                    const auto& L = SavedProp.at("location");
+                    const auto& R = SavedProp.at("rotation");
+                    if (!L.is_array() || L.size() != 3 ||
+                        !R.is_array() || R.size() != 3)
+                    {
+                        throw std::runtime_error(
+                            "invalid trickshot prop data");
+                    }
+                    FVector Scale(1.0, 1.0, 1.0);
+                    if (SavedProp.contains("scale"))
+                    {
+                        const auto& S = SavedProp["scale"];
+                        if (!S.is_array() || S.size() != 3)
+                            throw std::runtime_error(
+                                "invalid trickshot prop scale");
+                        Scale = FVector(
+                            S[0].get<double>(), S[1].get<double>(),
+                            S[2].get<double>());
+                    }
+                    FVector Location(
+                        L[0].get<double>(), L[1].get<double>(),
+                        L[2].get<double>());
+                    FRotator Rotation(
+                        R[0].get<double>(), R[1].get<double>(),
+                        R[2].get<double>());
+                    constexpr double kMaximumPropCoordinate = 10000000.0;
+                    constexpr double kMaximumPropRotation = 1000000.0;
+                    constexpr double kMaximumPropScale = 1000.0;
+                    if (!std::isfinite(Location.X) ||
+                        !std::isfinite(Location.Y) ||
+                        !std::isfinite(Location.Z) ||
+                        !std::isfinite(Rotation.Pitch) ||
+                        !std::isfinite(Rotation.Yaw) ||
+                        !std::isfinite(Rotation.Roll) ||
+                        !std::isfinite(Scale.X) ||
+                        !std::isfinite(Scale.Y) ||
+                        !std::isfinite(Scale.Z) ||
+                        std::abs(Location.X) > kMaximumPropCoordinate ||
+                        std::abs(Location.Y) > kMaximumPropCoordinate ||
+                        std::abs(Location.Z) > kMaximumPropCoordinate ||
+                        std::abs(Rotation.Pitch) > kMaximumPropRotation ||
+                        std::abs(Rotation.Yaw) > kMaximumPropRotation ||
+                        std::abs(Rotation.Roll) > kMaximumPropRotation ||
+                        std::abs(Scale.X) > kMaximumPropScale ||
+                        std::abs(Scale.Y) > kMaximumPropScale ||
+                        std::abs(Scale.Z) > kMaximumPropScale)
+                    {
+                        throw std::runtime_error(
+                            "invalid trickshot prop transform");
+                    }
+                    PendingProps.push_back({
+                        TWeakObjectPtr<UClass>(PropClass),
+                        Location, Rotation, Scale,
+                        ClassPath });
+                }
+            }
+            if (LegacyTireProps && TireClass &&
+                TrackedPropClasses.empty())
+            {
+                AssetRoots.Root(TireClass);
+                TrackedPropClasses.emplace_back(TireClass);
+            }
+            const auto& SavedBuildArray = Root["builds"];
+            if (SavedBuildArray.empty() && PendingProps.empty())
+            {
+                Message = "The selected trickshot contains no builds or spawned objects; the current trickshot was left unchanged.";
+                return false;
+            }
+            for (size_t RecordIndex = 0;
+                RecordIndex < SavedBuildArray.size(); ++RecordIndex)
+            {
+                const auto& SavedBuild = SavedBuildArray[RecordIndex];
+                if (!SavedBuild.is_object())
+                    throw std::runtime_error("invalid trickshot record");
                 const auto ClassPath = SavedBuild.at("class").get<std::string>();
-                // Player building classes are already resident while their map is active. Do not use
-                // StaticLoadObject here: its native signature varies by Fortnite version and can fault
-                // on versions where the SDK's resolved loader does not match the running executable.
+                const int Parent = SavedBuild.value("parent", -1);
+                if (Parent < -1)
+                    throw std::runtime_error("invalid building parent");
+                const std::string ItemDefinitionPath =
+                    SavedBuild.value("itemDefinition", "");
+                const bool HasExternalParent =
+                    SchemaVersion >= 4 &&
+                    SavedBuild.contains("externalParent");
+                std::string Kind;
+                if (SchemaVersion >= 3)
+                {
+                    if (!SavedBuild.contains("kind") ||
+                        !SavedBuild["kind"].is_string())
+                    {
+                        throw std::runtime_error(
+                            "missing trickshot record kind");
+                    }
+                    Kind = SavedBuild["kind"].get<std::string>();
+                    const bool ValidInternalTrap =
+                        Kind == "trap" && Parent >= 0 &&
+                        !HasExternalParent;
+                    const bool ValidExternalTrap =
+                        Kind == "trap" && Parent == -1 &&
+                        HasExternalParent;
+                    if ((Kind == "build" &&
+                         (Parent != -1 || HasExternalParent)) ||
+                        (Kind == "trap" &&
+                         (ItemDefinitionPath.empty() ||
+                          (!ValidInternalTrap && !ValidExternalTrap))) ||
+                        (Kind != "build" && Kind != "trap"))
+                    {
+                        throw std::runtime_error(
+                            "invalid trickshot record kind");
+                    }
+                }
+                const bool IsTrap = SchemaVersion >= 3
+                    ? Kind == "trap" : Parent >= 0;
                 UEAllocatedWString WideClassPath(ClassPath.begin(), ClassPath.end());
-                UClass* Class = (UClass*)SDK::StaticFindObject(WideClassPath.c_str(), UClass::StaticClass());
+                auto ClassObject = const_cast<UObject*>(
+                    FindTrickshotAssetGuarded(
+                        WideClassPath.c_str(), UClass::StaticClass()));
+                const bool bLoadedClassPackage =
+                    !IsLiveTrickshotAsset(
+                        ClassObject, UClass::StaticClass());
+                if (bLoadedClassPackage)
+                {
+                    // An edited subclass may not be resident in a fresh match.
+                    // Load only from this explicit user-triggered, game-thread
+                    // operation and keep the guarded fallback out of tick-time
+                    // placement and attachment repair.
+                    ClassObject = const_cast<UObject*>(
+                        LoadTrickshotAssetGuarded(
+                            WideClassPath.c_str(), UClass::StaticClass()));
+                }
+                UClass* Class = IsLiveTrickshotAsset(
+                    ClassObject, UClass::StaticClass())
+                    ? static_cast<UClass*>(ClassObject) : nullptr;
+                if (Class && bLoadedClassPackage)
+                    AssetRoots.Root(Class);
+                UFortDecoItemDefinition* ItemDefinition = nullptr;
+                if (IsTrap && !ItemDefinitionPath.empty())
+                {
+                    UEAllocatedWString WideItemDefinitionPath(
+                        ItemDefinitionPath.begin(),
+                        ItemDefinitionPath.end());
+                    auto ItemObject = const_cast<UObject*>(
+                        FindTrickshotAssetGuarded(
+                        WideItemDefinitionPath.c_str(),
+                        UFortDecoItemDefinition::StaticClass()));
+                    const bool bLoadedItemPackage =
+                        !IsLiveTrickshotAsset(
+                            ItemObject,
+                            UFortDecoItemDefinition::StaticClass());
+                    if (bLoadedItemPackage)
+                    {
+                        ItemObject = const_cast<UObject*>(
+                            LoadTrickshotAssetGuarded(
+                                WideItemDefinitionPath.c_str(),
+                                UFortDecoItemDefinition::StaticClass()));
+                    }
+                    ItemDefinition = IsLiveTrickshotAsset(
+                        ItemObject,
+                        UFortDecoItemDefinition::StaticClass())
+                        ? static_cast<UFortDecoItemDefinition*>(ItemObject)
+                        : nullptr;
+                    if (ItemDefinition)
+                        AssetRoots.Root(ItemDefinition);
+                }
                 const auto& L = SavedBuild.at("location");
                 const auto& R = SavedBuild.at("rotation");
                 if (L.size() != 3 || R.size() != 3)
                     throw std::runtime_error("invalid building data");
-                if (Class && (!Class->GetDefaultObj() || !Class->GetDefaultObj()->IsA(ABuildingSMActor::StaticClass())))
+                FVector ParsedLocation(
+                    L[0].get<double>(), L[1].get<double>(),
+                    L[2].get<double>());
+                FRotator ParsedRotation(
+                    R[0].get<double>(), R[1].get<double>(),
+                    R[2].get<double>());
+                constexpr double kMaximumSavedCoordinate = 10000000.0;
+                constexpr double kMaximumSavedRotation = 1000000.0;
+                if (!std::isfinite(ParsedLocation.X) ||
+                    !std::isfinite(ParsedLocation.Y) ||
+                    !std::isfinite(ParsedLocation.Z) ||
+                    !std::isfinite(ParsedRotation.Pitch) ||
+                    !std::isfinite(ParsedRotation.Yaw) ||
+                    !std::isfinite(ParsedRotation.Roll) ||
+                    std::abs(ParsedLocation.X) > kMaximumSavedCoordinate ||
+                    std::abs(ParsedLocation.Y) > kMaximumSavedCoordinate ||
+                    std::abs(ParsedLocation.Z) > kMaximumSavedCoordinate ||
+                    std::abs(ParsedRotation.Pitch) > kMaximumSavedRotation ||
+                    std::abs(ParsedRotation.Yaw) > kMaximumSavedRotation ||
+                    std::abs(ParsedRotation.Roll) > kMaximumSavedRotation)
+                {
+                    throw std::runtime_error(
+                        "invalid building transform");
+                }
+                const int RawAttachmentType = SavedBuild.value(
+                    "attachmentType",
+                    static_cast<int>(GuessAttachmentType(ClassPath)));
+                const int AttachmentSlot =
+                    SavedBuild.value("attachmentSlot", -1);
+                const int TrapLevel =
+                    SavedBuild.value("trapLevel", -1);
+                const int OriginalTrapLevel =
+                    SavedBuild.value("originalTrapLevel", -1);
+                if (RawAttachmentType < 0 || RawAttachmentType > UINT8_MAX ||
+                    AttachmentSlot < -1 || AttachmentSlot > UINT8_MAX ||
+                    TrapLevel < -1 || OriginalTrapLevel < -1)
+                {
+                    throw std::runtime_error("invalid trap attachment data");
+                }
+                auto ConcreteItemDefinition = IsTrap && ItemDefinition
+                    ? ABuildingSMActor::ResolveTrapDefinitionForAttachment(
+                        ItemDefinition,
+                        static_cast<uint8>(RawAttachmentType), Class)
+                    : ItemDefinition;
+                if (ConcreteItemDefinition)
+                    AssetRoots.Root(ConcreteItemDefinition);
+                if (!Class && ConcreteItemDefinition)
+                {
+                    Class = static_cast<UClass*>(
+                        const_cast<UObject*>(
+                            ConcreteItemDefinition->BlueprintClass.WeakPtr.Get()));
+                }
+                auto DefaultBuilding = Class
+                    ? static_cast<ABuildingSMActor*>(Class->GetDefaultObj())
+                    : nullptr;
+                if (!DefaultBuilding ||
+                    !DefaultBuilding->IsA(
+                        ABuildingSMActor::StaticClass()))
+                {
                     Class = nullptr;
-                Pending.push_back({ Class, FVector(L[0].get<double>(), L[1].get<double>(), L[2].get<double>()),
-                    FRotator(R[0].get<double>(), R[1].get<double>(), R[2].get<double>()), SavedBuild.value("level", 0),
-                    SavedBuild.value("parent", -1), SavedBuild.value("attachmentType", GuessAttachmentType(ClassPath)),
-                    SavedBuild.value("itemDefinition", "") });
+                }
+                else if (!IsTrap && DefaultBuilding->Cast<ABuildingTrap>())
+                {
+                    throw std::runtime_error(
+                        "trap class cannot be restored as a structure");
+                }
+                if (Class)
+                    AssetRoots.Root(Class);
+                if (!Class)
+                {
+                    SDK::DbgLog(
+                        "[TrickshotLoad] unavailable class record=%zu path=%s item=%s\n",
+                        RecordIndex, ClassPath.c_str(),
+                        ItemDefinitionPath.c_str());
+                }
+                if (IsTrap && !ItemDefinition)
+                {
+                    SDK::DbgLog(
+                        "[TrickshotLoad] unavailable trap definition record=%zu class=%s item=%s\n",
+                        RecordIndex, ClassPath.c_str(),
+                        ItemDefinitionPath.c_str());
+                }
+                FPendingTrickshotBuild PendingBuild;
+                PendingBuild.Class = TWeakObjectPtr<UClass>(Class);
+                PendingBuild.Location = ParsedLocation;
+                PendingBuild.Rotation = ParsedRotation;
+                PendingBuild.Level = SavedBuild.value("level", 0);
+                PendingBuild.Parent = Parent;
+                PendingBuild.AttachmentType =
+                    static_cast<uint8>(RawAttachmentType);
+                PendingBuild.AttachmentSlot = AttachmentSlot;
+                PendingBuild.Mirrored = SavedBuild.value("mirrored", false);
+                PendingBuild.TrapLevel = TrapLevel;
+                PendingBuild.OriginalTrapLevel = OriginalTrapLevel;
+                PendingBuild.IsTrap = IsTrap;
+                PendingBuild.SupportAnchor =
+                    SavedBuild.value("supportAnchor", false);
+                PendingBuild.HasSavedSupportAnchor =
+                    SavedBuild.contains("supportAnchor");
+                PendingBuild.ClassPath = ClassPath;
+                PendingBuild.ItemDefinition = ItemDefinitionPath;
+                PendingBuild.ResolvedItemDefinition =
+                    TWeakObjectPtr<UFortDecoItemDefinition>(ItemDefinition);
+                PendingBuild.ResolvedConcreteDefinition =
+                    TWeakObjectPtr<UFortDecoItemDefinition>(
+                        ConcreteItemDefinition);
+                if (HasExternalParent)
+                {
+                    const auto& External = SavedBuild["externalParent"];
+                    if (!External.is_object() ||
+                        !External.contains("class") ||
+                        !External.contains("location") ||
+                        !External.contains("rotation"))
+                    {
+                        throw std::runtime_error(
+                            "invalid external trap parent");
+                    }
+                    const auto& ExternalLocation = External["location"];
+                    const auto& ExternalRotation = External["rotation"];
+                    if (!ExternalLocation.is_array() ||
+                        ExternalLocation.size() != 3 ||
+                        !ExternalRotation.is_array() ||
+                        ExternalRotation.size() != 3)
+                    {
+                        throw std::runtime_error(
+                            "invalid external trap parent transform");
+                    }
+                    PendingBuild.HasExternalParent = true;
+                    PendingBuild.ExternalParentClassPath =
+                        External.at("class").get<std::string>();
+                    PendingBuild.ExternalParentActorPath =
+                        External.value("actorPath", "");
+                    PendingBuild.ExternalParentLocation = FVector(
+                        ExternalLocation[0].get<double>(),
+                        ExternalLocation[1].get<double>(),
+                        ExternalLocation[2].get<double>());
+                    PendingBuild.ExternalParentRotation = FRotator(
+                        ExternalRotation[0].get<double>(),
+                        ExternalRotation[1].get<double>(),
+                        ExternalRotation[2].get<double>());
+                    PendingBuild.ExternalParentBuildingType =
+                        External.value("buildingType", -1);
+                    if (PendingBuild.ExternalParentClassPath.empty() ||
+                        PendingBuild.ExternalParentBuildingType < -1 ||
+                        PendingBuild.ExternalParentBuildingType > UINT8_MAX ||
+                        !std::isfinite(PendingBuild.ExternalParentLocation.X) ||
+                        !std::isfinite(PendingBuild.ExternalParentLocation.Y) ||
+                        !std::isfinite(PendingBuild.ExternalParentLocation.Z) ||
+                        !std::isfinite(PendingBuild.ExternalParentRotation.Pitch) ||
+                        !std::isfinite(PendingBuild.ExternalParentRotation.Yaw) ||
+                        !std::isfinite(PendingBuild.ExternalParentRotation.Roll))
+                    {
+                        throw std::runtime_error(
+                            "invalid external trap parent data");
+                    }
+                }
+                Pending.push_back(std::move(PendingBuild));
             }
 
-            TArray<ABuildingSMActor*> ExistingBuilds;
-            Utils::GetAll<ABuildingSMActor>(ExistingBuilds);
-            for (auto Build : ExistingBuilds)
-                if (Build && Build->bPlayerPlaced)
-                    Build->SilentDie(true);
-            ExistingBuilds.Free();
-
-            int Loaded = 0;
-            int Skipped = 0;
-            std::vector<ABuildingSMActor*> SpawnedBuilds(Pending.size(), nullptr);
-
-            auto ApplyOwnership = [&](ABuildingSMActor* Build)
+            for (const auto& SavedBuild : Pending)
             {
-                if (!Build)
-                    return;
-                Build->bPlayerPlaced = true;
-                if (Controller->PlayerState)
-                {
-                    auto PlayerState = static_cast<AFortPlayerStateAthena*>(Controller->PlayerState);
-                    if (PlayerState->HasTeamIndex())
-                        Build->Team = PlayerState->TeamIndex;
-                    if (Build->HasTeamIndex())
-                        Build->TeamIndex = Build->Team;
-                    if (Build->HasOwnerPersistentID() && PlayerState->HasWorldPlayerId())
-                        Build->OwnerPersistentID = PlayerState->WorldPlayerId;
-                    if (PlayerState->HasTeamIndex())
-                        Build->SetTeam(PlayerState->TeamIndex);
-                }
-                Build->ForceNetUpdate();
-            };
-
-            // Structural supports must exist before Fortnite's native trap placement path runs.
-            for (int Index = 0; Index < Pending.size(); ++Index)
+                if (SavedBuild.IsTrap && !SavedBuild.HasExternalParent &&
+                    SavedBuild.Parent >= static_cast<int>(Pending.size()))
+                    throw std::runtime_error("invalid trap parent");
+            }
+            const int Canonicalized =
+                CanonicalizePendingStructuralCells(Pending);
+            if (Canonicalized > 0)
             {
-                const auto& SavedBuild = Pending[Index];
-                if (SavedBuild.Parent >= 0)
-                    continue;
-                if (!SavedBuild.Class)
-                {
-                    ++Skipped;
-                    continue;
-                }
-                auto Build = UWorld::SpawnActorUnfinished<ABuildingSMActor>(SavedBuild.Class, SavedBuild.Location, SavedBuild.Rotation, Controller);
-                if (Build)
-                {
-                    Build->InitializeKismetSpawnedBuildingActor(Build, Controller, true, nullptr, false);
-                    UWorld::FinishSpawnActor(Build, SavedBuild.Location, SavedBuild.Rotation);
-                }
-                if (!Build)
-                {
-                    ++Skipped;
-                    continue;
-                }
-                int BuildingLevel = SavedBuild.Level;
-                Build->CurrentBuildingLevel = BuildingLevel;
-                Build->OnRep_CurrentBuildingLevel();
-                ApplyOwnership(Build);
-                SpawnedBuilds[Index] = Build;
-                ++Loaded;
+                SDK::DbgLog(
+                    "[TrickshotLoad] canonicalized %d stale structural records\n",
+                    Canonicalized);
             }
 
-            for (int Index = 0; Index < Pending.size(); ++Index)
+            const bool HasStructuralRoot = std::any_of(
+                Pending.begin(), Pending.end(),
+                [](const FPendingTrickshotBuild& SavedBuild)
+                {
+                    return !SavedBuild.IsTrap;
+                });
+            if ((!Pending.empty() && !HasStructuralRoot) ||
+                (Pending.empty() && PendingProps.empty()))
             {
-                const auto& SavedBuild = Pending[Index];
-                if (SavedBuild.Parent < 0)
-                    continue;
-                if (!SavedBuild.Class || SavedBuild.Parent >= SpawnedBuilds.size() || !SpawnedBuilds[SavedBuild.Parent])
-                {
-                    ++Skipped;
-                    continue;
-                }
-                UEAllocatedWString ItemDefinitionPath(SavedBuild.ItemDefinition.begin(), SavedBuild.ItemDefinition.end());
-                auto Trap = ABuildingSMActor::SpawnSavedTrap(SavedBuild.Class, SavedBuild.Location, SavedBuild.Rotation,
-                    SpawnedBuilds[SavedBuild.Parent], SavedBuild.AttachmentType, Controller,
-                    SavedBuild.ItemDefinition.empty() ? nullptr : ItemDefinitionPath.c_str());
-                if (!Trap)
-                {
-                    ++Skipped;
-                    continue;
-                }
-                ApplyOwnership(Trap);
-                SpawnedBuilds[Index] = Trap;
-                ++Loaded;
+                Message = "The selected trickshot contains no structural builds or spawned objects; the current trickshot was left unchanged.";
+                return false;
             }
 
-            // Preserve the supporting-build relationship used by traps. This lets ownership,
-            // destruction, and replication continue to follow the restored parent build.
-            for (int Index = 0; Index < Pending.size(); ++Index)
+            if (std::any_of(
+                    Pending.begin(), Pending.end(),
+                    [](const FPendingTrickshotBuild& SavedBuild)
+                    {
+                        return SavedBuild.HasExternalParent;
+                    }))
             {
-                const int ParentIndex = Pending[Index].Parent;
-                if (ParentIndex < 0 || ParentIndex >= SpawnedBuilds.size() || !SpawnedBuilds[Index] || !SpawnedBuilds[ParentIndex])
-                    continue;
-                if (SpawnedBuilds[ParentIndex]->HasAttachedBuildingActors())
+                TArray<ABuildingSMActor*> WorldBuildings;
+                Utils::GetAll<ABuildingSMActor>(WorldBuildings);
+                std::vector<ABuildingSMActor*> ExternalCandidates;
+                ExternalCandidates.reserve(WorldBuildings.Num());
+                for (auto Build : WorldBuildings)
+                    ExternalCandidates.push_back(Build);
+
+                for (auto& SavedBuild : Pending)
                 {
-                    bool AlreadyAttached = false;
-                    for (auto Attached : SpawnedBuilds[ParentIndex]->AttachedBuildingActors)
-                        AlreadyAttached = AlreadyAttached || Attached == SpawnedBuilds[Index];
-                    if (!AlreadyAttached)
-                        SpawnedBuilds[ParentIndex]->AttachedBuildingActors.Add(SpawnedBuilds[Index]);
+                    if (!SavedBuild.HasExternalParent)
+                        continue;
+                    auto ExternalParent = ResolveExternalTrickshotParent(
+                        SavedBuild, ExternalCandidates);
+                    if (!ExternalParent)
+                    {
+                        WorldBuildings.Free();
+                        Message = "The natural building required by a saved trap is unavailable or ambiguous; the current trickshot was left unchanged.";
+                        return false;
+                    }
+                    SavedBuild.ResolvedExternalParent =
+                        TWeakObjectPtr<ABuildingSMActor>(ExternalParent);
+                }
+                WorldBuildings.Free();
+            }
+
+            // Validate the complete graph and all resident assets before the
+            // destructive replacement step. A failed preflight leaves the
+            // player's current trickshot untouched.
+            for (int Index = 0; Index < static_cast<int>(Pending.size()); ++Index)
+            {
+                auto& SavedBuild = Pending[Index];
+                auto SavedClass = SavedBuild.Class.Get();
+                if (!SavedClass)
+                {
+                    Message = "Required build or trap class is unavailable: " +
+                        SavedBuild.ClassPath +
+                        ". The current trickshot was left unchanged.";
+                    return false;
+                }
+                if (!SavedBuild.IsTrap)
+                    continue;
+                if (SavedBuild.HasExternalParent)
+                {
+                    if (!SavedBuild.ResolvedExternalParent.Get())
+                        throw std::runtime_error(
+                            "external trap parent became unavailable");
+                }
+                else if (
+                    (SavedBuild.Parent >= static_cast<int>(Pending.size()) ||
+                     SavedBuild.Parent == Index ||
+                     Pending[SavedBuild.Parent].IsTrap))
+                {
+                    throw std::runtime_error("invalid trap parent");
+                }
+                auto ResolvedItemDefinition =
+                    SavedBuild.ResolvedItemDefinition.Get();
+                if (!ResolvedItemDefinition)
+                {
+                    ResolvedItemDefinition =
+                        ABuildingSMActor::GetTrapDefinition(SavedClass);
+                    SavedBuild.ResolvedItemDefinition =
+                        TWeakObjectPtr<UFortDecoItemDefinition>(
+                            ResolvedItemDefinition);
+                }
+                if (!ResolvedItemDefinition)
+                {
+                    Message = "Required trap definition is unavailable: " +
+                        SavedBuild.ItemDefinition +
+                        ". The current trickshot was left unchanged.";
+                    return false;
+                }
+
+                auto ResolvedConcreteDefinition =
+                    ABuildingSMActor::ResolveTrapDefinitionForAttachment(
+                        ResolvedItemDefinition,
+                        SavedBuild.AttachmentType,
+                        SavedClass);
+                SavedBuild.ResolvedConcreteDefinition =
+                    TWeakObjectPtr<UFortDecoItemDefinition>(
+                        ResolvedConcreteDefinition);
+                if (!ResolvedConcreteDefinition)
+                {
+                    Message = "The saved trap definition does not support its attachment type; the current trickshot was left unchanged.";
+                    return false;
+                }
+                auto DefinitionClass = static_cast<UClass*>(
+                    const_cast<UObject*>(
+                        ResolvedConcreteDefinition->
+                            BlueprintClass.WeakPtr.Get()));
+                if (DefinitionClass && DefinitionClass != SavedClass)
+                    throw std::runtime_error("concrete trap definition does not match its saved class");
+            }
+
+            // The staged transaction deliberately destroys the existing setup
+            // before later layers spawn. Root every dependency now so an asset
+            // referenced only by the old actors cannot be collected mid-load.
+            for (auto& SavedBuild : Pending)
+            {
+                if (auto Class = SavedBuild.Class.Get())
+                    AssetRoots.Root(Class);
+                if (auto Definition =
+                    SavedBuild.ResolvedItemDefinition.Get())
+                {
+                    AssetRoots.Root(Definition);
+                }
+                if (auto Concrete =
+                    SavedBuild.ResolvedConcreteDefinition.Get())
+                {
+                    AssetRoots.Root(Concrete);
                 }
             }
-            Message = "Loaded " + std::to_string(Loaded) + " player builds.";
-            if (Skipped > 0)
-                Message += " Skipped " + std::to_string(Skipped) + " unavailable actors.";
+
+            EnsurePortableSupportAnchors(Pending);
+
+            std::vector<int> StructuralOrder;
+            StructuralOrder.reserve(Pending.size());
+            for (int Index = 0; Index < static_cast<int>(Pending.size()); ++Index)
+            {
+                if (!Pending[Index].IsTrap)
+                    StructuralOrder.push_back(Index);
+            }
+            std::stable_sort(
+                StructuralOrder.begin(), StructuralOrder.end(),
+                [&](int Left, int Right)
+                {
+                    return Pending[Left].Location.Z <
+                        Pending[Right].Location.Z;
+                });
+
+            FTrickshotLoadJob Job;
+            Job.Active = true;
+            Job.Name = Name;
+            Job.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
+            Job.Controller =
+                TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
+            Job.Pending = std::move(Pending);
+            Job.PendingProps = std::move(PendingProps);
+            Job.RestoreWaypoints = RestoreWaypoints;
+            Job.PendingWaypoints = std::move(PendingWaypoints);
+            Job.StructuralOrder = std::move(StructuralOrder);
+            Job.SpawnedBuilds.resize(Job.Pending.size());
+            Job.SpawnedProps.resize(Job.PendingProps.size());
+            Job.TrackedPropClasses = std::move(TrackedPropClasses);
+            Job.LegacyTireProps = LegacyTireProps;
+            auto CurrentWorld = UWorld::GetWorld();
+            {
+                TArray<ABuildingSMActor*> BaselineBuildings;
+                Utils::GetAll<ABuildingSMActor>(BaselineBuildings);
+                Job.BaselineBuildingActors.reserve(
+                    BaselineBuildings.Num());
+                for (auto Building : BaselineBuildings)
+                {
+                    if (Building)
+                    {
+                        Job.BaselineBuildingActors.emplace_back(
+                            Building);
+                    }
+                }
+                BaselineBuildings.Free();
+            }
+            PruneTrackedSpawnedActors(CurrentWorld);
+            for (const auto& Entry : GTrackedSpawnedActors)
+            {
+                auto Actor = Entry.Actor.Get();
+                if (Entry.World.Get() == CurrentWorld &&
+                    Entry.Controller.Get() == Controller &&
+                    IsLiveTrackedSpawnedActor(Actor, CurrentWorld))
+                {
+                    Job.ExistingTrackedProps.emplace_back(Actor);
+                }
+            }
+            Job.TemporaryRootedAssets = AssetRoots.Commit();
+            GLoadJob = std::move(Job);
+            Message = "Loading trickshot...";
             return true;
         }
         catch (const std::exception& Error)
@@ -6397,6 +8817,683 @@ namespace TrickshotManager
             Message = std::string("Failed to load trickshot: ") + Error.what();
             return false;
         }
+    }
+
+    inline void ApplyLoadedBuildOwnership(
+        ABuildingSMActor* Build,
+        AFortPlayerControllerAthena* Controller)
+    {
+        if (!Build || !Controller)
+            return;
+
+        Build->bPlayerPlaced = true;
+        if (Controller->PlayerState)
+        {
+            auto PlayerState = static_cast<AFortPlayerStateAthena*>(
+                Controller->PlayerState);
+            if (Build->HasTeam() && PlayerState->HasTeamIndex())
+                Build->Team = PlayerState->TeamIndex;
+            if (Build->HasTeamIndex() && PlayerState->HasTeamIndex())
+                Build->TeamIndex = PlayerState->TeamIndex;
+            if (Build->HasOwnerPersistentID() &&
+                PlayerState->HasWorldPlayerId())
+            {
+                Build->OwnerPersistentID = PlayerState->WorldPlayerId;
+            }
+            if (PlayerState->HasTeamIndex())
+                Build->SetTeam(PlayerState->TeamIndex);
+        }
+        Build->ForceNetUpdate();
+    }
+
+    inline bool ValidateLoadContext(
+        AFortPlayerControllerAthena*& Controller,
+        std::string& Message)
+    {
+        auto World = GLoadJob.World.Get();
+        Controller = GLoadJob.Controller.Get();
+        if (!World || World != UWorld::GetWorld())
+        {
+            Message =
+                "The world changed while the trickshot was loading.";
+            return false;
+        }
+        if (!Controller || Controller != GetHostController())
+        {
+            Message =
+                "The host disconnected while the trickshot was loading.";
+            return false;
+        }
+        return true;
+    }
+
+    std::string BuildLoadCompletionMessage()
+    {
+        std::string Message = "Loaded " +
+            std::to_string(GLoadJob.LoadedBuilds) +
+            " player builds, " +
+            std::to_string(GLoadJob.LoadedTraps) + " traps, and " +
+            std::to_string(GLoadJob.LoadedProps) + " spawned objects.";
+        if (GLoadJob.RestoreWaypoints)
+        {
+            Message += " Restored " +
+                std::to_string(
+                    AFortPlayerControllerAthena::
+                        SnapshotWaypoints().size()) +
+                " waypoints.";
+        }
+        if (GLoadJob.FailedTrapPlacements > 0)
+        {
+            Message += " Failed " +
+                std::to_string(GLoadJob.FailedTrapPlacements) +
+                " trap restorations.";
+        }
+        if (GLoadJob.FailedPropPlacements > 0)
+        {
+            Message += " Failed " +
+                std::to_string(GLoadJob.FailedPropPlacements) +
+                " spawned-object restorations.";
+        }
+        if (GLoadJob.Skipped >
+            GLoadJob.FailedTrapPlacements +
+                GLoadJob.FailedPropPlacements)
+        {
+            Message += " Skipped " +
+                std::to_string(
+                    GLoadJob.Skipped -
+                    GLoadJob.FailedTrapPlacements -
+                    GLoadJob.FailedPropPlacements) +
+                " other actor placements.";
+        }
+        return Message;
+    }
+
+    inline ELoadPumpResult PumpLoad(std::string& Message)
+    {
+        constexpr ULONGLONG kLoadPhaseDelayMs = 100ULL;
+        constexpr double kStructuralLayerTolerance = 1.0;
+
+        if (!GLoadJob.Active)
+        {
+            Message = "No trickshot load is in progress.";
+            return ELoadPumpResult::Failed;
+        }
+
+        AFortPlayerControllerAthena* Controller = nullptr;
+        if (!ValidateLoadContext(Controller, Message))
+            return ELoadPumpResult::Failed;
+
+        const ULONGLONG Now = GetTickCount64();
+        if (Now < GLoadJob.NextAdvanceMs)
+            return ELoadPumpResult::Running;
+
+        if (GLoadJob.Phase == ELoadPhase::Cleanup)
+        {
+            auto IsExistingTrackedProp = [&](AActor* Candidate)
+            {
+                if (!Candidate)
+                    return false;
+                for (const auto& Existing :
+                    GLoadJob.ExistingTrackedProps)
+                {
+                    if (Existing.Get() == Candidate)
+                        return true;
+                }
+                return GLoadJob.LegacyTireProps &&
+                    IsTrackedTrickshotPropClass(
+                        Candidate->Class,
+                        GLoadJob.TrackedPropClasses);
+            };
+
+            // Modern presets own exact registry instances. Never destroy every
+            // actor of an arbitrary saved class: the map or another player may
+            // legitimately own actors of that same class.
+            for (const auto& Existing : GLoadJob.ExistingTrackedProps)
+            {
+                auto Prop = Existing.Get();
+                if (IsLiveTrackedSpawnedActor(
+                        Prop, GLoadJob.World.Get()))
+                {
+                    ForgetTrackedSpawnedActor(Prop);
+                    Prop->K2_DestroyActor();
+                }
+            }
+
+            // Schemas 1-5 predate the instance registry and only allowed the
+            // Tower tire. Retain their narrow owner-aware migration cleanup.
+            if (GLoadJob.LegacyTireProps)
+            {
+                for (const auto& TrackedClass :
+                    GLoadJob.TrackedPropClasses)
+                {
+                    auto PropClass = TrackedClass.Get();
+                    if (!PropClass)
+                        continue;
+                    TArray<AActor*> ExistingProps;
+                    Utils::GetAll<AActor>(PropClass, ExistingProps);
+                    for (auto Prop : ExistingProps)
+                    {
+                        if (IsOwnedTrickshotTire(
+                                Prop, PropClass, Controller))
+                        {
+                            ForgetTrackedSpawnedActor(Prop);
+                            Prop->K2_DestroyActor();
+                        }
+                    }
+                    ExistingProps.Free();
+                }
+            }
+
+            TArray<ABuildingSMActor*> ExistingBuilds;
+            Utils::GetAll<ABuildingSMActor>(ExistingBuilds);
+            std::unordered_set<ABuildingSMActor*>
+                ExistingAttachments;
+            for (auto Build : ExistingBuilds)
+            {
+                if (!Build || IsExistingTrackedProp(Build))
+                    continue;
+                if (Build->HasAttachedBuildingActors())
+                {
+                    for (auto Attached : Build->AttachedBuildingActors)
+                    {
+                        if (Attached)
+                            ExistingAttachments.insert(Attached);
+                    }
+                }
+                if (Build->HasParentActorToAttachTo() &&
+                    Build->ParentActorToAttachTo)
+                {
+                    ExistingAttachments.insert(Build);
+                }
+                if (auto Trap = Build->Cast<ABuildingTrap>())
+                {
+                    if (Trap->HasAttachedTo() && Trap->AttachedTo)
+                        ExistingAttachments.insert(Trap);
+                }
+            }
+
+            // Destroy attachment children before their supports. The delay
+            // after this phase gives Fortnite's structural grid a full tick to
+            // remove the old setup before the first replacement layer arrives.
+            for (auto Build : ExistingBuilds)
+            {
+                if (ExistingAttachments.contains(Build) &&
+                    !IsExistingTrackedProp(Build) &&
+                    IsPresetOwnedPlayerBuild(Build, Controller))
+                {
+                    Build->SilentDie(true);
+                }
+            }
+            for (auto Build : ExistingBuilds)
+            {
+                if (!ExistingAttachments.contains(Build) &&
+                    !IsExistingTrackedProp(Build) &&
+                    IsPresetOwnedPlayerBuild(Build, Controller))
+                {
+                    Build->SilentDie(true);
+                }
+            }
+            ExistingBuilds.Free();
+
+            GLoadJob.Phase = ELoadPhase::Structures;
+            GLoadJob.NextAdvanceMs =
+                GetTickCount64() + kLoadPhaseDelayMs;
+            SDK::DbgLog(
+                "[TrickshotLoad] cleanup complete; waiting for structural grid\n");
+            return ELoadPumpResult::Running;
+        }
+
+        if (GLoadJob.Phase == ELoadPhase::Structures)
+        {
+            if (GLoadJob.NextStructural >=
+                GLoadJob.StructuralOrder.size())
+            {
+                GLoadJob.Phase = ELoadPhase::ReleaseStructuralSupport;
+                GLoadJob.NextAdvanceMs =
+                    GetTickCount64() + kLoadPhaseDelayMs;
+                return ELoadPumpResult::Running;
+            }
+
+            const int FirstIndex = GLoadJob.StructuralOrder[
+                GLoadJob.NextStructural];
+            const double LayerZ =
+                GLoadJob.Pending[FirstIndex].Location.Z;
+            int LayerBuilds = 0;
+
+            // Spawn one complete height band per timed pump. Scheduling the
+            // next deadline after this work also prevents GetMaxTickRate and
+            // TickFlush from advancing two bands in the same engine frame.
+            while (GLoadJob.NextStructural <
+                GLoadJob.StructuralOrder.size())
+            {
+                const int Index = GLoadJob.StructuralOrder[
+                    GLoadJob.NextStructural];
+                const auto& SavedBuild = GLoadJob.Pending[Index];
+                if (std::abs(SavedBuild.Location.Z - LayerZ) >
+                    kStructuralLayerTolerance)
+                {
+                    break;
+                }
+                ++GLoadJob.NextStructural;
+
+                auto SavedClass = SavedBuild.Class.Get();
+                if (!SavedClass)
+                {
+                    ++GLoadJob.Skipped;
+                    GLoadJob.FailureMessage =
+                        "A structural build asset became unavailable; later layers were not loaded.";
+                    GLoadJob.Phase = ELoadPhase::StructureSettle;
+                    GLoadJob.NextStructural =
+                        GLoadJob.StructuralOrder.size();
+                    break;
+                }
+
+                auto Build =
+                    UWorld::SpawnActorUnfinished<ABuildingSMActor>(
+                        SavedClass, SavedBuild.Location,
+                        SavedBuild.Rotation, Controller);
+                if (Build)
+                {
+                    // Hold incomplete height bands in the grid until every
+                    // saved neighbor exists. This is instance state only; it
+                    // does not mutate the shared building class asset.
+                    if (Build->HasbForciblyStructurallySupported())
+                        Build->bForciblyStructurallySupported = true;
+                    Build->InitializeKismetSpawnedBuildingActor(
+                        Build, Controller, true, nullptr, false);
+                    UWorld::FinishSpawnActor(
+                        Build, SavedBuild.Location,
+                        SavedBuild.Rotation);
+                }
+                if (!Build)
+                {
+                    ++GLoadJob.Skipped;
+                    GLoadJob.FailureMessage =
+                        "A structural build failed to spawn; later layers were not loaded.";
+                    GLoadJob.Phase = ELoadPhase::StructureSettle;
+                    GLoadJob.NextStructural =
+                        GLoadJob.StructuralOrder.size();
+                    break;
+                }
+
+                int BuildingLevel = SavedBuild.Level;
+                Build->CurrentBuildingLevel = BuildingLevel;
+                Build->OnRep_CurrentBuildingLevel();
+                Build->SetMirrored(SavedBuild.Mirrored);
+                ApplyLoadedBuildOwnership(Build, Controller);
+                GLoadJob.SpawnedBuilds[Index] =
+                    TWeakObjectPtr<ABuildingSMActor>(Build);
+                ++GLoadJob.LoadedBuilds;
+                ++LayerBuilds;
+            }
+
+            if (GLoadJob.NextStructural >=
+                GLoadJob.StructuralOrder.size())
+            {
+                GLoadJob.Phase = ELoadPhase::ReleaseStructuralSupport;
+            }
+            GLoadJob.NextAdvanceMs =
+                GetTickCount64() + kLoadPhaseDelayMs;
+            SDK::DbgLog(
+                "[TrickshotLoad] spawned structural layer z=%.2f actors=%d\n",
+                LayerZ, LayerBuilds);
+            return ELoadPumpResult::Running;
+        }
+
+        if (GLoadJob.Phase == ELoadPhase::ReleaseStructuralSupport)
+        {
+            // Restore normal structural behavior after the complete graph is
+            // present. Pieces that were directly world-supported when saved
+            // remain portable anchors; every other piece is checked through
+            // Fortnite's own finished structural graph.
+            for (int Index : GLoadJob.StructuralOrder)
+            {
+                auto Build = GLoadJob.SpawnedBuilds[Index].Get();
+                if (!Build || Build->bDestroyed ||
+                    (Build->HasbActorIsBeingDestroyed() &&
+                     Build->bActorIsBeingDestroyed))
+                {
+                    const auto& SavedBuild = GLoadJob.Pending[Index];
+                    SDK::DbgLog(
+                        "[TrickshotLoad] structure vanished before support release index=%d class=%s loc=(%.2f,%.2f,%.2f)\n",
+                        Index, SavedBuild.ClassPath.c_str(),
+                        SavedBuild.Location.X, SavedBuild.Location.Y,
+                        SavedBuild.Location.Z);
+                    Message =
+                        "A restored structural layer did not remain connected.";
+                    return ELoadPumpResult::Failed;
+                }
+                const auto& SavedBuild = GLoadJob.Pending[Index];
+                if (Build->HasbForciblyStructurallySupported())
+                {
+                    Build->bForciblyStructurallySupported =
+                        SavedBuild.SupportAnchor;
+                }
+            }
+
+            // Clear every temporary hold before asking native integrity code
+            // to traverse the graph. An early traversal must not see a later
+            // non-anchor piece as still forcibly supported.
+            for (int Index : GLoadJob.StructuralOrder)
+            {
+                auto Build = GLoadJob.SpawnedBuilds[Index].Get();
+                if (!Build || Build->bDestroyed ||
+                    (Build->HasbActorIsBeingDestroyed() &&
+                     Build->bActorIsBeingDestroyed))
+                {
+                    continue;
+                }
+                if (Build->GetFunction(
+                        "MarkConnectedBuildingsForStructuralIntegrityCheck"))
+                {
+                    Build->MarkConnectedBuildingsForStructuralIntegrityCheck();
+                }
+                Build->ForceNetUpdate();
+            }
+            GLoadJob.Phase = ELoadPhase::StructureSettle;
+            GLoadJob.NextAdvanceMs =
+                GetTickCount64() + kLoadPhaseDelayMs;
+            SDK::DbgLog(
+                "[TrickshotLoad] released temporary support; waiting for integrity check\n");
+            return ELoadPumpResult::Running;
+        }
+
+        if (GLoadJob.Phase == ELoadPhase::StructureSettle)
+        {
+            // The final support layer has now had a complete settle interval.
+            // Only after that may native trap placement see the final graph.
+            for (int Index : GLoadJob.StructuralOrder)
+            {
+                auto Build = GLoadJob.SpawnedBuilds[Index].Get();
+                if (!Build || Build->bDestroyed ||
+                    (Build->HasbActorIsBeingDestroyed() &&
+                     Build->bActorIsBeingDestroyed))
+                {
+                    const auto& SavedBuild = GLoadJob.Pending[Index];
+                    SDK::DbgLog(
+                        "[TrickshotLoad] structure failed settle index=%d class=%s loc=(%.2f,%.2f,%.2f) anchor=%d actor=%p destroyed=%d destroying=%d\n",
+                        Index, SavedBuild.ClassPath.c_str(),
+                        SavedBuild.Location.X, SavedBuild.Location.Y,
+                        SavedBuild.Location.Z,
+                        SavedBuild.SupportAnchor ? 1 : 0, Build,
+                        Build && Build->bDestroyed ? 1 : 0,
+                        Build && Build->HasbActorIsBeingDestroyed() &&
+                            Build->bActorIsBeingDestroyed ? 1 : 0);
+                    if (GLoadJob.FailureMessage.empty())
+                    {
+                        GLoadJob.FailureMessage =
+                            "A restored structural layer did not remain connected; traps were not loaded.";
+                    }
+                    Message = GLoadJob.FailureMessage;
+                    return ELoadPumpResult::Failed;
+                }
+            }
+
+            if (!GLoadJob.FailureMessage.empty())
+            {
+                Message = GLoadJob.FailureMessage;
+                return ELoadPumpResult::Failed;
+            }
+            GLoadJob.Phase = ELoadPhase::TrapPlacement;
+            GLoadJob.TrapPlacementPass = 0;
+        }
+
+        if (GLoadJob.Phase != ELoadPhase::TrapPlacement)
+        {
+            Message = "The trickshot loader entered an invalid trap phase.";
+            return ELoadPumpResult::Failed;
+        }
+
+        // Legacy ServerSpawnDeco can finish on a later game tick. Retry only
+        // unresolved traps on wall-clock deadlines; this never blocks the game
+        // thread and lets deferred children be adopted before another native
+        // spawn is attempted. Four native passes are followed by one final
+        // observation/cleanup sweep; the bounded worst-case wait is 2 seconds.
+        constexpr uint8 kNativeTrapPlacementPasses = 4;
+        constexpr uint8 kMaximumTrapPlacementPasses =
+            kNativeTrapPlacementPasses + 1;
+        constexpr ULONGLONG kTrapRetryDelaysMs[
+            kMaximumTrapPlacementPasses - 1] = {
+                250ULL, 500ULL, 1000ULL, 250ULL };
+        int UnresolvedTraps = 0;
+        for (int Index = 0;
+            Index < static_cast<int>(GLoadJob.Pending.size());
+            ++Index)
+        {
+            const auto& SavedBuild = GLoadJob.Pending[Index];
+            if (!SavedBuild.IsTrap)
+                continue;
+
+            auto ExistingTrap = GLoadJob.SpawnedBuilds[Index].Get();
+            if (ExistingTrap && !ExistingTrap->bDestroyed &&
+                !(ExistingTrap->HasbActorIsBeingDestroyed() &&
+                  ExistingTrap->bActorIsBeingDestroyed))
+            {
+                continue;
+            }
+            GLoadJob.SpawnedBuilds[Index] = {};
+
+            auto SavedClass = SavedBuild.Class.Get();
+            ABuildingSMActor* Parent = nullptr;
+            if (SavedBuild.HasExternalParent)
+                Parent = SavedBuild.ResolvedExternalParent.Get();
+            else if (SavedBuild.Parent >= 0 && SavedBuild.Parent <
+                static_cast<int>(GLoadJob.SpawnedBuilds.size()))
+            {
+                Parent =
+                    GLoadJob.SpawnedBuilds[SavedBuild.Parent].Get();
+            }
+            // A support disappearing is structural corruption, not a
+            // transient placement failure. Keep this fatal on every pass.
+            if (!SavedClass || !Parent || Parent->bDestroyed ||
+                (Parent->HasbActorIsBeingDestroyed() &&
+                 Parent->bActorIsBeingDestroyed))
+            {
+                SDK::DbgLog(
+                    "[TrickshotLoad] trap parent unavailable index=%d pass=%u external=%d parent=%p\n",
+                    Index,
+                    static_cast<unsigned>(
+                        GLoadJob.TrapPlacementPass + 1),
+                    SavedBuild.HasExternalParent ? 1 : 0,
+                    Parent);
+                Message = SavedBuild.HasExternalParent
+                    ? "A required natural trap support became unavailable during loading."
+                    : "A restored trap support became unavailable during loading.";
+                return ELoadPumpResult::Failed;
+            }
+
+            UEAllocatedWString ItemDefinitionPath(
+                SavedBuild.ItemDefinition.begin(),
+                SavedBuild.ItemDefinition.end());
+            auto Trap = ABuildingSMActor::SpawnSavedTrap(
+                SavedClass, SavedBuild.Location,
+                SavedBuild.Rotation, Parent,
+                SavedBuild.AttachmentType, Controller,
+                SavedBuild.ItemDefinition.empty()
+                    ? nullptr : ItemDefinitionPath.c_str(),
+                SavedBuild.AttachmentSlot,
+                SavedBuild.TrapLevel,
+                SavedBuild.OriginalTrapLevel,
+                SavedBuild.ResolvedItemDefinition.Get(),
+                GLoadJob.TrapPlacementPass > 0,
+                GLoadJob.TrapPlacementPass >=
+                    kNativeTrapPlacementPasses,
+                &GLoadJob.SpawnedBuilds,
+                &GLoadJob.BaselineBuildingActors);
+            if (!Trap)
+            {
+                SDK::DbgLog(
+                    "[TrickshotLoad] trap unresolved index=%d pass=%u class=%s parent=%p attachment=%u slot=%d\n",
+                    Index,
+                    static_cast<unsigned>(
+                        GLoadJob.TrapPlacementPass + 1),
+                    SavedBuild.ClassPath.c_str(), Parent,
+                    static_cast<unsigned>(
+                        SavedBuild.AttachmentType),
+                    SavedBuild.AttachmentSlot);
+                ++UnresolvedTraps;
+                continue;
+            }
+
+            int TrapBuildingLevel = SavedBuild.Level;
+            Trap->CurrentBuildingLevel = TrapBuildingLevel;
+            Trap->OnRep_CurrentBuildingLevel();
+            ApplyLoadedBuildOwnership(Trap, Controller);
+            GLoadJob.SpawnedBuilds[Index] =
+                TWeakObjectPtr<ABuildingSMActor>(Trap);
+        }
+
+        if (UnresolvedTraps > 0 &&
+            GLoadJob.TrapPlacementPass + 1 <
+                kMaximumTrapPlacementPasses)
+        {
+            const ULONGLONG RetryDelay =
+                kTrapRetryDelaysMs[GLoadJob.TrapPlacementPass];
+            SDK::DbgLog(
+                "[TrickshotLoad] trap pass=%u/%u unresolved=%d retryInMs=%llu\n",
+                static_cast<unsigned>(
+                    GLoadJob.TrapPlacementPass + 1),
+                static_cast<unsigned>(kMaximumTrapPlacementPasses),
+                UnresolvedTraps,
+                static_cast<unsigned long long>(RetryDelay));
+            ++GLoadJob.TrapPlacementPass;
+            GLoadJob.NextAdvanceMs = Now + RetryDelay;
+            return ELoadPumpResult::Running;
+        }
+        if (UnresolvedTraps > 0)
+        {
+            GLoadJob.Skipped += UnresolvedTraps;
+            GLoadJob.FailedTrapPlacements += UnresolvedTraps;
+        }
+        GLoadJob.LoadedTraps = 0;
+        for (int Index = 0;
+            Index < static_cast<int>(GLoadJob.Pending.size());
+            ++Index)
+        {
+            if (!GLoadJob.Pending[Index].IsTrap)
+                continue;
+            auto Trap = GLoadJob.SpawnedBuilds[Index].Get();
+            if (Trap && !Trap->bDestroyed &&
+                !(Trap->HasbActorIsBeingDestroyed() &&
+                  Trap->bActorIsBeingDestroyed))
+            {
+                ++GLoadJob.LoadedTraps;
+            }
+        }
+        SDK::DbgLog(
+            "[TrickshotLoad] trap phase complete passes=%u loaded=%d unresolved=%d\n",
+            static_cast<unsigned>(GLoadJob.TrapPlacementPass + 1),
+            GLoadJob.LoadedTraps, UnresolvedTraps);
+
+        // Trap retries deliberately span real time. Revalidate the entire
+        // structural graph after that window—not just unresolved traps'
+        // parents—so a delayed second-layer collapse cannot be hidden by a
+        // successful prop spawn and scene commit.
+        for (int Index : GLoadJob.StructuralOrder)
+        {
+            auto Build = GLoadJob.SpawnedBuilds[Index].Get();
+            if (!Build || Build->bDestroyed ||
+                (Build->HasbActorIsBeingDestroyed() &&
+                 Build->bActorIsBeingDestroyed))
+            {
+                const auto& SavedBuild = GLoadJob.Pending[Index];
+                SDK::DbgLog(
+                    "[TrickshotLoad] structure vanished during trap retries index=%d class=%s loc=(%.2f,%.2f,%.2f)\n",
+                    Index, SavedBuild.ClassPath.c_str(),
+                    SavedBuild.Location.X, SavedBuild.Location.Y,
+                    SavedBuild.Location.Z);
+                Message =
+                    "A restored structural layer collapsed while traps were settling; the partial load was removed.";
+                return ELoadPumpResult::Failed;
+            }
+        }
+
+        // Command-spawned objects go last so their construction and collision
+        // see the final structure/trap scene. AlwaysSpawn preserves the exact
+        // saved transform, including custom summon scale.
+        for (size_t Index = 0;
+            Index < GLoadJob.PendingProps.size(); ++Index)
+        {
+            const auto& SavedProp = GLoadJob.PendingProps[Index];
+            auto SavedClass = SavedProp.Class.Get();
+            if (!SavedClass)
+            {
+                ++GLoadJob.Skipped;
+                ++GLoadJob.FailedPropPlacements;
+                continue;
+            }
+
+            FTransform SpawnTransform(
+                SavedProp.Location,
+                SavedProp.Rotation.Quaternion(),
+                SavedProp.Scale);
+            AActor* SpawnOwner =
+                SavedProp.ClassPath == kTrickshotTireClassPath
+                ? static_cast<AActor*>(Controller) : nullptr;
+            auto Prop = UWorld::SpawnActor(
+                SavedClass, SpawnTransform, SpawnOwner, 1);
+            if (!Prop)
+            {
+                ++GLoadJob.Skipped;
+                ++GLoadJob.FailedPropPlacements;
+                continue;
+            }
+            if (Prop->Class != SavedClass ||
+                !IsLiveTrackedSpawnedActor(
+                    Prop, GLoadJob.World.Get()))
+            {
+                if (IsLiveTrackedSpawnedActor(
+                        Prop, GLoadJob.World.Get()))
+                    Prop->K2_DestroyActor();
+                ++GLoadJob.Skipped;
+                ++GLoadJob.FailedPropPlacements;
+                continue;
+            }
+            Prop->SetActorScale3D(SavedProp.Scale);
+            if (auto Car = Prop->Cast<AFortDagwoodVehicle>())
+            {
+                FortVehicleMods::RegisterSpawnedVehicle(Car);
+                Car->SetFuel(100.f);
+            }
+            Prop->ForceNetUpdate();
+            if (!IsLiveTrackedSpawnedActor(
+                    Prop, GLoadJob.World.Get()) ||
+                !RegisterSpawnedActorInternal(
+                    Prop, Controller, SavedProp.ClassPath, false))
+            {
+                if (IsLiveTrackedSpawnedActor(
+                        Prop, GLoadJob.World.Get()))
+                    Prop->K2_DestroyActor();
+                ++GLoadJob.Skipped;
+                ++GLoadJob.FailedPropPlacements;
+                continue;
+            }
+            GLoadJob.SpawnedProps[Index] =
+                TWeakObjectPtr<AActor>(Prop);
+            ++GLoadJob.LoadedProps;
+        }
+        if (GLoadJob.FailedPropPlacements > 0)
+        {
+            Message = "One or more saved objects failed to restore; the partial load was removed.";
+            return ELoadPumpResult::Failed;
+        }
+
+        // Waypoints are process-session state rather than actors. Publish the
+        // fully validated replacement only after every destructive scene phase
+        // has succeeded, so a failed preset never partially rewrites them.
+        if (GLoadJob.RestoreWaypoints)
+        {
+            AFortPlayerControllerAthena::ReplaceWaypoints(
+                std::move(GLoadJob.PendingWaypoints));
+        }
+        Message = BuildLoadCompletionMessage();
+        SDK::DbgLog(
+            "[TrickshotLoad] complete builds=%d traps=%d objects=%d skipped=%d failedTraps=%d failedObjects=%d\n",
+            GLoadJob.LoadedBuilds, GLoadJob.LoadedTraps,
+            GLoadJob.LoadedProps, GLoadJob.Skipped,
+            GLoadJob.FailedTrapPlacements,
+            GLoadJob.FailedPropPlacements);
+        return ELoadPumpResult::Succeeded;
     }
 }
 
@@ -6663,7 +9760,7 @@ void GUI::Init()
             ImGui::SameLine(0.f, 8.f);
             ImGui::SetCursorPosY(TitleY);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.54f, 1.f));
-            ImGui::TextUnformatted("v2.4.0");
+            ImGui::TextUnformatted("v2.5.0");
             ImGui::PopStyleColor();
 
             // FN / UE versions on the right, aligned to the visible viewport so they
@@ -7110,12 +10207,17 @@ void GUI::Init()
                             true, std::memory_order_release);
                     }
 
-                    AtomicLabeledSliderFloat(
-                        "Max Tick Rate",
-                        "##max-tick-rate",
-                        FConfiguration::MaxTickRate,
-                        5.0f, 180.0f,
-                        "%.0f sec", Width);
+                    if (AtomicLabeledSliderFloat(
+                            "Max Tick Rate",
+                            "##max-tick-rate",
+                            FConfiguration::MaxTickRate,
+                            FConfiguration::MinimumMaxTickRate,
+                            FConfiguration::MaximumMaxTickRate,
+                            "%.0f Hz", Width))
+                    {
+                        FConfiguration::bMaxTickRateUserOverride.store(
+                            true, std::memory_order_release);
+                    }
                 }
 
                 if (gsStatus == Joinable &&
@@ -7347,11 +10449,28 @@ void GUI::Init()
                 EndSectionBody();
             }
 
+            const int PublishedPlaylist = GetSelectedPlaylist();
+            const bool bConfiguredFoodFightPlaylist =
+                FConfiguration::Playlist &&
+                (wcscmp(
+                     FConfiguration::Playlist,
+                     L"/Game/Athena/Playlists/Barrier/"
+                     L"Playlist_Barrier.Playlist_Barrier") == 0 ||
+                 wcscmp(
+                     FConfiguration::Playlist,
+                     L"/Game/Athena/Playlists/Barrier/"
+                     L"Playlist_Barrier_16_B_Lava."
+                     L"Playlist_Barrier_16_B_Lava") == 0);
             const bool bFoodFightConfiguration =
                 SelectedPlaylist ==
                     static_cast<int>(Playlist::FoodFight) ||
                 SelectedPlaylist ==
-                    static_cast<int>(Playlist::DeepFriedSquads);
+                    static_cast<int>(Playlist::DeepFriedSquads) ||
+                PublishedPlaylist ==
+                    static_cast<int>(Playlist::FoodFight) ||
+                PublishedPlaylist ==
+                    static_cast<int>(Playlist::DeepFriedSquads) ||
+                bConfiguredFoodFightPlaylist;
             if (bFoodFightConfiguration && gsStatus < Ended)
             {
                 SectionHeader("LTM Configuration", SectionWidth);
@@ -7388,6 +10507,16 @@ void GUI::Init()
                     FConfiguration::FoodFightObjectiveHealth.store(
                         DisplayObjectiveHealth,
                         std::memory_order_release);
+                }
+                ImGui::EndDisabled();
+
+                ImGui::BeginDisabled(gsStatus != StartedMatch);
+                if (ImGui::Button(
+                        "Drop Wall",
+                        ImVec2(Width, Height)))
+                {
+                    FFortAthenaNativeLTMCompatibility::
+                        RequestFoodFightWallDrop();
                 }
                 ImGui::EndDisabled();
 
@@ -8933,71 +12062,30 @@ void GUI::Init()
                     }
 				}
 
-                UFortHealthSet* GodHealthSet =
-                    TargetPawn->HasHealthSet()
-                        ? TargetPawn->HealthSet
-                        : nullptr;
-                FFortGameplayAttributeData* GodHealth =
-                    GodHealthSet &&
-                    GodHealthSet->HasHealth() &&
-                    FFortGameplayAttributeData::StaticStruct() &&
-                    FFortGameplayAttributeData::HasMinimum()
-                        ? &GodHealthSet->Health
-                        : nullptr;
                 const bool bIsMinimumGodded =
                     AFortPlayerPawnAthena::
                         HasMinimumHealthGodMode(TargetPC);
                 const bool bIsGodded =
                     bIsMinimumGodded ||
                     AFortPlayerPawnAthena::
-                        HasFullHealthGodMode(TargetPawn);
+                        HasFullHealthGodMode(TargetPC);
 
                 if (bIsGodded)
                 {
                     if (ImGui::Button("Ungod Player", ImVec2(Width, Height)))
                     {
-                        if (bIsMinimumGodded)
-                        {
-                            AFortPlayerPawnAthena::
-                                SetMinimumHealthGodMode(
-                                    TargetPC, false);
-                        }
-                        else
-                        {
-                            if (TargetPawn->HasbCanBeDamaged())
-                                TargetPawn->bCanBeDamaged = true;
-                            if (GodHealth)
-                                GodHealth->Minimum = 0.f;
-                        }
-                        TargetPawn->ForceNetUpdate();
+                        AFortPlayerPawnAthena::DisableGodModes(
+                            TargetPC, TargetPawn);
                     }
                 }
                 else
                 {
                     if (ImGui::Button("God Player", ImVec2(Width, Height)))
                     {
-                        AFortPlayerPawnAthena::
-                            SetMinimumHealthGodMode(
-                                TargetPC, false);
-
-                        bool bAppliedGod = false;
-                        if (VersionInfo.FortniteVersion >= 21 &&
-                            TargetPawn->HasbCanBeDamaged())
-                        {
-                            TargetPawn->bCanBeDamaged = false;
-                            bAppliedGod = true;
-                        }
-                        else if (GodHealth)
-                        {
-                            GodHealth->Minimum =
-                                TargetPawn->GetMaxHealth();
-                            bAppliedGod = true;
-                        }
-                        else if (TargetPawn->HasbCanBeDamaged())
-                        {
-                            TargetPawn->bCanBeDamaged = false;
-                            bAppliedGod = true;
-                        }
+                        const bool bAppliedGod =
+                            AFortPlayerPawnAthena::
+                                SetFullHealthGodMode(
+                                    TargetPC, TargetPawn, true);
 
                         if (bAppliedGod)
                         {
@@ -9584,53 +12672,6 @@ void GUI::Init()
         }
         case 4:
         {
-            SectionHeader("Bot AI", SectionWidth);
-            BeginSectionBody();
-
-            AtomicCheckbox(
-                "Enable Bot AI (EXPERIMENTAL)",
-                BotAISettings::bEnabled);
-            ImGui::TextDisabled(
-                "Makes bots from the spawnbot command walk, run and");
-            ImGui::TextDisabled(
-                "swim around instead of standing still. They use the");
-            ImGui::TextDisabled(
-                "game's own movement. Native AI is untouched.");
-
-            if (BotAISettings::bEnabled.load(
-                    std::memory_order_acquire))
-            {
-                ImGui::Spacing();
-
-                AtomicCheckbox(
-                    "Stay Inside The Safe Zone",
-                    BotAISettings::bSeekSafeZone);
-                AtomicCheckbox(
-                    "Idle Jumps And Pauses",
-                    BotAISettings::bIdleFlourishes);
-                AtomicCheckbox(
-                    "Native Movement",
-                    BotAISettings::bNativeMovement);
-                ImGui::TextDisabled(
-                    "Uses the game's own walking, running and swimming.");
-                ImGui::TextDisabled(
-                    "Turn off if bots misbehave on this build.");
-
-                ImGui::Spacing();
-                AtomicCheckbox(
-                    "Movement Diagnostics",
-                    BotAISettings::bMovementDiagnostics);
-                ImGui::TextDisabled(
-                    "Debug only: bots stop moving and log why once a");
-                ImGui::TextDisabled(
-                    "second. Look for [BotAI][Diag] in the console.");
-
-                ImGui::Spacing();
-                ImGui::TextDisabled("%s", BotAI::GetStatusLine());
-            }
-
-            EndSectionBody();
-
             SectionHeader("Bot Stats", SectionWidth);
             BeginSectionBody();
 
@@ -9970,41 +13011,41 @@ void GUI::Init()
                 "Auto Reload on Waypoint TP",
                 FConfiguration::bAutoReloadOnWaypointTP);
 
+            AtomicCheckbox(
+                "Auto God Mode",
+                FConfiguration::bAutoGodMode);
+
+            if (FConfiguration::bAutoGodMode)
+            {
+                ImGui::Indent(12.f);
+
+                static const char* const AutoGodModes[] = {
+                    "Maximum",
+                    "Minimum"
+                };
+
+                ImGui::TextUnformatted("God Mode Type");
+                ImGui::SetNextItemWidth(Width);
+                AtomicCombo(
+                    "##auto-god-mode",
+                    FConfiguration::AutoGodModeType,
+                    AutoGodModes,
+                    IM_ARRAYSIZE(AutoGodModes));
+
+                // The trickshotters join first and the player they are all
+                // aiming at joins last, so the newest arrival is the one
+                // who has to stay killable.
+                if (FConfiguration::bInfiniteRender)
+                    AtomicCheckbox(
+                        "Exclude Last Player",
+                        FConfiguration::
+                            bAutoGodModeExcludeLastPlayer);
+
+                ImGui::Unindent(12.f);
+            }
+
             if (bBeforeJoinable)
             {
-                AtomicCheckbox(
-                    "Auto God Mode",
-                    FConfiguration::bAutoGodMode);
-
-                if (FConfiguration::bAutoGodMode)
-                {
-                    ImGui::Indent(12.f);
-
-                    static const char* const AutoGodModes[] = {
-                        "Maximum",
-                        "Minimum"
-                    };
-
-                    ImGui::TextUnformatted("God Mode Type");
-                    ImGui::SetNextItemWidth(Width);
-                    AtomicCombo(
-                        "##auto-god-mode",
-                        FConfiguration::AutoGodModeType,
-                        AutoGodModes,
-                        IM_ARRAYSIZE(AutoGodModes));
-
-                    // The trickshotters join first and the player they are all
-                    // aiming at joins last, so the newest arrival is the one
-                    // who has to stay killable.
-                    if (FConfiguration::bInfiniteRender)
-                        AtomicCheckbox(
-                            "Exclude Last Player",
-                            FConfiguration::
-                                bAutoGodModeExcludeLastPlayer);
-
-                    ImGui::Unindent(12.f);
-                }
-
                 if (FConfiguration::bLateGame)
                     AtomicCheckbox(
                         "Randomize Kills",
@@ -10214,6 +13255,38 @@ void GUI::Init()
                 InitializedTrickshotList = true;
             }
 
+            TrickshotManager::EAsyncOperation CompletedOperation =
+                TrickshotManager::EAsyncOperation::None;
+            bool CompletedSuccessfully = false;
+            std::string CompletedName;
+            std::string CompletedMessage;
+            if (TrickshotManager::ConsumeResult(
+                    CompletedOperation,
+                    CompletedSuccessfully,
+                    CompletedName,
+                    CompletedMessage))
+            {
+                TrickshotMessage = CompletedMessage;
+                if (CompletedSuccessfully &&
+                    CompletedOperation ==
+                        TrickshotManager::EAsyncOperation::Save)
+                {
+                    const std::string SavedName =
+                        TrickshotManager::SanitizeName(
+                            CompletedName.c_str());
+                    SavedTrickshots =
+                        TrickshotManager::GetSavedNames();
+                    auto It = std::find(
+                        SavedTrickshots.begin(),
+                        SavedTrickshots.end(), SavedName);
+                    SelectedTrickshot =
+                        It == SavedTrickshots.end()
+                            ? -1
+                            : static_cast<int>(std::distance(
+                                SavedTrickshots.begin(), It));
+                }
+            }
+
             ImGui::SetNextItemWidth(Width);
             ImGui::InputTextWithHint("##trickshot-name", "Trickshot Name", TrickshotName, IM_ARRAYSIZE(TrickshotName));
 
@@ -10236,29 +13309,46 @@ void GUI::Init()
             const float ButtonWidth = (Width - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (ImGui::Button("Save", ImVec2(ButtonWidth, Height)))
             {
-                if (TrickshotManager::Save(TrickshotName, TrickshotMessage))
-                {
-                    const std::string SavedName = TrickshotManager::SanitizeName(TrickshotName);
-                    SavedTrickshots = TrickshotManager::GetSavedNames();
-                    auto It = std::find(SavedTrickshots.begin(), SavedTrickshots.end(), SavedName);
-                    SelectedTrickshot = It == SavedTrickshots.end() ? -1 : static_cast<int>(std::distance(SavedTrickshots.begin(), It));
-                }
+                TrickshotManager::RequestSave(
+                    TrickshotName, TrickshotMessage);
             }
             ImGui::SameLine();
             if (ImGui::Button("Load", ImVec2(ButtonWidth, Height)))
             {
-                TrickshotManager::Load(SelectedTrickshot >= 0 && SelectedTrickshot < SavedTrickshots.size()
-                    ? SavedTrickshots[SelectedTrickshot] : "", TrickshotMessage);
+                TrickshotManager::RequestLoad(
+                    SelectedTrickshot >= 0 &&
+                        SelectedTrickshot < SavedTrickshots.size()
+                        ? SavedTrickshots[SelectedTrickshot]
+                        : "",
+                    TrickshotMessage);
             }
 
             if (ImGui::Button("Delete", ImVec2(ButtonWidth, Height)))
             {
-                const std::string SelectedName = SelectedTrickshot >= 0 && SelectedTrickshot < SavedTrickshots.size()
-                    ? SavedTrickshots[SelectedTrickshot] : "";
-                if (TrickshotManager::Delete(SelectedName, TrickshotMessage))
+                if (TrickshotManager::IsBusy())
                 {
-                    SavedTrickshots = TrickshotManager::GetSavedNames();
-                    SelectedTrickshot = SavedTrickshots.empty() ? -1 : (std::min)(SelectedTrickshot, static_cast<int>(SavedTrickshots.size()) - 1);
+                    TrickshotMessage =
+                        "Wait for the current trickshot operation to finish.";
+                }
+                else
+                {
+                    const std::string SelectedName =
+                        SelectedTrickshot >= 0 &&
+                            SelectedTrickshot < SavedTrickshots.size()
+                            ? SavedTrickshots[SelectedTrickshot]
+                            : "";
+                    if (TrickshotManager::Delete(
+                            SelectedName, TrickshotMessage))
+                    {
+                        SavedTrickshots =
+                            TrickshotManager::GetSavedNames();
+                        SelectedTrickshot = SavedTrickshots.empty()
+                            ? -1
+                            : (std::min)(
+                                SelectedTrickshot,
+                                static_cast<int>(
+                                    SavedTrickshots.size()) - 1);
+                    }
                 }
             }
             ImGui::SameLine();
@@ -10267,6 +13357,13 @@ void GUI::Init()
 
             if (!TrickshotMessage.empty())
                 ImGui::TextWrapped("%s", TrickshotMessage.c_str());
+
+            AtomicCheckbox(
+                "Save and Track Spawned Objects",
+                FConfiguration::bSaveAndTrackSpawnedObjects);
+            AtomicCheckbox(
+                "Save Waypoints",
+                FConfiguration::bSaveWaypoints);
 
             EndSectionBody();
 
@@ -10310,17 +13407,40 @@ void GUI::Init()
             ImGui::TextUnformatted("MAGNESIUM");
             ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 1.f));
-            ImGui::TextUnformatted("Gameserver  -  v2.4.0");
+            ImGui::TextUnformatted("Gameserver  -  v2.5.0");
             ImGui::PopStyleColor();
             ImGui::EndGroup();
 
             ImGui::Dummy(ImVec2(0.f, 14.f));
 
             ImGui::PushStyleColor(ImGuiCol_Text, Accent(0.85f));
-            ImGui::TextUnformatted("CORE");
+            ImGui::TextUnformatted("CREDITS");
             ImGui::PopStyleColor();
             rule();
-            credit("Erbium", "Base of the project", "https://github.com/plooshi/Erbium");
+
+            // Core attribution is part of Magnesium itself, so keep it
+            // independent of every optional feature, playlist and runtime
+            // integration used to decide which contributor credits apply.
+            struct CoreCredit
+            {
+                const char* Name;
+                const char* Role;
+                const char* Url;
+            };
+            static constexpr CoreCredit CoreCredits[] = {
+                {
+                    "Erbium",
+                    "Base of the project",
+                    "https://github.com/plooshi/Erbium"
+                },
+                {
+                    "Core",
+                    "Feature inspiration and references",
+                    "https://github.com/PongooDev/Core"
+                },
+            };
+            for (const CoreCredit& Entry : CoreCredits)
+                credit(Entry.Name, Entry.Role, Entry.Url);
 
             const bool anyContrib = FConfiguration::bInfiniteRender
                 || SelectedPlaylist == static_cast<int>(Playlist::Gav)

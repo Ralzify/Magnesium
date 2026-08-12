@@ -20,18 +20,6 @@ enum class EMovementMode : uint8_t
     MOVE_MAX = 7,
 };
 
-// UPlayer is the engine's "someone is driving this controller" object. A
-// ULocalPlayer subclass here is what makes APlayerController::IsLocalController
-// true, which in turn is what lets UCharacterMovementComponent run moves for
-// the possessed pawn. Server-spawned bot controllers have none by default.
-class UPlayer : public UObject
-{
-public:
-    UCLASS_COMMON_MEMBERS(UPlayer);
-
-    DEFINE_PROP(PlayerController, AActor*);
-};
-
 class UAthenaPickaxeItemDefinition : public UFortItemDefinition
 {
 public:
@@ -382,19 +370,32 @@ public:
     UCLASS_COMMON_MEMBERS(AController);
 };
 
-enum class EStatMod
+// ModType argument of AFortPlayerController::ServerModifyStat. Resolve the
+// reflected enum at runtime when possible because its ordering can vary.
+enum class EStatMod : uint8
 {
-    Delta,
-    Set,
-    Maximum,
-    EStatMod_MAX
+    Delta = 0,
+    Set = 1,
+    Maximum = 2,
+    EStatMod_MAX = 3
 };
+
+uint8 ResolveStatMod(EStatMod Mod);
 
 inline const UCurveTable* GameData = nullptr;
 class AFortPlayerControllerAthena : public AActor
 {
 public:
     UCLASS_COMMON_MEMBERS(AFortPlayerControllerAthena);
+
+    // Named waypoint commands share one server-session dictionary. Preset
+    // persistence calls these helpers only from the game thread; returning and
+    // replacing by value keeps Unreal object pointers out of the saved state.
+    using FWaypointHistory = std::vector<FVector>;
+    using FWaypointMap =
+        std::unordered_map<std::string, FWaypointHistory>;
+    static FWaypointMap SnapshotWaypoints();
+    static void ReplaceWaypoints(FWaypointMap NewWaypoints);
 
     DEFINE_PROP(AcknowledgedPawn, AActor*);
     DEFINE_PROP(StateName, FName);
@@ -406,8 +407,6 @@ public:
     DEFINE_PROP(LastDamager, AActor*);
     DEFINE_PROP(MyFortPawn, AFortPlayerPawnAthena*);
     DEFINE_PROP(Pawn, AFortPlayerPawnAthena*);
-    // Null on every server-spawned bot controller. See UPlayer above.
-    DEFINE_PROP(Player, UPlayer*);
 
     static inline uint32_t WorldInventory__Offset = 0;
     static inline bool WorldInventory__Initialized = false;
@@ -455,6 +454,9 @@ public:
     DEFINE_PROP(SwappingItemDefinition, FFortItemEntry*); // scuffness
     DEFINE_PROP(QuickBars, AFortQuickBars*);
     DEFINE_PROP(XPComponent, UFortPlayerControllerAthenaXPComponent*);
+    // Native match-stat storage can lag behind controller construction. Quest
+    // dispatch treats a reflected-but-null manager as not ready.
+    DEFINE_PROP(StatManager, UObject*);
     DEFINE_PROP(CheatManager, UFortCheatManager*);
     DEFINE_PROP(CheatClass, TSubclassOf<UObject>);
     DEFINE_PROP(WorldInventoryClass, TSubclassOf<AFortInventory>);
@@ -501,7 +503,6 @@ public:
     DEFINE_FUNC(ClientOnPawnSpawned, void);
     DEFINE_FUNC(IsActionInputIgnored, bool);
     DEFINE_FUNC(IsInAircraft, bool);
-    DEFINE_FUNC(IsLocalController, bool);
     DEFINE_FUNC(ServerSetTeam, void);
     DEFINE_FUNC(GetAircraftComponent, UFortControllerComponent_Aircraft*);
     DEFINE_FUNC(ServerAttemptAircraftJump, void);
@@ -546,6 +547,15 @@ public:
     DEFINE_FUNC(ServerApplyOverrideWrapToVehicle, void);
     DEFINE_FUNC(ClientSendConfirmationMessage, FText);
     DEFINE_FUNC(ServerModifyStat, void);
+    DEFINE_FUNC(GetStatValue, int32);
+
+    bool TryModifyStat(
+        const wchar_t* StatName,
+        int32 Amount,
+        EStatMod ModType = EStatMod::Set,
+        bool bForceStatSave = true) const;
+    static bool SyncReactiveKillStat(
+        AFortPlayerControllerAthena* PlayerController);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     // Removes spawn-island loot while retaining the harvesting/building tools

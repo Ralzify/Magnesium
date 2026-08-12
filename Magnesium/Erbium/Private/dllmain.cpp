@@ -22,6 +22,149 @@
 
 namespace
 {
+    constexpr wchar_t TransportMappingName[] =
+        L"Local\\Magnesium.Transport.v1";
+    constexpr DWORD TransportMagic = 0x4D475450u;
+    constexpr DWORD TransportSchema = 1u;
+    constexpr DWORD TransportCommitted = 1u;
+    constexpr DWORD TransportModeGenericLegacy = 0u;
+    constexpr DWORD TransportModeIris = 1u;
+
+    struct FTransportManifest
+    {
+        volatile LONG Sequence;
+        DWORD Magic;
+        DWORD Schema;
+        DWORD StructSize;
+        DWORD PublisherPid;
+        DWORD FortniteVersionHundredths;
+        DWORD ServerPort;
+        DWORD Committed;
+        DWORD Mode;
+    };
+
+    static_assert(sizeof(FTransportManifest) == 36);
+    static_assert(offsetof(FTransportManifest, Sequence) == 0);
+    static_assert(offsetof(FTransportManifest, Magic) == 4);
+    static_assert(offsetof(FTransportManifest, Mode) == 32);
+
+    HANDLE TransportMapping = nullptr;
+    FTransportManifest* TransportManifest = nullptr;
+
+    DWORD GetFortniteVersionHundredths()
+    {
+        return static_cast<DWORD>(
+            VersionInfo.FortniteVersion * 100.0 + 0.5);
+    }
+
+    bool IsDurianLegacyTransport(DWORD FortniteVersionHundredths)
+    {
+        static constexpr wchar_t DurianPlaylist[] =
+            L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian";
+        return FortniteVersionHundredths == 2711u &&
+            FConfiguration::Playlist &&
+            wcscmp(FConfiguration::Playlist, DurianPlaylist) == 0;
+    }
+
+    bool PublishTransportManifest(
+        DWORD FortniteVersionHundredths,
+        bool bUseIris)
+    {
+        if (!TransportMapping)
+        {
+            TransportMapping = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                nullptr,
+                PAGE_READWRITE,
+                0,
+                static_cast<DWORD>(sizeof(FTransportManifest)),
+                TransportMappingName);
+            if (!TransportMapping)
+            {
+                SDK::DbgLog(
+                    "[Transport] CreateFileMapping failed error=%lu\n",
+                    GetLastError());
+                return false;
+            }
+        }
+
+        if (!TransportManifest)
+        {
+            TransportManifest = static_cast<FTransportManifest*>(
+                MapViewOfFile(
+                    TransportMapping,
+                    FILE_MAP_ALL_ACCESS,
+                    0,
+                    0,
+                    sizeof(FTransportManifest)));
+            if (!TransportManifest)
+            {
+                SDK::DbgLog(
+                    "[Transport] MapViewOfFile failed error=%lu\n",
+                    GetLastError());
+                return false;
+            }
+        }
+
+        const LONG CurrentSequence = InterlockedCompareExchange(
+            &TransportManifest->Sequence, 0, 0);
+        const LONG OddSequence = (CurrentSequence & 1)
+            ? CurrentSequence + 2
+            : CurrentSequence + 1;
+        InterlockedExchange(
+            &TransportManifest->Sequence, OddSequence);
+
+        TransportManifest->Magic = TransportMagic;
+        TransportManifest->Schema = TransportSchema;
+        TransportManifest->StructSize = sizeof(FTransportManifest);
+        TransportManifest->PublisherPid = GetCurrentProcessId();
+        TransportManifest->FortniteVersionHundredths =
+            FortniteVersionHundredths;
+        const int ConfiguredPort = FConfiguration::Port.load(
+            std::memory_order_acquire);
+        TransportManifest->ServerPort =
+            ConfiguredPort > 0 && ConfiguredPort <= 65535
+                ? static_cast<DWORD>(ConfiguredPort)
+                : 7777u;
+        TransportManifest->Committed = TransportCommitted;
+        TransportManifest->Mode = bUseIris
+            ? TransportModeIris
+            : TransportModeGenericLegacy;
+
+        MemoryBarrier();
+        InterlockedExchange(
+            &TransportManifest->Sequence, OddSequence + 1);
+
+        SDK::DbgLog(
+            "[Transport] published name=%ls pid=%lu version=%lu "
+            "port=%lu mode=%s\n",
+            TransportMappingName,
+            TransportManifest->PublisherPid,
+            TransportManifest->FortniteVersionHundredths,
+            TransportManifest->ServerPort,
+            bUseIris ? "Iris" : "GenericLegacy");
+        return true;
+    }
+
+    void FinalizeTransportPolicy()
+    {
+        const DWORD FortniteVersionHundredths =
+            GetFortniteVersionHundredths();
+        const bool bDurianLegacy =
+            IsDurianLegacyTransport(FortniteVersionHundredths);
+        const bool bIrisRequested = FConfiguration::bEnableIris.load(
+            std::memory_order_acquire);
+        const bool bUseIris =
+            VersionInfo.EngineVersion >= 5.3 &&
+            bIrisRequested &&
+            !bDurianLegacy;
+
+        FConfiguration::bEnableIris.store(
+            bUseIris, std::memory_order_release);
+        PublishTransportManifest(
+            FortniteVersionHundredths, bUseIris);
+    }
+
     using UE421FrontendRenderTask = void (*)(void*, void*);
 
     UE421FrontendRenderTask UE421FrontendRenderTaskOG = nullptr;
@@ -242,9 +385,10 @@ void Main()
     }
 
     SDK::DbgLog("Main: start pressed\n");
-
-    if (fabs(VersionInfo.FortniteVersion - 27.11) < 0.001)
-        FConfiguration::bEnableIris = false;
+    // Playlist selection is final once the Start gate releases. Choose the
+    // transport once, publish it for ATLAS before the server becomes
+    // joinable, and retain the mapping/view for the lifetime of this process.
+    FinalizeTransportPolicy();
 
     if (VersionInfo.FortniteVersion <= 2.50)
         FConfiguration::bMovingBus = false;
@@ -294,28 +438,28 @@ void Main()
         }
     }
     SDK::DbgLog("Main: cp3 (pre Iris block)\n");
-    if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
+    if (VersionInfo.EngineVersion >= 5.3)
     {
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIris None"), nullptr);
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIrisRpc None"), nullptr);
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIrisBridge None"), nullptr);
-        /*auto IrisBool = Memcury::Scanner::FindPattern("83 3D ? ? ? ? ? 0F 8E ? ? ? ? 49 8B B9").RelativeOffset(2, 1).Get();
-        if (IrisBool)
-            *(uint32_t*)IrisBool = true;
-        else
-        {
-            IrisBool = Memcury::Scanner::FindPattern("44 39 25 ? ? ? ? 0F 9F C0 45 84 FF").RelativeOffset(3).Get();
-
-            if (IrisBool)
-                *(uint32_t*)IrisBool = true;
-        }*/
+        const bool bUseIris = FConfiguration::bEnableIris.load(
+            std::memory_order_acquire);
         auto IrisBool = FindCVar<uint32_t>(L"net.Iris.UseIrisReplication");
-
         if (IrisBool)
-            *IrisBool = true;
+            *IrisBool = bUseIris ? 1u : 0u;
+
+        SDK::DbgLog(
+            "[Transport] net.Iris.UseIrisReplication=%u cvar=%p\n",
+            bUseIris ? 1u : 0u,
+            static_cast<void*>(IrisBool));
+
+        if (bUseIris)
+        {
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIris None"), nullptr);
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIrisRpc None"), nullptr);
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIrisBridge None"), nullptr);
+        }
 
         SDK::DbgLog("Main: cp4 (Iris cvars done, pre FilterConfigs)\n");
-        if (VersionInfo.FortniteVersion >= 29 && VersionInfo.FortniteVersion < 32.00) // 32.11: FObjectReplicationBridgeFilterConfig::Size() is wrong here -> loop hangs; needs the real 32.11 struct layout
+        if (bUseIris && VersionInfo.FortniteVersion >= 29 && VersionInfo.FortniteVersion < 32.00) // 32.11: FObjectReplicationBridgeFilterConfig::Size() is wrong here -> loop hangs; needs the real 32.11 struct layout
         {
             auto ReplicationBridgeConfig = UObjectReplicationBridgeConfig::GetDefaultObj();
 
@@ -331,7 +475,6 @@ void Main()
                 }
             }
         }
-        //UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"net.Iris.UseIrisReplication 1"), nullptr);
     }
     SDK::DbgLog("Main: cp5 (Iris block done, pre EV5.4)\n");
     if (VersionInfo.EngineVersion >= 5.4)

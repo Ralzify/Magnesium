@@ -5,6 +5,7 @@
 #include <Windows.h>
 #include <Shellapi.h>
 #include <atomic>
+#include <string>
 
 class AFortAthenaMapInfo;
 
@@ -166,6 +167,15 @@ public:
     static void SafeZoneMapGameTick();
     static void ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo);
 
+    // Records an actor created by the authoritative `spawn`/`summon` command
+    // while Trickshot mode and spawned-object tracking are enabled. The preset
+    // manager owns only this exact actor instance; Actor::Owner remains
+    // available for normal gameplay and replication semantics.
+    static void RegisterTrickshotSpawnedActor(
+        AActor* Actor,
+        AFortPlayerControllerAthena* Controller,
+        const std::string& CanonicalClassPath);
+
     static bool IsArenaPlaylist()
     {
         const int Selected = GetSelectedPlaylist();
@@ -180,6 +190,22 @@ public:
 
     static inline FString* GetRequestURL(UObject* Connection)
     {
+        if (!Connection)
+            return nullptr;
+
+        const auto ReflectedOffset = Connection->GetOffset("RequestURL");
+        if (ReflectedOffset != static_cast<uint32>(-1) &&
+            ReflectedOffset <= 0x10000)
+        {
+            return reinterpret_cast<FString*>(
+                reinterpret_cast<uint8*>(Connection) + ReflectedOffset);
+        }
+
+        // These offsets are retained only for the verified legacy layouts that
+        // predate a usable reflected field. UE5 connection layouts vary by
+        // cohort; never guess 0x1B8 there just to obtain a display label.
+        if (VersionInfo.EngineVersion >= 5.0)
+            return nullptr;
         if (VersionInfo.EngineVersion <= 4.20)
             return (FString*)(__int64(Connection) + 432);
         if (std::floor(VersionInfo.FortniteVersion) >= 5 && VersionInfo.EngineVersion < 4.24)

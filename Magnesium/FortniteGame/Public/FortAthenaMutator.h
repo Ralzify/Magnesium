@@ -483,6 +483,7 @@ public:
         AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
     static void Tick(UNetDriver* Driver, float DeltaSeconds);
+    static void RequestFoodFightWallDrop();
     static bool TryGetFoodFightRespawnAllowed(
         const AFortPlayerStateAthena* PlayerState,
         bool& OutAllowed);
@@ -620,8 +621,12 @@ class AAthenaBigBaseWall : public AActor
 public:
     UCLASS_COMMON_MEMBERS(AAthenaBigBaseWall);
 
+    DEFINE_PROP(WallGravity, float);
+    DEFINE_PROP(TimeUntilWallComesDown, float);
     DEFINE_PROP(BarrierState, uint8);
 
+    DEFINE_FUNC(OnRep_WallGravity, void);
+    DEFINE_FUNC(OnRep_TimeUntilWallComesDown, void);
     DEFINE_FUNC(OnRep_BarrierState, void);
 };
 
@@ -685,6 +690,9 @@ public:
     DEFINE_PROP(ObjectiveMaxSpawnHeight, FScalableFloat);
     DEFINE_PROP(ObjectivesSpawnSameHeight, FScalableFloat);
     DEFINE_PROP(LavaLevelRelativeToMascot, FScalableFloat);
+    DEFINE_PROP(WallGravity, FScalableFloat);
+    DEFINE_PROP(SafeZonePhaseWhenToBringDownWall, FScalableFloat);
+    DEFINE_PROP(TimeToBringDownWall, FScalableFloat);
     DEFINE_PROP(
         GameMsg_WallComingDown,
         FAthenaGameMessageData);

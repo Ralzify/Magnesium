@@ -19,20 +19,44 @@ public:
     DEFINE_ENUM_PROP(PostGameReset);
 };
 
+class EFortMinigamePlayerSpawnLocationSetting
+{
+public:
+    UENUM_COMMON_MEMBERS(EFortMinigamePlayerSpawnLocationSetting);
+
+    DEFINE_ENUM_PROP(SpawnPads);
+    DEFINE_ENUM_PROP(Air);
+    DEFINE_ENUM_PROP(CurrentLocation);
+};
+
 class AFortMinigame : public AActor
 {
 public:
     UCLASS_COMMON_MEMBERS(AFortMinigame);
-    
+
     DEFINE_PROP(NumTeams, int32);
     DEFINE_PROP(CurrentState, uint8);
-    
+    DEFINE_PROP(SpawnLocationSetting, uint8);
+    DEFINE_PROP(WarmupDuration, float);
+    DEFINE_PROP(PostGameResetDelay, float);
+    DEFINE_PROP(Volume, AActor*);
+    DEFINE_PROP(MinigameStarter, AActor*);
+    DEFINE_PROP(PlayerStartComponents, TArray<UObject*>);
+    DEFINE_PROP(MinigameComponents, TArray<UObject*>);
+
     DEFINE_FUNC(GetParticipatingPlayers, void);
     DEFINE_FUNC(OnPlayerPawnPossessedDuringTransition, void);
     DEFINE_FUNC(OnClientFinishTeleportingForMinigame, void);
     DEFINE_FUNC(AdvanceState, void);
     DEFINE_FUNC(HandleMinigameStarted, void);
-    DEFINE_FUNC(HandleVolumeEditModeChange, void);    
+    DEFINE_FUNC(HandleVolumeEditModeChange, void);
+    DEFINE_FUNC(AddMinigamePlayer, void);
+    DEFINE_FUNC(OnRep_CurrentState, void);
+
+    // Watchdog for builds without the native SetState hook (everything below
+    // 18.00): logs every minigame state change and unsticks the start sequence
+    // when the native path stalls waiting on a teleport that never happens.
+    static void TickCreativeMinigames();
 public:
     DefHookOg(void, SetState, AFortMinigame* Minigame, uint8 NewState);
     InitHooks;

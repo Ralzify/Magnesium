@@ -59,10 +59,16 @@ public:
         const AFortPlayerControllerAthena* PC);
     static bool HasManagedAIControllers();
 
-    // Opens one bounded PlayerAI work budget for the current server frame.
-    // Expensive native probes consume this shared budget instead of every AI
+    // Opens one bounded work budget for the current server frame. Expensive
+    // native probes consume this shared budget instead of every caller
     // issuing the same work in one TickFlush.
     static void BeginServerTick(float TimeSeconds);
+
+    // Drives everything this layer owes the frame: the shared work budget,
+    // the cheat-bot cosmetic queue, deferred players-left replication, and a
+    // cache reset when the world changes underneath it. Called once per
+    // server tick from UNetDriver::TickFlush; safe in every phase.
+    static void TickServerFrame(const UNetDriver* Driver);
 
     // Server-owned controllers never send the client loading/possession RPCs
     // that normally unlock character customization. Publish the equivalent

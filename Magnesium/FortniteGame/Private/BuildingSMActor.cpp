@@ -155,18 +155,316 @@ void ABuildingSMActor::OnDamageServer(ABuildingSMActor* Actor, float Damage, FGa
 
 uint32 SpawnDecoVft = 0;
 uint32 ShouldAllowServerSpawnDecoVft = 0;
-static std::unordered_map<UClass*, UFortDecoItemDefinition*> SavedTrapDefinitions;
+struct FSavedTrapClassDefinition
+{
+	TWeakObjectPtr<UClass> TrapClass;
+	TWeakObjectPtr<UFortDecoItemDefinition> ItemDefinition;
+};
+static std::unordered_map<UClass*, FSavedTrapClassDefinition>
+	SavedTrapDefinitions;
+struct FSavedTrapInstanceDefinition
+{
+	TWeakObjectPtr<ABuildingSMActor> TrapActor;
+	TWeakObjectPtr<UClass> TrapClass;
+	TWeakObjectPtr<UFortDecoItemDefinition> ItemDefinition;
+};
+static std::unordered_map<ABuildingSMActor*, FSavedTrapInstanceDefinition>
+	SavedTrapInstanceDefinitions;
+static SRWLOCK SavedTrapDefinitionsLock = SRWLOCK_INIT;
 
-void ABuildingSMActor::RegisterTrapDefinition(UClass* TrapClass, UFortDecoItemDefinition* ItemDefinition)
+class FTrySavedTrapDefinitionsLock final
+{
+public:
+	FTrySavedTrapDefinitionsLock() noexcept
+		: bAcquired(
+			TryAcquireSRWLockExclusive(
+				&SavedTrapDefinitionsLock) != FALSE)
+	{
+	}
+
+	~FTrySavedTrapDefinitionsLock() noexcept
+	{
+		if (bAcquired)
+			ReleaseSRWLockExclusive(
+				&SavedTrapDefinitionsLock);
+	}
+
+	FTrySavedTrapDefinitionsLock(
+		const FTrySavedTrapDefinitionsLock&) = delete;
+	FTrySavedTrapDefinitionsLock& operator=(
+		const FTrySavedTrapDefinitionsLock&) = delete;
+
+	explicit operator bool() const noexcept
+	{
+		return bAcquired;
+	}
+
+private:
+	bool bAcquired = false;
+};
+
+static bool IsValidTrapDefinition(UFortDecoItemDefinition* Definition)
+{
+	if (!Definition || !SDK::MemReadable(Definition, 0x40))
+		return false;
+	const int32 ObjectIndex = static_cast<int32>(Definition->Index);
+	if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num() ||
+		TUObjectArray::GetObjectByIndex(ObjectIndex) != Definition)
+	{
+		return false;
+	}
+	return Definition->Class &&
+		SDK::MemReadable(Definition->Class, 0x40) &&
+		Definition->IsA<UFortDecoItemDefinition>();
+}
+
+static UFortDecoItemDefinition* RecoverContextTrapDefinition(
+	UFortDecoItemDefinition* ConcreteDefinition,
+	uint8 AttachmentType,
+	UClass* ExpectedTrapClass);
+
+void ABuildingSMActor::RegisterTrapDefinition(
+	UClass* TrapClass,
+	UFortDecoItemDefinition* ItemDefinition,
+	ABuildingSMActor* TrapActor)
 {
 	if (TrapClass && ItemDefinition)
-		SavedTrapDefinitions[TrapClass] = ItemDefinition;
+	{
+		FTrySavedTrapDefinitionsLock Lock;
+		if (!Lock)
+			return;
+		SavedTrapDefinitions[TrapClass] = {
+			TrapClass,
+			ItemDefinition
+		};
+		if (TrapActor && SDK::MemReadable(TrapActor, 0x40))
+		{
+			SavedTrapInstanceDefinitions[TrapActor] = {
+				TrapActor,
+				TrapActor->Class,
+				ItemDefinition
+			};
+		}
+	}
 }
 
 UFortDecoItemDefinition* ABuildingSMActor::GetTrapDefinition(UClass* TrapClass)
 {
-	auto Match = SavedTrapDefinitions.find(TrapClass);
-	return Match == SavedTrapDefinitions.end() ? nullptr : Match->second;
+	{
+		FTrySavedTrapDefinitionsLock Lock;
+		if (Lock)
+		{
+			auto Match = SavedTrapDefinitions.find(TrapClass);
+			if (Match != SavedTrapDefinitions.end())
+			{
+				auto CachedClass = Match->second.TrapClass.Get();
+				auto Definition = Match->second.ItemDefinition.Get();
+				if (CachedClass == TrapClass &&
+					IsValidTrapDefinition(Definition))
+				{
+					return Definition;
+				}
+				SavedTrapDefinitions.erase(Match);
+			}
+		}
+	}
+
+	// The placement hooks normally populate the cache. A preset can also be
+	// loaded before that trap has been placed in the current match, so recover
+	// the concrete definition from the resident object registry when possible.
+	for (int Index = 0; TrapClass && Index < TUObjectArray::Num(); ++Index)
+	{
+		auto Object = const_cast<UObject*>(
+			TUObjectArray::GetObjectByIndex(Index));
+		auto Definition = Object
+			? Object->Cast<UFortDecoItemDefinition>() : nullptr;
+		if (Definition &&
+			Definition->BlueprintClass.WeakPtr.Get() == TrapClass)
+		{
+			RegisterTrapDefinition(TrapClass, Definition);
+			return Definition;
+		}
+	}
+
+	return nullptr;
+}
+
+UFortDecoItemDefinition* ABuildingSMActor::GetTrapDefinition(
+	ABuildingSMActor* TrapActor)
+{
+	if (!TrapActor || !SDK::MemReadable(TrapActor, 0x40))
+		return nullptr;
+
+	// TrapData is the definition native placement actually copied onto this
+	// actor. For context traps it is the Battle Royale container definition,
+	// while the placement cache contains only the concrete floor/wall/ceiling
+	// child. Persisting that child loses container behavior such as Athena's
+	// infinite-use handling, so the actor-owned value is authoritative.
+	if (auto BuildingTrap = TrapActor->Cast<ABuildingTrap>())
+	{
+		auto TrapData = BuildingTrap->HasTrapData()
+			? static_cast<UObject*>(BuildingTrap->TrapData) : nullptr;
+		if (TrapData && TrapData->IsA<UFortDecoItemDefinition>())
+		{
+			auto Definition =
+				static_cast<UFortDecoItemDefinition*>(TrapData);
+			const uint8 AttachmentType =
+				TrapActor->HasBuildingAttachmentType()
+					? TrapActor->BuildingAttachmentType : 0;
+			if (auto ContextDefinition =
+				RecoverContextTrapDefinition(
+					Definition, AttachmentType, TrapActor->Class))
+			{
+				Definition = ContextDefinition;
+			}
+			RegisterTrapDefinition(
+				TrapActor->Class, Definition, TrapActor);
+			return Definition;
+		}
+	}
+
+	{
+		FTrySavedTrapDefinitionsLock Lock;
+		if (Lock)
+		{
+			auto Match = SavedTrapInstanceDefinitions.find(TrapActor);
+			if (Match != SavedTrapInstanceDefinitions.end())
+			{
+				const auto& Cached = Match->second;
+				auto CachedActor = Cached.TrapActor.Get();
+				auto CachedClass = Cached.TrapClass.Get();
+				auto CachedDefinition = Cached.ItemDefinition.Get();
+				if (CachedActor == TrapActor &&
+					CachedClass == TrapActor->Class &&
+					IsValidTrapDefinition(CachedDefinition))
+				{
+					return CachedDefinition;
+				}
+				SavedTrapInstanceDefinitions.erase(Match);
+			}
+		}
+	}
+
+	return GetTrapDefinition(TrapActor->Class);
+}
+
+UFortDecoItemDefinition*
+ABuildingSMActor::ResolveTrapDefinitionForAttachment(
+	UFortDecoItemDefinition* ItemDefinition,
+	uint8 AttachmentType,
+	UClass* ExpectedTrapClass)
+{
+	if (!IsValidTrapDefinition(ItemDefinition))
+		return nullptr;
+
+	auto ContextDefinition =
+		ItemDefinition->Cast<UFortContextTrapItemDefinition>();
+	if (!ContextDefinition)
+		return ItemDefinition;
+
+	auto AsTrapDefinition = [](UObject* Object)
+	{
+		return Object && Object->IsA<UFortDecoItemDefinition>()
+			? static_cast<UFortDecoItemDefinition*>(Object)
+			: nullptr;
+	};
+	UFortDecoItemDefinition* Candidates[] = {
+		AsTrapDefinition(ContextDefinition->HasFloorTrap()
+			? ContextDefinition->FloorTrap : nullptr),
+		AsTrapDefinition(ContextDefinition->HasCeilingTrap()
+			? ContextDefinition->CeilingTrap : nullptr),
+		AsTrapDefinition(ContextDefinition->HasWallTrap()
+			? ContextDefinition->WallTrap : nullptr),
+		AsTrapDefinition(ContextDefinition->HasStairTrap()
+			? ContextDefinition->StairTrap : nullptr)
+	};
+
+	// Prefer an exact resident-class match. This remains correct if the raw
+	// attachment enum changes while the context definition's child layout does
+	// not. WeakPtr.Get is resident-only and does not invoke package loading.
+	if (ExpectedTrapClass)
+	{
+		for (auto Candidate : Candidates)
+		{
+			if (Candidate &&
+				Candidate->BlueprintClass.WeakPtr.Get() ==
+				ExpectedTrapClass)
+			{
+				return Candidate;
+			}
+		}
+	}
+
+	switch (AttachmentType)
+	{
+	case 0:
+	case 6:
+		return Candidates[0];
+	case 2:
+	case 7:
+		return Candidates[1];
+	case 1:
+		return Candidates[2];
+	case 8:
+		return Candidates[3];
+	default:
+		return nullptr;
+	}
+}
+
+static UFortDecoItemDefinition* RecoverContextTrapDefinition(
+	UFortDecoItemDefinition* ConcreteDefinition,
+	uint8 AttachmentType,
+	UClass* ExpectedTrapClass)
+{
+	if (!IsValidTrapDefinition(ConcreteDefinition))
+		return nullptr;
+	if (ConcreteDefinition->IsA<UFortContextTrapItemDefinition>())
+		return ConcreteDefinition;
+
+	UFortDecoItemDefinition* BestMatch = nullptr;
+	int BestScore = -1;
+	for (int Index = 0; Index < TUObjectArray::Num(); ++Index)
+	{
+		auto Object = const_cast<UObject*>(
+			TUObjectArray::GetObjectByIndex(Index));
+		auto Context = Object
+			? Object->Cast<UFortContextTrapItemDefinition>() : nullptr;
+		if (!Context)
+			continue;
+
+		auto Source = reinterpret_cast<UFortDecoItemDefinition*>(Context);
+		if (!IsValidTrapDefinition(Source))
+			continue;
+		auto Child =
+			ABuildingSMActor::ResolveTrapDefinitionForAttachment(
+				Source, AttachmentType, ExpectedTrapClass);
+		if (!IsValidTrapDefinition(Child))
+			continue;
+
+		// A concrete definition can share its actor BlueprintClass with an
+		// unrelated context item. Only promote it when this exact definition is
+		// one of the context's authored children; class equality alone is not
+		// enough to preserve item identity.
+		const bool bExactChild = Child == ConcreteDefinition;
+		if (!bExactChild)
+		{
+			continue;
+		}
+
+		int Score = 1000;
+		const std::string Name = Source->Name.ToString().c_str();
+		if (Name.find("Athena") != std::string::npos)
+			Score += 20;
+		if (Name.find("Context") != std::string::npos)
+			Score += 10;
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			BestMatch = Source;
+		}
+	}
+	return BestMatch;
 }
 
 static bool ResolveDecoToolPlayer(AFortDecoTool* DecoTool, AFortPlayerPawnAthena*& Pawn, AFortPlayerControllerAthena*& PlayerController, AFortPlayerStateAthena*& PlayerState)
@@ -227,12 +525,332 @@ static bool ApplyTrapTeam(ABuildingSMActor* Trap, AFortPlayerStateAthena* Player
 	return true;
 }
 
+static bool HasAttachedBuildingActor(
+	const TArray<ABuildingSMActor*>& Actors,
+	ABuildingSMActor* Actor)
+{
+	for (auto Candidate : Actors)
+	{
+		if (Candidate == Actor)
+			return true;
+	}
+	return false;
+}
+
+struct FPendingSavedTrapAttachment
+{
+	TWeakObjectPtr<ABuildingSMActor> Trap;
+	TWeakObjectPtr<ABuildingSMActor> Parent;
+	uint8 AttachmentType = 0;
+	int32 AttachmentSlot = -1;
+	uint8 TicksRemaining = 0;
+};
+
+// Several versions finish a deco one frame after SpawnDeco returns. That
+// finish step can clear a relationship which was correct on the spawn frame,
+// so saved traps need a short, game-thread post-build repair window.
+static std::vector<FPendingSavedTrapAttachment>
+	PendingSavedTrapAttachments;
+
+static bool EnsureSavedTrapAttachment(
+	ABuildingSMActor* Trap,
+	ABuildingSMActor* AttachedActor,
+	uint8 AttachmentType,
+	int32 AttachmentSlot)
+{
+	if (!Trap || !AttachedActor)
+		return false;
+	bool bChanged = false;
+
+	// Native attachment repair consumes these fields, so restore the exact saved
+	// side and slot before asking the engine to rebuild the relationship.
+	if (Trap->HasBuildingAttachmentType() &&
+		Trap->BuildingAttachmentType != AttachmentType)
+	{
+		Trap->BuildingAttachmentType = AttachmentType;
+		bChanged = true;
+	}
+	if (AttachmentSlot >= 0 && AttachmentSlot <= UINT8_MAX &&
+		Trap->HasBuildingAttachmentSlot() &&
+		Trap->BuildingAttachmentSlot != static_cast<uint8>(AttachmentSlot))
+	{
+		Trap->BuildingAttachmentSlot =
+			static_cast<uint8>(AttachmentSlot);
+		bChanged = true;
+	}
+
+	bool bParentTracksTrap =
+		AttachedActor->HasAttachedBuildingActors() &&
+		HasAttachedBuildingActor(
+			AttachedActor->AttachedBuildingActors, Trap);
+	bool bChildRelationObservable = false;
+	bool bTrapTracksParent = false;
+	if (Trap->HasParentActorToAttachTo())
+	{
+		bChildRelationObservable = true;
+		bTrapTracksParent =
+			Trap->ParentActorToAttachTo == AttachedActor;
+	}
+
+	auto BuildingTrap = Trap->Cast<ABuildingTrap>();
+	if (BuildingTrap)
+	{
+		if (BuildingTrap->HasAttachedTo())
+		{
+			bChildRelationObservable = true;
+			bTrapTracksParent =
+				BuildingTrap->AttachedTo == AttachedActor;
+		}
+		else if (BuildingTrap->GetFunction("GetBuildingAttachedTo"))
+		{
+			bChildRelationObservable = true;
+			bTrapTracksParent =
+				BuildingTrap->GetBuildingAttachedTo() == AttachedActor;
+		}
+	}
+	// This native helper establishes the engine's destruction callbacks and
+	// both sides of the supporting-build relationship. Normally SpawnDeco has
+	// already done it; call it only as a postcondition repair.
+	if ((!bParentTracksTrap ||
+		(bChildRelationObservable && !bTrapTracksParent)) &&
+		AttachedActor->GetFunction("AttachBuildingActorToMe"))
+	{
+		AttachedActor->AttachBuildingActorToMe(Trap, true);
+		bChanged = true;
+	}
+
+	if (Trap->HasParentActorToAttachTo() &&
+		Trap->ParentActorToAttachTo != AttachedActor)
+	{
+		Trap->ParentActorToAttachTo = AttachedActor;
+		bChanged = true;
+	}
+
+	if (BuildingTrap)
+	{
+		bool bAttachedToMatches = false;
+		bool bAttachedToObservable = false;
+		if (BuildingTrap->HasAttachedTo())
+		{
+			bAttachedToObservable = true;
+			bAttachedToMatches =
+				BuildingTrap->AttachedTo == AttachedActor;
+		}
+		else if (BuildingTrap->GetFunction("GetBuildingAttachedTo"))
+		{
+			bAttachedToObservable = true;
+			bAttachedToMatches =
+				BuildingTrap->GetBuildingAttachedTo() == AttachedActor;
+		}
+
+		if ((!bAttachedToObservable || !bAttachedToMatches) &&
+			BuildingTrap->GetFunction("SetAttachedTo"))
+		{
+			BuildingTrap->SetAttachedTo(AttachedActor);
+			bChanged = true;
+		}
+		else if (BuildingTrap->HasAttachedTo() &&
+			!bAttachedToMatches)
+		{
+			BuildingTrap->AttachedTo = AttachedActor;
+			bChanged = true;
+		}
+	}
+
+	// Old versions do not expose every native helper. Keep the reflected graph
+	// coherent as a final fallback so the trap remains tied to its support.
+	if (AttachedActor->HasAttachedBuildingActors() &&
+		!HasAttachedBuildingActor(
+			AttachedActor->AttachedBuildingActors, Trap))
+	{
+		AttachedActor->AttachedBuildingActors.Add(Trap);
+		bChanged = true;
+	}
+	if (Trap->HasBuildingActorsAttachedTo() &&
+		!HasAttachedBuildingActor(
+			Trap->BuildingActorsAttachedTo, AttachedActor))
+	{
+		Trap->BuildingActorsAttachedTo.Add(AttachedActor);
+		bChanged = true;
+	}
+
+	if (bChanged)
+	{
+		Trap->ForceNetUpdate();
+		AttachedActor->ForceNetUpdate();
+	}
+
+	bParentTracksTrap =
+		AttachedActor->HasAttachedBuildingActors() &&
+		HasAttachedBuildingActor(
+			AttachedActor->AttachedBuildingActors, Trap);
+	bChildRelationObservable = false;
+	bTrapTracksParent = false;
+	if (BuildingTrap && BuildingTrap->HasAttachedTo())
+	{
+		bChildRelationObservable = true;
+		bTrapTracksParent =
+			BuildingTrap->AttachedTo == AttachedActor;
+	}
+	else if (BuildingTrap &&
+		BuildingTrap->GetFunction("GetBuildingAttachedTo"))
+	{
+		bChildRelationObservable = true;
+		bTrapTracksParent =
+			BuildingTrap->GetBuildingAttachedTo() == AttachedActor;
+	}
+	else if (Trap->HasParentActorToAttachTo())
+	{
+		bChildRelationObservable = true;
+		bTrapTracksParent =
+			Trap->ParentActorToAttachTo == AttachedActor;
+	}
+
+	return bParentTracksTrap && bChildRelationObservable &&
+		bTrapTracksParent;
+}
+
+static void QueueSavedTrapAttachmentRepair(
+	ABuildingSMActor* Trap,
+	ABuildingSMActor* Parent,
+	uint8 AttachmentType,
+	int32 AttachmentSlot)
+{
+	if (!Trap || !Parent)
+		return;
+	for (auto& Pending : PendingSavedTrapAttachments)
+	{
+		if (Pending.Trap.Get() != Trap)
+			continue;
+		Pending.Parent = TWeakObjectPtr<ABuildingSMActor>(Parent);
+		Pending.AttachmentType = AttachmentType;
+		Pending.AttachmentSlot = AttachmentSlot;
+		Pending.TicksRemaining = 16;
+		return;
+	}
+
+	PendingSavedTrapAttachments.push_back({
+		TWeakObjectPtr<ABuildingSMActor>(Trap),
+		TWeakObjectPtr<ABuildingSMActor>(Parent),
+		AttachmentType,
+		AttachmentSlot,
+		16 });
+}
+
+void ABuildingSMActor::TickSavedTrapAttachments()
+{
+	for (size_t Index = 0;
+		Index < PendingSavedTrapAttachments.size();)
+	{
+		auto& Pending = PendingSavedTrapAttachments[Index];
+		auto Trap = Pending.Trap.Get();
+		auto Parent = Pending.Parent.Get();
+		if (!Trap || !Parent || Trap->bDestroyed || Parent->bDestroyed)
+		{
+			PendingSavedTrapAttachments.erase(
+				PendingSavedTrapAttachments.begin() + Index);
+			continue;
+		}
+
+		EnsureSavedTrapAttachment(
+			Trap, Parent, Pending.AttachmentType,
+			Pending.AttachmentSlot);
+		if (--Pending.TicksRemaining == 0)
+		{
+			PendingSavedTrapAttachments.erase(
+				PendingSavedTrapAttachments.begin() + Index);
+			continue;
+		}
+		++Index;
+	}
+}
+
 static int GetAttachedBuildingActorCount(ABuildingSMActor* AttachedActor)
 {
 	if (!AttachedActor || !AttachedActor->HasAttachedBuildingActors())
 		return 0;
 
 	return AttachedActor->AttachedBuildingActors.Num();
+}
+
+static bool IsChapterFourDirectionalPad(
+	UFortDecoItemDefinition* ItemDefinition,
+	double* OutLocalLimit = nullptr)
+{
+	if (!ItemDefinition || VersionInfo.FortniteVersion < 27.0 ||
+		VersionInfo.FortniteVersion >= 28.0)
+	{
+		return false;
+	}
+
+	static const FName UpwardPad(
+		L"TID_Floor_Player_Jump_Pad_Athena");
+	static const FName FreeDirectionalPad(
+		L"TID_Floor_Player_Jump_Pad_Free_Direction_Athena");
+	if (ItemDefinition->Name == UpwardPad)
+	{
+		if (OutLocalLimit)
+			*OutLocalLimit = 256.0;
+		return true;
+	}
+	if (ItemDefinition->Name == FreeDirectionalPad)
+	{
+		if (OutLocalLimit)
+			*OutLocalLimit = 512.0;
+		return true;
+	}
+	return false;
+}
+
+static void SnapChapterFourDirectionalPadToSupport(
+	UFortDecoItemDefinition* ItemDefinition,
+	FVector& Location,
+	ABuildingSMActor*& AttachedActor,
+	uint8 AttachmentType)
+{
+	double LocalLimit = 0.0;
+	if (!IsChapterFourDirectionalPad(
+			ItemDefinition, &LocalLimit) ||
+		!AttachedActor || !SDK::MemReadable(AttachedActor, 0x40) ||
+		AttachedActor->bActorIsBeingDestroyed || AttachedActor->bDestroyed ||
+		!AttachedActor->HasBuildingType() || AttachedActor->BuildingType != 1 ||
+		(AttachmentType != 0 && AttachmentType != 6))
+	{
+		return;
+	}
+
+	const auto SuppliedLocation = AttachedActor->K2_GetActorLocation();
+	const auto SuppliedRotation = AttachedActor->K2_GetActorRotation();
+	if (!std::isfinite(static_cast<double>(Location.X)) ||
+		!std::isfinite(static_cast<double>(Location.Y)) ||
+		!std::isfinite(static_cast<double>(SuppliedLocation.X)) ||
+		!std::isfinite(static_cast<double>(SuppliedLocation.Y)) ||
+		!std::isfinite(static_cast<double>(SuppliedRotation.Yaw)))
+	{
+		return;
+	}
+	const double DeltaX =
+		static_cast<double>(Location.X - SuppliedLocation.X);
+	const double DeltaY =
+		static_cast<double>(Location.Y - SuppliedLocation.Y);
+	const double YawRadians =
+		static_cast<double>(SuppliedRotation.Yaw) *
+		3.14159265358979323846 / 180.0;
+	const double CosYaw = std::cos(YawRadians);
+	const double SinYaw = std::sin(YawRadians);
+	const double LocalX = CosYaw * DeltaX + SinYaw * DeltaY;
+	const double LocalY = -SinYaw * DeltaX + CosYaw * DeltaY;
+	const double SnappedLocalX = std::clamp(
+		std::round(LocalX / 256.0) * 256.0,
+		-LocalLimit, LocalLimit);
+	const double SnappedLocalY = std::clamp(
+		std::round(LocalY / 256.0) * 256.0,
+		-LocalLimit, LocalLimit);
+
+	Location.X = SuppliedLocation.X +
+		CosYaw * SnappedLocalX - SinYaw * SnappedLocalY;
+	Location.Y = SuppliedLocation.Y +
+		SinYaw * SnappedLocalX + CosYaw * SnappedLocalY;
 }
 
 static bool ApplyTrapTeamToNewAttachments(ABuildingSMActor* AttachedActor, AFortPlayerStateAthena* PlayerState,
@@ -249,7 +867,9 @@ static bool ApplyTrapTeamToNewAttachments(ABuildingSMActor* AttachedActor, AFort
 		auto AttachedBuildingActor = AttachedBuildingActors.Get(i);
 		bApplied = ApplyTrapTeam(AttachedBuildingActor, PlayerState) || bApplied;
 		if (AttachedBuildingActor && ItemDefinition)
-			ABuildingSMActor::RegisterTrapDefinition(AttachedBuildingActor->Class, ItemDefinition);
+			ABuildingSMActor::RegisterTrapDefinition(
+				AttachedBuildingActor->Class, ItemDefinition,
+				AttachedBuildingActor);
 	}
 
 	return bApplied;
@@ -286,6 +906,80 @@ struct FLegacyTrapStackSnapshot
 	int32 Count = 0;
 };
 
+class FLegacyTrapPlacementPawnScope final
+{
+public:
+	explicit FLegacyTrapPlacementPawnScope(
+		AFortPlayerPawnAthena* InPawn)
+		: Pawn(InPawn)
+	{
+		if (!Pawn)
+			return;
+		OriginalLocation = Pawn->K2_GetActorLocation();
+		if (Pawn->CharacterMovement)
+		{
+			OriginalVelocity = Pawn->CharacterMovement->Velocity;
+			bHasVelocity = true;
+		}
+	}
+
+	~FLegacyTrapPlacementPawnScope()
+	{
+		if (!Pawn || !bRelocationAttempted)
+			return;
+		Pawn->K2_SetActorLocation(
+			OriginalLocation, false, nullptr, true);
+		if (bHasVelocity && Pawn->CharacterMovement)
+			Pawn->CharacterMovement->Velocity = OriginalVelocity;
+	}
+
+	FLegacyTrapPlacementPawnScope(
+		const FLegacyTrapPlacementPawnScope&) = delete;
+	FLegacyTrapPlacementPawnScope& operator=(
+		const FLegacyTrapPlacementPawnScope&) = delete;
+
+	bool MoveWithinNativeRange(const FVector& TrapLocation)
+	{
+		if (!Pawn)
+			return false;
+
+		auto IsWithinRange = [&](const FVector& Location)
+		{
+			const auto Delta = Location - TrapLocation;
+			return Delta.X * Delta.X + Delta.Y * Delta.Y +
+				Delta.Z * Delta.Z <= 1500.0 * 1500.0;
+		};
+		if (IsWithinRange(OriginalLocation))
+			return true;
+
+		// Legacy ServerSpawnDeco rejects administrative restores beyond the
+		// definition's placement distance. Move only the authoritative pawn,
+		// only around this synchronous call, and restore it before the net tick.
+		FVector NearbyLocation = TrapLocation;
+		NearbyLocation.Z += 512.0;
+		// Restore the pawn even if the move is clamped and the teleport fallback
+		// fails. A failed range check must never leave the host displaced.
+		bRelocationAttempted = true;
+		Pawn->K2_SetActorLocation(
+			NearbyLocation, false, nullptr, true);
+		bool bWithinRange = IsWithinRange(Pawn->K2_GetActorLocation());
+		if (!bWithinRange)
+		{
+			bWithinRange = Pawn->K2_TeleportTo(
+				NearbyLocation, Pawn->K2_GetActorRotation()) &&
+				IsWithinRange(Pawn->K2_GetActorLocation());
+		}
+		return bWithinRange;
+	}
+
+private:
+	AFortPlayerPawnAthena* Pawn = nullptr;
+	FVector OriginalLocation{};
+	FVector OriginalVelocity{};
+	bool bHasVelocity = false;
+	bool bRelocationAttempted = false;
+};
+
 static bool AreItemGuidsEqual(
 	const FGuid& Left,
 	const FGuid& Right)
@@ -315,16 +1009,18 @@ static UFortWorldItem* FindInventoryItemInstance(
 }
 
 static std::vector<FLegacyTrapStackSnapshot>
-	ProtectLegacyTrapStacks(
+ProtectLegacyTrapStacks(
 		AFortDecoTool* Tool,
 		AFortPlayerControllerAthena* PlayerController,
-		uint8 AttachmentType)
+		uint8 AttachmentType,
+		bool bForceProtection = false)
 {
 	std::vector<FLegacyTrapStackSnapshot> Snapshots;
 	if (!Tool || !PlayerController ||
 		!PlayerController->WorldInventory ||
-		!AFortInventory::ShouldBypassItemConsumption(
-			PlayerController, 1, false))
+		(!bForceProtection &&
+			!AFortInventory::ShouldBypassItemConsumption(
+				PlayerController, 1, false)))
 	{
 		return Snapshots;
 	}
@@ -412,33 +1108,407 @@ static void RestoreLegacyTrapStacks(
 	}
 }
 
-ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVector& SavedLocation, const FRotator& SavedRotation,
-	ABuildingSMActor* AttachedActor, uint8 AttachmentType, AFortPlayerControllerAthena* PlayerController, const wchar_t* ItemDefinitionPath)
+static bool VerifySavedTrapLevel(
+	ABuildingSMActor* Trap,
+	int32 SavedTrapLevel,
+	int32 SavedOriginalTrapLevel)
 {
-	if (!TrapClass || !AttachedActor || !PlayerController || !PlayerController->PlayerState || !SpawnDecoVft)
-		return nullptr;
+	if (SavedTrapLevel < 0 && SavedOriginalTrapLevel < 0)
+		return true;
 
-	UObject* SavedItemObject = ItemDefinitionPath && *ItemDefinitionPath
-		? (UObject*)SDK::StaticFindObject(ItemDefinitionPath, UObject::StaticClass()) : nullptr;
-	UFortDecoItemDefinition* ItemDefinition = SavedItemObject && SavedItemObject->IsA<UFortDecoItemDefinition>()
-		? (UFortDecoItemDefinition*)SavedItemObject : nullptr;
-	if (!ItemDefinition)
-		ItemDefinition = GetTrapDefinition(TrapClass);
-	if (!SavedItemObject)
-		SavedItemObject = ItemDefinition;
-	// Item definitions are UObjects, not actors; UGameplayStatics::GetAllActorsOfClass
-	// will always return an empty list for them. Search the loaded object registry.
-	for (int Index = 0; !ItemDefinition && Index < TUObjectArray::Num(); ++Index)
+	auto BuildingTrap = Trap ? Trap->Cast<ABuildingTrap>() : nullptr;
+	if (!BuildingTrap)
+		return false;
+
+	if (SavedTrapLevel >= 0)
 	{
-		auto Object = TUObjectArray::GetObjectByIndex(Index);
-		auto Definition = Object && Object->IsA<UFortDecoItemDefinition>() ? (UFortDecoItemDefinition*)Object : nullptr;
-		if (Definition && Definition->BlueprintClass.Get() == TrapClass)
+		if (BuildingTrap->HasTrapLevel())
 		{
-			ItemDefinition = Definition;
-			break;
+			if (BuildingTrap->TrapLevel != SavedTrapLevel)
+				return false;
+		}
+		else if (BuildingTrap->GetFunction("GetTrapLevel"))
+		{
+			if (BuildingTrap->GetTrapLevel() != SavedTrapLevel)
+				return false;
+		}
+		else
+			return false;
+	}
+	if (SavedOriginalTrapLevel >= 0)
+	{
+		if (!BuildingTrap->HasOriginalTrapLevel() ||
+			BuildingTrap->OriginalTrapLevel != SavedOriginalTrapLevel)
+		{
+			return false;
 		}
 	}
-	auto TrapToolClass = FindClass("FortTrapTool");
+	return true;
+}
+
+static bool ZeroSavedTrapDurabilityCostOnSet(UObject* AttributeSet)
+{
+	if (!AttributeSet || !SDK::MemReadable(AttributeSet, 0x40) ||
+		!AttributeSet->Class ||
+		!SDK::MemReadable(AttributeSet->Class, 0x40) ||
+		!FFortGameplayAttributeData::StaticStruct() ||
+		!FFortGameplayAttributeData::HasBaseValue() ||
+		!FFortGameplayAttributeData::HasCurrentValue())
+	{
+		return false;
+	}
+
+	const uint32 CostOffset =
+		AttributeSet->GetOffset("DurabilityCostPerFire");
+	const int32 AttributeSize =
+		FFortGameplayAttributeData::Size();
+	if (CostOffset == UINT32_MAX || CostOffset > 0x10000 ||
+		AttributeSize <= 0 || AttributeSize > 0x400)
+	{
+		return false;
+	}
+
+	const int32 SetSize =
+		AttributeSet->Class->GetPropertiesSize();
+	if (SetSize > 0 && SetSize <= 0x100000 &&
+		(static_cast<uint64>(CostOffset) +
+			static_cast<uint64>(AttributeSize) >
+			static_cast<uint64>(SetSize)))
+	{
+		return false;
+	}
+
+	auto Cost = reinterpret_cast<FFortGameplayAttributeData*>(
+		reinterpret_cast<uint8*>(AttributeSet) + CostOffset);
+	if (!SDK::MemReadable(Cost, AttributeSize))
+		return false;
+
+	AFortPlayerPawnAthena::WriteDirectAttributeValue(*Cost, 0.0f);
+	return true;
+}
+
+static void ApplySavedTrapInfiniteDurability(ABuildingSMActor* Trap)
+{
+	if (!Trap)
+		return;
+
+	// DurabilityCostPerFire belongs to the spawned trap's attribute-set
+	// subobject. Zeroing it is instance-scoped and prevents native trigger
+	// abilities from consuming uses without changing a shared item asset.
+	UObject* AuthoritativeSet =
+		Trap->HasBuildingAttributeSet()
+			? Trap->BuildingAttributeSet : nullptr;
+	UObject* ReplicatedSet =
+		Trap->HasReplicatedBuildingAttributeSet()
+			? Trap->ReplicatedBuildingAttributeSet : nullptr;
+	bool bChanged =
+		ZeroSavedTrapDurabilityCostOnSet(AuthoritativeSet);
+	if (ReplicatedSet && ReplicatedSet != AuthoritativeSet)
+	{
+		bChanged = ZeroSavedTrapDurabilityCostOnSet(
+			ReplicatedSet) || bChanged;
+	}
+
+	if (!bChanged)
+		return;
+
+	// Older trap sets expose a no-argument rep-notify for Durability. It
+	// refreshes bound use-count widgets after the cost changes; later versions
+	// with a different signature safely fall back to ordinary replication.
+	for (auto AttributeSet : { AuthoritativeSet, ReplicatedSet })
+	{
+		if (!AttributeSet)
+			continue;
+		auto OnRepDurability =
+			AttributeSet->GetFunction("OnRep_Durability");
+		if (OnRepDurability &&
+			OnRepDurability->GetPropertiesSize() == 0)
+		{
+			AttributeSet->ProcessEvent(OnRepDurability, nullptr);
+		}
+		if (ReplicatedSet == AuthoritativeSet)
+			break;
+	}
+	Trap->ForceNetUpdate();
+}
+
+static ABuildingSMActor* FinalizeSavedTrapInstance(
+	ABuildingSMActor* Trap,
+	UClass* TrapClass,
+	ABuildingSMActor* AttachedActor,
+	uint8 AttachmentType,
+	int32 AttachmentSlot,
+	int32 SavedTrapLevel,
+	int32 SavedOriginalTrapLevel,
+	UFortDecoItemDefinition* ItemDefinition,
+	UFortContextTrapItemDefinition* ContextItemDefinition,
+	AFortPlayerControllerAthena* PlayerController,
+	bool bDestroyInvalid)
+{
+	if (!Trap || !SDK::MemReadable(Trap, 0x40) || !Trap->Class ||
+		!SDK::MemReadable(Trap->Class, 0x40))
+	{
+		return nullptr;
+	}
+	if (Trap->Class != TrapClass)
+	{
+		if (bDestroyInvalid)
+			Trap->SilentDie(true);
+		return nullptr;
+	}
+
+	// Legacy native placement can select the context item's concrete child for
+	// the actor even though ordinary Battle Royale placement keeps the source
+	// container. Restore that source per actor so HasDurability and the HUD see
+	// the same authored definition as a normally placed trap.
+	if (ContextItemDefinition &&
+		ContextItemDefinition->IsA(
+			UFortTrapItemDefinition::StaticClass()))
+	{
+		if (auto BuildingTrap = Trap->Cast<ABuildingTrap>();
+			BuildingTrap && BuildingTrap->HasTrapData())
+		{
+			auto ContextTrapDefinition =
+				reinterpret_cast<UFortTrapItemDefinition*>(
+					ContextItemDefinition);
+			if (BuildingTrap->TrapData != ContextTrapDefinition)
+			{
+				BuildingTrap->TrapData = ContextTrapDefinition;
+				Trap->ForceNetUpdate();
+			}
+		}
+	}
+
+	const bool bLevelMetadataMatches = VerifySavedTrapLevel(
+		Trap, SavedTrapLevel, SavedOriginalTrapLevel);
+	const bool bAttachmentRestored = EnsureSavedTrapAttachment(
+		Trap, AttachedActor, AttachmentType, AttachmentSlot);
+	// Legacy placement consumes the temporary inventory/equipped-tool level
+	// while initializing durability, so a mismatch there means the trap was
+	// genuinely initialized with the wrong gameplay data. Modern SpawnDeco can
+	// legitimately normalize OriginalTrapLevel independently from TrapLevel;
+	// infinite-use restoration is instance-scoped below, so do not destroy a
+	// valid, attached modern trap solely because that diagnostic field differs.
+	if (!bAttachmentRestored ||
+		(VersionInfo.FortniteVersion < 18 && !bLevelMetadataMatches))
+	{
+		if (bDestroyInvalid)
+			Trap->SilentDie(true);
+		return nullptr;
+	}
+	if (!bLevelMetadataMatches)
+	{
+		SDK::DbgLog(
+			"[TrickshotTrap] accepted modern level normalization "
+			"trap=%p savedLevel=%d savedOriginal=%d\n",
+			(void*)Trap, SavedTrapLevel, SavedOriginalTrapLevel);
+	}
+	ApplyTrapTeam(
+		Trap, static_cast<AFortPlayerStateAthena*>(
+			PlayerController->PlayerState));
+	ApplySavedTrapInfiniteDurability(Trap);
+	QueueSavedTrapAttachmentRepair(
+		Trap, AttachedActor, AttachmentType, AttachmentSlot);
+	ABuildingSMActor::RegisterTrapDefinition(
+		TrapClass, ItemDefinition, Trap);
+	return Trap;
+}
+
+static bool IsExcludedSavedTrapActor(
+	ABuildingSMActor* Candidate,
+	const std::vector<TWeakObjectPtr<ABuildingSMActor>>* ExcludedActors,
+	const std::vector<TWeakObjectPtr<ABuildingSMActor>>* BaselineActors)
+{
+	if (!Candidate)
+		return false;
+	auto Contains = [&](const auto* Actors)
+	{
+		if (!Actors)
+			return false;
+		for (const auto& Actor : *Actors)
+		{
+			if (Actor.Get() == Candidate)
+				return true;
+		}
+		return false;
+	};
+	return Contains(ExcludedActors) || Contains(BaselineActors);
+}
+
+ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVector& SavedLocation, const FRotator& SavedRotation,
+	ABuildingSMActor* AttachedActor, uint8 AttachmentType, AFortPlayerControllerAthena* PlayerController,
+	const wchar_t* ItemDefinitionPath, int32 AttachmentSlot,
+	int32 SavedTrapLevel, int32 SavedOriginalTrapLevel,
+	UFortDecoItemDefinition* ResolvedItemDefinition,
+	bool bRecoverDeferredPlacement,
+	bool bFinalPlacementSweep,
+	const std::vector<TWeakObjectPtr<ABuildingSMActor>>*
+		ExcludedActors,
+	const std::vector<TWeakObjectPtr<ABuildingSMActor>>*
+		BaselineActors)
+{
+	if (!TrapClass || !AttachedActor || !PlayerController ||
+		!PlayerController->PlayerState ||
+		(VersionInfo.FortniteVersion >= 18 && !SpawnDecoVft))
+		return nullptr;
+
+	// The staged loader already resolves and validates this asset on the game
+	// thread. Prefer that object so fresh-match restores do not repeat an
+	// unguarded resident lookup after preflight has succeeded.
+	UObject* SavedItemObject = ResolvedItemDefinition;
+	if (!SavedItemObject && ItemDefinitionPath && *ItemDefinitionPath)
+	{
+		SavedItemObject = (UObject*)SDK::StaticFindObject(
+			ItemDefinitionPath, UObject::StaticClass());
+	}
+	UFortDecoItemDefinition* ItemDefinition = SavedItemObject && SavedItemObject->IsA<UFortDecoItemDefinition>()
+		? (UFortDecoItemDefinition*)SavedItemObject : nullptr;
+	// Never pass an arbitrary object supplied by the preset to native SpawnDeco.
+	SavedItemObject = ItemDefinition;
+	if (!ItemDefinition)
+		ItemDefinition = GetTrapDefinition(TrapClass);
+	if (!ItemDefinition)
+		return nullptr;
+	auto ConcreteItemDefinition =
+		ResolveTrapDefinitionForAttachment(
+			ItemDefinition, AttachmentType, TrapClass);
+	if (!ConcreteItemDefinition)
+		return nullptr;
+	// Older preset revisions persisted only the concrete child selected by a
+	// context trap. Recover the original Battle Royale container so native
+	// placement receives the same WeaponData/TrapData as ordinary gameplay.
+	// New saves normalize the actor's TrapData back to that container whenever
+	// its exact authored context child is resident.
+	if (auto ContextDefinition = RecoverContextTrapDefinition(
+			ConcreteItemDefinition, AttachmentType, TrapClass))
+	{
+		ItemDefinition = ContextDefinition;
+	}
+	auto ResidentDefinitionClass = static_cast<UClass*>(
+		const_cast<UObject*>(
+			ConcreteItemDefinition->BlueprintClass.WeakPtr.Get()));
+	if (ResidentDefinitionClass &&
+		ResidentDefinitionClass != TrapClass)
+	{
+		return nullptr;
+	}
+
+	auto ContextItemDefinition =
+		ItemDefinition->Cast<UFortContextTrapItemDefinition>();
+
+	// On some legacy builds ServerSpawnDeco returns before it appends the new
+	// trap to the supporting actor. A later retry must adopt that deferred child
+	// instead of spawning a duplicate. Only perform this lookup after a previous
+	// native attempt failed, and require the exact class plus a tight transform
+	// match on this exact parent.
+	if (bRecoverDeferredPlacement &&
+		AttachedActor->HasAttachedBuildingActors())
+	{
+		FVector ExpectedDeferredLocation = SavedLocation;
+		auto ExpectedDeferredParent = AttachedActor;
+		SnapChapterFourDirectionalPadToSupport(
+			ConcreteItemDefinition, ExpectedDeferredLocation,
+			ExpectedDeferredParent, AttachmentType);
+		std::vector<ABuildingSMActor*> MatchingDeferredChildren;
+		for (auto Candidate : AttachedActor->AttachedBuildingActors)
+		{
+			if (!Candidate || Candidate->Class != TrapClass ||
+				IsExcludedSavedTrapActor(
+					Candidate, ExcludedActors,
+					BaselineActors) ||
+				Candidate->bDestroyed ||
+				(Candidate->HasbActorIsBeingDestroyed() &&
+				 Candidate->bActorIsBeingDestroyed))
+			{
+				continue;
+			}
+			const auto CandidateLocation =
+				Candidate->K2_GetActorLocation();
+			const auto Delta =
+				CandidateLocation - ExpectedDeferredLocation;
+			constexpr double kDeferredTrapLocationTolerance = 64.0;
+			if (Delta.X * Delta.X + Delta.Y * Delta.Y +
+				Delta.Z * Delta.Z >
+				kDeferredTrapLocationTolerance *
+					kDeferredTrapLocationTolerance)
+			{
+				continue;
+			}
+
+			MatchingDeferredChildren.push_back(Candidate);
+		}
+		// Final cleanup may synchronously remove a trap from the parent's UE
+		// TArray. Iterate a stable copy so SilentDie cannot invalidate traversal.
+		ABuildingSMActor* Recovered = nullptr;
+		for (auto Candidate : MatchingDeferredChildren)
+		{
+			if (Recovered)
+				continue;
+			Recovered = FinalizeSavedTrapInstance(
+					Candidate, TrapClass, AttachedActor,
+					AttachmentType, AttachmentSlot,
+					SavedTrapLevel, SavedOriginalTrapLevel,
+					ItemDefinition, ContextItemDefinition,
+					PlayerController, bFinalPlacementSweep);
+		}
+		if (Recovered)
+		{
+			size_t RemovedDuplicates = 0;
+			for (auto Candidate : MatchingDeferredChildren)
+			{
+				if (Candidate == Recovered || !Candidate ||
+					Candidate->bDestroyed ||
+					(Candidate->HasbActorIsBeingDestroyed() &&
+					 Candidate->bActorIsBeingDestroyed))
+				{
+					continue;
+				}
+				// Every entry in this list was created after the exact baseline
+				// snapshot and matches this saved parent/class/transform. Keep
+				// exactly one; repeated legacy native attempts can otherwise
+				// leave duplicate job-owned children outside SpawnedBuilds.
+				Candidate->SilentDie(true);
+				++RemovedDuplicates;
+			}
+			SDK::DbgLog(
+				"[TrickshotTrap] recovered deferred legacy placement trap=%p parent=%p duplicates=%zu\n",
+				(void*)Recovered, (void*)AttachedActor,
+				RemovedDuplicates);
+			return Recovered;
+		}
+		if (!MatchingDeferredChildren.empty())
+		{
+			if (bFinalPlacementSweep)
+			{
+				// FinalizeSavedTrapInstance destroys an exact but invalid
+				// deferred child on the final observation pass. It must not be
+				// left alive outside the load job after we report failure.
+				SDK::DbgLog(
+					"[TrickshotTrap] removed invalid deferred placement on final sweep parent=%p class=%p\n",
+					(void*)AttachedActor, (void*)TrapClass);
+			}
+			else
+			{
+				// Its native initialization is still in flight. Leave it intact
+				// and let the next wall-clock attempt finish adopting it.
+				SDK::DbgLog(
+					"[TrickshotTrap] deferred legacy placement still initializing parent=%p class=%p\n",
+					(void*)AttachedActor, (void*)TrapClass);
+			}
+			return nullptr;
+		}
+	}
+	// The final pass is observation/cleanup only. Issuing another asynchronous
+	// legacy native spawn here could create an untracked child after the load
+	// job has already reported its final failure.
+	if (bFinalPlacementSweep)
+		return nullptr;
+
+	auto TrapToolClass = ContextItemDefinition
+		? FindClass("FortDecoTool_ContextTrap") : nullptr;
+	const bool bUsingContextTool = TrapToolClass != nullptr;
+	if (!TrapToolClass)
+		TrapToolClass = FindClass("FortTrapTool");
 	if (!TrapToolClass)
 		return nullptr;
 
@@ -446,15 +1516,60 @@ ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVec
 	if (!Tool)
 		return nullptr;
 
-	// SpawnDeco receives the concrete trap class and supporting build directly. The
-	// item definition improves parity when available, but is not required by legacy
-	// versions and must not prevent old saves from restoring their attachment.
+	// Context items are equipped through their specialized tool and retain the
+	// source/container definition for native inventory validation. If that tool
+	// is unavailable, the concrete child definition is safe for the generic tool.
+	SavedItemObject = bUsingContextTool
+		? static_cast<UObject*>(ItemDefinition)
+		: static_cast<UObject*>(ConcreteItemDefinition);
+	int32 PlacementTrapLevel =
+		SavedOriginalTrapLevel >= 0
+			? SavedOriginalTrapLevel
+			: SavedTrapLevel >= 0
+				? SavedTrapLevel
+				: 0;
 	Tool->ItemDefinition = SavedItemObject;
 	Tool->Owner = PlayerController->MyFortPawn ? (AActor*)PlayerController->MyFortPawn : (AActor*)PlayerController;
 	Tool->Instigator = PlayerController->MyFortPawn;
+	auto WeaponTool = Tool->Cast<AFortWeapon>();
+	if (WeaponTool && WeaponTool->HasWeaponData())
+	{
+		// Legacy ServerSpawnDeco copies AFortWeapon::WeaponData into the
+		// spawned trap's TrapData before initializing it. A raw server-spawned
+		// deco tool leaves WeaponData null, which makes native trap setup
+		// dereference a null TrapData after the actor has already spawned.
+		WeaponTool->WeaponData =
+			reinterpret_cast<UFortWeaponItemDefinition*>(SavedItemObject);
+	}
+	else if (VersionInfo.FortniteVersion < 18)
+	{
+		// The reflected field is required by the legacy native placement path.
+		// Fail closed instead of invoking it with an incomplete tool.
+		Tool->K2_DestroyActor();
+		return nullptr;
+	}
+	if (WeaponTool && WeaponTool->HasWeaponLevel())
+		WeaponTool->WeaponLevel = PlacementTrapLevel;
+	if (bUsingContextTool)
+	{
+		auto ContextTool = Tool->Cast<AFortDecoTool_ContextTrap>();
+		if (!ContextTool)
+		{
+			Tool->K2_DestroyActor();
+			return nullptr;
+		}
+		if (ContextTool->HasContextTrapItemDefinition())
+			ContextTool->ContextTrapItemDefinition = ContextItemDefinition;
+		if (ContextTool->GetFunction("SetContextTrapItemDefinition"))
+			ContextTool->SetContextTrapItemDefinition(
+				ContextItemDefinition);
+	}
 
 	FVector Location = SavedLocation;
 	FRotator Rotation = SavedRotation;
+	SnapChapterFourDirectionalPadToSupport(
+		ConcreteItemDefinition, Location, AttachedActor,
+		AttachmentType);
 	ABuildingSMActor* Trap = nullptr;
 	if (VersionInfo.FortniteVersion < 18)
 	{
@@ -464,29 +1579,96 @@ ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVec
 		if (SavedItemObject && SavedItemObject->IsA<UFortItemDefinition>() && PlayerController->WorldInventory)
 		{
 			// The original legacy placement event verifies inventory and consumes one
-			// trap. Supply that transient placement item so restore follows the same path.
-			const bool bInfiniteConsumption =
-				AFortInventory::ShouldBypassItemConsumption(
-					PlayerController, 1, false);
+			// trap. Supply a transient placement item so restore follows the same path,
+			// then restore the exact pre-grant stack count regardless of consumption
+			// policy. Removing the GUID outright would erase a player's existing stack
+			// when GiveItem merged this administrative item into it.
+			auto Inventory = PlayerController->WorldInventory;
+			auto ProtectedStacks = ProtectLegacyTrapStacks(
+				Tool, PlayerController, AttachmentType, true);
 			auto PlacementItem =
-				PlayerController->WorldInventory->GiveItem(
+				Inventory->GiveItem(
 					(UFortItemDefinition*)SavedItemObject, 1);
 			FGuid PlacementItemGuid{};
+			int32 OriginalPlacementItemCount = 0;
 			const bool bHasPlacementItem =
 				PlacementItem != nullptr;
 			if (bHasPlacementItem)
+			{
 				PlacementItemGuid =
 					PlacementItem->ItemEntry.ItemGuid;
-			const int PreviousCount = GetAttachedBuildingActorCount(AttachedActor);
-			Tool->ServerSpawnDeco(Location, Rotation, AttachedActor, AttachmentType);
-			if (bInfiniteConsumption && bHasPlacementItem)
-			{
-				// This grant exists only to authorize save restoration. Infinite
-				// consumption deliberately keeps ordinary player stacks, so
-				// explicitly remove this administrative temporary afterward.
-				PlayerController->WorldInventory->Remove(
-					PlacementItemGuid);
+				// CreateTemporaryItemInstanceBP clamps a requested Athena level 0
+				// to level 1. Native ServerSpawnDeco reads both the equipped
+				// weapon level and its inventory row; keep both at the saved
+				// original level so zero-level traps retain infinite durability.
+				PlacementItem->ItemEntry.Level = PlacementTrapLevel;
+				PlacementItem->ItemEntry.bIsDirty = true;
+				if (auto PlacementEntry =
+					Inventory->Inventory.ReplicatedEntries.Search(
+						[&](FFortItemEntry& Candidate)
+						{
+							return AreItemGuidsEqual(
+								Candidate.ItemGuid,
+								PlacementItemGuid);
+						},
+						FFortItemEntry::Size()))
+				{
+					PlacementEntry->Level = PlacementTrapLevel;
+				}
+				OriginalPlacementItemCount = (std::max)(
+					0, PlacementItem->ItemEntry.Count - 1);
+				// Legacy ServerSpawnDeco validates both the item definition and the
+				// weapon's backing inventory GUID. A tool spawned directly by the
+				// server has no equipped entry, so associate it with the temporary
+				// placement item before invoking the native RPC.
+				if (WeaponTool && WeaponTool->HasItemEntryGuid())
+				{
+					WeaponTool->ItemEntryGuid = PlacementItemGuid;
+				}
 			}
+			const int PreviousCount = GetAttachedBuildingActorCount(AttachedActor);
+			{
+				FLegacyTrapPlacementPawnScope PawnPlacement(
+					PlayerController->MyFortPawn);
+				if (PawnPlacement.MoveWithinNativeRange(Location))
+				{
+					Tool->ServerSpawnDeco(
+						Location, Rotation, AttachedActor,
+						AttachmentType);
+				}
+			}
+			if (bHasPlacementItem)
+			{
+				auto Entry = Inventory->Inventory.ReplicatedEntries.Search(
+					[&](FFortItemEntry& Candidate)
+					{
+						return AreItemGuidsEqual(
+							Candidate.ItemGuid,
+							PlacementItemGuid);
+					},
+					FFortItemEntry::Size());
+				if (OriginalPlacementItemCount == 0)
+				{
+					if (Entry || FindInventoryItemInstance(
+							Inventory, PlacementItemGuid))
+					{
+						Inventory->Remove(PlacementItemGuid);
+					}
+				}
+				else if (Entry)
+				{
+					Entry->Count = OriginalPlacementItemCount;
+					if (auto Item = FindInventoryItemInstance(
+							Inventory, PlacementItemGuid))
+					{
+						Item->ItemEntry.Count =
+							OriginalPlacementItemCount;
+						Item->ItemEntry.bIsDirty = true;
+					}
+					Inventory->UpdateEntry(*Entry);
+				}
+			}
+			RestoreLegacyTrapStacks(Inventory, ProtectedStacks);
 			if (AttachedActor->HasAttachedBuildingActors() && AttachedActor->AttachedBuildingActors.Num() > PreviousCount)
 				Trap = AttachedActor->AttachedBuildingActors.Get(PreviousCount);
 		}
@@ -506,14 +1688,17 @@ ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVec
 			Trap = SpawnDeco(Tool, TrapClass, Location, Rotation, AttachedActor, AttachmentType, 0);
 	}
 
-	if (!Trap || !SDK::MemReadable(Trap, 0x40) || !Trap->Class || !SDK::MemReadable(Trap->Class, 0x40))
+	if (IsExcludedSavedTrapActor(
+			Trap, ExcludedActors, BaselineActors))
 	{
 		Tool->K2_DestroyActor();
 		return nullptr;
 	}
-	ApplyTrapTeam(Trap, static_cast<AFortPlayerStateAthena*>(PlayerController->PlayerState));
-	if (ItemDefinition)
-		RegisterTrapDefinition(TrapClass, ItemDefinition);
+	Trap = FinalizeSavedTrapInstance(
+		Trap, TrapClass, AttachedActor, AttachmentType,
+		AttachmentSlot, SavedTrapLevel,
+		SavedOriginalTrapLevel, ItemDefinition,
+		ContextItemDefinition, PlayerController, true);
 	Tool->K2_DestroyActor();
 	return Trap;
 }
@@ -562,6 +1747,9 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 
 		if (!ItemDefinition)
 			return;
+		SnapChapterFourDirectionalPadToSupport(
+			ItemDefinition, Location, AttachedActor,
+			InBuildingAttachmentType);
 
 		auto ShouldAllowServerSpawnDeco = (bool (*)(AFortDecoTool*, FVector&, FRotator&, ABuildingSMActor*, uint8_t)) DecoTool->Vft[ShouldAllowServerSpawnDecoVft];
 
@@ -586,7 +1774,13 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 		}
 
 		ApplyTrapTeam(NewTrap, PlayerState);
-		ABuildingSMActor::RegisterTrapDefinition(NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(), ItemDefinition);
+		if (NewTrap)
+			QueueSavedTrapAttachmentRepair(
+				NewTrap, AttachedActor,
+				InBuildingAttachmentType, -1);
+		ABuildingSMActor::RegisterTrapDefinition(
+			NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(),
+			ItemDefinition, NewTrap);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
 
 		if (FConfiguration::bInfiniteAmmo ||
@@ -671,6 +1865,9 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 
 		if (!ItemDefinition)
 			return;
+		SnapChapterFourDirectionalPadToSupport(
+			ItemDefinition, Location, AttachedActor,
+			InBuildingAttachmentType);
 
 		auto ShouldAllowServerSpawnDeco = (bool (*)(AFortDecoTool*, FVector&, FRotator&, ABuildingSMActor*, uint8_t)) DecoTool->Vft[ShouldAllowServerSpawnDecoVft];
 
@@ -695,7 +1892,13 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 		}
 
 		ApplyTrapTeam(NewTrap, PlayerState);
-		ABuildingSMActor::RegisterTrapDefinition(NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(), ItemDefinition);
+		if (NewTrap)
+			QueueSavedTrapAttachmentRepair(
+				NewTrap, AttachedActor,
+				InBuildingAttachmentType, -1);
+		ABuildingSMActor::RegisterTrapDefinition(
+			NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(),
+			ItemDefinition, NewTrap);
 		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
 
 		if (FConfiguration::bInfiniteAmmo ||
@@ -887,16 +2090,35 @@ _out:
 		*(uint32*)(__int64(&BuildingClassData) + UpgradeLevelOffset) = 0;
 
 	UFortWorldItem* Item = nullptr;
-	if (!FConfiguration::bInfiniteMats)
+	const bool bInfiniteMaterials =
+		FConfiguration::bInfiniteMats.load(
+			std::memory_order_acquire);
+	if (!bInfiniteMaterials)
 	{
 		auto CanAffordToPlaceBuildableClass = (bool(*)(AFortPlayerControllerAthena*, FBuildingClassData)) CanAffordToPlaceBuildableClass_;
 
 		if (CanAffordToPlaceBuildableClass)
 		{
-			if (!CanAffordToPlaceBuildableClass(PlayerController, BuildingClassData))
+			const bool bOverrideBuildFree =
+				PlayerController->HasbBuildFree() &&
+				PlayerController->bBuildFree;
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = false;
+				PlayerController->bBuildFree = bBuildFree;
+			}
+			const bool bCanAfford =
+				CanAffordToPlaceBuildableClass(
+					PlayerController, BuildingClassData);
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = true;
+				PlayerController->bBuildFree = bBuildFree;
+			}
+			if (!bCanAfford)
 				return;
 		}
-		else if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
+		else
 		{
 			auto Resource = UFortKismetLibrary::K2_GetResourceItemDefinition(((ABuildingSMActor*)BuildingClass->GetDefaultObj())->ResourceType);
 
@@ -973,11 +2195,33 @@ _out:
 
 	//UWorld::FinishSpawnActor(Building, BuildLoc, BuildRot);
 
-	if (!PlayerController->bBuildFree && !FConfiguration::bInfiniteMats)
+	if (!bInfiniteMaterials)
 	{
 		auto PayBuildableClassPlacementCost = (int(*)(AFortPlayerControllerAthena*, FBuildingClassData)) PayBuildableClassPlacementCost_;
 		if (PayBuildableClassPlacementCost)
-			PayBuildableClassPlacementCost(PlayerController, BuildingClassData);
+		{
+			const bool bOverrideBuildFree =
+				PlayerController->HasbBuildFree() &&
+				PlayerController->bBuildFree;
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = false;
+				PlayerController->bBuildFree = bBuildFree;
+			}
+			PayBuildableClassPlacementCost(
+				PlayerController, BuildingClassData);
+			if (bOverrideBuildFree)
+			{
+				bool bBuildFree = true;
+				PlayerController->bBuildFree = bBuildFree;
+			}
+		}
+		else if (Item)
+		{
+			Item->ItemEntry.Count -= 10;
+			PlayerController->WorldInventory->Update(
+				&Item->ItemEntry);
+		}
 	}
 
 	/*Building->Team = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->TeamIndex;

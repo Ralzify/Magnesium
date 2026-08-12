@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
+#include "../Public/FortPlayerControllerAthena.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/GUI.h"
 #include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
@@ -2344,7 +2345,8 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 			{
 				auto PlayerController = (AFortPlayerControllerAthena*)UncastedPlayer;
 
-				PlayerController->GetQuestManager(1)->SendStatEvent(PlayerController, EFortQuestObjectiveStatEvent::GetStormPhase(), 1, false);
+				UFortQuestManager::TrySendStatEvent(PlayerController,
+					EFortQuestObjectiveStatEvent::GetStormPhase(), 1, false);
 			}
 	}
 }
