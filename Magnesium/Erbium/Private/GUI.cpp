@@ -7470,10 +7470,15 @@ namespace TrickshotManager
         HANDLE Handle = INVALID_HANDLE_VALUE;
         DWORD Error = ERROR_SUCCESS;
 
-        explicit FScopedPresetReadGuard(const fs::path& Path)
+        explicit FScopedPresetReadGuard(
+            const fs::path& Path,
+            bool bAllowAtomicReplacement = false)
         {
+            const DWORD ShareMode = bAllowAtomicReplacement
+                ? FILE_SHARE_READ | FILE_SHARE_DELETE
+                : FILE_SHARE_READ;
             Handle = CreateFileW(
-                Path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                Path.c_str(), GENERIC_READ, ShareMode,
                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                 nullptr);
             if (Handle == INVALID_HANDLE_VALUE)
@@ -7548,7 +7553,8 @@ namespace TrickshotManager
                     // its writer closes. Opening with read-only sharing fails
                     // while any writer is still active, so the last good GUI
                     // list is retained until the copy is actually loadable.
-                    FScopedPresetReadGuard ReadGuard(Path);
+                    FScopedPresetReadGuard ReadGuard(
+                        Path, true);
                     if (!ReadGuard)
                     {
                         if (ReadGuard.ShouldRetryScan())
@@ -8107,9 +8113,21 @@ namespace TrickshotManager
             return false;
         }
 
+        const auto PresetPath = Directory / (Name + ".json");
+        FScopedPresetReadGuard ReadGuard(PresetPath);
+        if (!ReadGuard)
+        {
+            Message = ReadGuard.ShouldRetryScan()
+                ? "That preset is still being copied. Try again in a moment."
+                : "Could not open the selected trickshot file.";
+            return false;
+        }
+
         try
         {
-            std::ifstream File(Directory / (Name + ".json"));
+            // Keep ReadGuard alive while parsing so an external writer cannot
+            // replace or modify the file between the readiness check and read.
+            std::ifstream File(PresetPath);
             nlohmann::json Root;
             if (!File || !(File >> Root) || !Root.contains("builds") || !Root["builds"].is_array())
             {
@@ -13250,9 +13268,6 @@ void GUI::Init()
             static std::string TrickshotMessage;
             static bool InitializedTrickshotList = false;
             static ULONGLONG NextTrickshotListRefreshAtMs = 0;
-            static bool HasTrickshotDirectorySnapshot = false;
-            static TrickshotManager::FSavedPresetFileSignatures
-                LastObservedTrickshotFiles;
 
             const ULONGLONG NowMs = GetTickCount64();
             if (!InitializedTrickshotList ||
@@ -13264,63 +13279,23 @@ void GUI::Init()
                         ? SavedTrickshots[SelectedTrickshot]
                         : "";
                 bool bRefreshSucceeded = false;
-                TrickshotManager::FSavedPresetFileSignatures
-                    ObservedTrickshotFiles;
                 auto RefreshedTrickshots =
                     TrickshotManager::GetSavedNames(
-                        &bRefreshSucceeded,
-                        &ObservedTrickshotFiles);
-                if (bRefreshSucceeded)
+                        &bRefreshSucceeded);
+                if (bRefreshSucceeded &&
+                    RefreshedTrickshots != SavedTrickshots)
                 {
-                    // Explorer can expose a destination .json while it is
-                    // still being copied. Existing files are always kept,
-                    // while a newly discovered external file must have the
-                    // same size/write-time in two consecutive scans before
-                    // it becomes loadable in the combo.
-                    if (HasTrickshotDirectorySnapshot)
-                    {
-                        std::vector<std::string> StableTrickshots;
-                        StableTrickshots.reserve(
-                            RefreshedTrickshots.size());
-                        for (const auto& Name : RefreshedTrickshots)
-                        {
-                            const bool bAlreadyPublished = std::find(
-                                SavedTrickshots.begin(),
-                                SavedTrickshots.end(), Name) !=
-                                SavedTrickshots.end();
-                            const auto Previous =
-                                LastObservedTrickshotFiles.find(Name);
-                            const auto Current =
-                                ObservedTrickshotFiles.find(Name);
-                            const bool bStableNewFile =
-                                Previous !=
-                                    LastObservedTrickshotFiles.end() &&
-                                Current != ObservedTrickshotFiles.end() &&
-                                Previous->second == Current->second;
-                            if (bAlreadyPublished || bStableNewFile)
-                                StableTrickshots.push_back(Name);
-                        }
-                        RefreshedTrickshots =
-                            std::move(StableTrickshots);
-                    }
-
-                    LastObservedTrickshotFiles =
-                        std::move(ObservedTrickshotFiles);
-                    HasTrickshotDirectorySnapshot = true;
-                    if (RefreshedTrickshots != SavedTrickshots)
-                    {
-                        SavedTrickshots =
-                            std::move(RefreshedTrickshots);
-                        auto Selected = std::find(
-                            SavedTrickshots.begin(),
-                            SavedTrickshots.end(), SelectedName);
-                        SelectedTrickshot =
-                            SelectedName.empty() ||
-                            Selected == SavedTrickshots.end()
-                                ? -1
-                                : static_cast<int>(std::distance(
-                                    SavedTrickshots.begin(), Selected));
-                    }
+                    SavedTrickshots =
+                        std::move(RefreshedTrickshots);
+                    auto Selected = std::find(
+                        SavedTrickshots.begin(),
+                        SavedTrickshots.end(), SelectedName);
+                    SelectedTrickshot =
+                        SelectedName.empty() ||
+                        Selected == SavedTrickshots.end()
+                            ? -1
+                            : static_cast<int>(std::distance(
+                                SavedTrickshots.begin(), Selected));
                 }
                 InitializedTrickshotList = true;
                 NextTrickshotListRefreshAtMs = NowMs + 500ULL;
@@ -13350,18 +13325,26 @@ void GUI::Init()
                         TrickshotManager::GetSavedNames(
                             &bRefreshSucceeded);
                     if (bRefreshSucceeded)
-                    {
                         SavedTrickshots =
                             std::move(RefreshedTrickshots);
-                        auto It = std::find(
+                    if (std::find(
                             SavedTrickshots.begin(),
-                            SavedTrickshots.end(), SavedName);
-                        SelectedTrickshot =
-                            It == SavedTrickshots.end()
-                                ? -1
-                                : static_cast<int>(std::distance(
-                                    SavedTrickshots.begin(), It));
+                            SavedTrickshots.end(), SavedName) ==
+                        SavedTrickshots.end())
+                    {
+                        SavedTrickshots.push_back(SavedName);
+                        std::sort(
+                            SavedTrickshots.begin(),
+                            SavedTrickshots.end());
                     }
+                    auto It = std::find(
+                        SavedTrickshots.begin(),
+                        SavedTrickshots.end(), SavedName);
+                    SelectedTrickshot =
+                        It == SavedTrickshots.end()
+                            ? -1
+                            : static_cast<int>(std::distance(
+                                SavedTrickshots.begin(), It));
                 }
             }
 
@@ -13418,21 +13401,24 @@ void GUI::Init()
                     if (TrickshotManager::Delete(
                             SelectedName, TrickshotMessage))
                     {
+                        SavedTrickshots.erase(
+                            std::remove(
+                                SavedTrickshots.begin(),
+                                SavedTrickshots.end(), SelectedName),
+                            SavedTrickshots.end());
                         bool bRefreshSucceeded = false;
                         auto RefreshedTrickshots =
                             TrickshotManager::GetSavedNames(
                                 &bRefreshSucceeded);
                         if (bRefreshSucceeded)
-                        {
                             SavedTrickshots =
                                 std::move(RefreshedTrickshots);
-                            SelectedTrickshot = SavedTrickshots.empty()
-                                ? -1
-                                : (std::min)(
-                                    SelectedTrickshot,
-                                    static_cast<int>(
-                                        SavedTrickshots.size()) - 1);
-                        }
+                        SelectedTrickshot = SavedTrickshots.empty()
+                            ? -1
+                            : (std::min)(
+                                SelectedTrickshot,
+                                static_cast<int>(
+                                    SavedTrickshots.size()) - 1);
                     }
                 }
             }
