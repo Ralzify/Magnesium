@@ -6316,9 +6316,10 @@ namespace TrickshotManager
         std::vector<TWeakObjectPtr<ABuildingSMActor>> SpawnedBuilds;
         std::vector<TWeakObjectPtr<AActor>> SpawnedProps;
         std::vector<TWeakObjectPtr<UClass>> TrackedPropClasses;
-        // Exact command-spawned actor instances owned by the current preset.
+        // Exact command-spawned actor instances belonging to the current
+        // shared trickshot session, regardless of which player spawned them.
         // Arbitrary class-wide cleanup would destroy natural map actors and
-        // objects spawned by another player.
+        // unrelated runtime gameplay actors of the same class.
         std::vector<TWeakObjectPtr<AActor>> ExistingTrackedProps;
         // Exact pre-load building identities. Deferred legacy trap recovery
         // must never adopt, mutate, or destroy natural/foreign actors that
@@ -6456,35 +6457,8 @@ namespace TrickshotManager
         }
     };
 
-    int CountConnectedHumanControllers()
-    {
-        int Count = 0;
-        auto World = UWorld::GetWorld();
-        auto Driver = World
-            ? static_cast<UNetDriver*>(World->NetDriver) : nullptr;
-        if (!Driver)
-            return Count;
-        for (auto Connection : Driver->ClientConnections)
-        {
-            auto Controller = Connection && Connection->PlayerController
-                ? Connection->PlayerController->Cast<
-                    AFortPlayerControllerAthena>() : nullptr;
-            if (!Controller)
-                continue;
-            auto PlayerState = Controller->PlayerState;
-            if (PlayerState && PlayerState->HasbIsABot() &&
-                PlayerState->bIsABot)
-            {
-                continue;
-            }
-            ++Count;
-        }
-        return Count;
-    }
-
-    bool IsPresetOwnedPlayerBuild(
-        const ABuildingSMActor* Build,
-        const AFortPlayerControllerAthena* Controller = nullptr)
+    bool IsTrickshotSessionPlayerBuild(
+        const ABuildingSMActor* Build)
     {
         if (!Build || !Build->bPlayerPlaced || Build->bDestroyed ||
             (Build->HasbActorIsBeingDestroyed() &&
@@ -6493,48 +6467,11 @@ namespace TrickshotManager
         {
             return false;
         }
-
-        if (!Controller || !Controller->PlayerState)
-            return false;
-        auto PlayerState = static_cast<const AFortPlayerStateAthena*>(
-            Controller->PlayerState);
-        if (Build->HasOwnerPersistentID() &&
-            PlayerState->HasWorldPlayerId())
-        {
-            return Build->OwnerPersistentID ==
-                PlayerState->WorldPlayerId;
-        }
-
-        // Some old builds do not expose persistent ownership. Prefer a native
-        // Owner relationship where available and adopt unattributed player
-        // builds only when there is no second human they could belong to.
-        if (Build->HasOwner() && Build->Owner)
-        {
-            if (Build->Owner == Controller ||
-                Build->Owner == Controller->Pawn ||
-                Build->Owner == Controller->MyFortPawn)
-            {
-                return true;
-            }
-            if (SDK::MemReadable(Build->Owner, 0x40) &&
-                Build->Owner->Index >= 0 &&
-                Build->Owner->Index < TUObjectArray::Num() &&
-                TUObjectArray::GetObjectByIndex(
-                    Build->Owner->Index) == Build->Owner)
-            {
-                if (auto OwnerController =
-                    Build->Owner->Cast<AFortPlayerControllerAthena>())
-                {
-                    return OwnerController == Controller;
-                }
-                if (auto OwnerPawn =
-                    Build->Owner->Cast<AFortPlayerPawnAthena>())
-                {
-                    return OwnerPawn->Controller == Controller;
-                }
-            }
-        }
-        return CountConnectedHumanControllers() <= 1;
+        // Trickshot presets represent the shared setup in this world, not one
+        // player's ownership slice. bPlayerPlaced is the cross-version boundary
+        // that includes every participant's builds while excluding natural and
+        // map-startup structures.
+        return true;
     }
 
     bool TryGetStructuralCellKey(
@@ -6879,7 +6816,7 @@ namespace TrickshotManager
                 return Entry.World.Get() != CurrentWorld ||
                     !IsLiveTrackedSpawnedActor(
                         Entry.Actor.Get(), CurrentWorld) ||
-                    !Entry.Controller.Get() || Entry.ClassPath.empty();
+                    Entry.ClassPath.empty();
             });
     }
 
@@ -6939,17 +6876,16 @@ namespace TrickshotManager
                 return true;
             }
         }
-        const size_t OwnedActorCount = static_cast<size_t>(std::count_if(
+        const size_t SessionActorCount = static_cast<size_t>(std::count_if(
             GTrackedSpawnedActors.begin(), GTrackedSpawnedActors.end(),
             [&](const FTrackedSpawnedActor& Entry)
             {
-                return Entry.World.Get() == World &&
-                    Entry.Controller.Get() == Controller;
+                return Entry.World.Get() == World;
             }));
-        if (OwnedActorCount >= kMaximumTrickshotSpawnedObjects)
+        if (SessionActorCount >= kMaximumTrickshotSpawnedObjects)
         {
             SDK::DbgLog(
-                "[TrickshotSpawn] tracking limit reached controller=%p limit=%zu class=%s\n",
+                "[TrickshotSpawn] session tracking limit reached controller=%p limit=%zu class=%s\n",
                 Controller, kMaximumTrickshotSpawnedObjects,
                 CanonicalClassPath.c_str());
             return false;
@@ -7082,10 +7018,9 @@ namespace TrickshotManager
         return false;
     }
 
-    bool IsOwnedTrickshotTire(
+    bool IsSessionTrickshotTire(
         AActor* Actor,
-        UClass* TireClass,
-        AFortPlayerControllerAthena* Controller)
+        UClass* TireClass)
     {
         if (!Actor || Actor->Class != TireClass ||
             (Actor->HasbActorIsBeingDestroyed() &&
@@ -7094,55 +7029,17 @@ namespace TrickshotManager
         {
             return false;
         }
-
-        if (!Controller)
-            return false;
-
-        auto ResolveOwner = [&](AActor* Candidate)
+        if (auto Build = Actor->Cast<ABuildingSMActor>())
         {
-            for (int Depth = 0; Candidate && Depth < 6; ++Depth)
-            {
-                if (!IsLiveTrickshotAsset(
-                        Candidate, AActor::StaticClass()))
-                {
-                    return 0;
-                }
-                if (Candidate == Controller ||
-                    Candidate == Controller->Pawn ||
-                    Candidate == Controller->MyFortPawn)
-                {
-                    return 1;
-                }
-                if (auto OwnerController =
-                    Candidate->Cast<AFortPlayerControllerAthena>())
-                {
-                    return OwnerController == Controller ? 1 : -1;
-                }
-                if (auto OwnerPawn =
-                    Candidate->Cast<AFortPlayerPawnAthena>())
-                {
-                    if (OwnerPawn->Controller)
-                        return OwnerPawn->Controller == Controller ? 1 : -1;
-                }
-                Candidate = Candidate->HasOwner()
-                    ? Candidate->Owner : nullptr;
-            }
-            return 0;
-        };
+            if (Build->HasbDestroyed() && Build->bDestroyed)
+                return false;
+        }
 
-        const int OwnerResult = ResolveOwner(
-            Actor->HasOwner() ? Actor->Owner : nullptr);
-        if (OwnerResult != 0)
-            return OwnerResult > 0;
-        const int InstigatorResult = ResolveOwner(
-            Actor->HasInstigator() ? Actor->Instigator : nullptr);
-        if (InstigatorResult != 0)
-            return InstigatorResult > 0;
-
-        // Older command-spawned tires have no ownership metadata. They are
-        // safe to adopt only in a one-human session; in multiplayer an
-        // unowned tire cannot be attributed without risking another player.
-        return CountConnectedHumanControllers() <= 1;
+        // This exact functional class is the only legacy prop adopted by a
+        // world scan. Net-startup instances were rejected above, so every
+        // remaining instance belongs to the active player-created session,
+        // regardless of which participant deployed it or whether they left.
+        return true;
     }
 
     void CleanupPartialLoad()
@@ -7568,20 +7465,120 @@ namespace TrickshotManager
         return 0;
     }
 
-    inline std::vector<std::string> GetSavedNames()
+    struct FScopedPresetReadGuard
     {
-        std::vector<std::string> Names;
-        auto Directory = GetDirectory();
-        if (Directory.empty())
-            return Names;
+        HANDLE Handle = INVALID_HANDLE_VALUE;
+        DWORD Error = ERROR_SUCCESS;
 
-        std::error_code Error;
-        for (const auto& Entry : fs::directory_iterator(Directory, Error))
+        explicit FScopedPresetReadGuard(const fs::path& Path)
         {
-            if (Entry.is_regular_file() && Entry.path().extension() == ".json")
-                Names.push_back(Entry.path().stem().string());
+            Handle = CreateFileW(
+                Path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+            if (Handle == INVALID_HANDLE_VALUE)
+                Error = GetLastError();
         }
+
+        ~FScopedPresetReadGuard()
+        {
+            if (Handle != INVALID_HANDLE_VALUE)
+                CloseHandle(Handle);
+        }
+
+        FScopedPresetReadGuard(const FScopedPresetReadGuard&) = delete;
+        FScopedPresetReadGuard& operator=(
+            const FScopedPresetReadGuard&) = delete;
+
+        explicit operator bool() const
+        {
+            return Handle != INVALID_HANDLE_VALUE;
+        }
+
+        bool ShouldRetryScan() const
+        {
+            return Error == ERROR_SHARING_VIOLATION ||
+                Error == ERROR_LOCK_VIOLATION ||
+                Error == ERROR_FILE_NOT_FOUND ||
+                Error == ERROR_PATH_NOT_FOUND;
+        }
+    };
+
+    inline std::vector<std::string> GetSavedNames(
+        bool* bScanSucceeded = nullptr)
+    {
+        if (bScanSucceeded)
+            *bScanSucceeded = false;
+
+        std::vector<std::string> Names;
+        try
+        {
+            auto Directory = GetDirectory();
+            if (Directory.empty())
+                return Names;
+
+            std::error_code Error;
+            fs::directory_iterator Iterator(Directory, Error);
+            const fs::directory_iterator End;
+            while (!Error && Iterator != End)
+            {
+                const auto& Entry = *Iterator;
+                std::error_code EntryError;
+                const bool bRegularFile =
+                    Entry.is_regular_file(EntryError);
+                if (EntryError)
+                {
+                    Error = EntryError;
+                    break;
+                }
+
+                const auto Path = Entry.path();
+                auto Extension = Path.extension().string();
+                std::transform(
+                    Extension.begin(), Extension.end(),
+                    Extension.begin(),
+                    [](unsigned char Character)
+                    {
+                        return static_cast<char>(
+                            std::tolower(Character));
+                    });
+                if (bRegularFile && Extension == ".json")
+                {
+                    // A drag/copy can publish the destination filename before
+                    // its writer closes. Opening with read-only sharing fails
+                    // while any writer is still active, so the last good GUI
+                    // list is retained until the copy is actually loadable.
+                    FScopedPresetReadGuard ReadGuard(Path);
+                    if (!ReadGuard)
+                    {
+                        if (ReadGuard.ShouldRetryScan())
+                        {
+                            Error = std::error_code(
+                                static_cast<int>(ReadGuard.Error),
+                                std::system_category());
+                            break;
+                        }
+                        Iterator.increment(Error);
+                        continue;
+                    }
+                    Names.push_back(Path.stem().string());
+                }
+                Iterator.increment(Error);
+            }
+
+            if (Error)
+                return {};
+        }
+        catch (...)
+        {
+            return {};
+        }
+
         std::sort(Names.begin(), Names.end());
+        Names.erase(
+            std::unique(Names.begin(), Names.end()), Names.end());
+        if (bScanSucceeded)
+            *bScanSucceeded = true;
         return Names;
     }
 
@@ -7652,10 +7649,9 @@ namespace TrickshotManager
         // A Tower/Port-a-Fort deployment creates its functional tire from
         // Blueprint rather than through the cheat summon command, so it never
         // reaches RegisterTrickshotSpawnedActor. Adopt only this exact,
-        // allowlisted runtime class at save time. Ownership/net-startup checks
-        // keep natural map tires and another player's objects out, while the
-        // one-human fallback covers old versions that leave deployed tires
-        // unowned. Once adopted, later cleanup remains instance-based.
+        // allowlisted runtime class at save time. Net-startup checks keep map
+        // tires out while including tires deployed by every participant (even
+        // one who has since disconnected). Later cleanup remains instance-based.
         if (bSaveSpawnedObjects &&
             FConfiguration::bEnableTrickshotTab.load(
                 std::memory_order_acquire) &&
@@ -7665,8 +7661,7 @@ namespace TrickshotManager
             Utils::GetAll<AActor>(TireClass, DeployedTires);
             for (auto Tire : DeployedTires)
             {
-                if (!IsOwnedTrickshotTire(
-                        Tire, TireClass, Controller))
+                if (!IsSessionTrickshotTire(Tire, TireClass))
                 {
                     continue;
                 }
@@ -7682,7 +7677,6 @@ namespace TrickshotManager
         {
             auto Actor = Entry.Actor.Get();
             if (Entry.World.Get() != CurrentWorld ||
-                Entry.Controller.Get() != Controller ||
                 !IsLiveTrackedSpawnedActor(Actor, CurrentWorld))
             {
                 continue;
@@ -7750,7 +7744,7 @@ namespace TrickshotManager
             FStructuralCellKeyHash> CanonicalBuildByCell;
         for (auto Build : Builds)
         {
-            if (!IsPresetOwnedPlayerBuild(Build, Controller) ||
+            if (!IsTrickshotSessionPlayerBuild(Build) ||
                 Build->Cast<ABuildingTrap>() ||
                 (TireClass && Build->Class == TireClass) ||
                 TrackedPropActors.contains(Build))
@@ -7814,7 +7808,7 @@ namespace TrickshotManager
         auto SerializeTrap = [&](ABuildingSMActor* Trap, ABuildingSMActor* Parent)
         {
             if (!Trap || !Parent ||
-                !IsPresetOwnedPlayerBuild(Trap, Controller) ||
+                !IsTrickshotSessionPlayerBuild(Trap) ||
                 (TireClass && Trap->Class == TireClass) ||
                 TrackedPropActors.contains(Trap) ||
                 Trap->bDestroyed ||
@@ -7827,7 +7821,7 @@ namespace TrickshotManager
 
             auto ParentIndex = SavedIndices.find(Parent);
             if (ParentIndex == SavedIndices.end() &&
-                IsPresetOwnedPlayerBuild(Parent, Controller))
+                IsTrickshotSessionPlayerBuild(Parent))
             {
                 FStructuralCellKey ParentKey;
                 if (TryGetStructuralCellKey(Parent, ParentKey))
@@ -7836,6 +7830,15 @@ namespace TrickshotManager
                     if (Canonical != CanonicalBuildByCell.end())
                         ParentIndex = SavedIndices.find(Canonical->second);
                 }
+            }
+            if (ParentIndex == SavedIndices.end() &&
+                TrackedPropActors.contains(Parent))
+            {
+                bUnsupportedTrapParent = true;
+                SDK::DbgLog(
+                    "[TrickshotSave] trap=%p has unsupported tracked-object parent=%p\n",
+                    Trap, Parent);
+                return;
             }
             const bool bExternalParent =
                 ParentIndex == SavedIndices.end() &&
@@ -8024,7 +8027,7 @@ namespace TrickshotManager
 
         if (bUnsupportedTrapParent)
         {
-            Message = "Could not save because an attached trap belongs to a different player's unsupported build.";
+            Message = "Could not save because an attached trap has an unsupported player-built parent.";
             return false;
         }
         if (bUnresolvedTrapDefinition)
@@ -8801,7 +8804,6 @@ namespace TrickshotManager
             {
                 auto Actor = Entry.Actor.Get();
                 if (Entry.World.Get() == CurrentWorld &&
-                    Entry.Controller.Get() == Controller &&
                     IsLiveTrackedSpawnedActor(Actor, CurrentWorld))
                 {
                     Job.ExistingTrackedProps.emplace_back(Actor);
@@ -8960,7 +8962,7 @@ namespace TrickshotManager
             }
 
             // Schemas 1-5 predate the instance registry and only allowed the
-            // Tower tire. Retain their narrow owner-aware migration cleanup.
+            // Tower tire. Retain their narrow session-scoped migration cleanup.
             if (GLoadJob.LegacyTireProps)
             {
                 for (const auto& TrackedClass :
@@ -8973,8 +8975,7 @@ namespace TrickshotManager
                     Utils::GetAll<AActor>(PropClass, ExistingProps);
                     for (auto Prop : ExistingProps)
                     {
-                        if (IsOwnedTrickshotTire(
-                                Prop, PropClass, Controller))
+                        if (IsSessionTrickshotTire(Prop, PropClass))
                         {
                             ForgetTrackedSpawnedActor(Prop);
                             Prop->K2_DestroyActor();
@@ -9019,7 +9020,7 @@ namespace TrickshotManager
             {
                 if (ExistingAttachments.contains(Build) &&
                     !IsExistingTrackedProp(Build) &&
-                    IsPresetOwnedPlayerBuild(Build, Controller))
+                    IsTrickshotSessionPlayerBuild(Build))
                 {
                     Build->SilentDie(true);
                 }
@@ -9028,7 +9029,7 @@ namespace TrickshotManager
             {
                 if (!ExistingAttachments.contains(Build) &&
                     !IsExistingTrackedProp(Build) &&
-                    IsPresetOwnedPlayerBuild(Build, Controller))
+                    IsTrickshotSessionPlayerBuild(Build))
                 {
                     Build->SilentDie(true);
                 }
@@ -13248,11 +13249,81 @@ void GUI::Init()
             static int SelectedTrickshot = -1;
             static std::string TrickshotMessage;
             static bool InitializedTrickshotList = false;
+            static ULONGLONG NextTrickshotListRefreshAtMs = 0;
+            static bool HasTrickshotDirectorySnapshot = false;
+            static TrickshotManager::FSavedPresetFileSignatures
+                LastObservedTrickshotFiles;
 
-            if (!InitializedTrickshotList)
+            const ULONGLONG NowMs = GetTickCount64();
+            if (!InitializedTrickshotList ||
+                NowMs >= NextTrickshotListRefreshAtMs)
             {
-                SavedTrickshots = TrickshotManager::GetSavedNames();
+                const std::string SelectedName =
+                    SelectedTrickshot >= 0 &&
+                    SelectedTrickshot < SavedTrickshots.size()
+                        ? SavedTrickshots[SelectedTrickshot]
+                        : "";
+                bool bRefreshSucceeded = false;
+                TrickshotManager::FSavedPresetFileSignatures
+                    ObservedTrickshotFiles;
+                auto RefreshedTrickshots =
+                    TrickshotManager::GetSavedNames(
+                        &bRefreshSucceeded,
+                        &ObservedTrickshotFiles);
+                if (bRefreshSucceeded)
+                {
+                    // Explorer can expose a destination .json while it is
+                    // still being copied. Existing files are always kept,
+                    // while a newly discovered external file must have the
+                    // same size/write-time in two consecutive scans before
+                    // it becomes loadable in the combo.
+                    if (HasTrickshotDirectorySnapshot)
+                    {
+                        std::vector<std::string> StableTrickshots;
+                        StableTrickshots.reserve(
+                            RefreshedTrickshots.size());
+                        for (const auto& Name : RefreshedTrickshots)
+                        {
+                            const bool bAlreadyPublished = std::find(
+                                SavedTrickshots.begin(),
+                                SavedTrickshots.end(), Name) !=
+                                SavedTrickshots.end();
+                            const auto Previous =
+                                LastObservedTrickshotFiles.find(Name);
+                            const auto Current =
+                                ObservedTrickshotFiles.find(Name);
+                            const bool bStableNewFile =
+                                Previous !=
+                                    LastObservedTrickshotFiles.end() &&
+                                Current != ObservedTrickshotFiles.end() &&
+                                Previous->second == Current->second;
+                            if (bAlreadyPublished || bStableNewFile)
+                                StableTrickshots.push_back(Name);
+                        }
+                        RefreshedTrickshots =
+                            std::move(StableTrickshots);
+                    }
+
+                    LastObservedTrickshotFiles =
+                        std::move(ObservedTrickshotFiles);
+                    HasTrickshotDirectorySnapshot = true;
+                    if (RefreshedTrickshots != SavedTrickshots)
+                    {
+                        SavedTrickshots =
+                            std::move(RefreshedTrickshots);
+                        auto Selected = std::find(
+                            SavedTrickshots.begin(),
+                            SavedTrickshots.end(), SelectedName);
+                        SelectedTrickshot =
+                            SelectedName.empty() ||
+                            Selected == SavedTrickshots.end()
+                                ? -1
+                                : static_cast<int>(std::distance(
+                                    SavedTrickshots.begin(), Selected));
+                    }
+                }
                 InitializedTrickshotList = true;
+                NextTrickshotListRefreshAtMs = NowMs + 500ULL;
             }
 
             TrickshotManager::EAsyncOperation CompletedOperation =
@@ -13274,16 +13345,23 @@ void GUI::Init()
                     const std::string SavedName =
                         TrickshotManager::SanitizeName(
                             CompletedName.c_str());
-                    SavedTrickshots =
-                        TrickshotManager::GetSavedNames();
-                    auto It = std::find(
-                        SavedTrickshots.begin(),
-                        SavedTrickshots.end(), SavedName);
-                    SelectedTrickshot =
-                        It == SavedTrickshots.end()
-                            ? -1
-                            : static_cast<int>(std::distance(
-                                SavedTrickshots.begin(), It));
+                    bool bRefreshSucceeded = false;
+                    auto RefreshedTrickshots =
+                        TrickshotManager::GetSavedNames(
+                            &bRefreshSucceeded);
+                    if (bRefreshSucceeded)
+                    {
+                        SavedTrickshots =
+                            std::move(RefreshedTrickshots);
+                        auto It = std::find(
+                            SavedTrickshots.begin(),
+                            SavedTrickshots.end(), SavedName);
+                        SelectedTrickshot =
+                            It == SavedTrickshots.end()
+                                ? -1
+                                : static_cast<int>(std::distance(
+                                    SavedTrickshots.begin(), It));
+                    }
                 }
             }
 
@@ -13340,14 +13418,21 @@ void GUI::Init()
                     if (TrickshotManager::Delete(
                             SelectedName, TrickshotMessage))
                     {
-                        SavedTrickshots =
-                            TrickshotManager::GetSavedNames();
-                        SelectedTrickshot = SavedTrickshots.empty()
-                            ? -1
-                            : (std::min)(
-                                SelectedTrickshot,
-                                static_cast<int>(
-                                    SavedTrickshots.size()) - 1);
+                        bool bRefreshSucceeded = false;
+                        auto RefreshedTrickshots =
+                            TrickshotManager::GetSavedNames(
+                                &bRefreshSucceeded);
+                        if (bRefreshSucceeded)
+                        {
+                            SavedTrickshots =
+                                std::move(RefreshedTrickshots);
+                            SelectedTrickshot = SavedTrickshots.empty()
+                                ? -1
+                                : (std::min)(
+                                    SelectedTrickshot,
+                                    static_cast<int>(
+                                        SavedTrickshots.size()) - 1);
+                        }
                     }
                 }
             }

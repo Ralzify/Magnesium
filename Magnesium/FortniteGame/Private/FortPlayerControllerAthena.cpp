@@ -47,6 +47,10 @@ static const UClass* GetRemoteControlledPawnClass();
 static bool IsNativeVehiclePossessionPawn(AActor* Actor);
 static bool IsUsableDeathObject(const UObject* Object);
 static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory);
+static void RememberLastEditingWeaponSelection(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	const FGuid& ItemGuid);
 static bool IsManagedNonRespawningBot(
 	AFortPlayerControllerAthena* PlayerController);
 static bool IsTerminalManagedBot(
@@ -7310,6 +7314,9 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 
 	FFortWeaponMods::ApplyEntrySlotsAfterEquip(
 		(AFortWeapon*)Weapon, *entry);
+	RememberLastEditingWeaponSelection(
+		PlayerController, PlayerController->MyFortPawn,
+		entry->ItemGuid);
 
 	if (VersionInfo.FortniteVersion <= 2.5)
 	{
@@ -7419,6 +7426,9 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryWeapon(UObject* Context,
 
 	Weapon = EquippedWeapon;
 	FFortWeaponMods::ApplyEntrySlotsAfterEquip(Weapon, *entry);
+	RememberLastEditingWeaponSelection(
+		PlayerController, PlayerController->MyFortPawn,
+		entry->ItemGuid);
 
 	if (auto DecoTool = Weapon->Cast<AFortDecoTool>())
 	{
@@ -7750,6 +7760,14 @@ struct FEditingToolRestoreState
 static std::unordered_map<
 	AFortPlayerControllerAthena*, FEditingToolRestoreState>
 	GEditingToolRestoreStates;
+struct FLastEditingWeaponSelection
+{
+	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+	FGuid ItemGuid{};
+};
+static std::unordered_map<
+	AFortPlayerControllerAthena*, FLastEditingWeaponSelection>
+	GLastEditingWeaponSelections;
 static UWorld* GEditingToolRestoreWorld = nullptr;
 
 static bool IsRestorableAfterEditing(
@@ -7782,6 +7800,80 @@ static FFortItemEntry* FindEditingRestoreEntry(
 					Entry.ItemGuid, ItemGuid) &&
 					IsRestorableAfterEditing(&Entry);
 			}, FFortItemEntry::Size());
+}
+
+static bool IsValidLastEditingWeaponEntry(
+	const FFortItemEntry* Entry)
+{
+	if (!IsRestorableAfterEditing(Entry))
+		return false;
+
+	auto WeaponDefinition = Entry->ItemDefinition
+		? Entry->ItemDefinition->Cast<UFortWeaponItemDefinition>()
+		: nullptr;
+	return WeaponDefinition &&
+		(!WeaponDefinition->HasbValidForLastEquipped() ||
+			WeaponDefinition->bValidForLastEquipped);
+}
+
+static FFortItemEntry* FindLastEditingWeaponSelection(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	auto Selection =
+		GLastEditingWeaponSelections.find(PlayerController);
+	if (Selection == GLastEditingWeaponSelections.end())
+		return nullptr;
+
+	if (!Pawn || Selection->second.Pawn.Get() != Pawn)
+	{
+		GLastEditingWeaponSelections.erase(Selection);
+		return nullptr;
+	}
+
+	auto Entry = FindEditingRestoreEntry(
+		PlayerController, Selection->second.ItemGuid);
+	if (!IsValidLastEditingWeaponEntry(Entry))
+	{
+		GLastEditingWeaponSelections.erase(Selection);
+		return nullptr;
+	}
+	return Entry;
+}
+
+static void RememberLastEditingWeaponSelection(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
+	const FGuid& ItemGuid)
+{
+	if (!PlayerController || !IsUsableDeathObject(Pawn) ||
+		PlayerController->MyFortPawn != Pawn)
+	{
+		return;
+	}
+	auto Existing =
+		GLastEditingWeaponSelections.find(PlayerController);
+	if (Existing != GLastEditingWeaponSelections.end())
+	{
+		if (Existing->second.Pawn.Get() != Pawn)
+		{
+			GLastEditingWeaponSelections.erase(Existing);
+		}
+		else if (VehicleLoadoutGuidsEqual(
+			Existing->second.ItemGuid, ItemGuid))
+		{
+			return;
+		}
+	}
+
+	auto Entry = FindEditingRestoreEntry(
+		PlayerController, ItemGuid);
+	if (!IsValidLastEditingWeaponEntry(Entry))
+		return;
+
+	GLastEditingWeaponSelections[PlayerController] = {
+		TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn),
+		Entry->ItemGuid };
 }
 
 static bool CaptureEditingRestoreItem(
@@ -7899,6 +7991,14 @@ static ABuildingSMActor* BeginEditingToolRestoreSession(
 	}
 
 	State.bHasRestoreItem = false;
+	if (auto LastSelection = FindLastEditingWeaponSelection(
+			PlayerController, Pawn))
+	{
+		State.RestoreItemGuid = LastSelection->ItemGuid;
+		State.bHasRestoreItem = true;
+		return SupersededBuilding;
+	}
+
 	if (Pawn->HasPreviousWeapon() &&
 		CaptureEditingRestoreItem(
 			PlayerController, Pawn->PreviousWeapon, State))
@@ -9207,6 +9307,12 @@ static bool RestoreInactiveEditingTool(
 			StateIt->second.RestoreItemGuid);
 	}
 
+	if (!RestoreEntry)
+	{
+		RestoreEntry = FindLastEditingWeaponSelection(
+			PlayerController, Pawn);
+	}
+
 	if (!RestoreEntry && Pawn->HasPreviousWeapon())
 	{
 		auto PreviousWeapon = IsUsableDeathObject(Pawn->PreviousWeapon)
@@ -9219,7 +9325,6 @@ static bool RestoreInactiveEditingTool(
 				PreviousWeapon->ItemEntryGuid);
 		}
 	}
-
 	if (!RestoreEntry)
 		RestoreEntry =
 			FindHarvestingToolEntry(
@@ -9243,6 +9348,7 @@ void AFortPlayerControllerAthena::TickEditingToolStateRepair(
 	if (!World)
 	{
 		GEditingToolRestoreStates.clear();
+		GLastEditingWeaponSelections.clear();
 		GEditingToolRestoreWorld = nullptr;
 		return;
 	}
@@ -9252,6 +9358,7 @@ void AFortPlayerControllerAthena::TickEditingToolStateRepair(
 	if (GEditingToolRestoreWorld != World)
 	{
 		GEditingToolRestoreStates.clear();
+		GLastEditingWeaponSelections.clear();
 		GEditingToolRestoreWorld = World;
 	}
 
@@ -9279,6 +9386,8 @@ void AFortPlayerControllerAthena::TickEditingToolStateRepair(
 			Pawn->GetHealth() <= 0.f)
 		{
 			GEditingToolRestoreStates.erase(
+				PlayerController);
+			GLastEditingWeaponSelections.erase(
 				PlayerController);
 			continue;
 		}
@@ -9330,6 +9439,14 @@ void AFortPlayerControllerAthena::TickEditingToolStateRepair(
 
 		if (!EditTool)
 		{
+			if (auto CurrentWeapon =
+					GetPawnCurrentWeaponSafe(Pawn))
+			{
+				RememberLastEditingWeaponSelection(
+					PlayerController, Pawn,
+					CurrentWeapon->ItemEntryGuid);
+			}
+
 			// A weapon swap is also an edit exit. Remove any orphaned edit-tool
 			// target left in the pawn's weapon list before forgetting the session.
 			ClearNonCurrentEditingTools(
@@ -9400,6 +9517,20 @@ void AFortPlayerControllerAthena::TickEditingToolStateRepair(
 			ConnectedControllers.end())
 		{
 			It = GEditingToolRestoreStates.erase(It);
+		}
+		else
+		{
+			++It;
+		}
+	}
+
+	for (auto It = GLastEditingWeaponSelections.begin();
+		It != GLastEditingWeaponSelections.end();)
+	{
+		if (ConnectedControllers.find(It->first) ==
+			ConnectedControllers.end())
+		{
+			It = GLastEditingWeaponSelections.erase(It);
 		}
 		else
 		{
