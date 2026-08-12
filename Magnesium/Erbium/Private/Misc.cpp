@@ -487,7 +487,7 @@ const std::unordered_map<std::string, std::string> Misc::ObjectNames = {
 	{ "dumpster", "/Game/Athena/Items/EnvironmentalItems/HidingProps/Props/B_HidingProp_Dumpster.B_HidingProp_Dumpster_C" },
 	{ "trash", "/Game/Athena/Items/EnvironmentalItems/HidingProps/Props/B_HidingProp_Dumpster.B_HidingProp_Dumpster_C" },
 	{ "trashbin", "/Game/Athena/Items/EnvironmentalItems/HidingProps/Props/B_HidingProp_Dumpster.B_HidingProp_Dumpster_C" },
-	{ "tire", "/Game/Building/ActorBlueprints/Prop/Prop_TirePile_04.Prop_TirePile_04_C" },
+	{ "tire", "/Game/Athena/Items/Consumables/TowerGrenade/Prop_TirePile_Tower.Prop_TirePile_Tower_C" },
 	{ "llama", "/Game/Athena/SupplyDrops/Llama/AthenaSupplyDrop_Llama.AthenaSupplyDrop_Llama_C" },
 	{ "paf", "/Game/Athena/Items/Consumables/TowerGrenade/Prop_TirePile_Tower.Prop_TirePile_Tower_C" },
 	{ "airvent", "/Game/Athena/Environments/Blueprints/DUDEBRO/BGA_HVAC.BGA_HVAC_C" },

@@ -55,6 +55,221 @@ static bool UsesLegacyDirectForcedRespawn(
 	AFortPlayerControllerAthena* PlayerController,
 	AFortPlayerStateAthena* PlayerState);
 
+// Name of the stat the client's kill-driven reactive cosmetics observe.
+// Confirmed present in the 13.40 FName pool; the 10.40 reflection dump shows
+// the matching ServerModifyStat(FName, int32, EStatMod, bool) signature.
+static const wchar_t* const GReactiveKillStatName = L"AthenaKills";
+
+uint8 ResolveStatMod(EStatMod Mod)
+{
+	// Resolved once per member through the UEnum, because the numeric values
+	// are only verified against 10.40 and a reorder would silently write a
+	// bogus ModType byte. The dumped value is the fallback for builds where
+	// the enum object is not found.
+	static int64 Resolved[3] = { -2, -2, -2 };
+	static const char* const Names[3] = { "Delta", "Set", "Maximum" };
+
+	const auto Index = (uint8)Mod;
+	if (Index >= 3)
+		return (uint8)Mod;
+
+	if (Resolved[Index] == -2)
+	{
+		auto StatModEnum = SDK::FindEnum("EStatMod");
+		Resolved[Index] = StatModEnum
+			? StatModEnum->GetValue(Names[Index])
+			: -1;
+	}
+
+	return Resolved[Index] >= 0
+		? (uint8)Resolved[Index]
+		: (uint8)Mod;
+}
+
+bool AFortPlayerControllerAthena::TryModifyStat(
+	const wchar_t* StatName,
+	int32 Amount,
+	EStatMod ModType,
+	bool bForceStatSave) const
+{
+	if (!this || !StatName)
+		return false;
+
+	// ServerModifyStat lives on AFortPlayerController, so GetFunction resolves
+	// it through the super chain. It is absent on some early builds.
+	if (!ServerModifyStat__Initialized)
+	{
+		ServerModifyStat__Initialized = true;
+		ServerModifyStat__Ptr = GetFunction("ServerModifyStat");
+	}
+
+	if (!ServerModifyStat__Ptr)
+		return false;
+
+	// The native body writes straight through StatManager. A controller that
+	// never had one (bots on some builds, controllers touched before their
+	// components are constructed) would fault instead of no-opping.
+	if (!HasStatManager() || !StatManager)
+		return false;
+
+	// Pass exactly-sized arguments: UObject::Call memcpys each one by the
+	// reflected property size on <32.00 builds and by sizeof(arg) on 32.00+,
+	// so an `int` where a byte property is expected would overrun on 32.00+.
+	const FName ResolvedStatName(StatName);
+	const uint8 ResolvedModType = ResolveStatMod(ModType);
+
+	Call<void>(
+		ServerModifyStat__Ptr,
+		ResolvedStatName,
+		Amount,
+		ResolvedModType,
+		bForceStatSave);
+
+	return true;
+}
+
+// Diagnostic for the two links after the push: whether the server's stat
+// manager actually recorded the value, and whether anything mirrored it onto
+// the pawn's replicated ClientObservedStats (the array the client's cosmetic
+// watcher reads). Read-only.
+static void LogReactiveStatState(
+	AFortPlayerControllerAthena* PlayerController,
+	int32 ExpectedValue)
+{
+	if (!PlayerController)
+		return;
+
+	// EStatRecordingPeriod::Map(4) is the per-match bucket; Persistent(6) is
+	// the career one. Both are cheap and either could be what is watched.
+	const int32 MapValue = PlayerController->GetStatValue(
+		FName(GReactiveKillStatName), (uint8)4);
+	const int32 PersistentValue = PlayerController->GetStatValue(
+		FName(GReactiveKillStatName), (uint8)6);
+
+	auto Pawn = PlayerController->MyFortPawn;
+
+	int32 ObservedNum = -1;
+	int32 ObservedKills = -1;
+	int32 bHasManager = -1;
+	if (Pawn && Pawn->HasClientObservedStats())
+	{
+		auto& Observed = Pawn->ClientObservedStats;
+
+		if (FFortClientObservedStatArray::HasMyStatManager())
+			bHasManager = Observed.MyStatManager ? 1 : 0;
+
+		if (FFortClientObservedStatArray::HasObservedStats())
+		{
+			auto& Stats = Observed.ObservedStats;
+			ObservedNum = Stats.Num();
+
+			const FName WantedName(GReactiveKillStatName);
+			for (int32 i = 0; i < Stats.Num(); i++)
+			{
+				auto& Entry = Stats.Get(i, FFortClientObservedStat::Size());
+
+				if (Entry.StatName.ComparisonIndex ==
+					WantedName.ComparisonIndex)
+				{
+					ObservedKills = Entry.StatValue;
+					break;
+				}
+			}
+		}
+	}
+
+	SDK::DbgLog(
+		"[ReactiveCosmetics] pushed controller=%p expected=%d "
+		"getStatValueFn=%p statMap=%d statPersistent=%d pawn=%p "
+		"observedNum=%d observedKills=%d observedManager=%d\n",
+		(void*)PlayerController,
+		ExpectedValue,
+		(void*)AFortPlayerControllerAthena::GetStatValue__Ptr,
+		MapValue,
+		PersistentValue,
+		(void*)Pawn,
+		ObservedNum,
+		ObservedKills,
+		bHasManager);
+}
+
+bool AFortPlayerControllerAthena::SyncReactiveKillStat(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController || !PlayerController->PlayerState)
+		return false;
+
+	const int32 KillCount =
+		PlayerController->PlayerState->GetEffectiveKillScore();
+
+	const bool bPushed = PlayerController->TryModifyStat(
+		GReactiveKillStatName,
+		KillCount,
+		EStatMod::Set,
+		true);
+
+	// One line per controller per world, so a build without ServerModifyStat or
+	// without a StatManager is diagnosable without spamming every elimination.
+	static UWorld* TrackedWorld = nullptr;
+	static std::unordered_set<AFortPlayerControllerAthena*> LoggedControllers;
+
+	auto World = UWorld::GetWorld();
+	if (TrackedWorld != World)
+	{
+		TrackedWorld = World;
+		LoggedControllers.clear();
+	}
+
+	if (!bPushed && LoggedControllers.insert(PlayerController).second)
+	{
+		SDK::DbgLog(
+			"[ReactiveCosmetics] stat push unavailable controller=%p "
+			"func=%p statManager=%d kills=%d FN=%.2f\n",
+			(void*)PlayerController,
+			(void*)ServerModifyStat__Ptr,
+			PlayerController->HasStatManager()
+				? (PlayerController->StatManager ? 1 : 0)
+				: -1,
+			KillCount,
+			VersionInfo.FortniteVersion);
+	}
+
+	if (bPushed)
+		LogReactiveStatState(PlayerController, KillCount);
+
+	return bPushed;
+}
+
+int32 AFortPlayerStateAthena::GetEffectiveKillScore() const
+{
+	if (!this)
+		return 0;
+
+	return HasKillScore() ? KillScore : (HasKills() ? Kills : 0);
+}
+
+void AFortPlayerStateAthena::ApplyKillScore(int32 NewScore)
+{
+	if (!this)
+		return;
+
+	if (HasKillScore())
+		KillScore = NewScore;
+	else if (HasKills())
+		Kills = NewScore;
+
+	OnRep_Kills();
+
+	// A PlayerState's Owner is its controller; bots and disconnected states may
+	// not have one, in which case there is no stat manager to update anyway.
+	auto PlayerController = HasOwner() && Owner
+		? Owner->Cast<AFortPlayerControllerAthena>()
+		: nullptr;
+
+	if (PlayerController)
+		AFortPlayerControllerAthena::SyncReactiveKillStat(PlayerController);
+}
+
 bool AFortPlayerControllerAthena::ClientStreamingReadiness(
 	AFortPlayerControllerAthena* PlayerController)
 {
@@ -6310,10 +6525,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
 				int RandomKills = RandomAmount(rng);
 
-				if (PlayerState->HasKillScore())
-					PlayerState->KillScore = RandomKills;
-				else
-					PlayerState->Kills = RandomKills;
+				PlayerState->ApplyKillScore(RandomKills);
 			}
 		}
 	}
@@ -6401,6 +6613,12 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 			SetMinimumHealthGodMode(
 				PlayerController, true);
 	}
+
+	// Reactive cosmetics read the stats replicated on the PAWN, so a respawned
+	// or newly possessed pawn starts back at tier 0 no matter what the killer's
+	// scoreboard says. Republish the kill count now that the pawn exists and
+	// its customization has been applied.
+	SyncReactiveKillStat(PlayerController);
 
 	// This player is now genuinely in the world, which is the first point a
 	// snow change can reach them. Re-send the Calendar tab's value; the push
@@ -9488,8 +9706,11 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 
 			Pawn->ForceNetUpdate();
 
-			Pawn->EmoteStopped(false);
-			Pawn->bMovingEmote = false;
+			// The emote is deliberately not torn down here. ForceNetUpdate only
+			// marks the pawn dirty, so the moving-emote flags set above are read
+			// at the next net update - clearing them now means a traversal emote
+			// never reaches the client as one and any movement input cancels it.
+			// EmoteStopped_ clears that state once the emote actually ends.
 		}
 	}
 }
@@ -9586,8 +9807,8 @@ void AFortPlayerControllerAthena::PlayEmoteInternal(AFortPlayerControllerAthena*
 
 			Pawn->ForceNetUpdate();
 
-			Pawn->EmoteStopped(false);
-			Pawn->bMovingEmote = false;
+			// See ServerPlayEmoteItem_: tearing the emote down here would strip
+			// the moving-emote flags before they ever replicate.
 		}
 	}
 
@@ -16644,11 +16865,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 					(AFortPlayerPawnAthena*)
 						PlayerController->Pawn))
 		{
-			if (KillerPlayerState->HasKillScore())
-				KillerPlayerState->KillScore++;
-			else
-				KillerPlayerState->Kills++;
-			KillerPlayerState->OnRep_Kills();
+			// ApplyKillScore also republishes "AthenaKills" through
+			// ServerModifyStat, which is what drives kill-reactive cosmetics.
+			KillerPlayerState->ApplyKillScore(
+				KillerPlayerState->GetEffectiveKillScore() + 1);
 			if (KillerPlayerState->HasTeamKillScore())
 			{
 				KillerPlayerState->TeamKillScore++;
@@ -25028,16 +25248,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					catch (...) {}
 				}
 
-				if (PlayerState->HasKillScore())
-				{
-					PlayerState->KillScore = Count;
-				}
-				else
-				{
-					PlayerState->Kills = Count;
-				}
-
-				PlayerState->OnRep_Kills();
+				PlayerState->ApplyKillScore(Count);
 				PlayerController->ClientMessage(FString(L"Set kills!"), FName(), 1.f);
 			}
 			else if (command == "setpoints" || command == "setarenapoints")
@@ -31651,8 +31862,20 @@ void AFortPlayerControllerAthena::ServerGiveCreativeItem(UObject* Context, FFram
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
+	if (!CreativeItem->ItemDefinition)
+	{
+		free(CreativeItem);
+		return;
+	}
+
+	// Creative devices and props (spawn pads, prefabs, galleries) are weapon
+	// item definitions but carry no ranged stat row, so GetStats() returns null
+	// for them and there is no clip to preload.
 	if (auto WeaponDef = CreativeItem->ItemDefinition->Cast<UFortWeaponItemDefinition>())
-		CreativeItem->LoadedAmmo = AFortInventory::GetStats(WeaponDef)->ClipSize;
+	{
+		if (auto Stats = AFortInventory::GetStats(WeaponDef))
+			CreativeItem->LoadedAmmo = Stats->ClipSize;
+	}
 
 	PlayerController->InternalPickup(CreativeItem);
 	free(CreativeItem);

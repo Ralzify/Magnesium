@@ -6119,6 +6119,49 @@ namespace TrickshotManager
         return 0;
     }
 
+    // Free-standing props a trickshot depends on but that the player-build pass does
+    // not persist: tires arrive from the tire-pile grenade or "cheat spawn tire"
+    // rather than from placement. Listing them by exact class keeps a load from
+    // clearing anything the trickshot itself could not have created.
+    inline const std::vector<std::string>& GetPropClassPaths()
+    {
+        static const std::vector<std::string> Paths = {
+            "/Game/Athena/Items/Consumables/TowerGrenade/Prop_TirePile_Tower.Prop_TirePile_Tower_C"
+        };
+        return Paths;
+    }
+
+    // Resident-only lookup. Nothing can exist in the world while its class is
+    // unloaded, so enumerating and clearing props never needs the loading fallback.
+    inline UClass* FindResidentClass(const std::string& ClassPath)
+    {
+        if (ClassPath.empty())
+            return nullptr;
+
+        UEAllocatedWString WideClassPath(ClassPath.begin(), ClassPath.end());
+        return (UClass*)SDK::StaticFindObject(WideClassPath.c_str(), UClass::StaticClass());
+    }
+
+    inline UClass* ResolvePropClass(const std::string& ClassPath)
+    {
+        auto Class = FindResidentClass(ClassPath);
+        if (!Class)
+        {
+            // Unlike player building classes, prop packages are not guaranteed to be
+            // resident with the map, so a trickshot loaded in a fresh session can run
+            // before anything pulled the tire in. FindObject falls back to
+            // StaticLoadObject, the same resolution "cheat spawn tire" already uses
+            // for this class, and only on this miss path.
+            UEAllocatedWString WideClassPath(ClassPath.begin(), ClassPath.end());
+            Class = (UClass*)FindObject<UClass>(WideClassPath.c_str());
+        }
+
+        if (Class && (!Class->GetDefaultObj() || !Class->GetDefaultObj()->IsA(AActor::StaticClass())))
+            Class = nullptr;
+
+        return Class;
+    }
+
     inline std::vector<std::string> GetSavedNames()
     {
         std::vector<std::string> Names;
@@ -6178,10 +6221,27 @@ namespace TrickshotManager
         }
 
         nlohmann::json Root;
-        Root["version"] = 1;
+        Root["version"] = 2; // 2 adds "props"; Load still reads version 1 files.
         Root["name"] = SafeName;
         Root["map"] = GetCurrentMapPath();
         Root["builds"] = nlohmann::json::array();
+        Root["props"] = nlohmann::json::array();
+
+        // Resolved once so the build pass can hand any prop over to the prop pass
+        // below. A prop deriving from ABuildingSMActor would otherwise be written to
+        // both arrays and restored twice.
+        std::vector<UClass*> PropClasses;
+        for (const auto& PropClassPath : GetPropClassPaths())
+            if (auto PropClass = FindResidentClass(PropClassPath))
+                PropClasses.push_back(PropClass);
+
+        auto IsProp = [&](AActor* Actor)
+        {
+            for (auto PropClass : PropClasses)
+                if (Actor->IsA(PropClass))
+                    return true;
+            return false;
+        };
 
         TArray<ABuildingSMActor*> Builds;
         Utils::GetAll<ABuildingSMActor>(Builds);
@@ -6200,7 +6260,7 @@ namespace TrickshotManager
         }
         for (auto Build : Builds)
         {
-            if (!Build || !Build->bPlayerPlaced || Build->bDestroyed || AttachedActors.contains(Build))
+            if (!Build || !Build->bPlayerPlaced || Build->bDestroyed || AttachedActors.contains(Build) || IsProp(Build))
                 continue;
 
             SavedBuilds.push_back(Build);
@@ -6222,6 +6282,31 @@ namespace TrickshotManager
         }
         Builds.Free();
 
+        std::unordered_set<AActor*> SavedProps;
+        for (auto PropClass : PropClasses)
+        {
+            TArray<AActor*> Props;
+            Utils::GetAll<AActor>(PropClass, Props);
+            for (auto Prop : Props)
+            {
+                // Overlapping class entries would otherwise record the same actor twice.
+                if (!Prop || !SavedProps.insert(Prop).second)
+                    continue;
+
+                const FVector Location = Prop->K2_GetActorLocation();
+                const FRotator Rotation = Prop->K2_GetActorRotation();
+                auto Transform = Prop->GetTransform();
+                const FVector Scale = Transform.Scale3D;
+                Root["props"].push_back({
+                    { "class", FStringToStdString(UKismetSystemLibrary::GetPathName(Prop->Class)) },
+                    { "location", { Location.X, Location.Y, Location.Z } },
+                    { "rotation", { Rotation.Pitch, Rotation.Yaw, Rotation.Roll } },
+                    { "scale", { Scale.X, Scale.Y, Scale.Z } }
+                });
+            }
+            Props.Free();
+        }
+
         std::ofstream File(Directory / (SafeName + ".json"), std::ios::trunc);
         if (!File)
         {
@@ -6229,7 +6314,10 @@ namespace TrickshotManager
             return false;
         }
         File << Root.dump(4);
-        Message = "Saved " + std::to_string(Root["builds"].size()) + " player builds.";
+        Message = "Saved " + std::to_string(Root["builds"].size()) + " player builds";
+        if (!Root["props"].empty())
+            Message += " and " + std::to_string(Root["props"].size()) + " tires";
+        Message += ".";
         return true;
     }
 
@@ -6285,12 +6373,56 @@ namespace TrickshotManager
                     SavedBuild.value("itemDefinition", "") });
             }
 
+            struct PendingProp { UClass* Class; FVector Location; FRotator Rotation; FVector Scale; };
+            std::vector<PendingProp> PendingProps;
+            // Files written before props were saved simply have no entry here.
+            if (Root.contains("props") && Root["props"].is_array())
+            {
+                for (const auto& SavedProp : Root["props"])
+                {
+                    const auto& L = SavedProp.at("location");
+                    const auto& R = SavedProp.at("rotation");
+                    if (L.size() != 3 || R.size() != 3)
+                        throw std::runtime_error("invalid prop data");
+
+                    FVector Scale(1.0, 1.0, 1.0);
+                    const auto SavedScale = SavedProp.find("scale");
+                    if (SavedScale != SavedProp.end() && SavedScale->is_array() && SavedScale->size() == 3)
+                        Scale = FVector(SavedScale->at(0).get<double>(), SavedScale->at(1).get<double>(), SavedScale->at(2).get<double>());
+
+                    PendingProps.push_back({ ResolvePropClass(SavedProp.at("class").get<std::string>()),
+                        FVector(L[0].get<double>(), L[1].get<double>(), L[2].get<double>()),
+                        FRotator(R[0].get<double>(), R[1].get<double>(), R[2].get<double>()), Scale });
+                }
+            }
+
             TArray<ABuildingSMActor*> ExistingBuilds;
             Utils::GetAll<ABuildingSMActor>(ExistingBuilds);
             for (auto Build : ExistingBuilds)
                 if (Build && Build->bPlayerPlaced)
                     Build->SilentDie(true);
             ExistingBuilds.Free();
+
+            // Loading replaces the scene, so the props this feature owns are cleared
+            // alongside the builds. Both the tracked classes and whatever the file
+            // itself references are removed, so a save always restores exactly.
+            std::unordered_set<UClass*> PropClassesToClear;
+            for (const auto& PropClassPath : GetPropClassPaths())
+                if (auto PropClass = FindResidentClass(PropClassPath))
+                    PropClassesToClear.insert(PropClass);
+            for (const auto& SavedProp : PendingProps)
+                if (SavedProp.Class)
+                    PropClassesToClear.insert(SavedProp.Class);
+
+            for (auto PropClass : PropClassesToClear)
+            {
+                TArray<AActor*> ExistingProps;
+                Utils::GetAll<AActor>(PropClass, ExistingProps);
+                for (auto Prop : ExistingProps)
+                    if (Prop)
+                        Prop->K2_DestroyActor();
+                ExistingProps.Free();
+            }
 
             int Loaded = 0;
             int Skipped = 0;
@@ -6386,7 +6518,36 @@ namespace TrickshotManager
                         SpawnedBuilds[ParentIndex]->AttachedBuildingActors.Add(SpawnedBuilds[Index]);
                 }
             }
-            Message = "Loaded " + std::to_string(Loaded) + " player builds.";
+
+            // Props go last so anything they rest on has already been restored.
+            int LoadedProps = 0;
+            for (const auto& SavedProp : PendingProps)
+            {
+                if (!SavedProp.Class)
+                {
+                    ++Skipped;
+                    continue;
+                }
+
+                FRotator Rotation = SavedProp.Rotation;
+                FTransform SpawnTransform(SavedProp.Location, Rotation, SavedProp.Scale);
+                // AlwaysSpawn: the saved transform is the whole point of a trickshot,
+                // so the engine must not nudge a tire out of a build it overlaps.
+                auto Prop = UWorld::SpawnActor(SavedProp.Class, SpawnTransform, nullptr, 1);
+                if (!Prop)
+                {
+                    ++Skipped;
+                    continue;
+                }
+
+                Prop->ForceNetUpdate();
+                ++LoadedProps;
+            }
+
+            Message = "Loaded " + std::to_string(Loaded) + " player builds";
+            if (LoadedProps > 0)
+                Message += " and " + std::to_string(LoadedProps) + " tires";
+            Message += ".";
             if (Skipped > 0)
                 Message += " Skipped " + std::to_string(Skipped) + " unavailable actors.";
             return true;

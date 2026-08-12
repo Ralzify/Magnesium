@@ -103,6 +103,29 @@ public:
     FGameplayTagContainer SourceTags;
 };
 
+// One replicated stat sample. Reactive cosmetics read these off the pawn:
+// UFortAsyncAction_CosmeticAdaptiveStatWatcher::WatchCosmeticStat resolves its
+// tag against this array rather than against the server's StatManager.
+struct FFortClientObservedStat : public SDK::FFastArraySerializerItem
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FFortClientObservedStat);
+
+    DEFINE_STRUCT_PROP(StatName, FName);
+    DEFINE_STRUCT_PROP(StatValue, int32);
+};
+
+struct FFortClientObservedStatArray : public SDK::FFastArraySerializer
+{
+public:
+    USCRIPTSTRUCT_COMMON_MEMBERS(FFortClientObservedStatArray);
+
+    DEFINE_STRUCT_PROP(ObservedStats, TArray<FFortClientObservedStat>);
+    // Set when the array has been bound to the owning controller's stat
+    // manager. A null value means nothing is mirroring stats onto this pawn.
+    DEFINE_STRUCT_PROP(MyStatManager, UObject*);
+};
+
 class UNetDriver;
 class AController;
 
@@ -143,6 +166,9 @@ public:
     DEFINE_PROP(bShouldDropItemsOnDeath, bool);
     DEFINE_PROP(MoveSoundStimulusBroadcastInterval, uint16_t);
     DEFINE_PROP(Damagers, TArray<FDamagerInfo>);
+    // Replicated to every client, which is how remote players see a reactive
+    // cosmetic change tier too.
+    DEFINE_PROP(ClientObservedStats, FFortClientObservedStatArray);
     // Native damage timestamp inherited from FortPawn. The health-state
     // watchdog uses it to distinguish a lethal hit from scripted zero-health
     // possession/form transitions.

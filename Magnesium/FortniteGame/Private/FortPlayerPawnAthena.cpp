@@ -5557,14 +5557,10 @@ void AFortPlayerPawnAthena::OnCapsuleBeginOverlap_(UObject* Context, FFrame& Sta
 }
 
 
-void AFortPlayerPawnAthena::MovingEmoteStopped(UObject* Context, FFrame& Stack)
+// Drops the pawn back to normal movement rules. The flags are per-emote, so
+// whatever ends an emote has to clear them or the next one inherits them.
+static void ClearMovingEmoteState(AFortPlayerPawnAthena* Pawn)
 {
-	Stack.IncrementCode();
-	auto Pawn = (AFortPlayerPawnAthena*)Context;
-
-	if (Pawn->HasbIsPlayingEmote() && Pawn->bIsPlayingEmote)
-		return;
-
 	static auto HasbMovingEmote = Pawn->HasbMovingEmote();
 	if (HasbMovingEmote)
 		Pawn->bMovingEmote = false;
@@ -5576,6 +5572,17 @@ void AFortPlayerPawnAthena::MovingEmoteStopped(UObject* Context, FFrame& Stack)
 	static auto HasbMovingEmoteFollowingOnly = Pawn->HasbMovingEmoteFollowingOnly();
 	if (HasbMovingEmoteFollowingOnly)
 		Pawn->bMovingEmoteFollowingOnly = false;
+}
+
+void AFortPlayerPawnAthena::MovingEmoteStopped(UObject* Context, FFrame& Stack)
+{
+	Stack.IncrementCode();
+	auto Pawn = (AFortPlayerPawnAthena*)Context;
+
+	if (Pawn->HasbIsPlayingEmote() && Pawn->bIsPlayingEmote)
+		return;
+
+	ClearMovingEmoteState(Pawn);
 
 	if (Pawn->HasLastReplicatedEmoteExecuted())
 	{
@@ -5737,6 +5744,15 @@ void AFortPlayerPawnAthena::EmoteStopped_(UObject* Context, FFrame& Stack)
 		auto OldEmote = Pawn->LastReplicatedEmoteExecuted;
 		Pawn->LastReplicatedEmoteExecuted = nullptr;
 		Pawn->OnRep_LastReplicatedEmoteExecuted(OldEmote);
+
+		// This is the emote that installed the traversal state, and it is over.
+		// MovingEmoteStopped only clears it while no emote is playing, so
+		// without this a traversal emote would leave bMovingEmote set and the
+		// following emote could be walked out of.
+		ClearMovingEmoteState(Pawn);
+
+		if (Pawn->HasbIsPlayingEmote())
+			Pawn->bIsPlayingEmote = false;
 	}
 
 	return callOG(Pawn, Stack.GetCurrentNativeFunction(), EmoteStopped, MontageItemDef);

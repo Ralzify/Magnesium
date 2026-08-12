@@ -370,13 +370,24 @@ public:
     UCLASS_COMMON_MEMBERS(AController);
 };
 
-enum class EStatMod
+// ModType argument of AFortPlayerController::ServerModifyStat. These values are
+// the ones in the 10.40 reflection dump; ResolveStatMod() below prefers the
+// runtime UEnum so a build that reorders the enum still sends the right byte.
+enum class EStatMod : uint8
 {
-    Delta,
-    Set,
-    Maximum,
-    EStatMod_MAX
+    Delta = 0,
+    Set = 1,
+    Maximum = 2,
+    EStatMod_MAX = 3
 };
+
+// Reactive cosmetics (glowing Candy Axe, adaptive back blings, ...) watch the
+// pawn's replicated ClientObservedStats array, which the server only fills from
+// its StatManager. Nothing in the private-server elimination path writes those
+// stats - replicating KillScore alone updates the scoreboard but leaves the
+// cosmetic at tier 0 - so the kill count has to be pushed through
+// ServerModifyStat as well.
+uint8 ResolveStatMod(EStatMod Mod);
 
 inline const UCurveTable* GameData = nullptr;
 class AFortPlayerControllerAthena : public AActor
@@ -471,6 +482,10 @@ public:
     DEFINE_BITFIELD_PROP(bIsCreativeQuickmenuEnabled);
     DEFINE_PROP(PlayerToSpectateOnDeath, AActor*);
 	DEFINE_PROP(IndicatedActorManagementComponent, UFortIndicatedActorManagementComponent*);
+    // Owner of the stat records ServerModifyStat writes into. Only used to skip
+    // the call when the manager was never created, since the native body
+    // dereferences it.
+    DEFINE_PROP(StatManager, UObject*);
 
     DEFINE_FUNC(GetViewTarget, AActor*);
     DEFINE_FUNC(SetViewTargetWithBlend, void);
@@ -531,6 +546,22 @@ public:
     DEFINE_FUNC(ServerApplyOverrideWrapToVehicle, void);
     DEFINE_FUNC(ClientSendConfirmationMessage, FText);
     DEFINE_FUNC(ServerModifyStat, void);
+    DEFINE_FUNC(GetStatValue, int32);
+
+    // Capability-checked ServerModifyStat. Returns false when the function or
+    // the StatManager is missing on this build, so callers can log the reason
+    // instead of silently doing nothing. bForceStatSave defaults to true to
+    // match how the client drives its own stats.
+    bool TryModifyStat(
+        const wchar_t* StatName,
+        int32 Amount,
+        EStatMod ModType = EStatMod::Set,
+        bool bForceStatSave = true) const;
+    // Republishes this controller's kill count as the "AthenaKills" stat.
+    // Cheap and idempotent, so it is safe to call on every possession as well
+    // as on every credited elimination.
+    static bool SyncReactiveKillStat(
+        AFortPlayerControllerAthena* PlayerController);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     // Removes spawn-island loot while retaining the harvesting/building tools
