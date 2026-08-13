@@ -47,10 +47,6 @@ static const UClass* GetRemoteControlledPawnClass();
 static bool IsNativeVehiclePossessionPawn(AActor* Actor);
 static bool IsUsableDeathObject(const UObject* Object);
 static FFortItemEntry* FindHarvestingToolEntry(AFortInventory* Inventory);
-static void RememberLastEditingWeaponSelection(
-	AFortPlayerControllerAthena* PlayerController,
-	AFortPlayerPawnAthena* Pawn,
-	const FGuid& ItemGuid);
 static bool IsManagedNonRespawningBot(
 	AFortPlayerControllerAthena* PlayerController);
 static bool IsTerminalManagedBot(
@@ -3149,21 +3145,31 @@ static void NormalizeLegacyRespawnControllerState(
 	PlayerController->ForceNetUpdate();
 }
 
+static bool IsDefaultPlayerSprintAbility(
+	const UFortGameplayAbility* Ability);
+static bool IsTacticalSprintSetAbility(
+	const UFortGameplayAbility* Ability);
+
 static bool IsRespawnBlockingAbility(const UFortGameplayAbility* Ability,
-	bool bIncludeJump)
+	bool bIncludeMovement)
 {
 	if (!Ability)
 		return false;
 
 	const auto Name = Ability->Name.ToString();
+	const bool bIsTacticalSprint =
+		VersionInfo.FortniteVersion >= 20 &&
+		(IsDefaultPlayerSprintAbility(Ability) ||
+		 IsTacticalSprintSetAbility(Ability));
 	return Name.find("DBNO") != std::string::npos ||
 		Name.find("DefaultPlayer_Death") != std::string::npos ||
 		Name.find("GenericDeath") != std::string::npos ||
 		// PlayerState owns the ASC, so a genuinely active per-player Jump instance
 		// can survive dead-pawn replacement. Match only the exact authored CDO, not
 		// unrelated jump-pad, vehicle, or boost-pack abilities.
-		(bIncludeJump &&
-		 Name == "Default__FortGameplayAbility_Jump");
+		(bIncludeMovement &&
+		 (Name == "Default__FortGameplayAbility_Jump" ||
+		  bIsTacticalSprint));
 }
 
 static bool IsDefaultPlayerJumpAbility(const UFortGameplayAbility* Ability)
@@ -3171,6 +3177,59 @@ static bool IsDefaultPlayerJumpAbility(const UFortGameplayAbility* Ability)
 	return Ability &&
 		Ability->Name.ToString() ==
 			"Default__FortGameplayAbility_Jump";
+}
+
+static bool IsDefaultPlayerSprintAbility(
+	const UFortGameplayAbility* Ability)
+{
+	return Ability &&
+		Ability->Name.ToString() ==
+			"Default__FortGameplayAbility_Sprint";
+}
+
+static bool IsTacticalSprintSetAbility(
+	const UFortGameplayAbility* Ability)
+{
+	if (!Ability)
+		return false;
+	auto AbilitySet = AFortGameMode::TacticalSprintAbilitySet;
+	if (!AbilitySet || !AbilitySet->HasGameplayAbilities())
+	{
+		return false;
+	}
+	int32 MatchingClassCount = 0;
+	for (int32 Index = 0;
+		Index < AbilitySet->GameplayAbilities.Num(); ++Index)
+	{
+		auto AbilityClass = AbilitySet->GameplayAbilities[Index].Get();
+		if (!AbilityClass)
+			continue;
+		auto DefaultAbility = AbilityClass->GetDefaultObj();
+		if (!DefaultAbility ||
+			DefaultAbility->Name.ToString().find("TacticalSprint") ==
+				std::string::npos)
+		{
+			continue;
+		}
+		++MatchingClassCount;
+	}
+	if (MatchingClassCount != 1)
+		return false;
+
+	for (int32 Index = 0;
+		Index < AbilitySet->GameplayAbilities.Num(); ++Index)
+	{
+		auto AbilityClass = AbilitySet->GameplayAbilities[Index].Get();
+		auto DefaultAbility = AbilityClass
+			? AbilityClass->GetDefaultObj() : nullptr;
+		if (AbilityClass && DefaultAbility &&
+			DefaultAbility->Name.ToString().find("TacticalSprint") !=
+				std::string::npos)
+		{
+			return Ability->Class == AbilityClass;
+		}
+	}
+	return false;
 }
 
 static bool IsRespawnBlockingEffect(const UGameplayEffect* Effect)
@@ -3426,7 +3485,7 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 	}
 
 	auto AbilitySystemComponent = PlayerController->PlayerState->AbilitySystemComponent;
-	const bool bCanIncludeJump =
+	const bool bCanIncludeMovement =
 		bIncludeJump && CanRebindDefaultPlayerJumpAbility();
 	struct FPendingAbilityInstanceEnd
 	{
@@ -3458,7 +3517,7 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 	{
 		auto& Spec = AbilitySystemComponent->ActivatableAbilities.Items.Get(
 			Index, FGameplayAbilitySpec::Size());
-		if (IsRespawnBlockingAbility(Spec.Ability, bCanIncludeJump))
+		if (IsRespawnBlockingAbility(Spec.Ability, bCanIncludeMovement))
 		{
 			const bool bIsJump =
 				IsDefaultPlayerJumpAbility(Spec.Ability);
@@ -3791,7 +3850,7 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 	{
 		auto& Spec = AbilitySystemComponent->ActivatableAbilities.Items.Get(
 			Index, FGameplayAbilitySpec::Size());
-		if (!IsRespawnBlockingAbility(Spec.Ability, bCanIncludeJump))
+		if (!IsRespawnBlockingAbility(Spec.Ability, bCanIncludeMovement))
 			continue;
 
 		bool bSpecStillActive =
@@ -3872,7 +3931,7 @@ static void ClearRespawnBlockingAbilityState(AFortPlayerControllerAthena* Player
 		ReconciledInactiveBlockerCount,
 		TerminalActivationCount, UnknownInstanceStateCount,
 		RemovedEffectCount, (int)EffectsToRemove.size(),
-		(int)bIncludeJump, (int)bCanIncludeJump);
+		(int)bIncludeJump, (int)bCanIncludeMovement);
 }
 
 static bool IsConfiguredOneShotPlaylist()
@@ -3944,6 +4003,355 @@ static void NormalizeShieldAfterGameplayInitialization(
 }
 
 static bool IsGameplayEffectClassForCommand(const UClass* Class);
+
+enum class EIceGameplayEffectApplyResult : uint8
+{
+	Applied,
+	AlreadyActive,
+	UnsupportedVersion,
+	NoAbilitySystem,
+	EffectUnavailable,
+	Rejected
+};
+
+struct FIceGameplayEffectRemovalResult
+{
+	int32 InitialEffectCount = 0;
+	int32 RemainingEffectCount = 0;
+	bool bInspectionAvailable = true;
+	bool bRemovalApiAvailable = true;
+};
+
+static const UClass* TryLoadIceGameplayEffectByPath()
+{
+	if (VersionInfo.FortniteVersion < 6.01)
+		return nullptr;
+
+	const UClass* Result = nullptr;
+
+	__try
+	{
+		Result = FindObject<UClass>(
+			L"/Game/Athena/Items/Traps/FreezeTrap/GE_Trap_Ice_LowFriction_Athena.GE_Trap_Ice_LowFriction_Athena_C");
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		Result = nullptr;
+	}
+
+	return Result;
+}
+
+static const UClass* TryFindLoadedIceGameplayEffectByName()
+{
+	if (VersionInfo.FortniteVersion < 6.01)
+		return nullptr;
+
+	const UClass* Result = nullptr;
+
+	__try
+	{
+		Result = TUObjectArray::FindObject<UClass>(
+			"GE_Trap_Ice_LowFriction_Athena_C");
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		Result = nullptr;
+	}
+
+	return Result;
+}
+
+static const UClass* GetIceGameplayEffectClass()
+{
+	if (VersionInfo.FortniteVersion < 6.01)
+		return nullptr;
+
+	static TWeakObjectPtr<UClass> CachedEffectClass;
+	if (auto CachedClass = CachedEffectClass.Get())
+		if (IsGameplayEffectClassForCommand(CachedClass))
+			return CachedClass;
+
+	auto EffectClass = TryLoadIceGameplayEffectByPath();
+	if (!EffectClass)
+		EffectClass = TryFindLoadedIceGameplayEffectByName();
+
+	if (!IsGameplayEffectClassForCommand(EffectClass))
+		return nullptr;
+
+	CachedEffectClass =
+		TWeakObjectPtr<UClass>(const_cast<UClass*>(EffectClass));
+	return CachedEffectClass.Get();
+}
+
+static UAbilitySystemComponent* GetIceGameplayEffectAbilitySystem(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!PlayerController ||
+		!PlayerController->PlayerState ||
+		!SDK::MemReadable(PlayerController->PlayerState, sizeof(UObject)))
+	{
+		return nullptr;
+	}
+
+	auto PlayerState =
+		PlayerController->PlayerState->Cast<AFortPlayerStateAthena>();
+	if (!PlayerState || !PlayerState->HasAbilitySystemComponent())
+		return nullptr;
+
+	auto AbilitySystemComponent = PlayerState->AbilitySystemComponent;
+	return AbilitySystemComponent &&
+		SDK::MemReadable(AbilitySystemComponent, sizeof(UObject))
+		? AbilitySystemComponent
+		: nullptr;
+}
+
+static bool IsIceGameplayEffectDefinition(
+	UGameplayEffect* EffectDefinition,
+	const UClass* IceGameplayEffectClass)
+{
+	if (!EffectDefinition ||
+		!SDK::MemReadable(EffectDefinition, sizeof(UObject)))
+	{
+		return false;
+	}
+
+	if (IceGameplayEffectClass &&
+		EffectDefinition->IsA(IceGameplayEffectClass))
+	{
+		return true;
+	}
+
+	const auto EffectName = EffectDefinition->Name.ToWString();
+	if (EffectName ==
+		L"Default__GE_Trap_Ice_LowFriction_Athena_C")
+	{
+		return true;
+	}
+
+	return EffectDefinition->Class &&
+		SDK::MemReadable(EffectDefinition->Class, sizeof(UObject)) &&
+		EffectDefinition->Class->Name.ToWString() ==
+			L"GE_Trap_Ice_LowFriction_Athena_C";
+}
+
+static bool CollectIceGameplayEffectHandles(
+	UAbilitySystemComponent* AbilitySystemComponent,
+	const UClass* IceGameplayEffectClass,
+	std::vector<FActiveGameplayEffectHandle>& OutHandles,
+	std::vector<UClass*>* OutEffectClasses = nullptr)
+{
+	OutHandles.clear();
+	if (OutEffectClasses)
+		OutEffectClasses->clear();
+
+	if (!AbilitySystemComponent ||
+		!SDK::MemReadable(AbilitySystemComponent, sizeof(UObject)) ||
+		!AbilitySystemComponent->HasActiveGameplayEffects() ||
+		!FActiveGameplayEffectsContainer::HasGameplayEffects_Internal() ||
+		!FActiveGameplayEffect::HasSpec() ||
+		!FGameplayEffectSpec::HasDef())
+	{
+		return false;
+	}
+
+	auto& Effects = AbilitySystemComponent
+		->ActiveGameplayEffects.GameplayEffects_Internal;
+	if (!SDK::MemReadable(&Effects, sizeof(Effects)))
+		return false;
+
+	const int32 EffectCount = Effects.Num();
+	const int32 EffectCapacity = Effects.Max();
+	const int32 ActiveEffectSize = FActiveGameplayEffect::Size();
+	if (EffectCount < 0 || EffectCount > 4096 ||
+		EffectCapacity < EffectCount || EffectCapacity > 100000 ||
+		ActiveEffectSize < 0x14 || ActiveEffectSize > 0x1000)
+	{
+		return false;
+	}
+
+	if (EffectCount == 0)
+		return true;
+
+	const size_t EffectsByteCount =
+		static_cast<size_t>(EffectCount) *
+		static_cast<size_t>(ActiveEffectSize);
+	if (!Effects.GetData() ||
+		!SDK::MemReadable(Effects.GetData(), EffectsByteCount))
+	{
+		return false;
+	}
+
+	OutHandles.reserve(EffectCount);
+	if (OutEffectClasses)
+		OutEffectClasses->reserve(EffectCount);
+
+	for (int32 EffectIndex = 0;
+		EffectIndex < EffectCount; EffectIndex++)
+	{
+		auto& ActiveEffect = Effects.Get(
+			EffectIndex, ActiveEffectSize);
+		auto EffectDefinition = ActiveEffect.Spec.Def;
+		if (!IsIceGameplayEffectDefinition(
+				EffectDefinition, IceGameplayEffectClass))
+		{
+			continue;
+		}
+
+		auto Handle =
+			*reinterpret_cast<FActiveGameplayEffectHandle*>(
+				reinterpret_cast<uint8*>(&ActiveEffect) + 0xC);
+		if (Handle.Handle <= 0)
+			continue;
+
+		OutHandles.push_back(Handle);
+		if (OutEffectClasses)
+			OutEffectClasses->push_back(EffectDefinition->Class);
+	}
+
+	return true;
+}
+
+static EIceGameplayEffectApplyResult ApplyIceGameplayEffect(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (VersionInfo.FortniteVersion < 6.01)
+		return EIceGameplayEffectApplyResult::UnsupportedVersion;
+
+	auto AbilitySystemComponent =
+		GetIceGameplayEffectAbilitySystem(PlayerController);
+	if (!AbilitySystemComponent)
+		return EIceGameplayEffectApplyResult::NoAbilitySystem;
+
+	auto IceGameplayEffectClass = GetIceGameplayEffectClass();
+	if (!IceGameplayEffectClass)
+		return EIceGameplayEffectApplyResult::EffectUnavailable;
+
+	std::vector<FActiveGameplayEffectHandle> ExistingHandles;
+	if (CollectIceGameplayEffectHandles(
+			AbilitySystemComponent,
+			IceGameplayEffectClass,
+			ExistingHandles) &&
+		!ExistingHandles.empty())
+	{
+		return EIceGameplayEffectApplyResult::AlreadyActive;
+	}
+
+	auto Pawn = PlayerController->Pawn;
+	auto Context = AbilitySystemComponent->MakeEffectContext();
+	Context.Instigator = PlayerController;
+	Context.Causer = Pawn;
+	if (Pawn)
+		Context.AddSourceObject(Pawn);
+
+	auto Handle = AbilitySystemComponent->BP_ApplyGameplayEffectToSelf(
+		IceGameplayEffectClass, 1.0f, Context);
+	if (!Handle.bPassedFiltersAndWasExecuted && Handle.Handle <= 0)
+		return EIceGameplayEffectApplyResult::Rejected;
+
+	if (Pawn)
+		Pawn->ForceNetUpdate();
+	PlayerController->PlayerState->ForceNetUpdate();
+	PlayerController->ForceNetUpdate();
+	return EIceGameplayEffectApplyResult::Applied;
+}
+
+static FIceGameplayEffectRemovalResult RemoveIceGameplayEffect(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	FIceGameplayEffectRemovalResult Result;
+	if (VersionInfo.FortniteVersion < 6.01)
+	{
+		Result.bInspectionAvailable = false;
+		Result.bRemovalApiAvailable = false;
+		return Result;
+	}
+
+	auto AbilitySystemComponent =
+		GetIceGameplayEffectAbilitySystem(PlayerController);
+	if (!AbilitySystemComponent)
+	{
+		Result.bInspectionAvailable = false;
+		Result.bRemovalApiAvailable = false;
+		return Result;
+	}
+
+	auto IceGameplayEffectClass = GetIceGameplayEffectClass();
+	std::vector<FActiveGameplayEffectHandle> Handles;
+	std::vector<UClass*> EffectClasses;
+	if (!CollectIceGameplayEffectHandles(
+			AbilitySystemComponent,
+			IceGameplayEffectClass,
+			Handles,
+			&EffectClasses))
+	{
+		Result.bInspectionAvailable = false;
+		return Result;
+	}
+
+	Result.InitialEffectCount = static_cast<int32>(Handles.size());
+	Result.RemainingEffectCount = Result.InitialEffectCount;
+	if (Handles.empty())
+		return Result;
+
+	auto RemoveActiveEffect = AbilitySystemComponent
+		->GetFunction("RemoveActiveGameplayEffect");
+	auto RemoveBySourceEffect = AbilitySystemComponent
+		->GetFunction("RemoveActiveGameplayEffectBySourceEffect");
+	if (!RemoveActiveEffect && !RemoveBySourceEffect)
+	{
+		Result.bRemovalApiAvailable = false;
+		return Result;
+	}
+
+	std::unordered_set<UClass*> SourceFallbackClasses;
+	for (size_t EffectIndex = 0;
+		EffectIndex < Handles.size(); EffectIndex++)
+	{
+		bool bRemoved = false;
+		if (RemoveActiveEffect)
+		{
+			bRemoved = AbilitySystemComponent->Call<bool>(
+				RemoveActiveEffect, Handles[EffectIndex], -1);
+		}
+
+		if (!bRemoved && EffectIndex < EffectClasses.size() &&
+			EffectClasses[EffectIndex])
+		{
+			SourceFallbackClasses.insert(EffectClasses[EffectIndex]);
+		}
+	}
+
+	if (RemoveBySourceEffect)
+	{
+		for (auto EffectClass : SourceFallbackClasses)
+		{
+			AbilitySystemComponent->Call<void>(
+				RemoveBySourceEffect,
+				EffectClass,
+				static_cast<UAbilitySystemComponent*>(nullptr),
+				-1);
+		}
+	}
+
+	std::vector<FActiveGameplayEffectHandle> RemainingHandles;
+	if (!CollectIceGameplayEffectHandles(
+			AbilitySystemComponent,
+			IceGameplayEffectClass,
+			RemainingHandles))
+	{
+		Result.bInspectionAvailable = false;
+		return Result;
+	}
+
+	Result.RemainingEffectCount =
+		static_cast<int32>(RemainingHandles.size());
+	if (PlayerController->Pawn)
+		PlayerController->Pawn->ForceNetUpdate();
+	PlayerController->PlayerState->ForceNetUpdate();
+	PlayerController->ForceNetUpdate();
+	return Result;
+}
 
 // One Shot's playlist already supplies its movement/gravity behavior. This
 // separate persistent effect owns the purple low-gravity leg cue and fall
@@ -4336,6 +4744,19 @@ struct FGameplayAbilityInitializationState
 	TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
 	TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
 	TWeakObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
+	TWeakObjectPtr<UFortGameplayAbility> TacticalSprintAbility;
+	TWeakObjectPtr<UObject> TacticalSprintSourceObject;
+	TWeakObjectPtr<AFortPlayerPawnAthena> TacticalSprintRestoredPawn;
+	TWeakObjectPtr<AFortPlayerPawnAthena> PendingTacticalSprintPawn;
+	int32 TacticalSprintLevel = 1;
+	int32 TacticalSprintInputID = -1;
+	int32 PendingTacticalSprintHandle = 0;
+	ULONGLONG PendingTacticalSprintStartedAtMs = 0;
+	bool bHadTacticalSprintAbility = false;
+	bool bTacticalSprintHadSourceObject = false;
+	bool bTacticalSprintMetadataSafe = false;
+	bool bTacticalSprintGrantDispatched = false;
+	bool bTacticalSprintPendingLogged = false;
 };
 
 static std::vector<FGameplayAbilityInitializationState>
@@ -4375,6 +4796,52 @@ static const UFortAbilitySet* FindDefaultPlayerAbilitySet()
 	}
 
 	return nullptr;
+}
+
+static FGameplayAbilitySpec* FindTacticalSprintSetSpec(
+	UAbilitySystemComponent* AbilitySystemComponent,
+	int32 Handle = 0)
+{
+	if (!AbilitySystemComponent || VersionInfo.FortniteVersion < 20)
+		return nullptr;
+	for (int32 SpecIndex = 0;
+		SpecIndex < AbilitySystemComponent
+			->ActivatableAbilities.Items.Num(); ++SpecIndex)
+	{
+		auto& Spec = AbilitySystemComponent
+			->ActivatableAbilities.Items.Get(
+				SpecIndex, FGameplayAbilitySpec::Size());
+		if (IsTacticalSprintSetAbility(Spec.Ability) &&
+			(Handle <= 0 || Spec.Handle.Handle == Handle))
+		{
+			return &Spec;
+		}
+	}
+
+	return nullptr;
+}
+
+static bool ObservePendingTacticalSprintSpecGrant(
+	FGameplayAbilityInitializationState& State,
+	UAbilitySystemComponent* AbilitySystemComponent)
+{
+	if (!State.bTacticalSprintGrantDispatched ||
+		State.PendingTacticalSprintHandle <= 0 ||
+		!FindTacticalSprintSetSpec(
+			AbilitySystemComponent,
+			State.PendingTacticalSprintHandle))
+	{
+		return false;
+	}
+
+	State.TacticalSprintRestoredPawn =
+		State.PendingTacticalSprintPawn;
+	State.PendingTacticalSprintPawn = {};
+	State.PendingTacticalSprintHandle = 0;
+	State.PendingTacticalSprintStartedAtMs = 0;
+	State.bTacticalSprintGrantDispatched = false;
+	State.bTacticalSprintPendingLogged = false;
+	return true;
 }
 
 static FDefaultPlayerAbilityInspection InspectDefaultPlayerAbilities(
@@ -4471,7 +4938,76 @@ static void RememberGameplayAbilityInitialization(
 		TWeakObjectPtr<AFortPlayerStateAthena>(PlayerState);
 	State.AbilitySystemComponent =
 		TWeakObjectPtr<UAbilitySystemComponent>(AbilitySystemComponent);
+	auto TacticalSprintSpec =
+		FindTacticalSprintSetSpec(AbilitySystemComponent);
+	if (TacticalSprintSpec)
+	{
+		State.bHadTacticalSprintAbility = true;
+		State.TacticalSprintAbility =
+			TWeakObjectPtr<UFortGameplayAbility>(
+				TacticalSprintSpec->Ability);
+		State.TacticalSprintLevel = TacticalSprintSpec->HasLevel()
+			? TacticalSprintSpec->Level : 1;
+		State.TacticalSprintInputID = TacticalSprintSpec->HasInputID()
+			? TacticalSprintSpec->InputID : -1;
+		auto SourceObject = TacticalSprintSpec->HasSourceObject()
+			? TacticalSprintSpec->SourceObject : nullptr;
+		State.bTacticalSprintHadSourceObject = SourceObject != nullptr;
+		State.TacticalSprintSourceObject =
+			TWeakObjectPtr<UObject>(SourceObject);
+		const bool bHasLevel = TacticalSprintSpec->HasLevel();
+		const bool bHasInputID = TacticalSprintSpec->HasInputID();
+		const bool bHasSourceObject =
+			TacticalSprintSpec->HasSourceObject();
+		const bool bPawnBoundSource = SourceObject &&
+			SourceObject->IsA(AFortPlayerPawnAthena::StaticClass());
+		State.bTacticalSprintMetadataSafe =
+			bHasLevel && bHasInputID && bHasSourceObject &&
+			(VersionInfo.EngineVersion < 5.1 ||
+			 State.TacticalSprintInputID == -1) &&
+			!bPawnBoundSource &&
+			TacticalSprintSpec->HasDynamicAbilityTags() &&
+			TacticalSprintSpec->DynamicAbilityTags.GameplayTags.Num() == 0 &&
+			TacticalSprintSpec->DynamicAbilityTags.ParentTags.Num() == 0;
+	}
 	GGameplayAbilityInitializationStates.emplace_back(State);
+}
+
+static void CaptureTacticalSprintInitializationBaseline(
+	FGameplayAbilityInitializationState& State,
+	UAbilitySystemComponent* AbilitySystemComponent)
+{
+	if (State.bHadTacticalSprintAbility ||
+		State.bTacticalSprintGrantDispatched)
+	{
+		return;
+	}
+	auto Spec = FindTacticalSprintSetSpec(AbilitySystemComponent);
+	if (!Spec || !Spec->Ability)
+		return;
+
+	State.bHadTacticalSprintAbility = true;
+	State.TacticalSprintAbility =
+		TWeakObjectPtr<UFortGameplayAbility>(Spec->Ability);
+	const bool bHasLevel = Spec->HasLevel();
+	const bool bHasInputID = Spec->HasInputID();
+	const bool bHasSourceObject = Spec->HasSourceObject();
+	State.TacticalSprintLevel = bHasLevel ? Spec->Level : 1;
+	State.TacticalSprintInputID = bHasInputID ? Spec->InputID : -1;
+	auto SourceObject = bHasSourceObject ? Spec->SourceObject : nullptr;
+	State.bTacticalSprintHadSourceObject = SourceObject != nullptr;
+	State.TacticalSprintSourceObject =
+		TWeakObjectPtr<UObject>(SourceObject);
+	const bool bPawnBoundSource = SourceObject &&
+		SourceObject->IsA(AFortPlayerPawnAthena::StaticClass());
+	State.bTacticalSprintMetadataSafe =
+		bHasLevel && bHasInputID && bHasSourceObject &&
+		(VersionInfo.EngineVersion < 5.1 ||
+		 State.TacticalSprintInputID == -1) &&
+		!bPawnBoundSource &&
+		Spec->HasDynamicAbilityTags() &&
+		Spec->DynamicAbilityTags.GameplayTags.Num() == 0 &&
+		Spec->DynamicAbilityTags.ParentTags.Num() == 0;
 }
 
 static bool RestorePersistentDefaultAbilitySpecsWithoutEffects(
@@ -4523,6 +5059,95 @@ static bool RestorePersistentDefaultAbilitySpecsWithoutEffects(
 	return bComplete;
 }
 
+static bool RestoreMissingTacticalSprintSpecWithoutEffects(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerStateAthena* PlayerState,
+	AFortPlayerPawnAthena* Pawn,
+	UAbilitySystemComponent* AbilitySystemComponent,
+	FGameplayAbilityInitializationState& InitializationState)
+{
+	if (InitializationState.bTacticalSprintGrantDispatched)
+	{
+		const bool bObserved = ObservePendingTacticalSprintSpecGrant(
+			InitializationState, AbilitySystemComponent);
+		if (bObserved)
+		{
+			PlayerState->ForceNetUpdate();
+			PlayerController->ForceNetUpdate();
+		}
+		return bObserved;
+	}
+	if (!InitializationState.bHadTacticalSprintAbility ||
+		FindTacticalSprintSetSpec(AbilitySystemComponent))
+	{
+		return false;
+	}
+	if (!PlayerController || !PlayerState || !AbilitySystemComponent ||
+		!FindGiveAbility() ||
+		(VersionInfo.EngineVersion >= 5.1 &&
+		 !FindConstructAbilitySpec()))
+	{
+		return false;
+	}
+
+	auto TacticalSprintAbility =
+		InitializationState.TacticalSprintAbility.Get();
+	auto SourceObject =
+		InitializationState.TacticalSprintSourceObject.Get();
+	if (!TacticalSprintAbility ||
+		!InitializationState.bTacticalSprintMetadataSafe ||
+		(InitializationState.bTacticalSprintHadSourceObject &&
+		 !SourceObject))
+	{
+		SDK::DbgLog(
+			"[AbilityInit] skipped Tactical Sprint repair: metadata unsafe "
+			"controller=%p playerState=%p asc=%p ability=%p source=%p "
+			"safe=%d FN=%.2f\n",
+			(void*)PlayerController, (void*)PlayerState,
+			(void*)AbilitySystemComponent,
+			(void*)TacticalSprintAbility, (void*)SourceObject,
+			(int)InitializationState.bTacticalSprintMetadataSafe,
+			VersionInfo.FortniteVersion);
+		return false;
+	}
+
+	// AS_TacticalSprint was authored as a separate set. Restore only its ability
+	// spec: replaying the complete set would stack its granted gameplay effect on
+	// every death. The initial grant used the same Level/Input/Source defaults.
+	InitializationState.bTacticalSprintGrantDispatched = true;
+	InitializationState.PendingTacticalSprintPawn =
+		TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
+	InitializationState.PendingTacticalSprintStartedAtMs =
+		GetTickCount64();
+	InitializationState.bTacticalSprintPendingLogged = false;
+	const auto Handle = AbilitySystemComponent->GiveAbility(
+		TacticalSprintAbility, SourceObject,
+		InitializationState.TacticalSprintLevel,
+		InitializationState.TacticalSprintInputID);
+	InitializationState.PendingTacticalSprintHandle = Handle.Handle;
+	if (Handle.Handle <= 0)
+	{
+		InitializationState.PendingTacticalSprintPawn = {};
+		InitializationState.PendingTacticalSprintStartedAtMs = 0;
+		InitializationState.bTacticalSprintGrantDispatched = false;
+	}
+	const bool bRestored = Handle.Handle > 0 &&
+		ObservePendingTacticalSprintSpecGrant(
+			InitializationState, AbilitySystemComponent);
+	if (bRestored)
+	{
+		PlayerState->ForceNetUpdate();
+		PlayerController->ForceNetUpdate();
+	}
+	SDK::DbgLog(
+		"[AbilityInit] Tactical Sprint spec-only repair controller=%p "
+		"playerState=%p asc=%p handle=%d restored=%d FN=%.2f\n",
+		(void*)PlayerController, (void*)PlayerState,
+		(void*)AbilitySystemComponent, Handle.Handle,
+		(int)bRestored, VersionInfo.FortniteVersion);
+	return bRestored;
+}
+
 // The PlayerState ASC normally survives pawn replacement. Some authored death
 // paths clear its ability specs without replacing the ASC object, though, so a
 // remembered ASC generation must still have its live default-player coverage
@@ -4531,8 +5156,11 @@ static bool RestorePersistentDefaultAbilitySpecsWithoutEffects(
 // the same lethal hit and leave the pawn at zero health without death.
 static bool EnsurePawnGameplayAbilitiesInitialized(
 	AFortPlayerControllerAthena* PlayerController,
-	AFortPlayerPawnAthena* Pawn)
+	AFortPlayerPawnAthena* Pawn,
+	bool* OutTacticalSprintRestored = nullptr)
 {
+	if (OutTacticalSprintRestored)
+		*OutTacticalSprintRestored = false;
 	if (!PlayerController || !Pawn || !PlayerController->PlayerState)
 		return false;
 
@@ -4542,6 +5170,8 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 	if (!AbilitySystemComponent)
 		return false;
 	bool bPersistentASCGeneration = false;
+	FGameplayAbilityInitializationState* PersistentInitializationState =
+		nullptr;
 
 	for (auto It = GGameplayAbilityInitializationStates.begin();
 		It != GGameplayAbilityInitializationStates.end();)
@@ -4558,9 +5188,20 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 			ExistingAbilitySystem == AbilitySystemComponent)
 		{
 			bPersistentASCGeneration = true;
+			PersistentInitializationState = &*It;
+			CaptureTacticalSprintInitializationBaseline(
+				*It, AbilitySystemComponent);
 			It->PlayerController =
 				TWeakObjectPtr<AFortPlayerControllerAthena>(
 					PlayerController);
+			const bool bObservedPendingTacticalSprint =
+				ObservePendingTacticalSprintSpecGrant(
+					*It, AbilitySystemComponent);
+			if (bObservedPendingTacticalSprint)
+			{
+				PlayerState->ForceNetUpdate();
+				PlayerController->ForceNetUpdate();
+			}
 
 			const auto CurrentInspection =
 				InspectDefaultPlayerAbilities(AbilitySystemComponent);
@@ -4570,13 +5211,25 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 				(CurrentInspection.Coverage ==
 					EDefaultPlayerAbilityCoverage::Unavailable &&
 				 HasDefaultPlayerDeathAbility(AbilitySystemComponent));
-			if (bCoverageStillValid)
+			const bool bTacticalSprintStillValid =
+				!It->bHadTacticalSprintAbility ||
+				FindTacticalSprintSetSpec(
+					AbilitySystemComponent) != nullptr;
+			if (OutTacticalSprintRestored &&
+				(It->TacticalSprintRestoredPawn.Get() == Pawn ||
+				 (It->bTacticalSprintGrantDispatched &&
+				  It->PendingTacticalSprintPawn.Get() == Pawn)))
+			{
+				*OutTacticalSprintRestored = true;
+			}
+			if (bCoverageStillValid &&
+				bTacticalSprintStillValid)
 				return true;
 
 			SDK::DbgLog(
 				"[AbilityInit] cached ASC lost default coverage controller=%p "
 				"playerState=%p asc=%p specs=%d matched=%d/%d coverage=%d "
-				"version=%.2f\n",
+				"tacticalSprint=%d/%d version=%.2f\n",
 				(void*)PlayerController,
 				(void*)PlayerState,
 				(void*)AbilitySystemComponent,
@@ -4584,6 +5237,8 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 				CurrentInspection.MatchedAbilityCount,
 				CurrentInspection.ExpectedAbilityCount,
 				(int)CurrentInspection.Coverage,
+				(int)bTacticalSprintStillValid,
+				(int)It->bHadTacticalSprintAbility,
 				VersionInfo.FortniteVersion);
 			break;
 		}
@@ -4593,11 +5248,12 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 
 	const auto Inspection = InspectDefaultPlayerAbilities(
 		AbilitySystemComponent);
-	if (Inspection.Coverage ==
+	if (!bPersistentASCGeneration &&
+		(Inspection.Coverage ==
 		EDefaultPlayerAbilityCoverage::Complete ||
 		(Inspection.Coverage ==
 			EDefaultPlayerAbilityCoverage::Unavailable &&
-		 HasDefaultPlayerDeathAbility(AbilitySystemComponent)))
+		 HasDefaultPlayerDeathAbility(AbilitySystemComponent))))
 	{
 		// Native possession already granted the persistent default set. Its actor
 		// info is rebound separately by Possess; initialization is not an avatar
@@ -4619,20 +5275,63 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 
 	if (bPersistentASCGeneration)
 	{
+		const bool bTacticalSprintFreshForPawn =
+			PersistentInitializationState &&
+			PersistentInitializationState
+				->TacticalSprintRestoredPawn.Get() == Pawn;
+		const bool bTacticalSprintRestored =
+			!bTacticalSprintFreshForPawn &&
+			PersistentInitializationState &&
+			RestoreMissingTacticalSprintSpecWithoutEffects(
+				PlayerController, PlayerState, Pawn,
+				AbilitySystemComponent,
+				*PersistentInitializationState);
+		const bool bTacticalSprintPendingForPawn =
+			PersistentInitializationState &&
+			PersistentInitializationState
+				->bTacticalSprintGrantDispatched &&
+			PersistentInitializationState
+				->PendingTacticalSprintPawn.Get() == Pawn;
+		if (OutTacticalSprintRestored)
+			*OutTacticalSprintRestored =
+				bTacticalSprintFreshForPawn ||
+				bTacticalSprintRestored ||
+				bTacticalSprintPendingForPawn;
+
+		const auto PostSprintInspection =
+			InspectDefaultPlayerAbilities(AbilitySystemComponent);
+		const bool bTacticalSprintComplete =
+			!PersistentInitializationState ||
+			!PersistentInitializationState->bHadTacticalSprintAbility ||
+			FindTacticalSprintSetSpec(
+				AbilitySystemComponent) != nullptr;
+		if ((PostSprintInspection.Coverage ==
+				EDefaultPlayerAbilityCoverage::Complete ||
+			 (PostSprintInspection.Coverage ==
+				EDefaultPlayerAbilityCoverage::Unavailable &&
+			  HasDefaultPlayerDeathAbility(AbilitySystemComponent))) &&
+			bTacticalSprintComplete)
+		{
+			return true;
+		}
+
 		// A PlayerState-owned ASC survives pawn replacement. Replaying the full
 		// ability set on UE < 4.19 also reapplies every GrantedGameplayEffect,
 		// stacking health/shield modifiers on each death. Repair only absent
 		// replicated specs; if their schema/native constructor is unavailable,
 		// preserve the surviving set and fail closed without touching effects.
-		if ((Inspection.Coverage ==
+		if ((PostSprintInspection.Coverage ==
 				EDefaultPlayerAbilityCoverage::Partial ||
-			 Inspection.Coverage ==
+			 PostSprintInspection.Coverage ==
 				EDefaultPlayerAbilityCoverage::None) &&
 			RestorePersistentDefaultAbilitySpecsWithoutEffects(
 				PlayerController, PlayerState,
-				AbilitySystemComponent, Inspection))
+				AbilitySystemComponent, PostSprintInspection))
 		{
-			return true;
+			return !PersistentInitializationState ||
+				!PersistentInitializationState->bHadTacticalSprintAbility ||
+				FindTacticalSprintSetSpec(
+					AbilitySystemComponent) != nullptr;
 		}
 
 		SDK::DbgLog(
@@ -4640,9 +5339,10 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 			"controller=%p playerState=%p asc=%p coverage=%d "
 			"matched=%d/%d version=%.2f\n",
 			(void*)PlayerController, (void*)PlayerState,
-			(void*)AbilitySystemComponent, (int)Inspection.Coverage,
-			Inspection.MatchedAbilityCount,
-			Inspection.ExpectedAbilityCount,
+			(void*)AbilitySystemComponent,
+			(int)PostSprintInspection.Coverage,
+			PostSprintInspection.MatchedAbilityCount,
+			PostSprintInspection.ExpectedAbilityCount,
 			VersionInfo.FortniteVersion);
 		return false;
 	}
@@ -4734,12 +5434,90 @@ static bool EnsurePawnGameplayAbilitiesInitialized(
 	return true;
 }
 
-// Default Jump stores a pawn-local copy of its replicated spec handle on the
-// owning client. The ASC itself lives on PlayerState, so ordinary possession can
-// leave that local copy pointing at the eliminated pawn's generation even though
-// the server-side spec survived. Replacing exactly this inactive spec makes the
-// normal fast-array remove/add callbacks bind the new pawn without replaying the
-// complete ability set or touching unrelated abilities/effects.
+static void TickPendingTacticalSprintSpecGrants()
+{
+	const auto Now = GetTickCount64();
+	for (auto& State : GGameplayAbilityInitializationStates)
+	{
+		if (!State.bTacticalSprintGrantDispatched)
+			continue;
+
+		auto AbilitySystemComponent =
+			State.AbilitySystemComponent.Get();
+		if (!IsUsableDeathObject(AbilitySystemComponent))
+			continue;
+
+		if (ObservePendingTacticalSprintSpecGrant(
+				State, AbilitySystemComponent))
+		{
+			auto PlayerState = State.PlayerState.Get();
+			auto PlayerController = State.PlayerController.Get();
+			if (IsUsableDeathObject(PlayerState))
+				PlayerState->ForceNetUpdate();
+			if (IsUsableDeathObject(PlayerController))
+				PlayerController->ForceNetUpdate();
+			SDK::DbgLog(
+				"[AbilityInit] observed delayed Tactical Sprint grant "
+				"controller=%p playerState=%p asc=%p pawn=%p FN=%.2f\n",
+				(void*)PlayerController, (void*)PlayerState,
+				(void*)AbilitySystemComponent,
+				(void*)State.TacticalSprintRestoredPawn.Get(),
+				VersionInfo.FortniteVersion);
+			continue;
+		}
+
+		if (!State.bTacticalSprintPendingLogged &&
+			State.PendingTacticalSprintStartedAtMs != 0 &&
+			Now >= State.PendingTacticalSprintStartedAtMs &&
+			Now - State.PendingTacticalSprintStartedAtMs >= 3000ULL)
+		{
+			State.bTacticalSprintPendingLogged = true;
+			SDK::DbgLog(
+				"[AbilityInit] Tactical Sprint grant still pending "
+				"controller=%p asc=%p pawn=%p handle=%d FN=%.2f\n",
+				(void*)State.PlayerController.Get(),
+				(void*)AbilitySystemComponent,
+				(void*)State.PendingTacticalSprintPawn.Get(),
+				State.PendingTacticalSprintHandle,
+				VersionInfo.FortniteVersion);
+		}
+	}
+}
+
+// Some movement abilities store a pawn-local copy of their replicated spec
+// handle on the owning client. The ASC itself lives on PlayerState, so ordinary
+// possession can leave that local copy pointing at the eliminated pawn's
+// generation even though the server-side spec survived. Replacing exactly the
+// inactive spec makes the normal fast-array remove/add callbacks bind the new
+// pawn without replaying the complete ability set or touching unrelated effects.
+enum class ERespawnAbilityRebindTarget : uint8
+{
+	Jump,
+	Sprint,
+	TacticalSprintSet
+};
+
+static const char* GetRespawnAbilityRebindTargetName(
+	ERespawnAbilityRebindTarget Target)
+{
+	if (Target == ERespawnAbilityRebindTarget::Sprint)
+		return "Sprint";
+	if (Target == ERespawnAbilityRebindTarget::TacticalSprintSet)
+		return "TacticalSprintSet";
+	return "Jump";
+}
+
+static bool IsRespawnAbilityRebindTarget(
+	ERespawnAbilityRebindTarget Target,
+	const UFortGameplayAbility* Ability)
+{
+	if (Target == ERespawnAbilityRebindTarget::Sprint)
+		return IsDefaultPlayerSprintAbility(Ability);
+	if (Target == ERespawnAbilityRebindTarget::TacticalSprintSet)
+		return IsTacticalSprintSetAbility(Ability);
+	return IsDefaultPlayerJumpAbility(Ability);
+}
+
 enum class ERespawnJumpRebindOutcome : uint8
 {
 	Complete,
@@ -4749,12 +5527,14 @@ enum class ERespawnJumpRebindOutcome : uint8
 
 struct FPendingRespawnJumpRebind
 {
+	ERespawnAbilityRebindTarget Target =
+		ERespawnAbilityRebindTarget::Jump;
 	TWeakObjectPtr<UWorld> World;
 	TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
 	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
 	TWeakObjectPtr<AFortPlayerStateAthena> PlayerState;
 	TWeakObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
-	TWeakObjectPtr<UFortGameplayAbility> JumpAbility;
+	TWeakObjectPtr<UFortGameplayAbility> Ability;
 	TWeakObjectPtr<UObject> SourceObject;
 	int32 OldHandle = 0;
 	int32 NewHandle = 0;
@@ -4835,9 +5615,10 @@ static void ReplicateRespawnJumpRebind(
 		PlayerController->ForceNetUpdate();
 }
 
-static bool HasDefaultJumpSpecHandle(
+static bool HasRespawnAbilitySpecHandle(
 	UAbilitySystemComponent* AbilitySystemComponent,
-	int32 Handle)
+	int32 Handle,
+	ERespawnAbilityRebindTarget Target)
 {
 	if (!IsUsableDeathObject(AbilitySystemComponent) || Handle <= 0)
 		return false;
@@ -4848,7 +5629,7 @@ static bool HasDefaultJumpSpecHandle(
 		auto& Spec = AbilitySystemComponent->ActivatableAbilities.Items.Get(
 			Index, FGameplayAbilitySpec::Size());
 		if (Spec.Handle.Handle == Handle &&
-			IsDefaultPlayerJumpAbility(Spec.Ability))
+			IsRespawnAbilityRebindTarget(Target, Spec.Ability))
 		{
 			return true;
 		}
@@ -4885,8 +5666,9 @@ static ERespawnJumpProvisionalCleanupResult
 		return ERespawnJumpProvisionalCleanupResult::Retain;
 	Pending.NextPollAtMs = 0;
 
-	if (!HasDefaultJumpSpecHandle(
-			AbilitySystemComponent, Pending.OldHandle))
+	if (!HasRespawnAbilitySpecHandle(
+			AbilitySystemComponent, Pending.OldHandle,
+			Pending.Target))
 	{
 		// Without the original functional spec, clearing the replacement could
 		// create a zero-Jump state. Leave a sole replacement untouched; this is
@@ -4894,8 +5676,9 @@ static ERespawnJumpProvisionalCleanupResult
 		return ERespawnJumpProvisionalCleanupResult::Cleaned;
 	}
 
-	bool bReplacementPresent = HasDefaultJumpSpecHandle(
-		AbilitySystemComponent, Pending.NewHandle);
+	bool bReplacementPresent = HasRespawnAbilitySpecHandle(
+		AbilitySystemComponent, Pending.NewHandle,
+		Pending.Target);
 	if (bReplacementPresent)
 	{
 		Pending.bProvisionalReplacementObserved = true;
@@ -4910,8 +5693,9 @@ static ERespawnJumpProvisionalCleanupResult
 			AbilitySystemComponent->ClearAbility(Provisional);
 			++Pending.ProvisionalClearDispatchAttempts;
 			Pending.LastProvisionalClearDispatchAtMs = Now;
-			bReplacementPresent = HasDefaultJumpSpecHandle(
-				AbilitySystemComponent, Pending.NewHandle);
+			bReplacementPresent = HasRespawnAbilitySpecHandle(
+				AbilitySystemComponent, Pending.NewHandle,
+				Pending.Target);
 		}
 	}
 
@@ -4940,8 +5724,9 @@ static ERespawnJumpProvisionalCleanupResult
 		{
 			Pending.bProvisionalCleanupTimeoutLogged = true;
 			SDK::DbgLog(
-				"[Respawn] provisional Jump cleanup timed out "
+				"[Respawn] provisional %s cleanup timed out "
 				"controller=%p old=%d new=%d clears=%d FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)Pending.PlayerController.Get(),
 				Pending.OldHandle, Pending.NewHandle,
 				Pending.ProvisionalClearDispatchAttempts,
@@ -5007,8 +5792,9 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		!ConstructSpecAddress)
 	{
 		SDK::DbgLog(
-			"[Respawn] skipped Jump rebind: native operation unavailable "
+			"[Respawn] skipped %s rebind: native operation unavailable "
 			"controller=%p pawn=%p give=%p clear=%p construct=%p FN=%.2f\n",
+			GetRespawnAbilityRebindTargetName(Pending.Target),
 			(void*)PlayerController, (void*)Pawn,
 			(void*)GiveAbilityAddress, (void*)ClearAbilityAddress,
 			(void*)ConstructSpecAddress,
@@ -5016,7 +5802,7 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		return ERespawnJumpRebindOutcome::Terminal;
 	}
 
-	struct FJumpSpecScan
+	struct FTargetSpecScan
 	{
 		int Count = 0;
 		int SoleIndex = -1;
@@ -5026,9 +5812,9 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		int NonOldCount = 0;
 		int32 NonOldHandle = 0;
 	};
-	auto ScanJumpSpecs = [&]()
+	auto ScanTargetSpecs = [&]()
 		{
-			FJumpSpecScan Scan;
+			FTargetSpecScan Scan;
 			for (int Index = 0;
 				Index < AbilitySystemComponent
 					->ActivatableAbilities.Items.Num();
@@ -5037,7 +5823,8 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 				auto& Spec = AbilitySystemComponent
 					->ActivatableAbilities.Items.Get(
 						Index, FGameplayAbilitySpec::Size());
-				if (!IsDefaultPlayerJumpAbility(Spec.Ability))
+				if (!IsRespawnAbilityRebindTarget(
+						Pending.Target, Spec.Ability))
 					continue;
 				++Scan.Count;
 				Scan.SoleIndex = Index;
@@ -5058,14 +5845,15 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 			return Scan;
 		};
 
-	auto Scan = ScanJumpSpecs();
+	auto Scan = ScanTargetSpecs();
 	if (!Pending.bMetadataCaptured)
 	{
 		if (Scan.Count != 1 || Scan.SoleIndex < 0)
 		{
 			SDK::DbgLog(
-				"[Respawn] skipped Jump rebind: expected one source spec "
+				"[Respawn] skipped %s rebind: expected one source spec "
 				"controller=%p pawn=%p count=%d FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)PlayerController, (void*)Pawn, Scan.Count,
 				VersionInfo.FortniteVersion);
 			return ERespawnJumpRebindOutcome::Terminal;
@@ -5074,12 +5862,28 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		auto& Spec = AbilitySystemComponent
 			->ActivatableAbilities.Items.Get(
 				Scan.SoleIndex, FGameplayAbilitySpec::Size());
+		const bool bModernSprintTarget =
+			Pending.Target == ERespawnAbilityRebindTarget::Sprint ||
+			Pending.Target ==
+				ERespawnAbilityRebindTarget::TacticalSprintSet;
+		if (bModernSprintTarget &&
+			(!Spec.HasLevel() || !Spec.HasInputID() ||
+			 !Spec.HasSourceObject()))
+		{
+			SDK::DbgLog(
+				"[Respawn] skipped Sprint rebind: spec metadata unavailable "
+				"controller=%p pawn=%p FN=%.2f\n",
+				(void*)PlayerController, (void*)Pawn,
+				VersionInfo.FortniteVersion);
+			return ERespawnJumpRebindOutcome::Terminal;
+		}
 		const auto InputID = Spec.HasInputID() ? Spec.InputID : -1;
 		if (VersionInfo.EngineVersion >= 5.1 && InputID != -1)
 		{
 			SDK::DbgLog(
-				"[Respawn] skipped Jump rebind: UE5 InputID cannot be "
+				"[Respawn] skipped %s rebind: UE5 InputID cannot be "
 				"preserved controller=%p pawn=%p input=%d FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)PlayerController, (void*)Pawn, InputID,
 				VersionInfo.FortniteVersion);
 			return ERespawnJumpRebindOutcome::Terminal;
@@ -5091,8 +5895,9 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 				DynamicTags.ParentTags.Num() > 0)
 			{
 				SDK::DbgLog(
-					"[Respawn] skipped Jump rebind: dynamic tags cannot "
+					"[Respawn] skipped %s rebind: dynamic tags cannot "
 					"be preserved controller=%p pawn=%p tags=%d/%d FN=%.2f\n",
+					GetRespawnAbilityRebindTargetName(Pending.Target),
 					(void*)PlayerController, (void*)Pawn,
 					DynamicTags.GameplayTags.Num(),
 					DynamicTags.ParentTags.Num(),
@@ -5100,11 +5905,13 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 				return ERespawnJumpRebindOutcome::Terminal;
 			}
 		}
-		else if (VersionInfo.EngineVersion >= 5.1)
+		else if (VersionInfo.EngineVersion >= 5.1 ||
+			bModernSprintTarget)
 		{
 			SDK::DbgLog(
-				"[Respawn] skipped Jump rebind: dynamic-tag metadata "
+				"[Respawn] skipped %s rebind: dynamic-tag metadata "
 				"unavailable controller=%p pawn=%p FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)PlayerController, (void*)Pawn,
 				VersionInfo.FortniteVersion);
 			return ERespawnJumpRebindOutcome::Terminal;
@@ -5113,19 +5920,30 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 			return ERespawnJumpRebindOutcome::Terminal;
 
 		Pending.OldHandle = Spec.Handle.Handle;
-		Pending.JumpAbility =
+		Pending.Ability =
 			TWeakObjectPtr<UFortGameplayAbility>(Spec.Ability);
 		Pending.Level = Spec.HasLevel() ? Spec.Level : 1;
 		Pending.InputID = InputID;
 		auto SourceObject = Spec.HasSourceObject()
 			? Spec.SourceObject : nullptr;
+		if (bModernSprintTarget &&
+			SourceObject &&
+			SourceObject->IsA(AFortPlayerPawnAthena::StaticClass()))
+		{
+			SDK::DbgLog(
+				"[Respawn] skipped Sprint rebind: pawn-bound source "
+				"controller=%p pawn=%p source=%p FN=%.2f\n",
+				(void*)PlayerController, (void*)Pawn,
+				(void*)SourceObject, VersionInfo.FortniteVersion);
+			return ERespawnJumpRebindOutcome::Terminal;
+		}
 		Pending.bHadSourceObject = SourceObject != nullptr;
 		Pending.SourceObject = TWeakObjectPtr<UObject>(SourceObject);
 		Pending.bMetadataCaptured = true;
-		Scan = ScanJumpSpecs();
+		Scan = ScanTargetSpecs();
 	}
 
-	auto CandidateMatches = [&](FJumpSpecScan& CandidateScan)
+	auto CandidateMatches = [&](FTargetSpecScan& CandidateScan)
 		{
 			if (CandidateScan.NonOldCount != 1 ||
 				CandidateScan.NonOldHandle <= 0)
@@ -5150,8 +5968,9 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 			ReplicateRespawnJumpRebind(
 				PlayerController, ReplicationPawn, PlayerState);
 			SDK::DbgLog(
-				"[Respawn] Jump spec rebound transaction controller=%p "
+				"[Respawn] %s spec rebound transaction controller=%p "
 				"pawn=%p old=%d new=%d attempts=%d FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)PlayerController, (void*)Pawn,
 				Pending.OldHandle, Pending.NewHandle,
 				Pending.Attempts, VersionInfo.FortniteVersion);
@@ -5165,14 +5984,15 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		if (!Scan.bOldActiveKnown || Scan.bOldActive)
 			return ERespawnJumpRebindOutcome::Retry;
 
-		auto JumpAbility = Pending.JumpAbility.Get();
+		auto Ability = Pending.Ability.Get();
 		auto SourceObject = Pending.SourceObject.Get();
-		if (!JumpAbility ||
+		if (!Ability ||
 			(Pending.bHadSourceObject && !SourceObject))
 		{
 			SDK::DbgLog(
-				"[Respawn] Jump rebind metadata expired before prepare "
+				"[Respawn] %s rebind metadata expired before prepare "
 				"controller=%p pawn=%p old=%d attempts=%d FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)PlayerController, (void*)Pawn,
 				Pending.OldHandle, Pending.Attempts,
 				VersionInfo.FortniteVersion);
@@ -5184,13 +6004,13 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		// cause a second blind grant on a retry.
 		Pending.bReplacementGiveDispatched = true;
 		const auto GivenHandle = AbilitySystemComponent->GiveAbility(
-			JumpAbility, SourceObject, Pending.Level, Pending.InputID);
+			Ability, SourceObject, Pending.Level, Pending.InputID);
 		if (GivenHandle.Handle > 0 &&
 			GivenHandle.Handle != Pending.OldHandle)
 		{
 			Pending.NewHandle = GivenHandle.Handle;
 		}
-		Scan = ScanJumpSpecs();
+		Scan = ScanTargetSpecs();
 	}
 
 	if (!Pending.bOldClearDispatched)
@@ -5233,7 +6053,7 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		AbilitySystemComponent->ClearAbility(OldHandle);
 		Pending.OldClearDispatchAttempts = 1;
 		Pending.LastOldClearDispatchAtMs = Now;
-		Scan = ScanJumpSpecs();
+		Scan = ScanTargetSpecs();
 	}
 
 	if (!Scan.bOldPresent && CandidateMatches(Scan))
@@ -5261,8 +6081,9 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 		{
 			Pending.bCommittedStallLogged = true;
 			SDK::DbgLog(
-				"[Respawn] Jump rebind retained committed observation "
+				"[Respawn] %s rebind retained committed observation "
 				"controller=%p pawn=%p old=%d new=%d clears=%d FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)PlayerController, (void*)Pawn,
 				Pending.OldHandle, Pending.NewHandle,
 				Pending.OldClearDispatchAttempts,
@@ -5283,10 +6104,17 @@ static ERespawnJumpRebindOutcome TryRespawnJumpRebind(
 	return ERespawnJumpRebindOutcome::Terminal;
 }
 
-static bool RebindDefaultPlayerJumpAbilityForRespawn(
+static bool RebindDefaultPlayerAbilityForRespawn(
 	AFortPlayerControllerAthena* PlayerController,
-	AFortPlayerPawnAthena* Pawn)
+	AFortPlayerPawnAthena* Pawn,
+	ERespawnAbilityRebindTarget Target)
 {
+	if ((Target == ERespawnAbilityRebindTarget::Sprint ||
+		 Target == ERespawnAbilityRebindTarget::TacticalSprintSet) &&
+		VersionInfo.FortniteVersion < 20)
+	{
+		return false;
+	}
 	if (!IsUsableDeathObject(PlayerController) ||
 		!IsUsableDeathObject(Pawn) ||
 		!IsUsableDeathObject(PlayerController->PlayerState))
@@ -5312,7 +6140,8 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 		Index >= 0; --Index)
 	{
 		auto& Existing = GPendingRespawnJumpRebinds[Index];
-		if (Existing.PlayerController.Get() != PlayerController)
+		if (Existing.Target != Target ||
+			Existing.PlayerController.Get() != PlayerController)
 			continue;
 		if (Existing.Pawn.Get() == Pawn &&
 			Existing.PlayerState.Get() == PlayerState &&
@@ -5327,8 +6156,9 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 			!Existing.bOldClearDispatched &&
 			Existing.NewHandle > 0 &&
 			IsRespawnJumpRebindTransactionContextCurrent(Existing) &&
-			HasDefaultJumpSpecHandle(
-				ExistingASC, Existing.OldHandle))
+			HasRespawnAbilitySpecHandle(
+				ExistingASC, Existing.OldHandle,
+				Existing.Target))
 		{
 			if (ExistingASC != AbilitySystemComponent)
 			{
@@ -5369,10 +6199,12 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 		if (Existing.bOldClearDispatched &&
 			ExistingASC != AbilitySystemComponent &&
 			IsRespawnJumpRebindTransactionContextCurrent(Existing) &&
-			HasDefaultJumpSpecHandle(
-				ExistingASC, Existing.OldHandle) &&
-			HasDefaultJumpSpecHandle(
-				ExistingASC, Existing.NewHandle))
+			HasRespawnAbilitySpecHandle(
+				ExistingASC, Existing.OldHandle,
+				Existing.Target) &&
+			HasRespawnAbilitySpecHandle(
+				ExistingASC, Existing.NewHandle,
+				Existing.Target))
 		{
 			// The controller moved to a new PlayerState/ASC generation. Preserve
 			// the old ASC's committed cleanup independently; the loop may still
@@ -5384,11 +6216,13 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 			ExistingASC == AbilitySystemComponent)
 		{
 			const bool bOldStillPresent =
-				HasDefaultJumpSpecHandle(
-					ExistingASC, Existing.OldHandle);
+				HasRespawnAbilitySpecHandle(
+					ExistingASC, Existing.OldHandle,
+					Existing.Target);
 			const bool bReplacementPresent =
-				HasDefaultJumpSpecHandle(
-					ExistingASC, Existing.NewHandle);
+				HasRespawnAbilitySpecHandle(
+					ExistingASC, Existing.NewHandle,
+					Existing.Target);
 			if (bOldStillPresent && bReplacementPresent)
 			{
 				// Finish the already-committed removal before beginning another
@@ -5424,8 +6258,9 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 		if (Existing.bReplacementGiveDispatched &&
 			!Existing.bOldClearDispatched &&
 			Existing.NewHandle > 0 &&
-			HasDefaultJumpSpecHandle(
-				ExistingASC, Existing.OldHandle))
+			HasRespawnAbilitySpecHandle(
+				ExistingASC, Existing.OldHandle,
+				Existing.Target))
 		{
 			FGameplayAbilitySpecHandle Provisional{};
 			Provisional.Handle = Existing.NewHandle;
@@ -5436,6 +6271,7 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 	}
 
 	FPendingRespawnJumpRebind Pending;
+	Pending.Target = Target;
 	Pending.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
 	Pending.PlayerController =
 		TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
@@ -5451,8 +6287,9 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 	{
 		GPendingRespawnJumpRebinds.emplace_back(Pending);
 		SDK::DbgLog(
-			"[Respawn] queued bounded Jump rebind controller=%p pawn=%p "
+			"[Respawn] queued bounded %s rebind controller=%p pawn=%p "
 			"captured=%d attempt=%d timeoutMs=%llu FN=%.2f\n",
+			GetRespawnAbilityRebindTargetName(Target),
 			(void*)PlayerController, (void*)Pawn,
 			(int)Pending.bMetadataCaptured, Pending.Attempts,
 			(unsigned long long)GRespawnJumpRebindPreCommitTimeoutMs,
@@ -5461,11 +6298,43 @@ static bool RebindDefaultPlayerJumpAbilityForRespawn(
 	return Outcome == ERespawnJumpRebindOutcome::Complete;
 }
 
+static bool RebindDefaultPlayerJumpAbilityForRespawn(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	return RebindDefaultPlayerAbilityForRespawn(
+		PlayerController, Pawn,
+		ERespawnAbilityRebindTarget::Jump);
+}
+
+static bool RebindDefaultPlayerSprintAbilityForRespawn(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	return RebindDefaultPlayerAbilityForRespawn(
+		PlayerController, Pawn,
+		ERespawnAbilityRebindTarget::Sprint);
+}
+
+static bool RebindTacticalSprintSetAbilityForRespawn(
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn)
+{
+	return RebindDefaultPlayerAbilityForRespawn(
+		PlayerController, Pawn,
+		ERespawnAbilityRebindTarget::TacticalSprintSet);
+}
+
 static void TickPendingRespawnJumpRebinds()
 {
-	std::vector<std::pair<
-		TWeakObjectPtr<AFortPlayerControllerAthena>,
-		TWeakObjectPtr<AFortPlayerPawnAthena>>>
+	struct FFollowupGenerationRebind
+	{
+		TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
+		TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+		ERespawnAbilityRebindTarget Target =
+			ERespawnAbilityRebindTarget::Jump;
+	};
+	std::vector<FFollowupGenerationRebind>
 		FollowupGenerationRebinds;
 	for (int Index =
 		(int)GPendingRespawnJumpRebinds.size() - 1;
@@ -5491,7 +6360,9 @@ static void TickPendingRespawnJumpRebinds()
 					ERespawnJumpProvisionalCleanupResult::Cleaned)
 			{
 				FollowupGenerationRebinds.emplace_back(
-					Pending.PlayerController, Pending.Pawn);
+					FFollowupGenerationRebind{
+						Pending.PlayerController, Pending.Pawn,
+						Pending.Target });
 			}
 			GPendingRespawnJumpRebinds.erase(
 				GPendingRespawnJumpRebinds.begin() + Index);
@@ -5539,9 +6410,10 @@ static void TickPendingRespawnJumpRebinds()
 		if (Outcome == ERespawnJumpRebindOutcome::Retry)
 		{
 			SDK::DbgLog(
-				"[Respawn] expired pre-commit Jump rebind controller=%p "
+				"[Respawn] expired pre-commit %s rebind controller=%p "
 				"pawn=%p captured=%d old=%d new=%d give=%d clear=%d "
 				"attempts=%d elapsedMs=%llu generation=%d FN=%.2f\n",
+				GetRespawnAbilityRebindTargetName(Pending.Target),
 				(void*)Pending.PlayerController.Get(),
 				(void*)Pending.Pawn.Get(),
 				(int)Pending.bMetadataCaptured,
@@ -5558,24 +6430,25 @@ static void TickPendingRespawnJumpRebinds()
 		if (bQueueFollowupGeneration)
 		{
 			FollowupGenerationRebinds.emplace_back(
-				Pending.PlayerController, Pending.Pawn);
+				FFollowupGenerationRebind{
+					Pending.PlayerController, Pending.Pawn,
+					Pending.Target });
 		}
 
 		GPendingRespawnJumpRebinds.erase(
 			GPendingRespawnJumpRebinds.begin() + Index);
 	}
 
-	for (auto& [WeakController, WeakPawn] :
-		FollowupGenerationRebinds)
+	for (auto& Followup : FollowupGenerationRebinds)
 	{
-		auto PlayerController = WeakController.Get();
-		auto Pawn = WeakPawn.Get();
+		auto PlayerController = Followup.PlayerController.Get();
+		auto Pawn = Followup.Pawn.Get();
 		if (IsUsableDeathObject(PlayerController) &&
 			IsUsableDeathObject(Pawn) &&
 			PlayerController->Pawn == Pawn)
 		{
-			RebindDefaultPlayerJumpAbilityForRespawn(
-				PlayerController, Pawn);
+			RebindDefaultPlayerAbilityForRespawn(
+				PlayerController, Pawn, Followup.Target);
 		}
 	}
 }
@@ -6399,15 +7272,24 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 		Num == 0 &&
 		!bRestoringRespawnPawn &&
 		!PlayersInitialized.contains(PlayerController);
+	bool bTacticalSprintRestored = false;
 	if (!bDeferInitial1040AbilityInitialization)
 	{
 		EnsurePawnGameplayAbilitiesInitialized(
-			PlayerController, FortPawn);
+			PlayerController, FortPawn,
+			&bTacticalSprintRestored);
 	}
 	if (bRestoringRespawnPawn)
 	{
 		RebindDefaultPlayerJumpAbilityForRespawn(
 			PlayerController, FortPawn);
+		RebindDefaultPlayerSprintAbilityForRespawn(
+			PlayerController, FortPawn);
+		if (!bTacticalSprintRestored)
+		{
+			RebindTacticalSprintSetAbilityForRespawn(
+				PlayerController, FortPawn);
+		}
 	}
 	AFortInventory::HandlePendingCarmineFocus(
 		PlayerController);
@@ -7314,10 +8196,6 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 
 	FFortWeaponMods::ApplyEntrySlotsAfterEquip(
 		(AFortWeapon*)Weapon, *entry);
-	RememberLastEditingWeaponSelection(
-		PlayerController, PlayerController->MyFortPawn,
-		entry->ItemGuid);
-
 	if (VersionInfo.FortniteVersion <= 2.5)
 	{
 		static auto BuildingToolClass = FindClass("FortWeap_BuildingTool");
@@ -7426,10 +8304,6 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryWeapon(UObject* Context,
 
 	Weapon = EquippedWeapon;
 	FFortWeaponMods::ApplyEntrySlotsAfterEquip(Weapon, *entry);
-	RememberLastEditingWeaponSelection(
-		PlayerController, PlayerController->MyFortPawn,
-		entry->ItemGuid);
-
 	if (auto DecoTool = Weapon->Cast<AFortDecoTool>())
 	{
 		DecoTool->SetDecoObjectPreview(ItemDefinition, true);
@@ -7689,9 +8563,9 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 	TargetTags.GameplayTags.Free();
 	TargetTags.ParentTags.Free();
 
-	if (((AFortPlayerStateAthena*)PlayerController->PlayerState)->HasTeamIndex()) 
+	if (((AFortPlayerStateAthena*)PlayerController->PlayerState)->HasTeamIndex())
 		Building->Team = ((AFortPlayerStateAthena*)PlayerController->PlayerState)->TeamIndex;
-	
+
 	if (Building->HasTeamIndex())
 		Building->TeamIndex = Building->Team;
 
@@ -7701,626 +8575,45 @@ void AFortPlayerControllerAthena::ServerCreateBuildingActor(UObject* Context, FF
 
 void SetEditingPlayer(ABuildingSMActor* _this, AFortPlayerStateAthena* NewEditingPlayer)
 {
-	if (!IsUsableDeathObject(_this) || _this->Role != 3 ||
-		(_this->EditingPlayer && NewEditingPlayer))
+	if (_this->Role == 3 && (!_this->EditingPlayer || !NewEditingPlayer))
 	{
-		return;
-	}
+		_this->SetNetDormancy(2 - (NewEditingPlayer != 0));
+		_this->ForceNetUpdate();
 
-	auto OwningState = _this->EditingPlayer
-		? _this->EditingPlayer : NewEditingPlayer;
-	if (OwningState)
-	{
-		auto Handle = OwningState->Owner;
-		if (!IsUsableDeathObject(Handle) ||
-			!Handle->Cast<AFortPlayerControllerAthena>())
+		auto EditingPlayer = _this->EditingPlayer;
+		if (EditingPlayer)
 		{
-			return;
-		}
-	}
+			auto Handle = EditingPlayer->Owner;
 
-	// Wake the actor before changing its replicated owner. The old ordering
-	// forced the previous value and then made a cleared build DormantAll, so
-	// legacy clients could retain an edit owner indefinitely.
-	_this->SetNetDormancy(ENetDormancy::DORM_Awake);
-	_this->FlushNetDormancy();
-	_this->EditingPlayer = NewEditingPlayer;
-	VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-		_this, L"EditingPlayer");
-	_this->OnRep_EditingPlayer();
-	_this->ForceNetUpdate();
-}
-
-struct FEditingToolSession
-{
-	uint64 Generation = 0;
-	TWeakObjectPtr<ABuildingSMActor> Building;
-	// Keep the original identity after the weak pointer becomes unusable. RPCs
-	// for a just-replaced actor can still carry that exact pointer value.
-	ABuildingSMActor* BuildingIdentity = nullptr;
-	ULONGLONG ClosedAtMs = 0;
-	bool bClosed = false;
-};
-
-struct FEditingToolRestoreState
-{
-	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
-	TWeakObjectPtr<AFortWeap_EditingTool> ObservedTool;
-	FGuid RestoreItemGuid{};
-	std::vector<FEditingToolSession> Sessions;
-	uint64 Generation = 0;
-	uint64 ActiveGeneration = 0;
-	int32 InactiveTicks = 0;
-	int32 RepairAttempts = 0;
-	int32 AwaitingToolTicks = 0;
-	bool bHasRestoreItem = false;
-	bool bAwaitingEditTool = false;
-};
-
-static std::unordered_map<
-	AFortPlayerControllerAthena*, FEditingToolRestoreState>
-	GEditingToolRestoreStates;
-struct FLastEditingWeaponSelection
-{
-	TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
-	FGuid ItemGuid{};
-};
-static std::unordered_map<
-	AFortPlayerControllerAthena*, FLastEditingWeaponSelection>
-	GLastEditingWeaponSelections;
-static UWorld* GEditingToolRestoreWorld = nullptr;
-
-static bool IsRestorableAfterEditing(
-	const FFortItemEntry* Entry)
-{
-	if (!Entry || !IsUsableDeathObject(Entry->ItemDefinition) ||
-		!Entry->ItemDefinition->IsA<UFortWeaponItemDefinition>())
-	{
-		return false;
-	}
-
-	auto EditToolDefinitionClass =
-		UFortEditToolItemDefinition::StaticClass();
-	return !EditToolDefinitionClass ||
-		!Entry->ItemDefinition->IsA(EditToolDefinitionClass);
-}
-
-static FFortItemEntry* FindEditingRestoreEntry(
-	AFortPlayerControllerAthena* PlayerController,
-	const FGuid& ItemGuid)
-{
-	if (!PlayerController || !PlayerController->WorldInventory)
-		return nullptr;
-
-	return PlayerController->WorldInventory
-		->Inventory.ReplicatedEntries.Search(
-			[&](FFortItemEntry& Entry)
-			{
-				return VehicleLoadoutGuidsEqual(
-					Entry.ItemGuid, ItemGuid) &&
-					IsRestorableAfterEditing(&Entry);
-			}, FFortItemEntry::Size());
-}
-
-static bool IsValidLastEditingWeaponEntry(
-	const FFortItemEntry* Entry)
-{
-	if (!IsRestorableAfterEditing(Entry))
-		return false;
-
-	auto WeaponDefinition = Entry->ItemDefinition
-		? Entry->ItemDefinition->Cast<UFortWeaponItemDefinition>()
-		: nullptr;
-	return WeaponDefinition &&
-		(!WeaponDefinition->HasbValidForLastEquipped() ||
-			WeaponDefinition->bValidForLastEquipped);
-}
-
-static FFortItemEntry* FindLastEditingWeaponSelection(
-	AFortPlayerControllerAthena* PlayerController,
-	AFortPlayerPawnAthena* Pawn)
-{
-	auto Selection =
-		GLastEditingWeaponSelections.find(PlayerController);
-	if (Selection == GLastEditingWeaponSelections.end())
-		return nullptr;
-
-	if (!Pawn || Selection->second.Pawn.Get() != Pawn)
-	{
-		GLastEditingWeaponSelections.erase(Selection);
-		return nullptr;
-	}
-
-	auto Entry = FindEditingRestoreEntry(
-		PlayerController, Selection->second.ItemGuid);
-	if (!IsValidLastEditingWeaponEntry(Entry))
-	{
-		GLastEditingWeaponSelections.erase(Selection);
-		return nullptr;
-	}
-	return Entry;
-}
-
-static void RememberLastEditingWeaponSelection(
-	AFortPlayerControllerAthena* PlayerController,
-	AFortPlayerPawnAthena* Pawn,
-	const FGuid& ItemGuid)
-{
-	if (!PlayerController || !IsUsableDeathObject(Pawn) ||
-		PlayerController->MyFortPawn != Pawn)
-	{
-		return;
-	}
-	auto Existing =
-		GLastEditingWeaponSelections.find(PlayerController);
-	if (Existing != GLastEditingWeaponSelections.end())
-	{
-		if (Existing->second.Pawn.Get() != Pawn)
-		{
-			GLastEditingWeaponSelections.erase(Existing);
-		}
-		else if (VehicleLoadoutGuidsEqual(
-			Existing->second.ItemGuid, ItemGuid))
-		{
-			return;
-		}
-	}
-
-	auto Entry = FindEditingRestoreEntry(
-		PlayerController, ItemGuid);
-	if (!IsValidLastEditingWeaponEntry(Entry))
-		return;
-
-	GLastEditingWeaponSelections[PlayerController] = {
-		TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn),
-		Entry->ItemGuid };
-}
-
-static bool CaptureEditingRestoreItem(
-	AFortPlayerControllerAthena* PlayerController,
-	AActor* WeaponActor,
-	FEditingToolRestoreState& State)
-{
-	if (!IsUsableDeathObject(WeaponActor) ||
-		WeaponActor->IsA<AFortWeap_EditingTool>())
-	{
-		return false;
-	}
-
-	auto Weapon = WeaponActor->Cast<AFortWeapon>();
-	auto Entry = Weapon
-		? FindEditingRestoreEntry(
-			PlayerController, Weapon->ItemEntryGuid)
-		: nullptr;
-	if (!Entry)
-		return false;
-
-	State.RestoreItemGuid = Entry->ItemGuid;
-	State.bHasRestoreItem = true;
-	return true;
-}
-
-static ABuildingSMActor* BeginEditingToolRestoreSession(
-	AFortPlayerControllerAthena* PlayerController,
-	AFortPlayerPawnAthena* Pawn,
-	ABuildingSMActor* Building = nullptr)
-{
-	if (!PlayerController || !Pawn)
-		return nullptr;
-
-	auto& State = GEditingToolRestoreStates[PlayerController];
-	if (State.Pawn.Get() != Pawn)
-		State = {};
-
-	State.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
-	State.InactiveTicks = 0;
-	State.RepairAttempts = 0;
-	State.AwaitingToolTicks = 0;
-	State.bAwaitingEditTool = false;
-	ABuildingSMActor* SupersededBuilding = nullptr;
-	if (Building)
-	{
-		FEditingToolSession* ActiveSession = nullptr;
-		for (auto& Session : State.Sessions)
-		{
-			if (!Session.bClosed &&
-				Session.Generation == State.ActiveGeneration)
-			{
-				ActiveSession = &Session;
-				break;
-			}
-		}
-
-		const bool bRepeatedBegin =
-			ActiveSession &&
-			ActiveSession->BuildingIdentity == Building;
-		if (!bRepeatedBegin)
-		{
-			// Re-entering the same UObject identity proves this Begin is the new
-			// lifecycle boundary. An older marker for that identity must not eat
-			// the new session's legitimate End RPC.
-			State.Sessions.erase(
-				std::remove_if(
-					State.Sessions.begin(), State.Sessions.end(),
-					[&](const FEditingToolSession& Session)
-					{
-						return Session.bClosed &&
-							Session.BuildingIdentity == Building;
-					}),
-				State.Sessions.end());
-
-			const ULONGLONG Now = GetTickCount64();
-			for (auto& Session : State.Sessions)
-			{
-				if (Session.bClosed)
-					continue;
-				if (Session.Generation == State.ActiveGeneration)
-					SupersededBuilding = Session.BuildingIdentity;
-				Session.bClosed = true;
-				Session.ClosedAtMs = Now;
-			}
-
-			State.Generation++;
-			State.ActiveGeneration = State.Generation;
-			State.Sessions.push_back({
-				State.Generation,
-				TWeakObjectPtr<ABuildingSMActor>(Building),
-				Building,
-				0,
-				false });
-			if (State.Sessions.size() > 16)
-				State.Sessions.erase(State.Sessions.begin());
-		}
-	}
-
-	auto CurrentWeapon = Pawn->HasCurrentWeapon()
-		? Pawn->CurrentWeapon : nullptr;
-	if (CaptureEditingRestoreItem(
-			PlayerController, CurrentWeapon, State))
-	{
-		return SupersededBuilding;
-	}
-
-	// Repeated Begin RPCs can arrive while the edit tool is already equipped.
-	// Preserve the first session snapshot; otherwise use native PreviousWeapon.
-	if (State.bHasRestoreItem &&
-		FindEditingRestoreEntry(
-			PlayerController, State.RestoreItemGuid))
-	{
-		return SupersededBuilding;
-	}
-
-	State.bHasRestoreItem = false;
-	if (auto LastSelection = FindLastEditingWeaponSelection(
-			PlayerController, Pawn))
-	{
-		State.RestoreItemGuid = LastSelection->ItemGuid;
-		State.bHasRestoreItem = true;
-		return SupersededBuilding;
-	}
-
-	if (Pawn->HasPreviousWeapon() &&
-		CaptureEditingRestoreItem(
-			PlayerController, Pawn->PreviousWeapon, State))
-	{
-		return SupersededBuilding;
-	}
-
-	auto HarvestingTool =
-		FindHarvestingToolEntry(PlayerController->WorldInventory);
-	if (IsRestorableAfterEditing(HarvestingTool))
-	{
-		State.RestoreItemGuid = HarvestingTool->ItemGuid;
-		State.bHasRestoreItem = true;
-	}
-	return SupersededBuilding;
-}
-
-static void PruneClosedEditingSessions(
-	FEditingToolRestoreState& State)
-{
-	const ULONGLONG Now = GetTickCount64();
-	State.Sessions.erase(
-		std::remove_if(
-			State.Sessions.begin(), State.Sessions.end(),
-			[&](const FEditingToolSession& Session)
-			{
-				return Session.bClosed &&
-					Session.Generation !=
-						State.ActiveGeneration &&
-					Session.ClosedAtMs != 0 &&
-					Now - Session.ClosedAtMs > 5000ULL;
-			}),
-		State.Sessions.end());
-}
-
-static int32 FindEditingSessionForRpc(
-	FEditingToolRestoreState& State,
-	ABuildingSMActor* Building,
-	bool bPreferClosed)
-{
-	PruneClosedEditingSessions(State);
-	// A null target normally means a just-replaced actor no longer resolves on
-	// the server. End RPCs likewise trail a completed Edit. Let that older
-	// tombstone absorb the RPC instead of terminating a newer live session.
-	if (bPreferClosed)
-	{
-		for (int32 Index = 0;
-			Index < (int32)State.Sessions.size(); Index++)
-		{
-			auto& Session = State.Sessions[Index];
-			if (Session.bClosed &&
-				(!Building || Session.BuildingIdentity == Building))
-			{
-				return Index;
-			}
-		}
-	}
-
-	// Otherwise a live session wins over retained tombstones. A normal Edit RPC
-	// with a resolved target must not be swallowed by an older marker.
-	for (int32 Index = 0;
-		Index < (int32)State.Sessions.size(); Index++)
-	{
-		auto& Session = State.Sessions[Index];
-		if (!Session.bClosed &&
-			Session.Generation == State.ActiveGeneration &&
-			(!Building || Session.BuildingIdentity == Building))
-		{
-			return Index;
-		}
-	}
-
-	for (int32 Index = 0;
-		Index < (int32)State.Sessions.size(); Index++)
-	{
-		auto& Session = State.Sessions[Index];
-		if (!Building || Session.BuildingIdentity == Building)
-			return Index;
-	}
-	return -1;
-}
-
-static bool IsCurrentEditingSessionRpc(
-	AFortPlayerControllerAthena* PlayerController,
-	ABuildingSMActor* Building,
-	bool bCloseSession,
-	bool bConsumeSession,
-	ABuildingSMActor** ResolvedBuilding = nullptr)
-{
-	if (ResolvedBuilding)
-		*ResolvedBuilding = nullptr;
-	auto StateIt =
-		GEditingToolRestoreStates.find(PlayerController);
-	if (StateIt == GEditingToolRestoreStates.end() ||
-		StateIt->second.Sessions.empty())
-	{
-		// Preserve compatibility for a session that began before this state was
-		// initialized (for example after hot injection).
-		return true;
-	}
-
-	auto& State = StateIt->second;
-	const int32 SessionIndex =
-		FindEditingSessionForRpc(
-			State, Building,
-			bConsumeSession || !Building);
-	if (SessionIndex < 0)
-		return false;
-
-	auto& Session = State.Sessions[SessionIndex];
-	if (ResolvedBuilding)
-		*ResolvedBuilding = Session.Building.Get();
-	const uint64 SessionGeneration = Session.Generation;
-	const bool bWasClosed = Session.bClosed;
-	const bool bIsCurrent =
-		!bWasClosed &&
-		SessionGeneration == State.ActiveGeneration;
-	if (bCloseSession && !bWasClosed)
-	{
-		Session.bClosed = true;
-		Session.ClosedAtMs = GetTickCount64();
-		if (bIsCurrent)
-			State.ActiveGeneration = 0;
-	}
-	if (bConsumeSession)
-	{
-		State.Sessions.erase(
-			State.Sessions.begin() + SessionIndex);
-	}
-	return bIsCurrent;
-}
-
-static ABuildingSMActor* GetActiveEditingSessionBuilding(
-	FEditingToolRestoreState& State)
-{
-	for (auto& Session : State.Sessions)
-	{
-		if (!Session.bClosed &&
-			Session.Generation == State.ActiveGeneration)
-		{
-			return Session.Building.Get();
-		}
-	}
-	return nullptr;
-}
-
-static void SetEditingToolActor(
-	AFortWeap_EditingTool* EditTool,
-	ABuildingSMActor* Building)
-{
-	if (!IsUsableDeathObject(EditTool) ||
-		!EditTool->HasEditActor())
-	{
-		return;
-	}
-
-	EditTool->SetNetDormancy(ENetDormancy::DORM_Awake);
-	EditTool->FlushNetDormancy();
-	EditTool->EditActor = Building;
-	VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-		EditTool, L"EditActor");
-	EditTool->OnRep_EditActor();
-	EditTool->ForceNetUpdate();
-}
-
-static bool HasActiveEditingTarget(
-	AFortPlayerControllerAthena* PlayerController,
-	AFortWeap_EditingTool* EditTool)
-{
-	if (!PlayerController || !IsUsableDeathObject(EditTool) ||
-		!EditTool->HasEditActor())
-	{
-		return false;
-	}
-
-	auto Building = EditTool->EditActor;
-	return IsUsableDeathObject(Building) &&
-		Building->IsA<ABuildingSMActor>() &&
-		!Building->bDestroyed &&
-		Building->EditingPlayer == PlayerController->PlayerState;
-}
-
-template <typename Visitor>
-static void ForEachEditingTool(
-	AFortPlayerPawnAthena* Pawn, Visitor&& Visit)
-{
-	if (!IsUsableDeathObject(Pawn))
-		return;
-
-	std::unordered_set<AFortWeap_EditingTool*> Seen;
-	auto VisitCandidate = [&](AActor* Candidate)
-	{
-		if (!IsUsableDeathObject(Candidate))
-			return;
-		auto EditTool = Candidate->Cast<AFortWeap_EditingTool>();
-		if (EditTool && Seen.insert(EditTool).second)
-			Visit(EditTool);
-	};
-
-	if (Pawn->HasCurrentWeapon())
-		VisitCandidate(Pawn->CurrentWeapon);
-	if (!Pawn->HasCurrentWeaponList())
-		return;
-
-	auto& WeaponList = Pawn->CurrentWeaponList;
-	for (int32 Index = 0; Index < WeaponList.Num(); Index++)
-		VisitCandidate(WeaponList.Get(Index));
-}
-
-static AFortWeap_EditingTool* GetCurrentEditingTool(
-	AFortPlayerControllerAthena* PlayerController)
-{
-	if (!PlayerController ||
-		!IsUsableDeathObject(PlayerController->MyFortPawn))
-	{
-		return nullptr;
-	}
-
-	auto Pawn = PlayerController->MyFortPawn;
-	if (!Pawn->HasCurrentWeapon() ||
-		!IsUsableDeathObject(Pawn->CurrentWeapon))
-	{
-		return nullptr;
-	}
-	return Pawn->CurrentWeapon
-		->Cast<AFortWeap_EditingTool>();
-}
-
-static bool HasCurrentActiveEditingTarget(
-	AFortPlayerControllerAthena* PlayerController)
-{
-	return HasActiveEditingTarget(
-		PlayerController,
-		GetCurrentEditingTool(PlayerController));
-}
-
-static bool ClearEditingToolActor(
-	AFortPlayerControllerAthena* PlayerController,
-	ABuildingSMActor* ExpectedBuilding)
-{
-	if (!PlayerController ||
-		!IsUsableDeathObject(PlayerController->MyFortPawn))
-	{
-		return false;
-	}
-
-	auto Pawn = PlayerController->MyFortPawn;
-	auto CurrentEditTool =
-		GetCurrentEditingTool(PlayerController);
-	bool bCleared = false;
-	ForEachEditingTool(
-		Pawn,
-		[&](AFortWeap_EditingTool* EditTool)
-		{
-			if (!EditTool->HasEditActor())
-				return;
-
-			auto Target = EditTool->EditActor;
-			const bool bMatchesExpected =
-				ExpectedBuilding && Target == ExpectedBuilding;
-			const bool bStaleWithoutExpected =
-				!ExpectedBuilding && Target &&
-				(EditTool != CurrentEditTool ||
-					!HasActiveEditingTarget(
-						PlayerController, EditTool));
-			if (bMatchesExpected || bStaleWithoutExpected)
-			{
-				if (!ExpectedBuilding &&
-					IsUsableDeathObject(Target) &&
-					Target->IsA<ABuildingSMActor>() &&
-					Target->EditingPlayer ==
-						PlayerController->PlayerState)
+			if (Handle)
+				if (auto PlayerController = Handle->Cast<AFortPlayerControllerAthena>())
 				{
-					SetEditingPlayer(Target, nullptr);
+					_this->EditingPlayer = NewEditingPlayer;
+					_this->OnRep_EditingPlayer();
+					return;
 				}
-				SetEditingToolActor(EditTool, nullptr);
-				bCleared = true;
-			}
-		});
-
-	return bCleared;
-}
-
-static void ClearNonCurrentEditingTools(
-	AFortPlayerControllerAthena* PlayerController,
-	AFortWeap_EditingTool* CurrentEditTool)
-{
-	if (!PlayerController ||
-		!IsUsableDeathObject(PlayerController->MyFortPawn))
-	{
-		return;
-	}
-
-	auto ActiveBuilding =
-		HasActiveEditingTarget(
-			PlayerController, CurrentEditTool)
-		? CurrentEditTool->EditActor : nullptr;
-	ForEachEditingTool(
-		PlayerController->MyFortPawn,
-		[&](AFortWeap_EditingTool* EditTool)
+		}
+		else
 		{
-			if (EditTool == CurrentEditTool ||
-				!EditTool->HasEditActor() ||
-				!EditTool->EditActor)
+			if (!NewEditingPlayer)
 			{
+				_this->EditingPlayer = NewEditingPlayer;
+				_this->OnRep_EditingPlayer();
 				return;
 			}
 
-			auto StaleBuilding = EditTool->EditActor;
-			if (StaleBuilding != ActiveBuilding &&
-				IsUsableDeathObject(StaleBuilding) &&
-				StaleBuilding->IsA<ABuildingSMActor>() &&
-				StaleBuilding->EditingPlayer ==
-					PlayerController->PlayerState)
+			auto Handle = NewEditingPlayer->Owner;
+
+			if (auto PlayerController = Handle->Cast<AFortPlayerControllerAthena>())
 			{
-				SetEditingPlayer(StaleBuilding, nullptr);
+				_this->EditingPlayer = NewEditingPlayer;
+				_this->OnRep_EditingPlayer();
 			}
-			SetEditingToolActor(EditTool, nullptr);
-		});
+		}
+	}
 }
 
-static bool ActivateLegacyEditingRestoreSlot(
+static bool ActivateLegacyInventoryRestoreSlot(
 	AFortPlayerControllerAthena* PlayerController,
 	const FFortItemEntry& Entry)
 {
@@ -8365,7 +8658,7 @@ static bool ActivateLegacyEditingRestoreSlot(
 	return false;
 }
 
-static void RefreshEditingRestoreOnClient(
+static void RefreshInventoryRestoreOnClient(
 	AFortPlayerControllerAthena* PlayerController,
 	const FFortItemEntry& Entry)
 {
@@ -8393,7 +8686,7 @@ static void RefreshEditingRestoreOnClient(
 		return;
 	}
 
-	ActivateLegacyEditingRestoreSlot(
+	ActivateLegacyInventoryRestoreSlot(
 		PlayerController, Entry);
 }
 
@@ -8502,13 +8795,28 @@ static bool IsTrackedVehicleLandingItem(
 			ItemGuid);
 }
 
+static bool IsRestorableLandingItem(
+	const FFortItemEntry* Entry)
+{
+	if (!Entry || !IsUsableDeathObject(Entry->ItemDefinition) ||
+		!Entry->ItemDefinition->IsA<UFortWeaponItemDefinition>())
+	{
+		return false;
+	}
+
+	auto EditToolDefinitionClass =
+		UFortEditToolItemDefinition::StaticClass();
+	return !EditToolDefinitionClass ||
+		!Entry->ItemDefinition->IsA(EditToolDefinitionClass);
+}
+
 static FFortItemEntry* FindLandingItemRestoreEntry(
 	AFortPlayerControllerAthena* PlayerController,
 	const FGuid& ItemGuid)
 {
 	auto Entry = FindLandingInventoryEntry(
 		PlayerController, ItemGuid);
-	if (!IsRestorableAfterEditing(Entry) ||
+	if (!IsRestorableLandingItem(Entry) ||
 		Entry->ItemDefinition->Cast<UFortGadgetItemDefinition>())
 	{
 		return nullptr;
@@ -9063,7 +9371,7 @@ static bool RestoreLandingItemSelection(
 		}
 		else if (bLegacyQuickbarOwnsTransition)
 		{
-			ActivateLegacyEditingRestoreSlot(
+			ActivateLegacyInventoryRestoreSlot(
 				PlayerController, *Entry);
 		}
 		else
@@ -9137,7 +9445,7 @@ static bool RestoreLandingItemSelection(
 	if (VersionInfo.FortniteVersion > 3.0 ||
 		UsesLegacyThreeParameterInventoryClientRefresh())
 	{
-		RefreshEditingRestoreOnClient(PlayerController, *Entry);
+		RefreshInventoryRestoreOnClient(PlayerController, *Entry);
 	}
 	if (CurrentWeapon)
 	{
@@ -9277,327 +9585,29 @@ static void TickLandingItemSelectionRestores()
 	}
 }
 
-static bool RestoreInactiveEditingTool(
-	AFortPlayerControllerAthena* PlayerController)
-{
-	if (!PlayerController || !PlayerController->WorldInventory ||
-		!IsUsableDeathObject(PlayerController->MyFortPawn) ||
-		HasCurrentActiveEditingTarget(PlayerController))
-	{
-		return false;
-	}
-
-	auto Pawn = PlayerController->MyFortPawn;
-	if (!Pawn->HasCurrentWeapon() ||
-		!IsUsableDeathObject(Pawn->CurrentWeapon) ||
-		!Pawn->CurrentWeapon->IsA<AFortWeap_EditingTool>())
-	{
-		return false;
-	}
-
-	ClearEditingToolActor(PlayerController, nullptr);
-	auto StateIt =
-		GEditingToolRestoreStates.find(PlayerController);
-	FFortItemEntry* RestoreEntry = nullptr;
-	if (StateIt != GEditingToolRestoreStates.end() &&
-		StateIt->second.bHasRestoreItem)
-	{
-		RestoreEntry = FindEditingRestoreEntry(
-			PlayerController,
-			StateIt->second.RestoreItemGuid);
-	}
-
-	if (!RestoreEntry)
-	{
-		RestoreEntry = FindLastEditingWeaponSelection(
-			PlayerController, Pawn);
-	}
-
-	if (!RestoreEntry && Pawn->HasPreviousWeapon())
-	{
-		auto PreviousWeapon = IsUsableDeathObject(Pawn->PreviousWeapon)
-			? Pawn->PreviousWeapon->Cast<AFortWeapon>() : nullptr;
-		if (PreviousWeapon &&
-			!PreviousWeapon->IsA<AFortWeap_EditingTool>())
-		{
-			RestoreEntry = FindEditingRestoreEntry(
-				PlayerController,
-				PreviousWeapon->ItemEntryGuid);
-		}
-	}
-	if (!RestoreEntry)
-		RestoreEntry =
-			FindHarvestingToolEntry(
-				PlayerController->WorldInventory);
-	if (!IsRestorableAfterEditing(RestoreEntry))
-		return false;
-
-	PlayerController->ServerExecuteInventoryItem(
-		RestoreEntry->ItemGuid);
-	RefreshEditingRestoreOnClient(
-		PlayerController, *RestoreEntry);
-	Pawn->ForceNetUpdate();
-	PlayerController->ForceNetUpdate();
-	return true;
-}
-
-void AFortPlayerControllerAthena::TickEditingToolStateRepair(
-	UNetDriver* Driver)
-{
-	auto World = UWorld::GetWorld();
-	if (!World)
-	{
-		GEditingToolRestoreStates.clear();
-		GLastEditingWeaponSelections.clear();
-		GEditingToolRestoreWorld = nullptr;
-		return;
-	}
-	if (Driver != World->NetDriver)
-		return;
-
-	if (GEditingToolRestoreWorld != World)
-	{
-		GEditingToolRestoreStates.clear();
-		GLastEditingWeaponSelections.clear();
-		GEditingToolRestoreWorld = World;
-	}
-
-	std::unordered_set<AFortPlayerControllerAthena*>
-		ConnectedControllers;
-	for (int32 Index = 0;
-		Index < Driver->ClientConnections.Num(); Index++)
-	{
-		auto Connection = Driver->ClientConnections[Index];
-		auto PlayerController =
-			Connection && Connection->PlayerController
-			? Connection->PlayerController
-				->Cast<AFortPlayerControllerAthena>()
-			: nullptr;
-		if (!IsUsableDeathObject(PlayerController))
-			continue;
-
-		ConnectedControllers.insert(PlayerController);
-		auto Pawn = PlayerController->MyFortPawn;
-		auto StateIt = GEditingToolRestoreStates.find(
-			PlayerController);
-		if (!IsUsableDeathObject(Pawn) ||
-			(IsUsableDeathObject(PlayerController->Pawn) &&
-				PlayerController->Pawn != Pawn) ||
-			Pawn->GetHealth() <= 0.f)
-		{
-			GEditingToolRestoreStates.erase(
-				PlayerController);
-			GLastEditingWeaponSelections.erase(
-				PlayerController);
-			continue;
-		}
-
-		auto EditTool =
-			GetCurrentEditingTool(PlayerController);
-		if (StateIt != GEditingToolRestoreStates.end() &&
-			StateIt->second.bAwaitingEditTool)
-		{
-			auto& PendingState = StateIt->second;
-			auto PendingBuilding =
-				GetActiveEditingSessionBuilding(PendingState);
-			const bool bCanFinishBegin =
-				EditTool && EditTool->HasEditActor() &&
-				IsUsableDeathObject(PendingBuilding) &&
-				PendingBuilding->EditingPlayer ==
-					PlayerController->PlayerState;
-			if (bCanFinishBegin)
-			{
-				SetEditingToolActor(
-					EditTool, PendingBuilding);
-				PendingState.ObservedTool =
-					TWeakObjectPtr<AFortWeap_EditingTool>(
-						EditTool);
-				PendingState.bAwaitingEditTool = false;
-				PendingState.AwaitingToolTicks = 0;
-				PendingState.InactiveTicks = 0;
-				PendingState.RepairAttempts = 0;
-			}
-			else if (++PendingState.AwaitingToolTicks < 3)
-			{
-				continue;
-			}
-			else
-			{
-				if (IsUsableDeathObject(PendingBuilding) &&
-					PendingBuilding->EditingPlayer ==
-						PlayerController->PlayerState)
-				{
-					SetEditingPlayer(
-						PendingBuilding, nullptr);
-				}
-				IsCurrentEditingSessionRpc(
-					PlayerController, PendingBuilding,
-					true, false);
-				PendingState.bAwaitingEditTool = false;
-			}
-		}
-
-		if (!EditTool)
-		{
-			if (auto CurrentWeapon =
-					GetPawnCurrentWeaponSafe(Pawn))
-			{
-				RememberLastEditingWeaponSelection(
-					PlayerController, Pawn,
-					CurrentWeapon->ItemEntryGuid);
-			}
-
-			// A weapon swap is also an edit exit. Remove any orphaned edit-tool
-			// target left in the pawn's weapon list before forgetting the session.
-			ClearNonCurrentEditingTools(
-				PlayerController, nullptr);
-			GEditingToolRestoreStates.erase(
-				PlayerController);
-			continue;
-		}
-
-		StateIt = GEditingToolRestoreStates.find(
-			PlayerController);
-		if (StateIt == GEditingToolRestoreStates.end() ||
-			StateIt->second.Pawn.Get() != Pawn)
-		{
-			BeginEditingToolRestoreSession(
-				PlayerController, Pawn);
-			StateIt = GEditingToolRestoreStates.find(
-				PlayerController);
-		}
-		if (StateIt == GEditingToolRestoreStates.end())
-			continue;
-
-		auto& State = StateIt->second;
-		if (State.ObservedTool.Get() != EditTool)
-		{
-			State.ObservedTool =
-				TWeakObjectPtr<AFortWeap_EditingTool>(EditTool);
-			State.InactiveTicks = 0;
-			State.RepairAttempts = 0;
-		}
-
-		ClearNonCurrentEditingTools(
-			PlayerController, EditTool);
-		if (HasCurrentActiveEditingTarget(PlayerController))
-		{
-			State.InactiveTicks = 0;
-			State.RepairAttempts = 0;
-			continue;
-		}
-
-		// Wait for two fully settled server ticks. A newer Begin RPC received in
-		// the same burst re-establishes an authoritative target and cancels this
-		// repair before it can unequip that newer session.
-		State.InactiveTicks++;
-		if (State.InactiveTicks < 2 ||
-			State.RepairAttempts >= 5 ||
-			((State.InactiveTicks - 2) % 3) != 0)
-		{
-			continue;
-		}
-
-		State.RepairAttempts++;
-		const bool bRestored =
-			RestoreInactiveEditingTool(PlayerController);
-		SDK::DbgLog(
-			"[EditRepair] controller=%p pawn=%p tool=%p "
-			"generation=%llu attempt=%d restored=%d\n",
-			(void*)PlayerController, (void*)Pawn,
-			(void*)EditTool,
-			(unsigned long long)State.Generation,
-			State.RepairAttempts, bRestored ? 1 : 0);
-	}
-
-	for (auto It = GEditingToolRestoreStates.begin();
-		It != GEditingToolRestoreStates.end();)
-	{
-		if (ConnectedControllers.find(It->first) ==
-			ConnectedControllers.end())
-		{
-			It = GEditingToolRestoreStates.erase(It);
-		}
-		else
-		{
-			++It;
-		}
-	}
-
-	for (auto It = GLastEditingWeaponSelections.begin();
-		It != GLastEditingWeaponSelections.end();)
-	{
-		if (ConnectedControllers.find(It->first) ==
-			ConnectedControllers.end())
-		{
-			It = GLastEditingWeaponSelections.erase(It);
-		}
-		else
-		{
-			++It;
-		}
-	}
-}
-
 void AFortPlayerControllerAthena::ServerBeginEditingBuildingActor(UObject* Context, FFrame& Stack)
 {
-	ABuildingSMActor* Building = nullptr;
+	ABuildingSMActor* Building;
 	Stack.StepCompiledIn(&Building);
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
-	if (!PlayerController ||
-		!IsUsableDeathObject(PlayerController->MyFortPawn) ||
-		!PlayerController->WorldInventory ||
-		!IsUsableDeathObject(Building) ||
-		!Building->IsA<ABuildingSMActor>())
+	if (!PlayerController || !PlayerController->MyFortPawn || !Building->IsA<ABuildingSMActor>() /* || Building->Team != static_cast<AFortPlayerStateAthena*>(PlayerController->PlayerState)->TeamIndex*/)
 		return;
 
 	AFortPlayerStateAthena* PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
-	if (!IsUsableDeathObject(PlayerState))
+	if (!PlayerState)
 		return;
 
 	SetEditingPlayer(Building, PlayerState);
-	if (Building->EditingPlayer != PlayerState)
-		return;
 
-	auto Pawn = PlayerController->MyFortPawn;
-	auto SupersededBuilding = BeginEditingToolRestoreSession(
-		PlayerController, Pawn, Building);
-	if (SupersededBuilding && SupersededBuilding != Building)
-	{
-		if (IsUsableDeathObject(SupersededBuilding) &&
-			SupersededBuilding->EditingPlayer == PlayerState)
-		{
-			SetEditingPlayer(SupersededBuilding, nullptr);
-		}
-		ClearEditingToolActor(
-			PlayerController, SupersededBuilding);
-	}
-	AFortWeap_EditingTool* EditTool = nullptr;
-	if (Pawn->HasCurrentWeapon() &&
-		IsUsableDeathObject(Pawn->CurrentWeapon) &&
-		Pawn->CurrentWeapon->IsA<AFortWeap_EditingTool>())
-	{
-		EditTool =
-			Pawn->CurrentWeapon
-				->Cast<AFortWeap_EditingTool>();
-	}
-
-	if (!EditTool)
+	if (!PlayerController->MyFortPawn->CurrentWeapon->IsA<AFortWeap_EditingTool>())
 	{
 		auto EditToolEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
 			{
-				return entry.ItemDefinition &&
-					entry.ItemDefinition->IsA<
-						UFortEditToolItemDefinition>();
+				return entry.ItemDefinition->Class == UFortEditToolItemDefinition::StaticClass();
 			}, FFortItemEntry::Size());
-		if (!EditToolEntry)
-		{
-			SetEditingPlayer(Building, nullptr);
-			return;
-		}
 
-		auto EditWeapon = (AFortWeapon*)Pawn->EquipWeaponDefinition(
+		auto EditWeapon = (AFortWeapon*)PlayerController->MyFortPawn->EquipWeaponDefinition(
 			(UFortWeaponItemDefinition*)EditToolEntry->ItemDefinition,
 			EditToolEntry->ItemGuid,
 			EditToolEntry->HasTrackerGuid() ? EditToolEntry->TrackerGuid : FGuid(),
@@ -9605,47 +9615,12 @@ void AFortPlayerControllerAthena::ServerBeginEditingBuildingActor(UObject* Conte
 		if (EditWeapon)
 			FFortWeaponMods::ApplyEntrySlotsAfterEquip(
 				EditWeapon, *EditToolEntry);
-
-		// EquipWeaponDefinition can return a replacement actor before the pawn's
-		// authoritative CurrentWeapon has settled. Never attach an edit target to
-		// that non-current actor; the game-thread repair will finish the handoff.
-		if (Pawn->HasCurrentWeapon() &&
-			IsUsableDeathObject(Pawn->CurrentWeapon) &&
-			Pawn->CurrentWeapon
-				->IsA<AFortWeap_EditingTool>())
-		{
-			EditTool =
-				Pawn->CurrentWeapon
-					->Cast<AFortWeap_EditingTool>();
-		}
 	}
 
-	if (!EditTool || !EditTool->HasEditActor())
+	if (auto EditTool = PlayerController->MyFortPawn->CurrentWeapon->Cast<AFortWeap_EditingTool>())
 	{
-		auto RestoreState =
-			GEditingToolRestoreStates.find(PlayerController);
-		if (RestoreState != GEditingToolRestoreStates.end())
-		{
-			RestoreState->second.bAwaitingEditTool = true;
-			RestoreState->second.AwaitingToolTicks = 0;
-		}
-		else
-		{
-			SetEditingPlayer(Building, nullptr);
-		}
-		return;
-	}
-
-	SetEditingToolActor(EditTool, Building);
-	auto RestoreState =
-		GEditingToolRestoreStates.find(PlayerController);
-	if (RestoreState != GEditingToolRestoreStates.end())
-	{
-		RestoreState->second.ObservedTool =
-			TWeakObjectPtr<AFortWeap_EditingTool>(EditTool);
-		RestoreState->second.InactiveTicks = 0;
-		RestoreState->second.RepairAttempts = 0;
-		RestoreState->second.bAwaitingEditTool = false;
+		EditTool->EditActor = Building;
+		EditTool->OnRep_EditActor();
 	}
 }
 
@@ -9654,10 +9629,10 @@ uint64_t InitializeBuildingActor_ = 0;
 uint64_t PostInitializeSpawnedBuildingActor_ = 0;
 void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFrame& Stack)
 {
-	ABuildingSMActor* Building = nullptr;
-	TSubclassOf<AActor> NewClass{};
-	uint8 RotationIterations = 0;
-	bool bMirrored = false;
+	ABuildingSMActor* Building;
+	TSubclassOf<AActor> NewClass;
+	uint8 RotationIterations;
+	bool bMirrored;
 	Stack.StepCompiledIn(&Building);
 	Stack.StepCompiledIn(&NewClass);
 	Stack.StepCompiledIn(&RotationIterations);
@@ -9665,98 +9640,22 @@ void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFra
 	Stack.IncrementCode();
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
 
-	if (!PlayerController)
-		return;
-	ABuildingSMActor* SessionBuilding = nullptr;
-	if (!IsCurrentEditingSessionRpc(
-			PlayerController, Building,
-			false, false, &SessionBuilding))
+	if (!PlayerController || !Building || !NewClass || !Building->IsA<ABuildingSMActor>() || !CanBePlacedByPlayer(NewClass) || Building->EditingPlayer != PlayerController->PlayerState || Building->bDestroyed)
 	{
-		IsCurrentEditingSessionRpc(
-			PlayerController, Building,
-			true, false);
 		return;
-	}
-	if (!Building)
-	{
-		Building = SessionBuilding;
-		if (!Building)
-		{
-			auto CurrentEditTool =
-				GetCurrentEditingTool(PlayerController);
-			if (CurrentEditTool && CurrentEditTool->HasEditActor())
-				Building = CurrentEditTool->EditActor;
-		}
 	}
 
-	const bool bValidActiveBuilding =
-		IsUsableDeathObject(Building) &&
-		Building->IsA<ABuildingSMActor>() &&
-		!Building->bDestroyed &&
-		Building->EditingPlayer ==
-			PlayerController->PlayerState;
-	if (!bValidActiveBuilding)
-	{
-		IsCurrentEditingSessionRpc(
-			PlayerController, Building,
-			true, false);
-		// A reset/confirm can race the old actor's replacement. Clear only a
-		// tool which still targets that exact actor; a newer edit is untouched.
-		ClearEditingToolActor(
-			PlayerController, Building);
-		return;
-	}
-	if (!NewClass || !CanBePlacedByPlayer(NewClass))
-		return;
-	IsCurrentEditingSessionRpc(
-		PlayerController, Building,
-		true, false);
-
-	// Modern ReplaceBuildingActor consumes the active editing relationship
-	// while handing the old actor's structural-grid entry to its replacement.
-	// Early builds expected the caller to clear it first; keep that legacy
-	// ordering only where it is required.
-	const bool bPreserveEditRelationshipDuringReplacement =
-		VersionInfo.FortniteVersion >= 11.0;
-	if (!bPreserveEditRelationshipDuringReplacement)
-	{
-		SetEditingPlayer(Building, nullptr);
-		ClearEditingToolActor(PlayerController, Building);
-	}
-	if (!ReplaceBuildingActor_)
-	{
-		if (bPreserveEditRelationshipDuringReplacement)
-		{
-			SetEditingPlayer(Building, nullptr);
-			ClearEditingToolActor(PlayerController, Building);
-		}
-		return;
-	}
+	SetEditingPlayer(Building, nullptr);
 
 	auto ReplaceBuildingActor = (ABuildingSMActor * (*&)(ABuildingSMActor*, unsigned int, TSubclassOf<AActor>, unsigned int, int, bool, AFortPlayerControllerAthena*)) ReplaceBuildingActor_;
 	auto ReplaceBuildingActor__New = (ABuildingSMActor * (*&)(ABuildingSMActor*, unsigned int, TSubclassOf<AActor>&, unsigned int, int, bool, AFortPlayerControllerAthena*)) ReplaceBuildingActor_;
 
-	ABuildingSMActor* NewBuild = nullptr;
+	ABuildingSMActor* NewBuild;
 
 	if (VersionInfo.FortniteVersion < 27)
 		NewBuild = ReplaceBuildingActor(Building, 1, NewClass, Building->CurrentBuildingLevel, RotationIterations, bMirrored, PlayerController);
 	else
 		NewBuild = ReplaceBuildingActor__New(Building, 1, NewClass, Building->CurrentBuildingLevel, RotationIterations, bMirrored, PlayerController);
-
-	if (bPreserveEditRelationshipDuringReplacement)
-	{
-		if (NewBuild &&
-			NewBuild->EditingPlayer == PlayerController->PlayerState)
-		{
-			SetEditingPlayer(NewBuild, nullptr);
-		}
-		else if (IsUsableDeathObject(Building) &&
-			Building->EditingPlayer == PlayerController->PlayerState)
-		{
-			SetEditingPlayer(Building, nullptr);
-		}
-		ClearEditingToolActor(PlayerController, Building);
-	}
 
 	/*else
 	{
@@ -9793,45 +9692,35 @@ void AFortPlayerControllerAthena::ServerEditBuildingActor(UObject* Context, FFra
 
 void AFortPlayerControllerAthena::ServerEndEditingBuildingActor(UObject* Context, FFrame& Stack)
 {
-	ABuildingSMActor* Building = nullptr;
+	ABuildingSMActor* Building;
 	Stack.StepCompiledIn(&Building);
 	Stack.IncrementCode();
 
 	auto PlayerController = (AFortPlayerControllerAthena*)Context;
-	if (!PlayerController ||
-		!IsUsableDeathObject(PlayerController->MyFortPawn))
+	if (!PlayerController || !PlayerController->MyFortPawn || !Building || !Building->IsA<ABuildingSMActor>() || Building->EditingPlayer != PlayerController->PlayerState/* || Building->Team != static_cast<AFortPlayerStateAthena*>(PlayerController->PlayerState)->TeamIndex*/ || Building->bDestroyed)
 		return;
-	ABuildingSMActor* SessionBuilding = nullptr;
-	if (!IsCurrentEditingSessionRpc(
-			PlayerController, Building,
-			true, true, &SessionBuilding))
+
+	SetEditingPlayer(Building, nullptr);
+
+	auto EditToolEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& entry)
 	{
+			return entry.ItemDefinition->Class == UFortEditToolItemDefinition::StaticClass();
+		}, FFortItemEntry::Size());
+
+	if (!EditToolEntry)
 		return;
-	}
-	if (!Building)
-	{
-		Building = SessionBuilding;
-		if (!Building)
-		{
-			auto CurrentEditTool =
-				GetCurrentEditingTool(PlayerController);
-			if (CurrentEditTool && CurrentEditTool->HasEditActor())
-				Building = CurrentEditTool->EditActor;
-		}
-	}
 
-	if (IsUsableDeathObject(Building) &&
-		Building->IsA<ABuildingSMActor>() &&
-		Building->EditingPlayer ==
-			PlayerController->PlayerState)
-	{
-		SetEditingPlayer(Building, nullptr);
-	}
+	auto EditToolPtr = PlayerController->Pawn->CurrentWeaponList.Search([&](AActor* Weapon__Uncasted)
+		{ return ((AFortWeapon*)Weapon__Uncasted)->ItemEntryGuid == EditToolEntry->ItemGuid; });
 
-	// Cleanup cannot depend on the old actor still being alive or still naming
-	// this player. Successful edits intentionally invalidate both conditions.
-	ClearEditingToolActor(
-		PlayerController, Building);
+	if (!EditToolPtr)
+		return;
+
+	if (auto EditTool = *(AFortWeap_EditingTool**)EditToolPtr)
+	{
+		EditTool->EditActor = nullptr;
+		EditTool->OnRep_EditActor();
+	}
 }
 
 
@@ -15235,11 +15124,20 @@ static bool ApplyLegacyDirectRespawnLifecycleFallback(
 	NormalizeLegacyRespawnControllerState(
 		PlayerController, Pawn);
 
+	bool bTacticalSprintRestored = false;
 	EnsurePawnGameplayAbilitiesInitialized(
-		PlayerController, Pawn);
+		PlayerController, Pawn,
+		&bTacticalSprintRestored);
 	if (CanRebindDefaultPlayerJumpAbility())
 	{
 		RebindDefaultPlayerJumpAbilityForRespawn(
+			PlayerController, Pawn);
+	}
+	RebindDefaultPlayerSprintAbilityForRespawn(
+		PlayerController, Pawn);
+	if (!bTacticalSprintRestored)
+	{
+		RebindTacticalSprintSetAbilityForRespawn(
 			PlayerController, Pawn);
 	}
 	ClearRespawnBlockingAbilityState(
@@ -19110,6 +19008,13 @@ static void ApplyWaypointTeleportEffects(
 			std::memory_order_acquire))
 	{
 		AFortInventory::ReloadAllWeaponAmmo(PlayerController);
+	}
+
+	if (VersionInfo.FortniteVersion >= 6.01 &&
+		FConfiguration::bRemoveIceOnWaypointTP.load(
+			std::memory_order_acquire))
+	{
+		RemoveIceGameplayEffect(PlayerController);
 	}
 }
 
@@ -23326,6 +23231,7 @@ void AFortPlayerControllerAthena::TickNukeRockets(float DeltaSeconds)
 	TickSpawnedBotMapIconBackfill();
 	TickTrackedSpawnedBotStormSuppression(DeltaSeconds);
 	TickSpawnedBotEquipmentAfterCosmetics();
+	TickPendingTacticalSprintSpecGrants();
 	TickPendingRespawnJumpRebinds();
 	TickPendingReviveVerifications();
 	TickForcedRespawnRepairs(DeltaSeconds);
@@ -24339,6 +24245,7 @@ cheat sethealth <amount> - Sets your pawn's health (0-100)
 cheat setshield <amount> - Sets your pawn's shield (0-100)
 cheat setmaxhealth <amount> - Sets your pawn's maximum health
 cheat setmaxshield <amount> - Sets your pawn's maximum shield
+cheat ice [player name] - Toggles icy feet for you or a selected player (6.01+)
 cheat regen - Regenerates health and shield to the maximum value
 cheat regenall - Regenerates health and shield for all players
 cheat setkills - Sets your kill count
@@ -25501,6 +25408,122 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 
 				Pawn->SetMaxShield(Shield);
 				PlayerController->ClientMessage(FString(L"Set pawn's max shield!"), FName(), 1.f);
+			}
+			else if (command == "ice")
+			{
+				if (VersionInfo.FortniteVersion < 6.01)
+				{
+					PlayerController->ClientMessage(
+						FString(L"Ice commands require Fortnite 6.01 or newer."),
+						FName(), 1.f);
+					return;
+				}
+
+				auto TargetController = PlayerController;
+				std::string MatchedName;
+				const auto CommandEnd = originalCommand.find_first_of(" \t");
+				const auto TargetName = CommandEnd == std::string::npos
+					? std::string()
+					: TrimPlayerCommandString(
+						originalCommand.substr(CommandEnd + 1).c_str());
+
+				if (!TargetName.empty())
+				{
+					bool bAmbiguous = false;
+					TargetController = FindPlayerByNameSubstringForCommand(
+						GameMode,
+						TargetName,
+						PlayerController,
+						MatchedName,
+						bAmbiguous,
+						true);
+
+					if (!TargetController)
+					{
+						PlayerController->ClientMessage(
+							FString(bAmbiguous
+								? L"Multiple players match that name. Be more specific."
+								: L"Could not find a player matching that name."),
+							FName(), 1.f);
+						return;
+					}
+				}
+
+				auto AbilitySystemComponent =
+					GetIceGameplayEffectAbilitySystem(TargetController);
+				if (!AbilitySystemComponent)
+				{
+					PlayerController->ClientMessage(
+						FString(L"That player has no available Ability System Component."),
+						FName(), 1.f);
+					return;
+				}
+
+				std::vector<FActiveGameplayEffectHandle> IceHandles;
+				if (!CollectIceGameplayEffectHandles(
+						AbilitySystemComponent,
+						GetIceGameplayEffectClass(),
+						IceHandles))
+				{
+					PlayerController->ClientMessage(
+						FString(L"The active ice state could not be inspected on this build."),
+						FName(), 1.f);
+					return;
+				}
+
+				std::wstring Message;
+				if (IceHandles.empty())
+				{
+					const auto ApplyResult =
+						ApplyIceGameplayEffect(TargetController);
+					switch (ApplyResult)
+					{
+					case EIceGameplayEffectApplyResult::Applied:
+						Message = TargetController == PlayerController
+							? L"Enabled ice for your player!"
+							: L"Enabled ice for " +
+								std::wstring(MatchedName.begin(), MatchedName.end()) +
+								L"!";
+						break;
+					case EIceGameplayEffectApplyResult::AlreadyActive:
+						Message = L"Ice became active before it could be toggled.";
+						break;
+					case EIceGameplayEffectApplyResult::EffectUnavailable:
+						Message = L"The ice Gameplay Effect is unavailable in this build.";
+						break;
+					default:
+						Message = L"The Ability System rejected the ice Gameplay Effect.";
+						break;
+					}
+				}
+				else
+				{
+					const auto RemovalResult =
+						RemoveIceGameplayEffect(TargetController);
+					if (!RemovalResult.bInspectionAvailable)
+					{
+						Message = L"The active ice state could not be inspected on this build.";
+					}
+					else if (!RemovalResult.bRemovalApiAvailable)
+					{
+						Message = L"Ice removal is unavailable on this build.";
+					}
+					else if (RemovalResult.RemainingEffectCount == 0)
+					{
+						Message = TargetController == PlayerController
+							? L"Disabled ice for your player!"
+							: L"Disabled ice for " +
+								std::wstring(MatchedName.begin(), MatchedName.end()) +
+								L"!";
+					}
+					else
+					{
+						Message = L"The active ice effect could not be removed.";
+					}
+				}
+
+				PlayerController->ClientMessage(
+					FString(Message.c_str()), FName(), 1.f);
 			}
 			else if (command == "effect")
 			{

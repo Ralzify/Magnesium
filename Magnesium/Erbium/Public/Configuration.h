@@ -177,6 +177,7 @@ struct FConfiguration
     static inline std::atomic_bool RandomizeArenaPoints{ false };
     static inline std::atomic_bool bPlayerMapIcons{ false };
     static inline std::atomic_bool bAutoReloadOnWaypointTP{ false };
+    static inline std::atomic_bool bRemoveIceOnWaypointTP{ false };
     // Auto god mode hands out the "god" command's protection the moment a
     // player leaves the bus, so a trickshot run never has to be typed for.
     // Maximum pins the health floor to max health - nothing lands at all;
@@ -223,6 +224,7 @@ struct FConfiguration
         RandomizeArenaPoints.store(false, std::memory_order_release);
         bPlayerMapIcons.store(false, std::memory_order_release);
         bAutoReloadOnWaypointTP.store(false, std::memory_order_release);
+        bRemoveIceOnWaypointTP.store(false, std::memory_order_release);
         bAutoGodMode.store(false, std::memory_order_release);
         AutoGodModeType.store(
             (int)EAutoGodMode::Maximum,

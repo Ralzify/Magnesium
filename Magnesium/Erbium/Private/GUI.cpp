@@ -5402,6 +5402,9 @@ static void ApplyInitialTrickshotDefaults()
         true, std::memory_order_release);
     FConfiguration::bAutoReloadOnWaypointTP.store(
         true, std::memory_order_release);
+    FConfiguration::bRemoveIceOnWaypointTP.store(
+        VersionInfo.FortniteVersion >= 6.01,
+        std::memory_order_release);
     FConfiguration::bAutoPauseTODM.store(
         false, std::memory_order_release);
 
@@ -13029,6 +13032,13 @@ void GUI::Init()
             AtomicCheckbox(
                 "Auto Reload on Waypoint TP",
                 FConfiguration::bAutoReloadOnWaypointTP);
+
+            if (VersionInfo.FortniteVersion >= 6.01)
+            {
+                AtomicCheckbox(
+                    "Remove Ice on Waypoint TP",
+                    FConfiguration::bRemoveIceOnWaypointTP);
+            }
 
             AtomicCheckbox(
                 "Auto God Mode",

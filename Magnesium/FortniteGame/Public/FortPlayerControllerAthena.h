@@ -585,7 +585,6 @@ public:
     static void ServerBeginEditingBuildingActor(UObject*, FFrame&);
     static void ServerEditBuildingActor(UObject*, FFrame&);
     static void ServerEndEditingBuildingActor(UObject*, FFrame&);
-    static void TickEditingToolStateRepair(UNetDriver* Driver);
     static void ServerRepairBuildingActor(UObject*, FFrame&);
     static void ServerAttemptInventoryDrop(UObject*, FFrame&);
     static void ServerPlayEmoteItem_(UObject*, FFrame&);

@@ -59,6 +59,7 @@ public:
     static inline uint8_t CurrentTeam = 3;
     static inline uint8_t PlayersOnCurTeam = 0;
     static inline TArray<const UFortAbilitySet*> AbilitySets;
+    static inline const UFortAbilitySet* TacticalSprintAbilitySet = nullptr;
     static inline FVector SafeZoneLoc{};
 
     UCLASS_COMMON_MEMBERS(AFortGameMode);

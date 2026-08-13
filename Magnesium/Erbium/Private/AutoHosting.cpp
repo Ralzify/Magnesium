@@ -344,6 +344,7 @@ namespace AutoHosting
                 { "randomize_arena_points", FConfiguration::RandomizeArenaPoints.load(std::memory_order_acquire) },
                 { "player_map_icons", FConfiguration::bPlayerMapIcons.load(std::memory_order_acquire) },
                 { "auto_reload_on_waypoint_tp", FConfiguration::bAutoReloadOnWaypointTP.load(std::memory_order_acquire) },
+                { "remove_ice_on_waypoint_tp", FConfiguration::bRemoveIceOnWaypointTP.load(std::memory_order_acquire) },
                 { "auto_god_mode", FConfiguration::bAutoGodMode.load(std::memory_order_acquire) },
                 { "auto_god_mode_type", FConfiguration::AutoGodModeType.load(std::memory_order_acquire) },
                 { "auto_god_mode_exclude_last_player", FConfiguration::bAutoGodModeExcludeLastPlayer.load(std::memory_order_acquire) },
@@ -502,6 +503,9 @@ namespace AutoHosting
                     std::memory_order_acquire);
             Trickshot["auto_reload_on_waypoint_tp"] =
                 FConfiguration::bAutoReloadOnWaypointTP.load(
+                    std::memory_order_acquire);
+            Trickshot["remove_ice_on_waypoint_tp"] =
+                FConfiguration::bRemoveIceOnWaypointTP.load(
                     std::memory_order_acquire);
             Trickshot["auto_god_mode"] =
                 FConfiguration::bAutoGodMode.load(
@@ -1045,6 +1049,14 @@ namespace AutoHosting
                     "auto_reload_on_waypoint_tp",
                     FConfiguration::bEnableTrickshotTab.load(
                         std::memory_order_acquire)),
+                std::memory_order_release);
+            FConfiguration::bRemoveIceOnWaypointTP.store(
+                VersionInfo.FortniteVersion >= 6.01 &&
+                    ReadBool(
+                        Trickshot,
+                        "remove_ice_on_waypoint_tp",
+                        FConfiguration::bEnableTrickshotTab.load(
+                            std::memory_order_acquire)),
                 std::memory_order_release);
             FConfiguration::bAutoGodMode.store(
                 ReadBool(

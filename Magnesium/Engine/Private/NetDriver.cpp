@@ -158,6 +158,19 @@ namespace
 		GCustomCadenceStates;
 	std::atomic<UNetDriver*> GValidatedLoopbackDriver{ nullptr };
 	std::atomic_bool GLoopbackFastFlushPolicyActive{ false };
+
+	constexpr bool SupportsLoopbackFastFlush(bool bUsesIris) noexcept
+	{
+		// Iris native TickFlush consumes state prepared by the explicit view and
+		// PreSendUpdate pass below. It cannot safely run on a native-only frame.
+		return !bUsesIris;
+	}
+
+	static_assert(!SupportsLoopbackFastFlush(true),
+		"Iris requires explicit replication preparation before every native flush");
+	static_assert(SupportsLoopbackFastFlush(false),
+		"The generic replication path supports native-only loopback flush frames");
+
 	UNetDriver* GLoopbackScanDriver = nullptr;
 	FReplicationObjectSnapshot GLoopbackScanDriverSnapshot;
 	std::unordered_map<
@@ -2350,7 +2363,6 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 
 	// Finalize invalid health states after every custom gameplay producer and
 	// immediately before this path's replication send.
-	AFortPlayerControllerAthena::TickEditingToolStateRepair(Driver);
 	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ClientConnections.Num() > 0)
 	{
@@ -2499,7 +2511,6 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 
 	// Finalize invalid health states after every custom gameplay producer and
 	// immediately before this path's replication send.
-	AFortPlayerControllerAthena::TickEditingToolStateRepair(Driver);
 	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ReplicationDriver)
 	{
@@ -2655,17 +2666,8 @@ volatile long g_tickFlushCounter = 0;
 
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
-	RefreshValidatedLoopbackState(Driver);
 	const float NativeDeltaSeconds = DeltaSeconds;
-	float CustomDeltaSeconds = DeltaSeconds;
 	_InterlockedIncrement(&g_tickFlushCounter);
-	if (!ShouldRunCustomCadenceFrame(
-			Driver, DeltaSeconds, CustomDeltaSeconds))
-	{
-		TickFlushOG(Driver, NativeDeltaSeconds);
-		return;
-	}
-	DeltaSeconds = CustomDeltaSeconds;
 
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
 	GUI::PlayerNamesGameTick();
@@ -2728,7 +2730,6 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 
 	// Finalize invalid health states after every custom gameplay producer and
 	// immediately before Iris builds its outgoing replication batch.
-	AFortPlayerControllerAthena::TickEditingToolStateRepair(Driver);
 	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ClientConnections.Num() > 0)
 	{
@@ -2989,13 +2990,18 @@ void UNetDriver::PostLoadHook()
 	{
 		if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
 		{
+			constexpr bool bEnableLoopbackFastFlush =
+				SupportsLoopbackFastFlush(true);
 			GLoopbackFastFlushPolicyActive.store(
-				true, std::memory_order_release);
+				bEnableLoopbackFastFlush, std::memory_order_release);
+			GValidatedLoopbackDriver.store(
+				nullptr, std::memory_order_release);
 			SDK::DbgLog(
 				"[ReplicationPolicy] version=%.2f model=Iris "
-				"explicitSend=%d nativeSend=1\n",
+				"explicitSend=%d nativeSend=1 fastFlush=%d\n",
 				VersionInfo.FortniteVersion,
-				1);
+				1,
+				bEnableLoopbackFastFlush ? 1 : 0);
 			FindSendClientAdjustment();
 			FindUpdateIrisReplicationViews();
 			FindPreSendUpdate();
@@ -3025,13 +3031,16 @@ void UNetDriver::PostLoadHook()
 
 		GetActorLocation = (void(*)(AActor*, FFrame&, FVector*))AActor::GetDefaultObj()->GetFunction("K2_GetActorLocation")->GetNativeFunc();
 
+		constexpr bool bEnableLoopbackFastFlush =
+			SupportsLoopbackFastFlush(false);
 		GLoopbackFastFlushPolicyActive.store(
-			true, std::memory_order_release);
+			bEnableLoopbackFastFlush, std::memory_order_release);
 		SDK::DbgLog(
 			"[ReplicationPolicy] version=%.2f model=Generic "
-			"explicitSend=%d nativeSend=1\n",
+			"explicitSend=%d nativeSend=1 fastFlush=%d\n",
 			VersionInfo.FortniteVersion,
-			1);
+			1,
+			bEnableLoopbackFastFlush ? 1 : 0);
 		Utils::Hook(FindTickFlush(), TickFlush, TickFlushOG);
 	}
 	else

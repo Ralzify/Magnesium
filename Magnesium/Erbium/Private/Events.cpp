@@ -381,24 +381,50 @@ namespace
 		return true;
 	}
 
+	bool CanInvokeWithZeroedScalarInput(UFunction* Function)
+	{
+		if (!ValidateParameterBuffer(Function))
+			return false;
+
+		int32 InputCount = 0;
+		const auto Parameters = Function->GetParamsNamed();
+		for (const auto& Parameter : Parameters.NameOffsetMap)
+		{
+			if (!IsInputParameter(Parameter))
+				continue;
+
+			++InputCount;
+			if (InputCount > 1)
+				return false;
+
+			const bool bSupportedScalar =
+				(Parameter.ElementSize == sizeof(uint8) &&
+					HasParameterPropertyType(
+						Function, Parameter, CastClassBoolProperty)) ||
+				(Parameter.ElementSize == sizeof(int32) &&
+					HasParameterPropertyType(
+						Function, Parameter, CastClassIntProperty)) ||
+				(Parameter.ElementSize == sizeof(float) &&
+					HasParameterPropertyType(
+						Function, Parameter, CastClassFloatProperty)) ||
+				(Parameter.ElementSize == sizeof(double) &&
+					HasParameterPropertyType(
+						Function, Parameter, CastClassDoubleProperty));
+			if (!bSupportedScalar)
+				return false;
+		}
+		return true;
+	}
+
 	bool InvokeZeroed(UObject* Target, UFunction* Function)
 	{
 		if (!IsLiveEventObject(Target) ||
-			!ValidateParameterBuffer(Function))
+			!CanInvokeWithZeroedScalarInput(Function))
 		{
 			return false;
 		}
 
 		const auto Parameters = Function->GetParamsNamed();
-		for (const auto& Parameter : Parameters.NameOffsetMap)
-		{
-			// Zero-filled buffers are safe only for genuine no-input calls.
-			// Silently supplying null/zero to an unexpected input is exactly the
-			// kind of reflected-schema mismatch that caused the event crashes.
-			if (IsInputParameter(Parameter))
-				return false;
-		}
-
 		const uint32 Size = Parameters.Size;
 		if (Size == 0)
 		{
@@ -3743,12 +3769,30 @@ namespace
 	{
 		if (!Event.PlaylistPath)
 			return true;
-		if (!IsLiveEventObject(Context.Playlist))
-			return false;
 		auto Expected =
 			FindObject<UFortPlaylistAthena>(Event.PlaylistPath);
-		return IsLiveEventObject(Expected) &&
-			Expected == Context.Playlist;
+		if (IsLiveEventObject(Expected) &&
+			IsLiveEventObject(Context.Playlist) &&
+			(Expected == Context.Playlist ||
+			 Expected->Name == Context.Playlist->Name))
+		{
+			return true;
+		}
+
+		const bool bConfiguredLegacyPlaylist =
+			Event.EventVersion <= 14.60 &&
+			FConfiguration::Playlist &&
+			wcscmp(FConfiguration::Playlist, Event.PlaylistPath) == 0;
+		if (bConfiguredLegacyPlaylist)
+		{
+			SDK::DbgLog(
+				"[Events] using configured legacy playlist fallback "
+				"for version %.2f\n",
+				Event.EventVersion);
+			return true;
+		}
+
+		return false;
 	}
 
 	bool CollectConnectedEventPlayers(
@@ -4890,12 +4934,43 @@ namespace
 			FStartAtIndexLayout Layout{};
 			return ResolveStartAtIndexLayout(Function, Layout);
 		}
-		return ValidateParameterBuffer(Function);
+		return CanInvokeWithZeroedScalarInput(Function);
+	}
+
+	bool UsesJerky1241LegacyDispatch(const FEvent& Event)
+	{
+		return fabs(Event.EventVersion - 12.41) < 0.001 &&
+			fabs(VersionInfo.FortniteVersion - 12.41) < 0.001;
+	}
+
+	bool TryDispatchJerky1241(const FEvent& Event)
+	{
+		static constexpr const wchar_t* StartFunctionPath =
+			L"/CycloneJerky/Gameplay/BP_Jerky_Loader."
+			L"BP_Jerky_Loader_C.startevent";
+
+		auto Loader = FindLiveActor(Event.LoaderClass);
+		auto StartFunction = const_cast<UFunction*>(
+			FindObject<UFunction>(StartFunctionPath));
+		if (!IsLiveEventObject(Loader) ||
+			!IsLiveEventObject(StartFunction))
+		{
+			return false;
+		}
+
+		Loader->Call<void>(StartFunction, 0.f);
+		SDK::DbgLog(
+			"[Events] dispatched legacy Jerky start target=%p function=%ls\n",
+			static_cast<void*>(Loader), StartFunctionPath);
+		return true;
 	}
 
 	bool TryDispatchEvent(
 		const FEvent& Event, const FEventContext& Context)
 	{
+		if (UsesJerky1241LegacyDispatch(Event))
+			return TryDispatchJerky1241(Event);
+
 		const auto Actors = ResolveEventActors(Event);
 		for (const auto& EventFunction : Event.EventFunctions)
 		{
@@ -5318,7 +5393,8 @@ void Events::Tick()
 		return;
 	}
 
-	if (!PlaylistMatchesEvent(*GEventState.Event, Context))
+	if (!UsesJerky1241LegacyDispatch(*GEventState.Event) &&
+		!PlaylistMatchesEvent(*GEventState.Event, Context))
 	{
 		LogWaiting(Now, "the configured event playlist");
 		GEventState.NextAttemptTime = Now + 0.25;

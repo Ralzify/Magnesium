@@ -2287,16 +2287,15 @@ namespace
             IsNitroFistsDefinition(WeaponDefinition);
         const auto DefinitionName = WeaponDefinition->Name.ToString();
 
-        // Modern weapon definitions distinguish clip-charge recharge (Hammer,
-        // Blade and Nitro Fists) from reserve-ammo recharge.  This watchdog
-        // owns ReplicatedEntry.LoadedAmmo, so never register a definition
-        // which explicitly says its authored recharge belongs to the reserve
-        // stack.  The latter continues through Fortnite's native component.
-        // Legacy builds do not expose this flag and retain the data-driven
-        // loaded-ammo behavior used by their recharge fields.
+        // This watchdog owns ReplicatedEntry.LoadedAmmo, so every non-special
+        // weapon must explicitly opt into clip recharge. Older builds expose
+        // inherited recharge getters on ordinary firearms (often returning
+        // 1 round per second) without exposing this opt-in flag; treating the
+        // getters alone as capability data makes normal magazines regenerate.
+        // Those builds retain their native recharge handling instead.
         if (!bNitroFists &&
-            WeaponDefinition->HasbRechargeAmmoToClip() &&
-            !WeaponDefinition->bRechargeAmmoToClip)
+            (!WeaponDefinition->HasbRechargeAmmoToClip() ||
+                !WeaponDefinition->bRechargeAmmoToClip))
         {
             return false;
         }

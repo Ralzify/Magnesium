@@ -6721,8 +6721,12 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
             if (!TacticalSprintAbility)
                 TacticalSprintAbility = FindObject<UFortAbilitySet>(L"/TacticalSprint/Gameplay/AS_TacticalSprint.AS_TacticalSprint");
-            TacticalSprintAbility->AddToRoot();
-            AbilitySets.Add(TacticalSprintAbility);
+            AFortGameMode::TacticalSprintAbilitySet = TacticalSprintAbility;
+            if (TacticalSprintAbility)
+            {
+                TacticalSprintAbility->AddToRoot();
+                AbilitySets.Add(TacticalSprintAbility);
+            }
 
             auto AscenderAbility = FindObject<UFortAbilitySet>(L"/Ascender/Gameplay/Ascender/AS_Ascender.AS_Ascender");
             AscenderAbility->AddToRoot();
