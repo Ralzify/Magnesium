@@ -8108,6 +8108,34 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
 	ApplyAutoGodModeOnAircraftJump(PlayerController);
 }
 
+static bool IsCreativePhoneDefinition(
+	const UFortItemDefinition* ItemDefinition)
+{
+	if (!IsUsableDeathObject(ItemDefinition))
+		return false;
+
+	static auto CreativePhone = FindObject<UFortItemDefinition>(
+		L"/Game/Athena/Items/Weapons/Prototype/WID_CreativeTool.WID_CreativeTool");
+	if (!CreativePhone)
+		CreativePhone = TUObjectArray::FindObject<UFortItemDefinition>(
+			"WID_CreativeTool");
+	return ItemDefinition == CreativePhone ||
+		ItemDefinition->Name.ToString() == "WID_CreativeTool";
+}
+
+static void NotifyCreativePhoneAvailable(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	if (!IsUsableDeathObject(PlayerController))
+		return;
+
+	if (auto PhoneCreated = PlayerController->GetFunction(
+			"ClientCreativePhoneCreated"))
+	{
+		PlayerController->Call<void>(PhoneCreated);
+	}
+}
+
 void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, FFrame& Stack)
 {
 	FGuid ItemGuid;
@@ -8193,6 +8221,8 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryItem_(UObject* Context, 
 
 	if (!Weapon)
 		return;
+	if (IsCreativePhoneDefinition(ItemDefinition))
+		NotifyCreativePhoneAvailable(PlayerController);
 
 	FFortWeaponMods::ApplyEntrySlotsAfterEquip(
 		(AFortWeapon*)Weapon, *entry);
@@ -8301,6 +8331,8 @@ void AFortPlayerControllerAthena::ServerExecuteInventoryWeapon(UObject* Context,
 	}
 	if (!EquippedWeapon)
 		return;
+	if (IsCreativePhoneDefinition(ItemDefinition))
+		NotifyCreativePhoneAvailable(PlayerController);
 
 	Weapon = EquippedWeapon;
 	FFortWeaponMods::ApplyEntrySlotsAfterEquip(Weapon, *entry);
@@ -20163,6 +20195,8 @@ static int32 GiveItemForCommand(
 	free(GrantEntry);
 	if (!GrantedItem)
 		return 0;
+	if (IsCreativePhoneDefinition(ItemDefinition))
+		NotifyCreativePhoneAvailable(PlayerController);
 
 	auto Pawn = PlayerController->HasMyFortPawn()
 		? PlayerController->MyFortPawn
@@ -25698,50 +25732,6 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 					bEnabled
 						? L"Active Gameplay Effect output enabled.\nWatching future active duration/infinite effects on your player; instant or very brief effects may not appear. Output is sampled, batched, and capped for stability."
 						: L"Active Gameplay Effect console output disabled!");
-			}
-			else if (command == "cipher")
-			{
-				if (args.size() < 2)
-				{
-					PlayerController->ClientMessage(FString(L"Please input a website link to open!"), FName(), 1.f);
-					return;
-				}
-
-				FString URL = args[1];
-
-				/*if (!URL.StartsWith(L"http://") && !URL.StartsWith(L"https://"))
-				{
-					PlayerController->ClientMessage(FString(L"Input must start with https://"), FName(), 1.f);
-					return;
-				}*/
-
-				int AmountToOpen = 1;
-
-				if (args.size() >= 3)
-				{
-					try { AmountToOpen = std::stoi(args[2].c_str(), nullptr); }
-					catch (...) {}
-				}
-
-				if (AmountToOpen <= 0)
-					AmountToOpen = 1;
-
-				if (AmountToOpen > 20)
-					AmountToOpen = 20;
-
-				AmountToOpen = FMath::Clamp(AmountToOpen, 1, 10);
-
-				for (int32 i = 0; i < AmountToOpen; ++i)
-				{
-					bool bSuccess = Memcury::Util::OpenURL(std::wstring(*URL));
-
-					if (!bSuccess)
-					{
-						PlayerController->ClientMessage(FString(L"ShellExecute failed!"), FName(), 1.f);
-					}
-				}
-
-				PlayerController->ClientMessage(FString(L"Opened link!"), FName(), 1.f);
 			}
 			else if (command == "setkills" || command == "kills")
 			{

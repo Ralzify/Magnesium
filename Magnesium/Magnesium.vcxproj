@@ -198,6 +198,7 @@
     <ClInclude Include="FortniteGame\Public\BuildingItemCollectorActor.h" />
     <ClInclude Include="FortniteGame\Public\BuildingSMActor.h" />
     <ClInclude Include="FortniteGame\Public\FortAthenaCreativePortal.h" />
+    <ClInclude Include="FortniteGame\Public\FortCreativeMoveTool.h" />
     <ClInclude Include="FortniteGame\Public\FortAthenaMutator.h" />
     <ClInclude Include="FortniteGame\Public\FortCheatManager.h" />
     <ClInclude Include="FortniteGame\Public\FortControllerComponent_VictoryCrowns.h" />
@@ -256,6 +257,7 @@
     <ClCompile Include="FortniteGame\Private\BuildingFoundation.cpp" />
     <ClCompile Include="FortniteGame\Private\BuildingSMActor.cpp" />
     <ClCompile Include="FortniteGame\Private\FortAthenaCreativePortal.cpp" />
+    <ClCompile Include="FortniteGame\Private\FortCreativeMoveTool.cpp" />
     <ClCompile Include="FortniteGame\Private\FortAthenaMutator.cpp" />
     <ClCompile Include="FortniteGame\Private\FortGameMode.cpp" />
     <ClCompile Include="FortniteGame\Private\FortInventory.cpp" />

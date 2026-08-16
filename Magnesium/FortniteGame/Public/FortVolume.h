@@ -33,6 +33,8 @@ public:
     DEFINE_PROP(PlotPermissions, FFortCreativePlotPermissionData);
 
     DEFINE_FUNC(OnRep_AccountIdOfOwner, void);
+    DEFINE_FUNC(OnRep_PlotPermissionsChanged, void);
+    DEFINE_FUNC(DoesPlayerHavePermissionToEdit, bool);
 };
 
 class UFortPlaysetItemDefinition : public UObject
@@ -88,6 +90,9 @@ public:
 
     DEFINE_PROP(AccountIdOfOwner, FUniqueNetIdRepl);
     DEFINE_PROP(PlotPermissions, FFortCreativePlotPermissionData);
+
+    DEFINE_FUNC(OnRep_AccountIdOfOwner, void);
+    DEFINE_FUNC(OnRep_PlotPermissionsChanged, void);
 };
 
 class AFortVolume : public AActor

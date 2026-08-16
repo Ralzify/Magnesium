@@ -53,7 +53,9 @@ public:
     DEFINE_FUNC(OnRep_PopulationChanged, void);
 
     static AFortAthenaCreativePortal* Create(AFortPlayerControllerAthena* Player);
+    static bool PrepareLinkedVolumeForEditing(AFortPlayerControllerAthena* Player);
     static void TeleportPlayerToLinkedVolume(UObject*, FFrame&);
+    static inline void (*TeleportPlayerToLinkedVolumeOG)(UObject*, FFrame&);
 
     InitHooks;
 };

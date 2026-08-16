@@ -222,6 +222,9 @@
     <ClInclude Include="FortniteGame\Public\FortAthenaCreativePortal.h">
       <Filter>FortniteGame\Public</Filter>
     </ClInclude>
+    <ClInclude Include="FortniteGame\Public\FortCreativeMoveTool.h">
+      <Filter>FortniteGame\Public</Filter>
+    </ClInclude>
     <ClInclude Include="FortniteGame\Public\FortVolume.h">
       <Filter>FortniteGame\Public</Filter>
     </ClInclude>
@@ -387,6 +390,9 @@
       <Filter>FortniteGame\Private</Filter>
     </ClCompile>
     <ClCompile Include="FortniteGame\Private\FortAthenaCreativePortal.cpp">
+      <Filter>FortniteGame\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="FortniteGame\Private\FortCreativeMoveTool.cpp">
       <Filter>FortniteGame\Private</Filter>
     </ClCompile>
     <ClCompile Include="FortniteGame\Private\FortMinigame.cpp">
