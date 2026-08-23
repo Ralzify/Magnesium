@@ -17323,7 +17323,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 		if (IsUsableDeathObject(KillerPlayerState) &&
 			(GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) &&
-			VersionInfo.FortniteVersion < 20.40) // crashes on 20.40, test other versions
+			VersionInfo.FortniteVersion < 17.30) // crashes on 17.30, 18.40, 20.40, test other versions
 		{
 			KillerPlayerState->ClientReportTournamentStatUpdate();
 		}
