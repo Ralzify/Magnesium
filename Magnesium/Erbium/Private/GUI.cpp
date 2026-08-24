@@ -72,6 +72,7 @@ namespace
 {
     SRWLOCK GPlayerNameCacheLock = SRWLOCK_INIT;
     std::atomic_bool GPlayerNameCacheDisabled{ false };
+    std::atomic_bool GPlayerNameRefreshRequested{ false };
     std::atomic<ULONGLONG> GPlayerNameCacheRetryAtMs{ 0 };
     constexpr ULONGLONG kPlayerNameCacheFaultRetryMs = 5000ULL;
     UWorld* GPlayerNameCacheWorld = nullptr;
@@ -361,18 +362,13 @@ namespace
         if (!Property)
             return false;
 
-        // ElementSize is reliable on the classic reflection layouts.  FN32's
-        // restricted metadata encrypts/reorders parts of FProperty, so the
-        // exact-name lookup plus the fully validated FString header/data below
-        // is the stronger check there.
-        if (VersionInfo.FortniteVersion < 32.0 &&
-            GetFromOffset<uint32>(
-                Property, Offsets::ElementSize) != sizeof(FString))
+		if (GetFromOffset<uint32>(
+				Property, Offsets::ElementSize) != sizeof(FString))
         {
             return false;
         }
 
-        const uint32 Offset = SDK::DecryptPropOffset(
+		const uint32 Offset = SDK::ReadPropertyOffset(
             GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal));
         if (Offset == UINT32_MAX || Offset >= 0x10000)
@@ -439,10 +435,7 @@ namespace
         constexpr uint64 CPF_Parm = 0x80;
         constexpr uint64 CPF_OutParm = 0x100;
         constexpr uint64 CPF_ReturnParm = 0x400;
-        const bool bEncryptedPropertyMetadata =
-            VersionInfo.FortniteVersion >= 32.0f;
-        const uint32 BufferSize = bEncryptedPropertyMetadata
-            ? 0x1000u : Parameters.Size;
+		const uint32 BufferSize = Parameters.Size;
         const bool bReturnFits =
             ReturnValueOffset != UINT32_MAX &&
             ReturnValueOffset <= BufferSize &&
@@ -450,11 +443,10 @@ namespace
         if (Parameters.NameOffsetMap.size() != 1 ||
             BufferSize == 0 || BufferSize > 0x1000 ||
             !bReturnFits ||
-            (!bEncryptedPropertyMetadata &&
-             (ReturnValueSize != sizeof(FString) ||
-              !(ReturnValueFlags & CPF_Parm) ||
-              !(ReturnValueFlags & CPF_OutParm) ||
-              !(ReturnValueFlags & CPF_ReturnParm))))
+			(ReturnValueSize != sizeof(FString) ||
+			  !(ReturnValueFlags & CPF_Parm) ||
+			  !(ReturnValueFlags & CPF_OutParm) ||
+			  !(ReturnValueFlags & CPF_ReturnParm)))
         {
             return false;
         }
@@ -1033,6 +1025,8 @@ namespace
         AFortPlayerPawnAthena* PlayerPawn,
         FPlayerCombatStats& OutStats)
     {
+        GPlayerNameRefreshRequested.store(
+            true, std::memory_order_release);
         OutStats = {};
         auto World = UWorld::GetWorld();
         const uint64_t WorldIdentity =
@@ -1089,8 +1083,7 @@ namespace
         if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
             return 0;
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 InvalidFlags =
-            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+		constexpr int32 InvalidFlags = 0x20;
         if (!Item || Item->GetObject() != Object ||
             (Item->GetFlags() & InvalidFlags))
         {
@@ -1147,6 +1140,10 @@ std::string GUI::GetPlayerName(
     AFortPlayerStateAthena* PlayerState,
     UNetConnection* Connection)
 {
+    // Publish demand to the game thread. The authoritative cache is useful
+    // only while a render/gameplay caller is actually consuming player data.
+    GPlayerNameRefreshRequested.store(
+        true, std::memory_order_release);
     if (GPlayerNameCacheDisabled.load(
             std::memory_order_acquire))
     {
@@ -1209,6 +1206,10 @@ namespace
             : nullptr;
         if (!World || !Driver)
         {
+            // Consume only the request observed by this pass. A caller that
+            // publishes fresh demand after this exchange remains pending.
+            GPlayerNameRefreshRequested.exchange(
+                false, std::memory_order_acq_rel);
             TryResetPlayerNameCache(nullptr);
             return;
         }
@@ -1219,6 +1220,12 @@ namespace
         {
             return;
         }
+
+        // Do not consume demand while the 250-ms refresh throttle is active.
+        // Exchanging only after TryBegin succeeds also preserves any request
+        // published concurrently while the cache is being rebuilt.
+        GPlayerNameRefreshRequested.exchange(
+            false, std::memory_order_acq_rel);
 
         const uint64_t WorldIdentity =
             GetGuiObjectIdentityGuarded(World);
@@ -1379,6 +1386,12 @@ namespace
 
 void GUI::PlayerNamesGameTick()
 {
+    if (!GPlayerNameRefreshRequested.load(
+            std::memory_order_acquire))
+    {
+        return;
+    }
+
     if (!TryReenablePlayerNameCache())
         return;
 
@@ -3227,10 +3240,9 @@ namespace SafeZoneMap
         if (!manager || !function)
             return false;
 
-        auto params = function->GetParamsNamed();
-        size_t bufferSize = VersionInfo.FortniteVersion >= 32.00f
-            ? 0x1000
-            : (size_t)(params.Size > 0 ? params.Size : 0x100);
+		auto params = function->GetParamsNamed();
+		size_t bufferSize =
+			(size_t)(params.Size > 0 ? params.Size : 0x100);
         if (bufferSize < 0x100)
             bufferSize = 0x100;
         if (bufferSize > 0x10000)
@@ -6080,7 +6092,6 @@ static void SanitizeNativeLTMSelection(int SelectedPlaylist)
             FConfiguration::bInfiniteMats = true;
             ApplyJoinInProgressPreset();
             ApplyKeepInventoryPreset();
-            FConfiguration::MaxTickRate = 60.f;
         };
 
     switch ((Playlist)SelectedPlaylist)
@@ -6100,7 +6111,6 @@ static void SanitizeNativeLTMSelection(int SelectedPlaylist)
         FConfiguration::bInfiniteAmmo = false;
         FConfiguration::bInfiniteMats = false;
         ApplyJoinInProgressPreset();
-        FConfiguration::MaxTickRate = 60.f;
         break;
     case Playlist::Boxfight:
         FConfiguration::SetLateGameEnabled(false);
@@ -6372,16 +6382,7 @@ namespace TrickshotManager
         auto Item = TUObjectArray::GetItemByIndex(Object->Index);
         if (!Item || Item->GetObject() != Object)
             return;
-        if (SDK::Offsets::bEncryptedObjects)
-        {
-            *reinterpret_cast<int32*>(
-                reinterpret_cast<uint8*>(Item) + 0x4) &=
-                ~kTrickshotRootSetFlag;
-        }
-        else
-        {
-            Item->Flags &= ~kTrickshotRootSetFlag;
-        }
+		Item->Flags &= ~kTrickshotRootSetFlag;
     }
 
     void ReleaseTrickshotAssetRoots(
@@ -6778,20 +6779,8 @@ namespace TrickshotManager
     {
         if (!Class)
             return {};
-        if (VersionInfo.FortniteVersion < 32.00)
-        {
-            return FStringToStdString(
-                UKismetSystemLibrary::GetPathName(Class));
-        }
-        auto Outer = Class->Outer;
-        if (!Outer)
-            return {};
-        const auto OuterName = Outer->Name.ToString();
-        const auto ClassName = Class->Name.ToString();
-        if (OuterName.empty() || ClassName.empty())
-            return {};
-        return std::string(OuterName.c_str()) + "." +
-            std::string(ClassName.c_str());
+		return FStringToStdString(
+			UKismetSystemLibrary::GetPathName(Class));
     }
 
     bool IsUnsafeTrickshotLifecycleClass(UClass* Class)
@@ -10189,19 +10178,6 @@ void GUI::Init()
                                     : 4;
                         }
                         bInitializedZone = true;
-                    }
-
-                    static bool bAutoDumpDefaultInitialized =
-                        false;
-                    if (!bAutoDumpDefaultInitialized)
-                    {
-                        if (!AutoHosting::
-                                HasRestoredPreferences() &&
-                            VersionInfo.FortniteVersion == 19.20)
-                        {
-                            FConfiguration::bAutoDump = false;
-                        }
-                        bAutoDumpDefaultInitialized = true;
                     }
 
                     AtomicCheckbox(

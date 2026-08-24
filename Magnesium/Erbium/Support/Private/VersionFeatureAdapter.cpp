@@ -408,8 +408,7 @@ static bool PlayerAIIsLiveSupportObject(const UObject* Object)
         return false;
 
     auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-    const int32 InvalidObjectFlags =
-        Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+    const int32 InvalidObjectFlags = 0x20;
 
     return Item && Item->GetObject() == Object &&
         !(Item->GetFlags() & InvalidObjectFlags) &&
@@ -449,7 +448,7 @@ static bool PlayerAISetReflectedReadyBool(
     }
 
     const int32 PropertyOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             Property, Offsets::Offset_Internal)));
     const uint32 ElementSize = GetFromOffset<uint32>(
         Property, Offsets::ElementSize);
@@ -508,7 +507,7 @@ static bool PlayerAITryReadReflectedBool(
     }
 
     const int32 PropertyOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             Property, Offsets::Offset_Internal)));
     const uint32 ElementSize = GetFromOffset<uint32>(
         Property, Offsets::ElementSize);
@@ -854,8 +853,7 @@ static bool PlayerAIValidateMarkPropertyDirty(UFunction* Function)
     if (Params.NameOffsetMap.size() != 2)
         return false;
 
-    if (VersionInfo.FortniteVersion < 32.0 &&
-        Params.Size != 0x10)
+    if (Params.Size != 0x10)
         return false;
 
     bool bHasObject = false;
@@ -866,17 +864,15 @@ static bool PlayerAIValidateMarkPropertyDirty(UFunction* Function)
         if (Param.Name == "Object")
         {
             bHasObject = Param.Offset == 0 &&
-                (VersionInfo.FortniteVersion >= 32.0 ||
-                 (Param.ElementSize == sizeof(UObject*) &&
-                  (Param.PropertyFlags & 0x80) != 0));
+                Param.ElementSize == sizeof(UObject*) &&
+                (Param.PropertyFlags & 0x80) != 0;
         }
         else if (Param.Name == "PropertyName")
         {
             bHasPropertyName = Param.Offset == 0x8 &&
-                (VersionInfo.FortniteVersion >= 32.0 ||
-                 ((Param.ElementSize == sizeof(int32) ||
-                   Param.ElementSize == sizeof(FName)) &&
-                  (Param.PropertyFlags & 0x80) != 0));
+                (Param.ElementSize == sizeof(int32) ||
+                 Param.ElementSize == sizeof(FName)) &&
+                (Param.PropertyFlags & 0x80) != 0;
         }
     }
 
@@ -2302,12 +2298,8 @@ bool VersionFeatureAdapter::TryBeginSkydiving(AFortPlayerPawnAthena* Pawn)
     }
 
     const auto Params = Fn->GetParamsNamed();
-    const bool bEncryptedParameterMetadata =
-        VersionInfo.FortniteVersion >= 32.00;
     const size_t BufferSize =
-        bEncryptedParameterMetadata
-        ? 0x1000
-        : Params.Size > 0
+        Params.Size > 0
         ? (size_t)Params.Size
         : 1;
 
@@ -2330,8 +2322,7 @@ bool VersionFeatureAdapter::TryBeginSkydiving(AFortPlayerPawnAthena* Pawn)
             break;
         }
 
-        if (!bEncryptedParameterMetadata &&
-            (Param.PropertyFlags & 0x400) == 0 &&
+        if ((Param.PropertyFlags & 0x400) == 0 &&
             Param.ElementSize == 1 &&
             FallbackBoolOffset == -1)
         {
@@ -2342,11 +2333,7 @@ bool VersionFeatureAdapter::TryBeginSkydiving(AFortPlayerPawnAthena* Pawn)
     if (BoolOffset == -1)
         BoolOffset = FallbackBoolOffset;
 
-    // FN32+ encrypts ElementSize/PropertyFlags/PropertiesSize but preserves
-    // the decrypted named offset. Do not guess a positional boolean there.
-    if ((bEncryptedParameterMetadata &&
-         BoolOffset < 0) ||
-        BoolOffset >= (int)BufferSize)
+    if (BoolOffset >= (int)BufferSize)
     {
         AIDebugLogger::MissingFeature(
             "BeginSkydivingForPlayerAI",
@@ -2627,12 +2614,8 @@ bool VersionFeatureAdapter::TryIsPawnGrounded(
             Movement, OutGrounded);
 
     const auto Params = Function->GetParamsNamed();
-    const bool bEncryptedParameterMetadata =
-        VersionInfo.FortniteVersion >= 32.00;
     const size_t BufferSize =
-        bEncryptedParameterMetadata
-        ? 0x1000
-        : Params.Size > 0
+        Params.Size > 0
         ? (size_t)Params.Size
         : 1;
 
@@ -2646,9 +2629,8 @@ bool VersionFeatureAdapter::TryIsPawnGrounded(
     {
         if (Param.Name == "ReturnValue")
         {
-            if (!bEncryptedParameterMetadata &&
-                (Param.ElementSize != 1 ||
-                 (Param.PropertyFlags & 0x400) == 0))
+            if (Param.ElementSize != 1 ||
+                (Param.PropertyFlags & 0x400) == 0)
             {
                 return PlayerAITryReadWalkingMovementMode(
                     Movement, OutGrounded);
@@ -2658,11 +2640,8 @@ bool VersionFeatureAdapter::TryIsPawnGrounded(
             continue;
         }
 
-        // IsMovingOnGround must remain a no-argument query. On FN32 the
-        // flags are encrypted, so any additional reflected field is
-        // conservatively treated as an unsupported schema.
-        if (bEncryptedParameterMetadata ||
-            (Param.PropertyFlags & 0x80) != 0)
+        // IsMovingOnGround must remain a no-argument query.
+        if ((Param.PropertyFlags & 0x80) != 0)
         {
             return PlayerAITryReadWalkingMovementMode(
                 Movement, OutGrounded);
@@ -3759,7 +3738,7 @@ static bool PlayerAIResolveFixedCharacterPartArray(
     }
 
     const int32 PropertyOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             Property, Offsets::Offset_Internal)));
     const uint32 ElementSize = GetFromOffset<uint32>(
         Property, Offsets::ElementSize);
@@ -3824,9 +3803,9 @@ static bool PlayerAIResolveStructCharacterPartArray(
         PropertyName, 0x100000);
     const UStruct* PartsStruct = nullptr;
 
-    // An exact script path avoids the short-name/type-filter ambiguity on
-    // encrypted 32.x object arrays. Retain FindStruct as a compatibility
-    // fallback for builds whose StaticFindObject is unavailable this early.
+    // An exact script path avoids short-name/type-filter ambiguity. Retain
+    // FindStruct as a compatibility fallback for builds whose StaticFindObject
+    // is unavailable this early.
     if (Offsets::StaticFindObject)
     {
         PartsStruct = reinterpret_cast<const UStruct*>(
@@ -3869,7 +3848,7 @@ static bool PlayerAIResolveStructCharacterPartArray(
     }
 
     const int32 OuterOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             OuterProperty, Offsets::Offset_Internal)));
     const uint32 OuterSize = GetFromOffset<uint32>(
         OuterProperty, Offsets::ElementSize);
@@ -3877,7 +3856,7 @@ static bool PlayerAIResolveStructCharacterPartArray(
         OuterProperty,
         Offsets::ElementSize - sizeof(int32));
     const int32 PartsOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             PartsProperty, Offsets::Offset_Internal)));
     const uint32 PartElementSize = GetFromOffset<uint32>(
         PartsProperty, Offsets::ElementSize);
@@ -3967,7 +3946,7 @@ static bool PlayerAIResolveStructField(
     }
 
     const int32 FieldOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             Property, Offsets::Offset_Internal)));
     const uint32 FieldElementSize =
         GetFromOffset<uint32>(
@@ -4369,7 +4348,7 @@ static bool PlayerAITryResolveEnumByteOffset(
         return false;
 
     const uint32 Offset = static_cast<uint32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             Property, Offsets::Offset_Internal)));
     const uint32 ElementSize = GetFromOffset<uint32>(
         Property, Offsets::ElementSize);
@@ -4656,24 +4635,20 @@ static bool PlayerAIChoosePartsOnPawn(
         return false;
     }
 
-    if (VersionInfo.FortniteVersion < 32.0)
+    const int32 ParamsSize = Function->GetPropertiesSize();
+    if (ParamsSize < 0x10 || ParamsSize > 0x1000)
     {
-        const int32 ParamsSize = Function->GetPropertiesSize();
-        if (ParamsSize < 0x10 || ParamsSize > 0x1000)
-        {
-            bPlayerAIServerChoosePartDisabled = true;
-            AIDebugLogger::MissingFeature(
-                "ServerChoosePartForPlayerAI",
-                "the parameter buffer size was unsupported; replicated character parts remain authoritative");
-            return false;
-        }
+        bPlayerAIServerChoosePartDisabled = true;
+        AIDebugLogger::MissingFeature(
+            "ServerChoosePartForPlayerAI",
+            "the parameter buffer size was unsupported; replicated character parts remain authoritative");
+        return false;
     }
 
     alignas(16) uint8 Params[0x1000]{};
     bool bInvoked = false;
     const bool bCommitEmptyModernSlots =
-        VersionInfo.FortniteVersion >= 19.0 &&
-        VersionInfo.FortniteVersion < 32.0;
+        VersionInfo.FortniteVersion >= 19.0;
     const int SlotsToCommit = bCommitEmptyModernSlots
         ? (std::min)(PlayerAICharacterPartSlotCount, 6)
         : PlayerAICharacterPartSlotCount;
@@ -4808,7 +4783,7 @@ static bool PlayerAIWriteLoadoutCharacter(
     }
 
     const int32 OuterOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             OuterProperty, Offsets::Offset_Internal)));
     const uint32 OuterSize = GetFromOffset<uint32>(
         OuterProperty, Offsets::ElementSize);
@@ -4816,7 +4791,7 @@ static bool PlayerAIWriteLoadoutCharacter(
         OuterProperty,
         Offsets::ElementSize - sizeof(int32));
     const int32 CharacterOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             CharacterProperty, Offsets::Offset_Internal)));
     const uint32 CharacterSize = GetFromOffset<uint32>(
         CharacterProperty, Offsets::ElementSize);
@@ -5850,7 +5825,7 @@ static bool PlayerAITryReadObjectProperty(
         return false;
 
     const int32 PropertyOffset = static_cast<int32>(
-        SDK::DecryptPropOffset(GetFromOffset<uint32>(
+        SDK::ReadPropertyOffset(GetFromOffset<uint32>(
             Property, Offsets::Offset_Internal)));
     const uint32 ElementSize = GetFromOffset<uint32>(
         Property, Offsets::ElementSize);
@@ -6148,7 +6123,7 @@ PlayerAIMatchRenderedCharacterPartMesh(
         }
 
         const int32 PropertyOffset = static_cast<int32>(
-            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal)));
         const uint32 PropertySize = GetFromOffset<uint32>(
             Property, Offsets::ElementSize);
@@ -6205,7 +6180,7 @@ PlayerAIMatchRenderedCharacterPartMesh(
             SDK::MemReadable(Property, RequiredMetadataBytes))
         {
             const int32 PropertyOffset = static_cast<int32>(
-                SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                     Property, Offsets::Offset_Internal)));
             const uint32 PropertySize = GetFromOffset<uint32>(
                 Property, Offsets::ElementSize);
@@ -6507,7 +6482,6 @@ void VersionFeatureAdapter::InitializeSyntheticPawnCosmeticLifecycle(
     AFortPlayerPawnAthena* Pawn)
 {
     if (VersionInfo.FortniteVersion < 19.0 ||
-        VersionInfo.FortniteVersion >= 32.0 ||
         !PlayerAIIsLiveSupportObject(PlayerState) ||
         !PlayerAIIsLiveSupportObject(Pawn) ||
         Pawn->PlayerState != PlayerState)
@@ -6550,7 +6524,7 @@ void VersionFeatureAdapter::InitializeSyntheticPawnCosmeticLifecycle(
     }
 }
 
-// FN19-FN31 expose the same native controller entry point used when a real
+// FN19-FN30 expose the same native controller entry point used when a real
 // player selects an outfit. Calling it is materially different from writing
 // CharacterData: it initializes the controller/pawn cosmetic loadout. FN30
 // otherwise logs that
@@ -6562,7 +6536,6 @@ static bool PlayerAITryServerSetCosmeticLoadout(
     bool bRefreshPawn)
 {
     if (VersionInfo.FortniteVersion < 19.0 ||
-        VersionInfo.FortniteVersion >= 32.0 ||
         bPlayerAIServerSetCosmeticLoadoutDisabled ||
         !PlayerAIIsLiveSupportObject(Controller) ||
         !PlayerAIIsLiveSupportObject(Character))
@@ -6616,7 +6589,7 @@ static bool PlayerAITryServerSetCosmeticLoadout(
                 }
 
                 const int32 Offset = static_cast<int32>(
-                    SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                    SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                         Property, Offsets::Offset_Internal)));
                 const uint32 Size = GetFromOffset<uint32>(
                     Property, Offsets::ElementSize);
@@ -6784,7 +6757,7 @@ static bool PlayerAITryServerSetCosmeticLoadout(
         }
 
         const int32 PropertyOffset = static_cast<int32>(
-            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal)));
         const uint32 PropertySize = GetFromOffset<uint32>(
             Property, Offsets::ElementSize);
@@ -6862,7 +6835,6 @@ static bool PlayerAITryApplyCharacterCosmetics(
         *OutInvoked = false;
 
     if (VersionInfo.FortniteVersion < 19.0 ||
-        VersionInfo.FortniteVersion >= 32.0 ||
         bPlayerAIApplyCharacterCosmeticsDisabled ||
         !PlayerAIIsLiveSupportObject(PlayerState) ||
         !PlayerAIIsLiveSupportActor(Pawn) || !Parts)
@@ -7071,12 +7043,11 @@ static bool PlayerAIFinishCosmetics(
 
     const bool bUseConfirmedCheatBotPath =
         VersionInfo.FortniteVersion >= 19.0 &&
-        VersionInfo.FortniteVersion < 32.0 &&
         CheatBotController;
     if (Character && !bUseConfirmedCheatBotPath)
         PlayerAIWriteCharacterLoadout(Pawn, Character);
 
-    // FN19-FN31 share the loadout-initialization failure observed in the
+    // FN19-FN30 share the loadout-initialization failure observed in the
     // 19.10 and 30.00 logs. Initialize the native loadout without asking its
     // void RPC to rebuild anything, then use ApplyCharacterCosmetics' real
     // success output as this tick's sole explicit visual commit. This is
@@ -7541,7 +7512,7 @@ static bool PlayerAIFinishCosmetics(
     return true;
 }
 
-// FN19-FN31 can finish a loadout refresh on a later game-thread tick. Keep the
+// FN19-FN30 can finish a loadout refresh on a later game-thread tick. Keep the
 // exact CID transaction alive until the pawn proves that its body is ready;
 // this prevents the old immediate rollback/retry loop from rebuilding meshes
 // throughout FN30 startup and from detaching a newly equipped harvesting tool.
@@ -7558,7 +7529,6 @@ static bool PlayerAIFinishRequestedCheatBotCosmetics(
         *OutTargetRetained = false;
     const bool bNeedsDeferredCheatBotPath =
         VersionInfo.FortniteVersion >= 19.0 &&
-        VersionInfo.FortniteVersion < 32.0 &&
         Character && Pawn &&
         PendingBotSkinCommitPawnCounts.contains(Pawn);
     if (!bNeedsDeferredCheatBotPath)
@@ -8533,12 +8503,7 @@ static size_t PlayerAICosmeticFunctionParamSize(
     if (!Function)
         return 0;
 
-    // 32.11 encrypts/reorders the reflected PropertiesSize field. A generous
-    // fixed buffer is safe because ProcessEvent uses the UFunction's own
-    // parameter size; named property offsets are still resolved independently.
-    size_t Size = VersionInfo.FortniteVersion >= 32.00
-        ? 0x1000
-        : Function->GetPropertiesSize();
+    size_t Size = Function->GetPropertiesSize();
 
     if (Size < 0x20)
         Size = 0x100;
@@ -8641,10 +8606,8 @@ static bool PlayerAIQueryCurrentBuildSkinCatalog()
         VersionInfo.FortniteVersion >= 20.00 ? 0x4 : 0x8;
     const int32 IdSize = NameSize * 2;
 
-    // Reflection is reliable before the encrypted 32.x layout. Refuse the
-    // optional catalog if this build reports anything other than the two-FName
-    // PrimaryAssetId ABI sampled across supported releases.
-    if (VersionInfo.FortniteVersion < 32.00)
+    // Refuse the optional catalog if reflection reports anything other than
+    // the two-FName PrimaryAssetId ABI sampled across supported releases.
     {
         auto PrimaryAssetIdStruct =
             FindStruct("PrimaryAssetId");
@@ -8667,8 +8630,8 @@ static bool PlayerAIQueryCurrentBuildSkinCatalog()
         }
     }
 
-    // These two layouts are stable at both sampled ABI endpoints:
-    // 10.40 (8-byte names) and 32.11 (compact 4-byte names). Exact offsets
+    // These two layouts are stable across the supported ABI endpoints:
+    // 10.40 (8-byte names) and FN20+ (compact 4-byte names). Exact offsets
     // prevent a corrupt reflected property from becoming an arbitrary free.
     const bool bCatalogSchemaValid =
         TypeOffset == 0 && OutputOffset == 0x8 &&
@@ -9225,7 +9188,6 @@ void VersionFeatureAdapter::TickCosmeticCache()
     // resident scan is redundant. Keep it solely as a fallback for builds
     // where the primary-asset functions are unavailable or return no skins.
     const bool bNeedsResidentFallback =
-        VersionInfo.FortniteVersion >= 32.0 ||
         bPrimaryAssetCosmeticFunctionsDisabled ||
         std::any_of(
             PendingRandomBotSkins.begin(),
@@ -9929,7 +9891,7 @@ bool VersionFeatureAdapter::ApplyCharacterSkin(
 
     const bool bStageCheatBotMetadata =
         VersionInfo.FortniteVersion >= 19.0 &&
-        VersionInfo.FortniteVersion < 32.0 && Pawn &&
+        Pawn &&
         PendingBotSkinCommitPawnCounts.contains(Pawn);
     if (!bStageCheatBotMetadata)
     {
@@ -10814,7 +10776,6 @@ static bool PlayerAITickPendingRequestedBotSkinCommits()
         }
 
         if (VersionInfo.FortniteVersion >= 19.0 &&
-            VersionInfo.FortniteVersion < 32.0 &&
             (!Pawn->HasController() ||
              Pawn->Controller != Controller ||
              !AFortPlayerControllerAthena::
@@ -10829,8 +10790,7 @@ static bool PlayerAITickPendingRequestedBotSkinCommits()
             continue;
         }
 
-        if (VersionInfo.FortniteVersion >= 19.0 &&
-            VersionInfo.FortniteVersion < 32.0)
+        if (VersionInfo.FortniteVersion >= 19.0)
         {
             const bool bAnotherVisualCommitActive =
                 std::any_of(
@@ -11038,7 +10998,6 @@ PlayerAITickPendingRandomBotSkin(
     }
 
     if (VersionInfo.FortniteVersion >= 19.0 &&
-        VersionInfo.FortniteVersion < 32.0 &&
         (!Pawn->HasController() ||
          Pawn->Controller != Controller ||
          !AFortPlayerControllerAthena::
@@ -11048,8 +11007,7 @@ PlayerAITickPendingRandomBotSkin(
         return EPlayerAIPendingRandomSkinResult::Keep;
     }
 
-    if (VersionInfo.FortniteVersion >= 32.0 ||
-        bPrimaryAssetCosmeticFunctionsDisabled)
+    if (bPrimaryAssetCosmeticFunctionsDisabled)
     {
         Pending.bUseResidentFallback = true;
     }
@@ -11065,8 +11023,7 @@ PlayerAITickPendingRandomBotSkin(
             !PendingSkinCatalogData;
         if (bCatalogWaitExpired || bCatalogFailed)
         {
-            // FN32's latent loader ABI is intentionally unsupported, and a
-            // stripped build can expose no primary-asset function at all.
+            // A stripped build can expose no primary-asset function at all.
             // Fall back to incrementally scanned resident CIDs rather than
             // converting every bot to the same default outfit.
             Pending.bUseResidentFallback = true;
@@ -11122,8 +11079,7 @@ PlayerAITickPendingRandomBotSkin(
     if (bNeedsCandidate)
     {
         const bool bModernStartup =
-            VersionInfo.FortniteVersion >= 19.0 &&
-            VersionInfo.FortniteVersion < 32.0;
+            VersionInfo.FortniteVersion >= 19.0;
         const int MaxNovelCandidatesInFlight =
             bModernStartup ? 1 : 4;
         const int NovelCandidatesInFlight =
@@ -11584,7 +11540,6 @@ bool VersionFeatureAdapter::QueueRandomSkin(
     Pending.PawnIdentity = Pawn;
     Pending.QueuedAt = GetTickCount64();
     Pending.bUseResidentFallback =
-        VersionInfo.FortniteVersion >= 32.0 ||
         bPrimaryAssetCosmeticFunctionsDisabled;
     PendingRandomBotSkins.push_back(std::move(Pending));
     PlayerAITrackPendingSkinCommit(Pawn);

@@ -75,8 +75,7 @@ namespace
             return false;
 
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 InvalidObjectFlags =
-            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        constexpr int32 InvalidObjectFlags = 0x20;
         return Item && Item->GetObject() == Object &&
             !(Item->GetFlags() & InvalidObjectFlags) &&
             Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
@@ -201,8 +200,7 @@ namespace
     UObject* GetLiveObjectByIndex(int32 ObjectIndex)
     {
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 InvalidObjectFlags =
-            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        constexpr int32 InvalidObjectFlags = 0x20;
         if (!Item || (Item->GetFlags() & InvalidObjectFlags))
             return nullptr;
 
@@ -375,7 +373,7 @@ namespace
         auto Setter =
             GameState->GetFunction("SetIsDBNODeathEnabled");
         bool bCalledSetter = false;
-        if (Setter && VersionInfo.FortniteVersion < 32.00)
+        if (Setter)
         {
             const auto Params = Setter->GetParamsNamed();
             const auto* EnabledParam =
@@ -2967,16 +2965,10 @@ namespace
             return false;
 
         FSupplyDropRuntimeLayout Candidate{};
-        const bool bEncryptedReflection =
-            VersionInfo.FortniteVersion >= 32.00;
-        Candidate.EntrySize = bEncryptedReflection
-            ? 0x50
-            : EntryStruct->GetPropertiesSize();
+        Candidate.EntrySize = EntryStruct->GetPropertiesSize();
         Candidate.ZoneDataOffset =
             (int32)EntryStruct->GetOffset("ZoneBasedData");
-        Candidate.ZoneDataSize = bEncryptedReflection
-            ? 0x28
-            : ZoneStruct->GetPropertiesSize();
+        Candidate.ZoneDataSize = ZoneStruct->GetPropertiesSize();
         Candidate.DropsRemainingOffset = (int32)
             ZoneStruct->GetOffset(
                 "NumDropsRemainingInWave", 0x80);
@@ -2986,9 +2978,7 @@ namespace
             ZoneStruct->GetOffset("NextSpawnTime", 0x100);
         Candidate.ItemDataOffset =
             (int32)EntryStruct->GetOffset("ItemDeliveryData");
-        Candidate.ItemDataSize = bEncryptedReflection
-            ? 0x20
-            : ItemStruct->GetPropertiesSize();
+        Candidate.ItemDataSize = ItemStruct->GetPropertiesSize();
         Candidate.ItemsToDeliverOffset = (int32)
             ItemStruct->GetOffset("NumItemsToDeliver", 0x80);
         Candidate.QueuedTimesOffset =
@@ -3335,23 +3325,27 @@ namespace
         const UClass* ComponentClass =
             FindClass(
                 "FortGameStateComponent_BattleRoyaleGamePhaseLogic");
-        if (!ComponentClass)
+        auto GameState = World && IsSaneObject(World->GameState)
+            ? static_cast<AFortGameStateAthena*>(World->GameState)
+            : nullptr;
+        if (!ComponentClass || !GameState)
             return nullptr;
 
-        for (int32 Index = 0; Index < TUObjectArray::Num(); ++Index)
+        auto Component =
+            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+                Get(World);
+        if ((!IsSaneObject(Component) ||
+                !IsOwnedByCurrentGameState(Component, World)) &&
+            IsSaneObject(GameState))
         {
-            auto Object = GetLiveObjectByIndex(Index);
-            if (!Object || Object->IsDefaultObject() ||
-                !Object->IsA(ComponentClass) ||
-                !IsSaneObject(Object) ||
-                !IsOwnedByCurrentGameState(Object, World))
-            {
-                continue;
-            }
-
-            auto Component = reinterpret_cast<
+            Component = reinterpret_cast<
                 UFortGameStateComponent_BattleRoyaleGamePhaseLogic*>(
-                    Object);
+                    GameState->GetComponentByClass(ComponentClass));
+        }
+        if (IsSaneObject(Component) &&
+            !Component->IsDefaultObject() &&
+            IsOwnedByCurrentGameState(Component, World))
+        {
             State.GamePhaseLogic = TWeakObjectPtr<
                 UFortGameStateComponent_BattleRoyaleGamePhaseLogic>(
                     Component);
@@ -3391,14 +3385,10 @@ namespace
         if (!MutatorDataStruct || !ItemDeliveryDataStruct)
             return false;
 
-        const bool bEncryptedReflection =
-            VersionInfo.FortniteVersion >= 32.00;
-        const int32 MutatorDataSize = bEncryptedReflection
-            ? 0x18
-            : MutatorDataStruct->GetPropertiesSize();
-        const int32 ItemDeliveryDataSize = bEncryptedReflection
-            ? 0x38
-            : ItemDeliveryDataStruct->GetPropertiesSize();
+        const int32 MutatorDataSize =
+            MutatorDataStruct->GetPropertiesSize();
+        const int32 ItemDeliveryDataSize =
+            ItemDeliveryDataStruct->GetPropertiesSize();
         const int32 ItemDeliveryArrayOffset = (int32)
             MutatorDataStruct->GetOffset(
                 "ItemDeliveryMutatorPerSafeZonePhase");
@@ -3818,8 +3808,15 @@ namespace
         TWeakObjectPtr<UClass> ProviderClass;
         TWeakObjectPtr<UClass> VehicleSpawnerClass;
         std::vector<TWeakObjectPtr<UObject>> ProcessedSources;
+        std::vector<TWeakObjectPtr<
+            AFortAthenaLivingWorldStaticPointProvider>>
+                CachedProviders;
+        std::vector<TWeakObjectPtr<AFortAthenaVehicleSpawner>>
+            CachedVehicleSpawners;
         ULONGLONG NextAttemptTimeMs = 0;
         ULONGLONG DeadlineTimeMs = 0;
+        ULONGLONG NextProviderRefreshTimeMs = 0;
+        ULONGLONG NextSpawnerRefreshTimeMs = 0;
         uint32 PassCount = 0;
         int32 TotalSpawned = 0;
         int32 ProviderCursor = 0;
@@ -3832,7 +3829,9 @@ namespace
 
     constexpr ULONGLONG VehicleSpawnRetryIntervalMs = 2000ULL;
     constexpr ULONGLONG VehicleSpawnRetryWindowMs = 45000ULL;
-    constexpr int32 VehicleSpawnBudgetPerPass = 16;
+    constexpr ULONGLONG VehicleInitialDiscoveryDelayMs = 12000ULL;
+    constexpr ULONGLONG VehicleSourceRefreshIntervalMs = 15000ULL;
+    constexpr int32 VehicleSpawnBudgetPerPass = 8;
     constexpr ULONGLONG VehicleClassLoadRetryIntervalMs = 15000ULL;
     constexpr float LivingWorldVehicleSpawnProbability = 0.35f;
 
@@ -4069,6 +4068,7 @@ namespace
             ++GVehicleProviderResolveEpoch;
         const bool LimitSpawnWork =
             UsesDeferredVehicleSpawnDiscovery();
+        const ULONGLONG CurrentTimeMs = GetTickCount64();
 
         // Resolve these dynamically on every bounded retry. SDK StaticClass
         // helpers permanently cache an early miss, while FN30 can stream the
@@ -4091,10 +4091,31 @@ namespace
         }
         if (ProviderClass)
         {
-            TArray<AFortAthenaLivingWorldStaticPointProvider*>
-                Providers{};
-            Utils::GetAll(ProviderClass, Providers);
-            ProviderCount = Providers.Num();
+            if (CurrentTimeMs >= GDeferredVehicleSpawnState
+                    .NextProviderRefreshTimeMs)
+            {
+                TArray<AFortAthenaLivingWorldStaticPointProvider*>
+                    Providers{};
+                Utils::GetAll(ProviderClass, Providers);
+                GDeferredVehicleSpawnState.CachedProviders.clear();
+                GDeferredVehicleSpawnState.CachedProviders.reserve(
+                    Providers.Num());
+                for (auto Provider : Providers)
+                {
+                    if (Provider)
+                    {
+                        GDeferredVehicleSpawnState.CachedProviders
+                            .emplace_back(Provider);
+                    }
+                }
+                Providers.Free();
+                GDeferredVehicleSpawnState
+                    .NextProviderRefreshTimeMs =
+                        CurrentTimeMs +
+                        VehicleSourceRefreshIntervalMs;
+            }
+            ProviderCount = static_cast<int32>(
+                GDeferredVehicleSpawnState.CachedProviders.size());
 
             const int32 ProviderStartIndex =
                 ProviderCount > 0
@@ -4118,7 +4139,9 @@ namespace
                 const int32 ProviderIndex =
                     (ProviderStartIndex + Visited) %
                         ProviderCount;
-                auto* Provider = Providers[ProviderIndex];
+                auto* Provider =
+                    GDeferredVehicleSpawnState.CachedProviders[
+                        ProviderIndex].Get();
                 if (!Provider ||
                     IsVehicleSpawnSourceProcessed(Provider))
                 {
@@ -4226,7 +4249,6 @@ namespace
                     Provider);
                 ++SpawnedThisPass;
             }
-            Providers.Free();
         }
 
         int32 SpawnerCount = 0;
@@ -4258,9 +4280,33 @@ namespace
         }
         if (VehicleSpawnerClass)
         {
-            TArray<AFortAthenaVehicleSpawner*> Spawners{};
-            Utils::GetAll(VehicleSpawnerClass, Spawners);
-            SpawnerCount = Spawners.Num();
+            if (CurrentTimeMs >= GDeferredVehicleSpawnState
+                    .NextSpawnerRefreshTimeMs)
+            {
+                TArray<AFortAthenaVehicleSpawner*> Spawners{};
+                Utils::GetAll(VehicleSpawnerClass, Spawners);
+                GDeferredVehicleSpawnState
+                    .CachedVehicleSpawners.clear();
+                GDeferredVehicleSpawnState
+                    .CachedVehicleSpawners.reserve(Spawners.Num());
+                for (auto Spawner : Spawners)
+                {
+                    if (Spawner)
+                    {
+                        GDeferredVehicleSpawnState
+                            .CachedVehicleSpawners.emplace_back(
+                                Spawner);
+                    }
+                }
+                Spawners.Free();
+                GDeferredVehicleSpawnState
+                    .NextSpawnerRefreshTimeMs =
+                        CurrentTimeMs +
+                        VehicleSourceRefreshIntervalMs;
+            }
+            SpawnerCount = static_cast<int32>(
+                GDeferredVehicleSpawnState
+                    .CachedVehicleSpawners.size());
 
             const int32 SpawnerStartIndex =
                 SpawnerCount > 0
@@ -4280,7 +4326,9 @@ namespace
                 const int32 SpawnerIndex =
                     (SpawnerStartIndex + Visited) %
                         SpawnerCount;
-                auto* Spawner = Spawners[SpawnerIndex];
+                auto* Spawner =
+                    GDeferredVehicleSpawnState
+                        .CachedVehicleSpawners[SpawnerIndex].Get();
                 if (!Spawner ||
                     IsVehicleSpawnSourceProcessed(Spawner))
                 {
@@ -4359,7 +4407,6 @@ namespace
                     Car->SetFuel(100.f);
                 }
             }
-            Spawners.Free();
         }
 
         ++GDeferredVehicleSpawnState.PassCount;
@@ -4407,10 +4454,14 @@ namespace
         if (GDeferredVehicleSpawnState.World.Get() != World)
         {
             GDeferredVehicleSpawnState.ProcessedSources.clear();
+            GDeferredVehicleSpawnState.CachedProviders.clear();
+            GDeferredVehicleSpawnState.CachedVehicleSpawners.clear();
             GDeferredVehicleSpawnState.World =
                 TWeakObjectPtr<UWorld>(World);
             GDeferredVehicleSpawnState.NextAttemptTimeMs = 0;
             GDeferredVehicleSpawnState.DeadlineTimeMs = 0;
+            GDeferredVehicleSpawnState.NextProviderRefreshTimeMs = 0;
+            GDeferredVehicleSpawnState.NextSpawnerRefreshTimeMs = 0;
             GDeferredVehicleSpawnState.PassCount = 0;
             GDeferredVehicleSpawnState.TotalSpawned = 0;
             GDeferredVehicleSpawnState.ProviderCursor = 0;
@@ -4427,10 +4478,9 @@ namespace
         GDeferredVehicleSpawnState.Active =
             UsesDeferredVehicleSpawnDiscovery();
         GDeferredVehicleSpawnState.NextAttemptTimeMs =
-            CurrentTimeMs + VehicleSpawnRetryIntervalMs;
+            CurrentTimeMs + VehicleInitialDiscoveryDelayMs;
         GDeferredVehicleSpawnState.DeadlineTimeMs =
             CurrentTimeMs + VehicleSpawnRetryWindowMs;
-        RunVehicleSpawnDiscoveryPass();
     }
 
     struct FJumpFatiguePolicySnapshot
@@ -4935,10 +4985,7 @@ namespace
         }
 
         auto PhaseLogic =
-            VersionInfo.FortniteVersion >= 32.00
-            ? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-                GetFixed()
-            : UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
                 Get(World);
         return IsSaneObject(PhaseLogic)
             ? PhaseLogic
@@ -6066,40 +6113,6 @@ namespace
         return bAllRequestsReady;
     }
 
-    bool AreInternalPlaylistLevelsVisible(
-        AFortGameStateAthena* GameState,
-        bool bRequireTracker)
-    {
-        const TArray<FPlaylistStreamedLevelData>* Tracker = nullptr;
-        int32 ElementSize = 0;
-        if (!GetInternalPlaylistStreamingTracker(
-                GameState, &Tracker, &ElementSize))
-        {
-            return !bRequireTracker;
-        }
-
-        for (int32 Index = 0;
-             Index < Tracker->Num(); ++Index)
-        {
-            const auto& Entry = Tracker->Get(Index, ElementSize);
-            auto StreamingLevel = Entry.StreamingLevel;
-            if (!StreamingLevel ||
-                !IsSaneObject(StreamingLevel) ||
-                !StreamingLevel->HasLoadedLevel())
-            {
-                return false;
-            }
-
-            auto LoadedLevel = StreamingLevel->LoadedLevel;
-            bool bVisible =
-                LoadedLevel && IsSaneObject(LoadedLevel) &&
-                LoadedLevel->HasbIsVisible() &&
-                LoadedLevel->bIsVisible;
-            if (!bVisible)
-                return false;
-        }
-        return true;
-    }
 }
 
 void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Ret)
@@ -6137,16 +6150,130 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
     static bool setup = false;
     static bool bListenSucceeded = false;
-    if (GameMode->HasWarmupRequiredPlayerCount() ? GameMode->WarmupRequiredPlayerCount != 1 : !setup)
+    static TWeakObjectPtr<UWorld> SetupWorld;
+    static ULONGLONG NextListenRetryTimeMs = 0;
+    auto World = UWorld::GetWorld();
+    if (SetupWorld.Get() != World)
+    {
+        SetupWorld = World
+            ? TWeakObjectPtr<UWorld>(World)
+            : TWeakObjectPtr<UWorld>{};
+        setup = false;
+        bListenSucceeded = false;
+        NextListenRetryTimeMs = 0;
+    }
+
+    auto InitializeListenDriver =
+        [&](UNetDriver* NetDriver) -> bool
+    {
+        if (!World || !NetDriver)
+            return false;
+
+        auto NetDriverName = FName(L"GameNetDriver");
+        if (VersionInfo.FortniteVersion >= 20)
+        {
+            NetDriver->NetServerMaxTickRate = static_cast<int32>(
+                FConfiguration::GetClampedMaxTickRate());
+        }
+        NetDriver->NetDriverName = NetDriverName;
+        NetDriver->World = World;
+
+        if (VersionInfo.EngineVersion >= 5.3 &&
+            FConfiguration::bEnableIris)
+        {
+            *(bool*)(__int64(&NetDriver->ReplicationDriver) + 0x11) = true;
+        }
+
+        const int32 LevelCollectionCount =
+            World->LevelCollections.Num();
+        for (int32 Index = 0;
+            Index < LevelCollectionCount && Index < 64;
+            ++Index)
+        {
+            auto& LevelCollection =
+                World->LevelCollections.Get(
+                    Index, FLevelCollection::Size());
+            LevelCollection.NetDriver = NetDriver;
+        }
+
+        auto InitListen =
+            (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&))
+                FindInitListen();
+        auto SetWorld =
+            (void (*)(UNetDriver*, UWorld*))FindSetWorld();
+        if (!InitListen || !SetWorld)
+            return false;
+
+        size_t URLSize = FURL::Size();
+        if (URLSize == 0 || URLSize > 0x1000)
+            return false;
+        auto URL = (FURL*)malloc(URLSize);
+        if (!URL)
+            return false;
+        memset((PBYTE)URL, 0, URLSize);
+        URL->Port =
+            FConfiguration::Port.load(std::memory_order_relaxed);
+
+        SDK::DbgLog(
+            "[GameMode] Listen: InitListen=%p SetWorld=%p Port=%d\n",
+            (void*)InitListen,
+            (void*)SetWorld,
+            FConfiguration::Port.load(std::memory_order_relaxed));
+        SetWorld(NetDriver, World);
+        FString Err;
+        const bool bInitialized =
+            InitListen(NetDriver, World, URL, false, Err);
+        free(URL);
+        if (bInitialized)
+            SetWorld(NetDriver, World);
+        return bInitialized;
+    };
+
+    const ULONGLONG CurrentListenTimeMs = GetTickCount64();
+    if (setup && !bListenSucceeded && World)
+    {
+        if (CurrentListenTimeMs >= NextListenRetryTimeMs)
+        {
+            if (World->NetDriver)
+            {
+                bListenSucceeded = InitializeListenDriver(
+                    static_cast<UNetDriver*>(World->NetDriver));
+            }
+            else
+            {
+                // Some native InitListen failure paths remove the partially
+                // initialized driver. Re-enter creation instead of leaving
+                // this world permanently stuck behind the setup sentinel.
+                setup = false;
+            }
+            NextListenRetryTimeMs = CurrentListenTimeMs + 2000ULL;
+            SDK::DbgLog(
+                "[GameMode] Listen retry returned %d recreate=%d\n",
+                (int)bListenSucceeded,
+                (int)!setup);
+        }
+    }
+
+    // Do not use WarmupRequiredPlayerCount as a setup sentinel. Newer builds
+    // can initialize it to one natively, which skipped server creation forever.
+    if (!setup && CurrentListenTimeMs >= NextListenRetryTimeMs)
     {
         setup = true;
 
         //if (!FindListenCall())
         {
             SDK::DbgLog("[GameMode] ReadyToStart Listen: ENTER setup=%d\n", (int)setup);
-            auto World = UWorld::GetWorld();
             auto Engine = UEngine::GetEngine();
             auto NetDriverName = FName(L"GameNetDriver");
+
+            if (!World || !Engine)
+            {
+                setup = false;
+                NextListenRetryTimeMs =
+                    CurrentListenTimeMs + 2000ULL;
+                *Ret = false;
+                return;
+            }
 
             if (GameMode->HasbEnableReplicationGraph())
                 GameMode->bEnableReplicationGraph = true;
@@ -6154,68 +6281,51 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             UNetDriver* NetDriver = nullptr;
             if (VersionInfo.FortniteVersion >= 16.00)
             {
+                auto GetWorldContext =
+                    (void* (*)(UEngine*, UWorld*))FindGetWorldContext();
+                auto CreateNetDriver =
+                    (UNetDriver * (*)(UEngine*, void*, FName, int))
+                        FindCreateNetDriverWorldContext();
                 SDK::DbgLog("[GameMode] Listen: GetWorldContext=%p CreateNetDriver=%p\n",
-                    (void*)FindGetWorldContext(), (void*)FindCreateNetDriverWorldContext());
-                void* WorldCtx = ((void* (*)(UEngine*, UWorld*)) FindGetWorldContext())(Engine, World);
-                World->NetDriver = NetDriver = ((UNetDriver * (*)(UEngine*, void*, FName, int)) FindCreateNetDriverWorldContext())(Engine, WorldCtx, NetDriverName, 0);
+                    (void*)GetWorldContext, (void*)CreateNetDriver);
+                void* WorldCtx = GetWorldContext
+                    ? GetWorldContext(Engine, World)
+                    : nullptr;
+                if (WorldCtx && CreateNetDriver)
+                {
+                    World->NetDriver = NetDriver =
+                        CreateNetDriver(
+                            Engine, WorldCtx, NetDriverName, 0);
+                }
                 SDK::DbgLog("[GameMode] Listen: WorldCtx=%p NetDriver=%p\n", WorldCtx, (void*)NetDriver);
             }
             else
-                World->NetDriver = NetDriver = ((UNetDriver * (*)(UEngine*, UWorld*, FName)) FindCreateNetDriver())(Engine, World, NetDriverName);
+            {
+                auto CreateNetDriver =
+                    (UNetDriver * (*)(UEngine*, UWorld*, FName))
+                        FindCreateNetDriver();
+                if (CreateNetDriver)
+                {
+                    World->NetDriver = NetDriver =
+                        CreateNetDriver(Engine, World, NetDriverName);
+                }
+            }
             if (!NetDriver)
             {
                 SDK::DbgLog("[GameMode] Listen: NetDriver NULL, abort\n");
+                setup = false;
+                NextListenRetryTimeMs =
+                    CurrentListenTimeMs + 2000ULL;
                 *Ret = false;
                 return;
             }
-            if (VersionInfo.FortniteVersion >= 20 && NetDriver)
+            bListenSucceeded = InitializeListenDriver(NetDriver);
+            SDK::DbgLog("[GameMode] Listen: InitListen returned %d\n", (int)bListenSucceeded);
+            if (!bListenSucceeded)
             {
-                NetDriver->NetServerMaxTickRate = static_cast<int32>(
-                    FConfiguration::GetClampedMaxTickRate());
-            }
-
-            NetDriver->NetDriverName = NetDriverName;
-            NetDriver->World = World;
-
-            if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
-            {
-                *(bool*)(__int64(&NetDriver->ReplicationDriver) + 0x11) = true;
-            }
-
-            NetDriver->NetDriverName = NetDriverName;
-            NetDriver->World = World;
-
-            for (int i = 0; i < World->LevelCollections.Num(); i++)
-            {
-                auto& LevelCollection = World->LevelCollections.Get(i, FLevelCollection::Size());
-
-                LevelCollection.NetDriver = NetDriver;
-            }
-
-            auto URL = (FURL*)malloc(FURL::Size());
-            memset((PBYTE)URL, 0, FURL::Size());
-            URL->Port =
-                FConfiguration::Port.load(std::memory_order_relaxed);
-
-            auto InitListen = (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&)) FindInitListen();
-            auto SetWorld = (void (*)(UNetDriver*, UWorld*)) FindSetWorld();
-            SDK::DbgLog(
-                "[GameMode] Listen: InitListen=%p SetWorld=%p Port=%d\n",
-                (void*)InitListen,
-                (void*)SetWorld,
-                FConfiguration::Port.load(std::memory_order_relaxed));
-
-            SetWorld(NetDriver, World);
-            FString Err;
-            bool ok = InitListen(NetDriver, World, URL, false, Err);
-            bListenSucceeded = ok;
-            SDK::DbgLog("[GameMode] Listen: InitListen returned %d\n", (int)ok);
-            if (ok)
-                SetWorld(NetDriver, World);
-            else
                 printf("Failed to listen!");
-
-            free(URL);
+                NextListenRetryTimeMs = GetTickCount64() + 2000ULL;
+            }
 
             if (!FConfiguration::bReadyToStart)
             {
@@ -7053,23 +7163,70 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     if (VersionInfo.EngineVersion >= 4.24 && GameMode->IsA<AFortGameModeAthena>())
     {
         int ReadyPlayers = 0;
-        TArray<AFortPlayerControllerAthena*> PlayerList;
-        Utils::GetAll<AFortPlayerControllerAthena>(PlayerList);
-
-        for (auto& PlayerController : PlayerList)
+        std::array<AFortPlayerControllerAthena*, 256>
+            CountedReadyControllers{};
+        size_t CountedReadyControllerCount = 0;
+        auto CountReadyController =
+            [&](AFortPlayerControllerAthena* PlayerController)
         {
+            if (!PlayerController || !PlayerController->PlayerState)
+                return;
+            for (size_t Index = 0;
+                Index < CountedReadyControllerCount;
+                ++Index)
+            {
+                if (CountedReadyControllers[Index] == PlayerController)
+                    return;
+            }
+            if (CountedReadyControllerCount <
+                CountedReadyControllers.size())
+            {
+                CountedReadyControllers[
+                    CountedReadyControllerCount++] =
+                        PlayerController;
+            }
             auto PlayerState = PlayerController->PlayerState;
-
             if (!PlayerState->bIsSpectator && PlayerController->bReadyToStartMatch)
-                ReadyPlayers++;
+                ++ReadyPlayers;
+        };
+        if (GameMode->HasAlivePlayers())
+        {
+            for (auto Actor : GameMode->AlivePlayers)
+            {
+                CountReadyController(
+                    Actor
+                        ? Actor->Cast<
+                            AFortPlayerControllerAthena>()
+                        : nullptr);
+            }
         }
-
-        PlayerList.Free();
+        auto ReadinessNetDriver = World
+            ? static_cast<UNetDriver*>(World->NetDriver)
+            : nullptr;
+        if (ReadinessNetDriver)
+        {
+            for (auto Connection :
+                ReadinessNetDriver->ClientConnections)
+            {
+                if (!Connection)
+                    continue;
+                CountReadyController(Connection->PlayerController);
+                for (auto Child : Connection->Children)
+                {
+                    if (Child)
+                        CountReadyController(Child->PlayerController);
+                }
+            }
+        }
 
         auto VolumeManager = GameState->HasVolumeManager() ? GameState->VolumeManager : nullptr;
 
         const UFortPlaylistAthena* ReadinessPlaylist =
             GetPublishedPlaylist(GameState);
+        const UFortPlaylistAthena* ActiveReadinessPlaylist =
+            ReadinessPlaylist
+                ? ReadinessPlaylist
+                : ResolveActivePlaylist(GameState);
         const bool bUsesManagedPlaylistStreaming =
             ReadinessPlaylist &&
             !FConfiguration::IsKnownS27CustomMapPlaylist() &&
@@ -7081,9 +7238,13 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             !bUsesManagedPlaylistStreaming ||
             MaintainManagedPlaylistLevels(
                 GameState, ReadinessPlaylist, false);
+        // MaintainManagedPlaylistLevels already verifies every level declared
+        // by the selected playlist.  Do not also require every entry in the
+        // engine's process-lifetime tracker: stale/unrelated entries can stay
+        // unloaded forever and used to leave an otherwise valid server stuck
+        // in "Setting up".
         const bool bAllLevelsFinishedStreaming =
-            bManagedRequestsReady &&
-            AreInternalPlaylistLevelsVisible(GameState, false);
+            bManagedRequestsReady;
 
         static auto WaitingToStart = FName(L"WaitingToStart");
         const bool bPlaylistReady =
@@ -7095,19 +7256,18 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             (VolumeManager->HasbInSpawningStartup()
                 ? VolumeManager->bInSpawningStartup
                 : GameState->bInSpawningStartup);
-        const bool bCoreServerReady =
+        const bool bServerJoinable =
             bListenSucceeded &&
             Misc::bHookedAll &&
             GameMode->bWorldIsReady &&
-            bPlaylistReady &&
-            GameMode->MatchState == WaitingToStart &&
-            bAllLevelsFinishedStreaming &&
-            !bStartupSpawning;
+            ActiveReadinessPlaylist != nullptr &&
+            GameMode->MatchState == WaitingToStart;
 
-        if (bCoreServerReady)
+        if (bServerJoinable)
             GUI::MarkServerJoinable();
 
         *Ret =
+            bListenSucceeded &&
             GameMode->bWorldIsReady &&
             bPlaylistReady &&
             GameMode->MatchState == WaitingToStart &&
@@ -7139,74 +7299,6 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             // duplicating it through the generic level-instance API crashes
             // the native async loader.
             *Ret = false;
-        }
-
-        auto LegacyWorld = UWorld::GetWorld();
-        auto LegacyNetDriver =
-            LegacyWorld
-                ? static_cast<UNetDriver*>(LegacyWorld->NetDriver)
-                : nullptr;
-        const int32 LegacyConnectionCount =
-            LegacyNetDriver
-                ? LegacyNetDriver->ClientConnections.Num()
-                : 0;
-        int32 LegacyReadyPlayerCount = 0;
-        TArray<AFortPlayerControllerAthena*> LegacyPlayerList;
-        Utils::GetAll<AFortPlayerControllerAthena>(LegacyPlayerList);
-        for (auto PlayerController : LegacyPlayerList)
-        {
-            if (PlayerController && PlayerController->PlayerState &&
-                !PlayerController->PlayerState->bIsSpectator &&
-                PlayerController->bReadyToStartMatch)
-            {
-                ++LegacyReadyPlayerCount;
-            }
-        }
-        LegacyPlayerList.Free();
-
-        static UWorld* LoggedLegacyReadinessWorld = nullptr;
-        static int32 LoggedLegacyConnections = -1;
-        static int32 LoggedLegacyReadyPlayers = -1;
-        static int32 LoggedLegacyAlivePlayers = -1;
-        static int32 LoggedLegacyNativeResult = -1;
-        if (LoggedLegacyReadinessWorld != LegacyWorld)
-        {
-            LoggedLegacyReadinessWorld = LegacyWorld;
-            LoggedLegacyConnections = -1;
-            LoggedLegacyReadyPlayers = -1;
-            LoggedLegacyAlivePlayers = -1;
-            LoggedLegacyNativeResult = -1;
-        }
-        const int32 LegacyAlivePlayerCount =
-            GameMode->HasAlivePlayers()
-                ? GameMode->AlivePlayers.Num()
-                : -1;
-        const int32 LegacyNativeResult = *Ret ? 1 : 0;
-        if (LegacyConnectionCount > 0 &&
-            (LoggedLegacyConnections != LegacyConnectionCount ||
-                LoggedLegacyReadyPlayers != LegacyReadyPlayerCount ||
-                LoggedLegacyAlivePlayers != LegacyAlivePlayerCount ||
-                LoggedLegacyNativeResult != LegacyNativeResult))
-        {
-            LoggedLegacyConnections = LegacyConnectionCount;
-            LoggedLegacyReadyPlayers = LegacyReadyPlayerCount;
-            LoggedLegacyAlivePlayers = LegacyAlivePlayerCount;
-            LoggedLegacyNativeResult = LegacyNativeResult;
-            SDK::DbgLog(
-                "[JoinLifecycle] legacy readiness native=%d clients=%d "
-                "ready=%d alive=%d playlist=%p playlistLoaded=%d "
-                "matchState=%s FN=%.2f UE=%.2f\n",
-                LegacyNativeResult,
-                LegacyConnectionCount,
-                LegacyReadyPlayerCount,
-                LegacyAlivePlayerCount,
-                (void*)Native1040Playlist,
-                (int)(GameState->HasbPlaylistDataIsLoaded()
-                    ? GameState->bPlaylistDataIsLoaded
-                    : true),
-                GameMode->MatchState.ToString().c_str(),
-                VersionInfo.FortniteVersion,
-                VersionInfo.EngineVersion);
         }
 
         static auto WaitingToStartLegacy = FName(L"WaitingToStart");
@@ -7257,8 +7349,16 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     }
 
     // Older native ReadyToStartMatch implementations populate the runtime
-    // schedule during the original call above. Clear that finished cache too.
-    TickSupplyDropSuppression(true);
+    // schedule during the original call above. Force one post-native discovery
+    // for each GameState, then leave the normal throttled tick to maintain it.
+    static TWeakObjectPtr<AFortGameStateAthena>
+        ForcedSupplyDropDiscoveryGameState;
+    if (ForcedSupplyDropDiscoveryGameState.Get() != GameState)
+    {
+        ForcedSupplyDropDiscoveryGameState =
+            TWeakObjectPtr<AFortGameStateAthena>(GameState);
+        TickSupplyDropSuppression(true);
+    }
     return;
 }
 
@@ -8567,17 +8667,12 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
         bool bWeak = false;
     };
 
-    // FN32 encrypts the FField class metadata used to distinguish an object
-    // pointer from an FWeakObjectPtr. Native team APIs remain available there;
-    // the direct repair below is deliberately disabled unless the reference
-    // representation can be proven from reflection.
     auto ResolveObjectReferenceField =
         [](UObject* Owner, const char* Name,
             FObjectReferenceField& OutField)
         {
             OutField = {};
-            if (!IsSaneObject(Owner) ||
-                VersionInfo.FortniteVersion >= 32.00)
+            if (!IsSaneObject(Owner))
             {
                 return false;
             }
@@ -8624,7 +8719,7 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             if (!(FieldFlags & ObjectReferenceFlags))
                 return false;
 
-            const uint32 Offset = SDK::DecryptPropOffset(
+            const uint32 Offset = SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property, Offsets::Offset_Internal));
             const uint32 ElementSize = GetFromOffset<uint32>(
@@ -8895,18 +8990,15 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
     constexpr uint64 CPF_Parm = 0x80;
     constexpr uint64 CPF_OutParm = 0x100;
     constexpr uint64 CPF_ReturnParm = 0x400;
-    const bool bEncryptedParameterMetadata =
-        VersionInfo.FortniteVersion >= 32.00;
     auto IsInputParam =
         [&](const UFunction::ParamNamed* Param,
             uint32 Offset, uint32 Size)
         {
             return Param && Param->Offset == Offset &&
-                (bEncryptedParameterMetadata ||
-                    (Param->ElementSize == Size &&
-                        (Param->PropertyFlags & CPF_Parm) &&
-                        !(Param->PropertyFlags &
-                            (CPF_OutParm | CPF_ReturnParm))));
+                Param->ElementSize == Size &&
+                (Param->PropertyFlags & CPF_Parm) &&
+                !(Param->PropertyFlags &
+                    (CPF_OutParm | CPF_ReturnParm));
         };
 
     constexpr uint32 ChangeTeamParamsSize = 0x38;
@@ -8942,10 +9034,9 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             IsInputParam(
                 TagsParam, 0x18,
                 sizeof(FGameplayTagContainer)) &&
-            (bEncryptedParameterMetadata ||
-                (Params.Size == ChangeTeamParamsSize &&
-                    ChangeTeamFunction->GetPropertiesSize() ==
-                        ChangeTeamParamsSize));
+            Params.Size == ChangeTeamParamsSize &&
+            ChangeTeamFunction->GetPropertiesSize() ==
+                ChangeTeamParamsSize;
         if (!bChangeTeamSchemaValid)
         {
             SDK::DbgLog(
@@ -10196,8 +10287,9 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
 
     // FN30 streams its Living World vehicle providers asynchronously. On
     // some starts UpdateVehicleSpawns runs around eleven seconds after this
-    // callback, so a one-shot scan permanently misses every source. Begin an
-    // immediate pass plus bounded, per-source-idempotent game-thread retries.
+    // callback, so a one-shot scan permanently misses every source. Begin a
+    // delayed, sparse, per-source-idempotent discovery window after streaming
+    // settles instead of sweeping the whole world throughout server startup.
     BeginDeferredVehicleSpawnDiscovery();
 
     if (VersionInfo.FortniteVersion > 3.4)
@@ -10307,120 +10399,11 @@ void PlayerCanRestart(UObject* Context, FFrame& Stack, bool* Ret)
     *Ret = true;
 }
 
-// 32.11: AGameMode::ReadyToStartMatch is a pure-native call, so Magnesium's ExecHook never fires and the
-// match is never configured. Hook it by direct RVA (Remix approach): configure playlist/warmup once, then
-// defer the actual readiness decision to the original.
-// Per-line-flushed logger (survives a game-thread hang, unlike buffered DbgLog) — used to pinpoint
-// exactly where ReadyToStartMatch_Direct dies on 32.11.
-static void RtsmLog(const char* fmt, ...)
-{
-    FILE* f = nullptr;
-    fopen_s(&f, "G:\\Fortnite Builds\\32.11\\FortniteGame\\Binaries\\Win64\\rtsm.log", "a");
-    if (!f) return;
-    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
-    fflush(f); fclose(f);
-}
-
-bool (*ReadyToStartMatch_DirectOG)(AFortGameModeAthena*) = nullptr;
-bool ReadyToStartMatch_Direct(AFortGameModeAthena* GameMode)
-{
-    static int s_call = 0;
-    int call = ++s_call;
-    if (call <= 20) RtsmLog("[RTSM #%d] enter GM=%p\n", call, (void*)GameMode);
-
-    if (!GameMode || !GameMode->GameState)
-        return false;
-    auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-
-    static bool s_setup = false;
-    if (!s_setup)
-    {
-        s_setup = true;
-        FConfiguration::Playlist = L"/BlastBerry/Playlists/Playlist_SunflowerSolo.Playlist_SunflowerSolo";
-        if (GameMode->HasWarmupRequiredPlayerCount())
-            GameMode->WarmupRequiredPlayerCount = 1;
-        SetupPlaylist(GameMode, GameState);
-        RtsmLog("[RTSM] SetupPlaylist done\n");
-    }
-
-    if (!GameMode->bWorldIsReady)
-    {
-        if (!(GameState->HasMapInfo() && GameState->MapInfo))
-            return false; // MapInfo actor not spawned yet
-
-        AFortGameMode::TickSupplyDropSuppression();
-
-        // 32.11: ::Get mis-resolves (returns null though the component exists on the game state, confirmed
-        // by object-array enum). Use the direct cached lookup instead.
-        auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed();
-        if (!GamePhaseLogic)
-            return false;
-        RtsmLog("[RTSM] GetFixed GamePhaseLogic=%p — setting up match\n", (void*)GamePhaseLogic);
-
-        // FindInitializeFlightPath misses on 32.11 -> Better-Remix RVA base+0x9101F80.
-        auto InitializeFlightPath = (void(*)(AFortAthenaMapInfo*, AFortGameStateAthena*, UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, bool, double, float, float))
-            (VersionInfo.FortniteVersion >= 32.00 ? Memcury::PE::GetModuleBase() + 0x9101F80 : FindInitializeFlightPath());
-        RtsmLog("[RTSM] pre-InitFlightPath (%p)\n", (void*)InitializeFlightPath);
-        if (InitializeFlightPath)
-            InitializeFlightPath(GameState->MapInfo, GameState, GamePhaseLogic, false, 0.f, 0.f, 360.f);
-        RtsmLog("[RTSM] post-InitFlightPath, pre-GenerateStormCircles\n");
-        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GenerateStormCircles(GameState->MapInfo);
-        AFortGameMode::TickSupplyDropSuppression(true);
-        RtsmLog("[RTSM] post-GenerateStormCircles\n");
-
-        auto Playlist = ResolveActivePlaylist(GameState);
-        if (Playlist && Playlist->HasbSkipWarmup())
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bSkipWarmup = Playlist->bSkipWarmup;
-        if (Playlist && Playlist->HasbSkipAircraft())
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bSkipAircraft = Playlist->bSkipAircraft;
-
-        GameMode->bWorldIsReady = true;
-        RtsmLog("[RTSM] bWorldIsReady=true set\n");
-    }
-
-    static auto WaitingToStart = FName(L"WaitingToStart");
-    auto World = UWorld::GetWorld();
-    if (GameMode->bWorldIsReady &&
-        GameMode->MatchState == WaitingToStart &&
-        Misc::bHookedAll &&
-        World &&
-        World->NetDriver)
-    {
-        GUI::MarkServerJoinable();
-    }
-
-    if (call <= 20) RtsmLog("[RTSM #%d] pre-GetAll PlayerControllers\n", call);
-    int ReadyPlayers = 0;
-    TArray<AFortPlayerControllerAthena*> PlayerList;
-    Utils::GetAll<AFortPlayerControllerAthena>(PlayerList);
-    if (call <= 20) RtsmLog("[RTSM #%d] GetAll done, num=%d\n", call, PlayerList.Num());
-    for (auto& PC : PlayerList)
-        if (PC && PC->PlayerState && !PC->PlayerState->bIsSpectator && PC->bReadyToStartMatch)
-            ReadyPlayers++;
-    PlayerList.Free();
-
-    bool ready = GameMode->bWorldIsReady
-        && GameMode->MatchState == WaitingToStart
-        && ReadyPlayers >= (GameMode->HasWarmupRequiredPlayerCount() ? GameMode->WarmupRequiredPlayerCount : 1);
-
-    if (call <= 20) RtsmLog("[RTSM #%d] worldReady=%d ReadyPlayers=%d ret=%d\n", call, GameMode->bWorldIsReady, ReadyPlayers, ready);
-    return ready;
-}
-
 void AFortGameMode::Hook()
 {
-    if (VersionInfo.FortniteVersion >= 32.00)
-    {
-        auto rtsm = Memcury::PE::GetModuleBase() + 0x918B180;
-        SDK::DbgLog("[GameMode] 32.11 direct ReadyToStartMatch hook @ %p (prologue=%08X)\n", (void*)rtsm, *(uint32_t*)rtsm);
-        Utils::Hook(rtsm, ReadyToStartMatch_Direct, ReadyToStartMatch_DirectOG);
-    }
-    else
-    {
-        auto _rtsmFn = GetDefaultObj()->GetFunction("ReadyToStartMatch");
-        SDK::DbgLog("[GameMode] Hook: ReadyToStartMatch UFunction=%p (CDO=%p)\n", (void*)_rtsmFn, (void*)GetDefaultObj());
-        Utils::ExecHook(_rtsmFn, ReadyToStartMatch_, ReadyToStartMatch_OG);
-    }
+    auto _rtsmFn = GetDefaultObj()->GetFunction("ReadyToStartMatch");
+    SDK::DbgLog("[GameMode] Hook: ReadyToStartMatch UFunction=%p (CDO=%p)\n", (void*)_rtsmFn, (void*)GetDefaultObj());
+    Utils::ExecHook(_rtsmFn, ReadyToStartMatch_, ReadyToStartMatch_OG);
     SDK::DbgLog("[GameMode] Hook: FindFinishWorldInitialization=%p\n", (void*)FindFinishWorldInitialization());
     Utils::Hook(FindFinishWorldInitialization(), FinishWorldInitialization, FinishWorldInitializationOG);
     //if (VersionInfo.EngineVersion == 4.16)

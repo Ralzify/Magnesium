@@ -99,7 +99,7 @@ namespace
         }
 
         const int32 PropertyOffset =
-            static_cast<int32>(SDK::DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property, Offsets::Offset_Internal)));
         const uint32 ElementSize = GetFromOffset<uint32>(
@@ -181,7 +181,7 @@ namespace
             return false;
 
         const int32 OuterOffset =
-            static_cast<int32>(SDK::DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     CharacterPartsProperty,
                     Offsets::Offset_Internal)));
@@ -189,7 +189,7 @@ namespace
             CharacterPartsProperty,
             Offsets::ElementSize);
         const int32 PartsOffset =
-            static_cast<int32>(SDK::DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     PartsProperty,
                     Offsets::Offset_Internal)));
@@ -371,7 +371,7 @@ namespace
         }
 
         const int32 PreviousPartsOffset =
-            static_cast<int32>(SDK::DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     PreviousPartsProperty,
                     Offsets::Offset_Internal)));
@@ -825,7 +825,7 @@ namespace
             return false;
 
         const int32 Offset = static_cast<int32>(
-            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal)));
         const uint8 FieldMask = Property->GetFieldMask();
         if (Offset < 0 || FieldMask == 0 ||
@@ -864,10 +864,10 @@ namespace
         }
 
         const int32 RepDataOffset = static_cast<int32>(
-            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 RepDataProperty, Offsets::Offset_Internal)));
         const int32 InGhostModeOffset = static_cast<int32>(
-            SDK::DecryptPropOffset(GetFromOffset<uint32>(
+            SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 InGhostModeProperty,
                 Offsets::Offset_Internal)));
         const int32 RepDataSize =
@@ -905,7 +905,7 @@ namespace
         if (ItemDefinitionProperty)
         {
             const int32 ItemDefinitionOffset =
-                static_cast<int32>(SDK::DecryptPropOffset(
+                static_cast<int32>(SDK::ReadPropertyOffset(
                     GetFromOffset<uint32>(
                         ItemDefinitionProperty,
                         Offsets::Offset_Internal)));
@@ -1079,7 +1079,7 @@ namespace
                 break;
 
             const int32 Offset = static_cast<int32>(
-                SDK::DecryptPropOffset(GetFromOffset<uint32>(
+                SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                     DurationProperty,
                     Offsets::Offset_Internal)));
             const uint32 ElementSize = GetFromOffset<uint32>(
@@ -1981,9 +1981,7 @@ namespace
 
         const auto Params = ClientStartedFunction->GetParamsNamed();
         const size_t AllocationSize =
-            VersionInfo.FortniteVersion >= 32.00
-                ? 0x1000
-                : static_cast<size_t>(Params.Size);
+            static_cast<size_t>(Params.Size);
         if (AllocationSize < sizeof(FGuid) + sizeof(float) ||
             AllocationSize > 0x4000)
         {
@@ -2091,8 +2089,7 @@ namespace
         }
 
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 InvalidObjectFlags =
-            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        constexpr int32 InvalidObjectFlags = 0x20;
         return Item &&
             Item->GetObject() == Object &&
             !(Item->GetFlags() & InvalidObjectFlags) &&
@@ -2217,9 +2214,7 @@ namespace
 
         const auto Params = Function->GetParamsNamed();
         const size_t AllocationSize =
-            VersionInfo.FortniteVersion >= 32.00
-                ? 0x1000
-                : static_cast<size_t>(Params.Size);
+            static_cast<size_t>(Params.Size);
         if (AllocationSize < sizeof(float) ||
             AllocationSize > 0x4000)
         {

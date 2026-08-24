@@ -46,20 +46,18 @@ namespace PlayerLoadout
         const std::string& Message) noexcept;
 
     // Resolves an already-resident preview texture or schedules its validated
-    // soft reference for loading. This is game-thread-only. Before FN 32 it
-    // reuses the reflected latent LoadAsset path; newer builds use a guarded,
-    // globally throttled one-shot load because that latent ABI is unavailable.
-    // Owner must be the live UObject that owns SoftReference.
+    // soft reference through the guarded, throttled reflected latent LoadAsset
+    // path. This is game-thread-only. Owner must be the live UObject that owns
+    // SoftReference.
     FPreviewTextureLoadResult ResolveOrRequestPreviewTexture(
         const void* Owner,
         const void* SoftReference,
         std::uint32_t SoftReferenceSize) noexcept;
 
-    // Generic form of the same resident/latent loader. It never performs the
-    // FN32+ synchronous fallback used by the inventory preview UI, making it
-    // safe for deferred gameplay cosmetics. ExpectedClass and Owner must be
-    // live game-thread UObjects; Owner is the stable identity used to serialize
-    // that caller's requests and need not contain the temporary soft pointer.
+    // Generic form of the same guarded resident/latent loader for deferred
+    // gameplay cosmetics. ExpectedClass and Owner must be live game-thread
+    // UObjects; Owner is the stable identity used to serialize that caller's
+    // requests and need not contain the temporary soft pointer.
     FSoftObjectLoadResult ResolveOrRequestSoftObject(
         const void* Owner,
         const void* SoftReference,

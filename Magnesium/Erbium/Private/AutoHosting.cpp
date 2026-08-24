@@ -643,8 +643,13 @@ namespace AutoHosting
                     "bus_settings_user_override",
                     false),
                 std::memory_order_release);
+            // Do not restore this diagnostic switch.  Older preference files
+            // commonly contain the old default of true, which makes every
+            // launch synchronously enumerate the entire UObject registry
+            // twice before bWorldIsReady can be published.  The GUI can still
+            // enable a dump explicitly for the current launch.
             FConfiguration::bAutoDump.store(
-                ReadBool(Match, "auto_dump", true),
+                false,
                 std::memory_order_release);
             FConfiguration::bIsCustomMap.store(
                 ReadBool(Match, "use_custom_map", false),
@@ -1385,7 +1390,7 @@ namespace AutoHosting
             FConfiguration::IsS27() ? 1 : 4,
             std::memory_order_release);
         FConfiguration::bAutoDump.store(
-            VersionInfo.FortniteVersion != 19.20,
+            false,
             std::memory_order_release);
         GDefaultPreferences = CapturePreferences();
 

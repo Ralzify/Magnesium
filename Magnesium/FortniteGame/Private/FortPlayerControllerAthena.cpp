@@ -102,10 +102,7 @@ bool AFortPlayerControllerAthena::TryModifyStat(
 	const FName ResolvedStatName(StatName);
 	const uint8 ResolvedModType = ResolveStatMod(ModType);
 	const auto Parameters = ServerModifyStat__Ptr->GetParamsNamed();
-	const bool bEncryptedParameterMetadata =
-		VersionInfo.FortniteVersion >= 32.00;
-	const size_t BufferSize = bEncryptedParameterMetadata
-		? 0x1000 : static_cast<size_t>(Parameters.Size);
+	const size_t BufferSize = static_cast<size_t>(Parameters.Size);
 	if (!BufferSize || BufferSize > 0x1000 ||
 		Parameters.NameOffsetMap.size() != 4)
 	{
@@ -147,8 +144,7 @@ bool AFortPlayerControllerAthena::TryModifyStat(
 
 		if (*Destination != UINT32_MAX ||
 			Parameter.Offset >= BufferSize ||
-			(!bEncryptedParameterMetadata &&
-			 Parameter.ElementSize != ExpectedSize))
+			Parameter.ElementSize != ExpectedSize)
 		{
 			return false;
 		}
@@ -214,10 +210,7 @@ static bool TryGetReactiveStatValue(
 		return false;
 
 	const auto Parameters = Function->GetParamsNamed();
-	const bool bEncryptedParameterMetadata =
-		VersionInfo.FortniteVersion >= 32.00;
-	const size_t BufferSize = bEncryptedParameterMetadata
-		? 0x1000 : static_cast<size_t>(Parameters.Size);
+	const size_t BufferSize = static_cast<size_t>(Parameters.Size);
 	if (!BufferSize || BufferSize > 0x1000 ||
 		Parameters.NameOffsetMap.size() != 3)
 	{
@@ -252,8 +245,7 @@ static bool TryGetReactiveStatValue(
 		}
 		if (*Destination != UINT32_MAX ||
 			Parameter.Offset >= BufferSize ||
-			(!bEncryptedParameterMetadata &&
-			 Parameter.ElementSize != ExpectedSize))
+			Parameter.ElementSize != ExpectedSize)
 		{
 			return false;
 		}
@@ -2441,9 +2433,8 @@ static UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
 	// owner. The older GameMode/GameState pointers can remain populated with the
 	// superseded indicator during an owner hand-off, which is how a respawn can
 	// be sent to an old (occasionally still-zero) circle on modern builds.
-	auto PhaseLogic = VersionInfo.FortniteVersion >= 32.00
-		? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed()
-		: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
+	auto PhaseLogic =
+		UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
 	return IsUsableDeathObject(PhaseLogic) ? PhaseLogic : nullptr;
 }
 
@@ -2525,13 +2516,10 @@ static bool TryGetSafeZonePhaseCenter(
 	FVector& OutCenter)
 {
 	if (!SafeZoneIndicator || !SafeZoneIndicator->HasSafeZonePhases() ||
-		SafeZonePhase < 0 || VersionInfo.FortniteVersion >= 32.00)
+		SafeZonePhase < 0)
 	{
 		return false;
 	}
-	// FN 32.x encrypts/relocates the reflected FProperty layout used by
-	// UScriptStruct::Size(). Never stride SafeZonePhases with that value there;
-	// the component's published NextCenter/interface is the safe source.
 	auto PhaseStruct = FFortSafeZonePhaseInfo::StaticStruct();
 	if (!PhaseStruct || !FFortSafeZonePhaseInfo::HasCenter() ||
 		!FFortSafeZonePhaseInfo::HasRadius())
@@ -2631,10 +2619,8 @@ static bool TryCallRespawnSafeZoneVectorGetter(
 		return false;
 
 	// UObject::Call's no-argument return fast path assumes ReturnValue lives at
-	// offset zero. That is normally true, but a schema mismatch writes into an
-	// undersized FVector buffer; on FN32 its generic return decoder also cannot
-	// trust encrypted PropertyFlags. Validate the exact getter shape and own the
-	// ProcessEvent buffer instead.
+	// offset zero. A schema mismatch writes into an undersized FVector buffer,
+	// so validate the exact getter shape and own the ProcessEvent buffer.
 	const auto Parameters = Function->GetParamsNamed();
 	if (Parameters.NameOffsetMap.size() != 1)
 		return false;
@@ -2649,19 +2635,16 @@ static bool TryCallRespawnSafeZoneVectorGetter(
 
 	constexpr uint64 CPF_Parm = 0x0000000000000080;
 	constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
-	const bool bFN32PropertyLayout = VersionInfo.FortniteVersion >= 32.00;
-	const uint32 BufferSize = bFN32PropertyLayout
-		? 0x1000u : Parameters.Size;
+	const uint32 BufferSize = Parameters.Size;
 	if (BufferSize == 0 || BufferSize > 0x1000 ||
 		ReturnParameter.Offset > BufferSize ||
 		VectorSize > BufferSize - ReturnParameter.Offset)
 	{
 		return false;
 	}
-	if (!bFN32PropertyLayout &&
-		(!(ReturnParameter.PropertyFlags & CPF_Parm) ||
+	if (!(ReturnParameter.PropertyFlags & CPF_Parm) ||
 		 !(ReturnParameter.PropertyFlags & CPF_ReturnParm) ||
-		 ReturnParameter.ElementSize != VectorSize))
+		 ReturnParameter.ElementSize != VectorSize)
 	{
 		return false;
 	}
@@ -8793,9 +8776,19 @@ static bool UsesLandingItemPollingFallback()
 	if (UsesLegacyThreeParameterInventoryClientRefresh())
 		return true;
 
+	static bool bResolvedEndSkydivingCapability = false;
+	static bool bRequiresPollingFallback = true;
+	if (bResolvedEndSkydivingCapability)
+		return bRequiresPollingFallback;
+
 	auto PawnDefault = AFortPlayerPawnAthena::GetDefaultObj();
-	return !PawnDefault ||
+	if (!PawnDefault)
+		return true;
+
+	bRequiresPollingFallback =
 		PawnDefault->GetFunction("EndSkydiving") == nullptr;
+	bResolvedEndSkydivingCapability = true;
+	return bRequiresPollingFallback;
 }
 
 static FFortItemEntry* FindLandingInventoryEntry(
@@ -9507,6 +9500,11 @@ static bool RestoreLandingItemSelection(
 static void TickLandingItemSelectionRestores()
 {
 	RefreshLandingItemRestoreWorld();
+	if (GLandingItemRestoreStates.empty())
+		return;
+
+	const bool bRequiresPollingFallback =
+		UsesLandingItemPollingFallback();
 	for (auto StateIt = GLandingItemRestoreStates.begin();
 		StateIt != GLandingItemRestoreStates.end();)
 	{
@@ -9523,6 +9521,24 @@ static void TickLandingItemSelectionRestores()
 			continue;
 		}
 		++StateIt;
+
+		// Modern builds have authoritative equip and EndSkydiving hooks. A
+		// settled, ordinary selection therefore needs no frame-by-frame pawn,
+		// health, weapon or inventory polling. Keep the poller active only for
+		// callback-less clients and transitions that still require observation.
+		const bool bPendingRespawnLanding =
+			GPendingRespawnLandingFinalization.find(
+				PlayerController) !=
+			GPendingRespawnLandingFinalization.end();
+		if (!bRequiresPollingFallback &&
+			!State.bLandingRestorePending &&
+			!State.bObservedSkydiving &&
+			!State.bSuppressRestore &&
+			!State.bPersistentSuppression &&
+			!bPendingRespawnLanding)
+		{
+			continue;
+		}
 
 		auto Pawn = PlayerController->MyFortPawn;
 		if (!IsValidLandingItemPlayer(
@@ -10071,9 +10087,9 @@ void AFortPlayerControllerAthena::ServerPlayEmoteItem_(UObject* Context, FFrame&
 	}
 	else
 	{
-		// Some builds (notably 32.11) do not expose the native activation
-		// helper. Fail closed instead of calling through zero or leaving a
-		// traversal flag installed without an emote that can stop it.
+		// Some builds do not expose the native activation helper. Fail closed
+		// instead of calling through zero or leaving a traversal flag installed
+		// without an emote that can stop it.
 		ClearPendingMovingEmoteState(PlayerController->MyFortPawn);
 	}
 }
@@ -10404,8 +10420,7 @@ static bool IsUsableDeathObject(const UObject* Object)
 		return false;
 
 	auto Item = TUObjectArray::GetItemByIndex(Object->Index);
-	const int32 InvalidObjectFlags =
-		Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+	constexpr int32 InvalidObjectFlags = 0x20;
 	if (!Item || Item->GetObject() != Object ||
 		(Item->GetFlags() & InvalidObjectFlags))
 		return false;
@@ -12685,20 +12700,15 @@ static bool IsPawnDBNOForSpectating(AFortPlayerPawnAthena* Pawn)
 		return bReflectedBitIsDBNO;
 	}
 
-	// FN32 relocates/encrypts property-size metadata, while the resolved name
-	// and offset remain usable. Earlier builds must match the full schema.
-	if (VersionInfo.FortniteVersion < 32.00)
+	constexpr uint64 CPF_Parm = 0x80;
+	constexpr uint64 CPF_ReturnParm = 0x400;
+	if (Params.Size != sizeof(bool) ||
+		IsDBNOFunction->GetPropertiesSize() != sizeof(bool) ||
+		ReturnParam->ElementSize != sizeof(bool) ||
+		!(ReturnParam->PropertyFlags & CPF_Parm) ||
+		!(ReturnParam->PropertyFlags & CPF_ReturnParm))
 	{
-		constexpr uint64 CPF_Parm = 0x80;
-		constexpr uint64 CPF_ReturnParm = 0x400;
-		if (Params.Size != sizeof(bool) ||
-			IsDBNOFunction->GetPropertiesSize() != sizeof(bool) ||
-			ReturnParam->ElementSize != sizeof(bool) ||
-			!(ReturnParam->PropertyFlags & CPF_Parm) ||
-			!(ReturnParam->PropertyFlags & CPF_ReturnParm))
-		{
-			return bReflectedBitIsDBNO;
-		}
+		return bReflectedBitIsDBNO;
 	}
 
 	return bReflectedBitIsDBNO ||
@@ -14210,10 +14220,7 @@ static bool TryGetLegacyRespawnServerWorldTime(
 
 	constexpr uint64 CPF_Parm = 0x0000000000000080;
 	constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
-	const bool bFN32PropertyLayout =
-		VersionInfo.FortniteVersion >= 32.00;
-	const uint32 BufferSize = bFN32PropertyLayout
-		? 0x1000u : Parameters.Size;
+	const uint32 BufferSize = Parameters.Size;
 	if (BufferSize == 0 || BufferSize > 0x1000 ||
 		ReturnParameter.Offset > BufferSize ||
 		sizeof(float) >
@@ -14221,10 +14228,9 @@ static bool TryGetLegacyRespawnServerWorldTime(
 	{
 		return false;
 	}
-	if (!bFN32PropertyLayout &&
-		(!(ReturnParameter.PropertyFlags & CPF_Parm) ||
+	if (!(ReturnParameter.PropertyFlags & CPF_Parm) ||
 		 !(ReturnParameter.PropertyFlags & CPF_ReturnParm) ||
-		 ReturnParameter.ElementSize != sizeof(float)))
+		 ReturnParameter.ElementSize != sizeof(float))
 	{
 		return false;
 	}
@@ -19603,9 +19609,6 @@ namespace
 	static uint32 GetCopyTargetParamsSize(
 		const UFunction::ParamsNamed& Params)
 	{
-		if (VersionInfo.FortniteVersion >= 32.00)
-			return CopyTargetParamsCapacity;
-
 		return Params.Size > 0 &&
 			Params.Size <= CopyTargetParamsCapacity
 			? Params.Size
@@ -19616,12 +19619,7 @@ namespace
 		const FCopyTargetField& Field,
 		uint32 ExpectedSize)
 	{
-		// FN32 relocates/encrypts FProperty::ElementSize. The decrypted field
-		// offset remains reliable, so validate the true C++ size against the
-		// fixed over-allocation there instead of trusting metadata garbage.
-		return Field.bFound &&
-			(VersionInfo.FortniteVersion >= 32.00 ||
-			 Field.Size == ExpectedSize);
+		return Field.bFound && Field.Size == ExpectedSize;
 	}
 
 	static bool IsCopyTargetCandidate(
@@ -19897,8 +19895,7 @@ namespace
 		if (HitSize < CopyTargetMinHitResultSize ||
 			HitSize > CopyTargetMaxHitResultSize ||
 			!OutHit.Fits(ParamsSize, HitSize) ||
-			(VersionInfo.FortniteVersion < 32.00 &&
-			 OutHit.Size != HitSize))
+			OutHit.Size != HitSize)
 		{
 			return nullptr;
 		}
@@ -20015,10 +20012,8 @@ namespace
 		if (!IsUsableDeathObject(Class))
 			return false;
 
-		// GetPathName is reliable on the UE4 builds and already produces the
-		// exact format consumed by summon. Its generic reflected FString return
-		// is not reliable on FN32, so use UObject's package/name fields there.
-		if (VersionInfo.FortniteVersion < 32.00)
+		// Prefer the exact reflected format consumed by summon. Keep the manual
+		// package/name fallback for layouts that do not expose a usable path.
 		{
 			auto ReflectedPath =
 				UKismetSystemLibrary::GetPathName(
@@ -21177,9 +21172,7 @@ static void TickLoadedGameplayEffectCatalogForCommand()
 	constexpr int32 MaxObjectsPerTick = 2048;
 	constexpr auto TimeBudget = std::chrono::microseconds(1000);
 	const auto TickStart = std::chrono::steady_clock::now();
-	const int32 SkipFlags = Offsets::bEncryptedObjects
-		? 0x10200000
-		: 0x20;
+	constexpr int32 SkipFlags = 0x20;
 	int32 ObjectsProcessed = 0;
 
 	while (Catalog.NextObjectIndex < Catalog.ObjectCount &&
@@ -22405,15 +22398,8 @@ static bool ClientForceViewTarget(
 		return false;
 
 	const auto ReflectedParams = Fn->GetParamsNamed();
-	// FN32 relocates/encrypts UStruct::PropertiesSize and FProperty element
-	// sizes. Parameter names and decrypted offsets remain usable, while the
-	// reflected total size does not; mirror UObject::Call's fixed safe buffer.
-	const bool bFN32ReflectionLayout =
-		VersionInfo.FortniteVersion >= 32.00;
 	const uint32 ParamsSize =
-		bFN32ReflectionLayout
-			? 0x1000
-			: ReflectedParams.Size > 0
+		ReflectedParams.Size > 0
 			? ReflectedParams.Size
 			: 0x40;
 	if (ParamsSize < sizeof(AActor*) ||
@@ -22449,8 +22435,7 @@ static bool ClientForceViewTarget(
 
 	// Legacy layouts consistently place the actor at offset zero, but prefer
 	// reflection and use this only when parameter names are unavailable.
-	if (TargetOffset < 0 &&
-		!bFN32ReflectionLayout)
+	if (TargetOffset < 0)
 	{
 		for (const auto& Parameter :
 			ReflectedParams.NameOffsetMap)
@@ -23879,14 +23864,7 @@ static bool TryResolveForceKillSchema(
 		return false;
 	}
 
-	// FN32 relocates/encrypts PropertiesSize, ElementSize and PropertyFlags,
-	// while names and decrypted offsets remain usable. Mirror the engine call
-	// path with a fixed zeroed buffer there, so only bounds-check those offsets.
-	const bool bUnreliablePropertyMetadata =
-		VersionInfo.FortniteVersion >= 32.00;
-	const uint32 ParamsSize = bUnreliablePropertyMetadata
-		? 0x1000u
-		: Params.Size > 0
+	const uint32 ParamsSize = Params.Size > 0
 			? Params.Size
 			: 0u;
 	const uint32 TagSize =
@@ -23901,17 +23879,6 @@ static bool TryResolveForceKillSchema(
 		sizeof(AActor*) > ParamsSize - KillerActor->Offset)
 	{
 		return false;
-	}
-
-	if (bUnreliablePropertyMetadata)
-	{
-		OutSchema = {
-			ParamsSize,
-			DeathReason->Offset,
-			KillerController->Offset,
-			KillerActor->Offset
-		};
-		return true;
 	}
 
 	constexpr uint64 CPF_Parm = 0x80;
@@ -23962,9 +23929,8 @@ static bool TryResolvePawnServerSuicideSchema(
 			MatchPlacement = &Param;
 	}
 
-	// Season 10 exposes only the suppression bool. By 13.40 and through
-	// 32.11 the RPC also carries MatchPlacement. Refuse every other reflected
-	// shape instead of guessing at a future parameter buffer.
+	// Season 10 exposes only the suppression bool. By 13.40 the RPC also
+	// carries MatchPlacement. Refuse every other reflected shape.
 	if (!SuppressResurrectionChip ||
 		(Params.NameOffsetMap.size() != 1 &&
 		 Params.NameOffsetMap.size() != 2) ||
@@ -23973,11 +23939,7 @@ static bool TryResolvePawnServerSuicideSchema(
 		return false;
 	}
 
-	const bool bUnreliablePropertyMetadata =
-		VersionInfo.FortniteVersion >= 32.00;
-	const uint32 ParamsSize = bUnreliablePropertyMetadata
-		? 0x1000u
-		: Params.Size;
+	const uint32 ParamsSize = Params.Size;
 	if (!ParamsSize || ParamsSize > 0x1000 ||
 		SuppressResurrectionChip->Offset >= ParamsSize ||
 		(MatchPlacement &&
@@ -23988,25 +23950,22 @@ static bool TryResolvePawnServerSuicideSchema(
 		return false;
 	}
 
-	if (!bUnreliablePropertyMetadata)
+	constexpr uint64 CPF_Parm = 0x80;
+	constexpr uint64 CPF_ReturnParm = 0x400;
+	auto IsInput = [](const UFunction::ParamNamed* Param,
+		uint32 ExpectedSize)
 	{
-		constexpr uint64 CPF_Parm = 0x80;
-		constexpr uint64 CPF_ReturnParm = 0x400;
-		auto IsInput = [](const UFunction::ParamNamed* Param,
-			uint32 ExpectedSize)
-		{
-			return Param &&
-				Param->ElementSize == ExpectedSize &&
-				(Param->PropertyFlags & CPF_Parm) &&
-				!(Param->PropertyFlags & CPF_ReturnParm);
-		};
-		if (Function->GetPropertiesSize() != Params.Size ||
-			!IsInput(SuppressResurrectionChip, sizeof(bool)) ||
-			(MatchPlacement &&
-			 !IsInput(MatchPlacement, sizeof(int32))))
-		{
-			return false;
-		}
+		return Param &&
+			Param->ElementSize == ExpectedSize &&
+			(Param->PropertyFlags & CPF_Parm) &&
+			!(Param->PropertyFlags & CPF_ReturnParm);
+	};
+	if (Function->GetPropertiesSize() != Params.Size ||
+		!IsInput(SuppressResurrectionChip, sizeof(bool)) ||
+		(MatchPlacement &&
+		 !IsInput(MatchPlacement, sizeof(int32))))
+	{
+		return false;
 	}
 
 	OutSchema.ParamsSize = ParamsSize;
@@ -24076,9 +24035,8 @@ bool AFortPlayerControllerAthena::TryEliminatePlayer(
 			ControllerServerSuicide->GetParamsNamed();
 		const bool bZeroParameterSchema =
 			Params.NameOffsetMap.empty() &&
-			(VersionInfo.FortniteVersion >= 32.00 ||
-			 (Params.Size == 0 &&
-			  ControllerServerSuicide->GetPropertiesSize() == 0));
+			Params.Size == 0 &&
+			ControllerServerSuicide->GetPropertiesSize() == 0;
 		if (bZeroParameterSchema)
 		{
 			PlayerController->ProcessEvent(
@@ -29326,7 +29284,7 @@ static bool ResolveBoundedVehicleWeaponStructProperty(
 	if (!Property)
 		return false;
 
-	const uint32 Offset = DecryptPropOffset(
+	const uint32 Offset = SDK::ReadPropertyOffset(
 		GetFromOffset<uint32>(Property, Offsets::Offset_Internal));
 	const uint32 ElementSize =
 		GetFromOffset<uint32>(Property, Offsets::ElementSize);
@@ -29475,7 +29433,7 @@ static bool ResolveVehicleMountedStructField(
 	if (!Property)
 		return false;
 
-	const uint32 Offset = DecryptPropOffset(
+	const uint32 Offset = SDK::ReadPropertyOffset(
 		GetFromOffset<uint32>(Property, Offsets::Offset_Internal));
 	const uint32 ElementSize =
 		GetFromOffset<uint32>(Property, Offsets::ElementSize);
@@ -30063,10 +30021,9 @@ static bool HasExactInputParameter(
 	{
 		if (Param.Name == Name &&
 			Param.Offset == Offset &&
-			(VersionInfo.FortniteVersion >= 32.00 ||
-				(Param.ElementSize == Size &&
-					(Param.PropertyFlags & CPF_Parm) &&
-					!(Param.PropertyFlags & CPF_ReturnParm))))
+			Param.ElementSize == Size &&
+			(Param.PropertyFlags & CPF_Parm) &&
+			!(Param.PropertyFlags & CPF_ReturnParm))
 		{
 			return true;
 		}
@@ -30083,10 +30040,8 @@ static bool HasServerNotifyStartLongUseSchema27_11(
 	}
 
 	const auto Params = Function->GetParamsNamed();
-	return (VersionInfo.FortniteVersion >= 32.00 ||
-			(Params.Size == sizeof(AActor*) &&
-				Function->GetPropertiesSize() ==
-					sizeof(AActor*))) &&
+	return Params.Size == sizeof(AActor*) &&
+		Function->GetPropertiesSize() == sizeof(AActor*) &&
 		Params.NameOffsetMap.size() == 1 &&
 		HasExactInputParameter(
 			Params,
@@ -30104,11 +30059,10 @@ static bool HasServerNotifyEndLongUseSchema27_11(
 	}
 
 	const auto Params = Function->GetParamsNamed();
-	return (VersionInfo.FortniteVersion >= 32.00 ||
-			(Params.Size ==
-				sizeof(FServerNotifyEndLongUseParams27_11) &&
-				Function->GetPropertiesSize() ==
-					sizeof(FServerNotifyEndLongUseParams27_11))) &&
+	return Params.Size ==
+			sizeof(FServerNotifyEndLongUseParams27_11) &&
+		Function->GetPropertiesSize() ==
+			sizeof(FServerNotifyEndLongUseParams27_11) &&
 		Params.NameOffsetMap.size() == 2 &&
 		HasExactInputParameter(
 			Params,
@@ -30234,7 +30188,7 @@ static uint8* PrepareLongInteractValidateInfo27_11(
 	}
 
 	const uint32 ValidateInfoOffset =
-		DecryptPropOffset(GetFromOffset<uint32>(
+		SDK::ReadPropertyOffset(GetFromOffset<uint32>(
 			ValidateInfoProperty,
 			Offsets::Offset_Internal));
 	const uint32 ValidateInfoSize =
@@ -30242,7 +30196,7 @@ static uint8* PrepareLongInteractValidateInfo27_11(
 			ValidateInfoProperty,
 			Offsets::ElementSize);
 	const uint32 TargetOffset =
-		DecryptPropOffset(GetFromOffset<uint32>(
+		SDK::ReadPropertyOffset(GetFromOffset<uint32>(
 			TargetProperty,
 			Offsets::Offset_Internal));
 	const uint32 TargetSize =
@@ -30601,11 +30555,10 @@ static bool HasServerAttemptInteractSchema27_11(
 	}
 
 	const auto Params = Function->GetParamsNamed();
-	if ((VersionInfo.FortniteVersion < 32.00 &&
-			(Params.Size !=
-				sizeof(FServerAttemptInteractParams27_11) ||
-				Function->GetPropertiesSize() !=
-					sizeof(FServerAttemptInteractParams27_11))) ||
+	if (Params.Size !=
+			sizeof(FServerAttemptInteractParams27_11) ||
+		Function->GetPropertiesSize() !=
+			sizeof(FServerAttemptInteractParams27_11) ||
 		Params.NameOffsetMap.size() != 6)
 	{
 		return false;
@@ -30621,11 +30574,9 @@ static bool HasServerAttemptInteractSchema27_11(
 			{
 				if (Param.Name == Name &&
 					Param.Offset == Offset &&
-					(VersionInfo.FortniteVersion >= 32.00 ||
-						(Param.ElementSize == Size &&
-							(Param.PropertyFlags & CPF_Parm) &&
-							!(Param.PropertyFlags &
-								CPF_ReturnParm))))
+					Param.ElementSize == Size &&
+					(Param.PropertyFlags & CPF_Parm) &&
+					!(Param.PropertyFlags & CPF_ReturnParm))
 				{
 					return true;
 				}
@@ -30673,17 +30624,14 @@ static ULONGLONG GetAuthoredReviveLongUseMinimumMs(
 	}
 	constexpr uint64 CPF_Parm = 0x80;
 	constexpr uint64 CPF_ReturnParm = 0x400;
-	const bool bEncryptedParameterMetadata =
-		VersionInfo.FortniteVersion >= 32.00;
 	const bool bSchemaValid =
 		Params.NameOffsetMap.size() == 1 &&
 		ReturnParam && ReturnParam->Offset == 0 &&
-		(bEncryptedParameterMetadata ||
-			(Params.Size == sizeof(float) &&
-				Function->GetPropertiesSize() == sizeof(float) &&
-				ReturnParam->ElementSize == sizeof(float) &&
-				(ReturnParam->PropertyFlags & CPF_Parm) &&
-				(ReturnParam->PropertyFlags & CPF_ReturnParm)));
+		Params.Size == sizeof(float) &&
+		Function->GetPropertiesSize() == sizeof(float) &&
+		ReturnParam->ElementSize == sizeof(float) &&
+		(ReturnParam->PropertyFlags & CPF_Parm) &&
+		(ReturnParam->PropertyFlags & CPF_ReturnParm);
 	if (!bSchemaValid)
 		return ConservativeFallbackMs;
 
@@ -32939,7 +32887,7 @@ static int32 GetStructPropertyOffset(const SDK::UStruct* Struct, const char* Pro
 		return -1;
 
 	auto Prop = Struct->GetProperty(PropertyName);
-	return Prop ? SDK::DecryptPropOffset(GetFromOffset<uint32>(Prop, Offsets::Offset_Internal)) : -1;
+	return Prop ? SDK::ReadPropertyOffset(GetFromOffset<uint32>(Prop, Offsets::Offset_Internal)) : -1;
 }
 
 static int32 GetObjectPropertyElementSize(const UObject* Object, const char* PropertyName)

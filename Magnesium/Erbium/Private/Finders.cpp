@@ -26,7 +26,7 @@ uint64_t FindGIsClient()
             sRef = Memcury::Scanner::FindStringRef(L"llowCommandletRendering").Get(); // bro why
 
         if (!sRef)
-            return GIsClient = 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+            return GIsClient = 0; // unresolved signature: avoid *(0 - i)
 
         int Skip = 2;
         uint8_t correctByte = 0;
@@ -87,7 +87,7 @@ uint64_t FindGIsServer()
             sRef = Memcury::Scanner::FindStringRef(L"llowCommandletRendering").Get(); // bro why
 
         if (!sRef)
-            return GIsServer = 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+            return GIsServer = 0; // unresolved signature: avoid *(0 - i)
 
         int Skip = 1;
         uint8_t correctByte = 0;
@@ -178,9 +178,6 @@ uint64_t FindGetWorldContext()
     {
         bInitialized = true;
 
-        if (VersionInfo.FortniteVersion >= 32.00)
-            return GetWorldContext = ImageBase + 0x1973A84; // 32.11 (GetWorldContextFromWorld)
-
         GetWorldContext = Memcury::Scanner::FindPattern("48 8B 81 ? ? ? ? 48 63 89 ? ? ? ? 4C 8D 04 C8 49 3B C0 74 ? 48 8B 08 48 39 91 80 02 00 00 75 ? 48 8B C1 C3").Get();
 
         if (!GetWorldContext)
@@ -255,9 +252,6 @@ uint64_t FindCreateNetDriverWorldContext()
     {
         bInitialized = true;
 
-        if (VersionInfo.FortniteVersion >= 32.00)
-            return CreateNetDriver = ImageBase + 0x2EF3758; // 32.11 (CreateNamedNetDriver); sig misses (43-vs-41)
-
         if (std::floor(VersionInfo.FortniteVersion) == 19)
             return CreateNetDriver = Memcury::Scanner::FindPattern("41 56 48 83 EC ? 48 63 81 ? ? ? ? 48 8D ? ? ? ? ? 48 8B B9 ? ? ? ? 4C 8B F2").ScanFor({ 0xC3 }, false).ScanFor({ 0x48 }).Get();
         if (VersionInfo.FortniteVersion >= 20)
@@ -329,9 +323,6 @@ uint64_t FindInitListen()
     {
         bInitialized = true;
 
-        if (VersionInfo.FortniteVersion >= 32.00)
-            return InitListen = ImageBase + 0x734AB88; // 32.11: prologue is 4E 8B DC (REX.WRX), sig misses
-
         if (VersionInfo.EngineVersion >= 5.0)
         {
             InitListen = Memcury::Scanner::FindPattern("4D 8B C8 4C 8B C2 33 D2 FF 90 ? ? ? ? 84 C0 75 ? 80 3D").ScanFor({ 0x4C, 0x8B, 0xDC }, false).Get();
@@ -379,9 +370,6 @@ uint64_t FindSetWorld()
     if (!bInitialized)
     {
         bInitialized = true;
-
-        if (VersionInfo.FortniteVersion >= 32.00)
-            return SetWorld = ImageBase + 0x29664C8; // 32.11 (UNetDriver::SetWorld); sig misses
 
         SetWorld = VersionInfo.FortniteVersion <= 13.20 ? Memcury::Scanner::FindStringRef(L"AOnlineBeaconHost::InitHost failed").ScanFor({ 0x48, 0x8B, 0xD0, 0xE8 }, false).RelativeOffset(4).Get() : 0;
 
@@ -850,7 +838,7 @@ uint64_t FindInternalTryActivateAbility()
         auto sRef = Memcury::Scanner::FindStringRef(L"InternalTryActivateAbility called with invalid Handle! ASC: %s. AvatarActor: %s", true, 0, VersionInfo.FortniteVersion >= 16).Get();
 
         if (!sRef)
-            return InternalTryActivateAbility = 0; // string not present (e.g. 32.11) — avoid *(0 - i) fault
+            return InternalTryActivateAbility = 0; // unresolved signature
 
         for (int i = 0; i < 1000; i++)
         {
@@ -1063,9 +1051,6 @@ uint64_t FindFinishedTargetSpline()
     if (!bInitialized)
     {
         bInitialized = true;
-
-        if (VersionInfo.FortniteVersion >= 32.00)
-            return FinishedTargetSpline = 0; // TODO: 32.11 sig — skipped for now (gameplay hook, not boot-critical)
 
         if (VersionInfo.EngineVersion == 4.16 || VersionInfo.EngineVersion == 4.19)
             return FinishedTargetSpline = Memcury::Scanner::FindPattern("4C 8B DC 53 55 56 48 83 EC 60 48 8B F1 48 8B 89 ? ? ? ? 48 85 C9").Get();
@@ -1545,7 +1530,7 @@ uint64_t FindRemoveInventoryItem()
 
         auto sRef = FindNameRef(L"ServerRemoveInventoryItem", 0, false);
         if (!sRef)
-            return RemoveInventoryItem = 0; // name ref absent (e.g. 32.11) — avoid *(0 - i) fault
+            return RemoveInventoryItem = 0; // unresolved signature
         uintptr_t uFuncCall = 0;
         for (int i = 0; i < 2000; i++)
         {
@@ -1728,7 +1713,7 @@ uint64 FindGiveAbilityAndActivateOnce()
         auto sRef = Memcury::Scanner::FindStringRef(L"GiveAbilityAndActivateOnce called on ability %s on the client, not allowed!", true, 0, VersionInfo.EngineVersion >= 5.0).Get();
 
         if (!sRef)
-            return GiveAbilityAndActivateOnce = 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+            return GiveAbilityAndActivateOnce = 0; // unresolved signature
 
         for (int i = 0; i < 1000; i++)
         {
@@ -2437,7 +2422,7 @@ uint64 FindReplicateActor()
         {
             auto sRef = Memcury::Scanner::FindStringRef(L"STAT_NetReplicateActorTime").Get();
 
-            if (!sRef) // 32.11: string ref not found -> guard the backward scan from a null read
+            if (!sRef) // guard the backward scan from a null read
                 return ReplicateActor = 0;
 
             for (int i = 0; i < 2000; i++)
@@ -2631,7 +2616,7 @@ uint64_t FindGetPlayerViewPoint()
     auto ftspRef = Memcury::Scanner::FindStringRef(L"%s failed to spawn a pawn", true, 0, VersionInfo.FortniteVersion >= 19).Get();
 
     if (!ftspRef)
-        return 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+        return 0; // unresolved signature: avoid *(0 - i)
 
     for (int i = 0; i < 1000; i++)
     {
@@ -3226,7 +3211,7 @@ uint32 FindSpawnDecoVft()
     auto sRefAddr = sRef.Get();
     SDK::DbgLog("    [SDV] sRef=%p\n", (void*)sRefAddr);
     if (!sRefAddr)
-        return 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+        return 0; // unresolved signature: avoid *(0 - i)
 
     uint64 SpawnDeco = 0;
     for (int i = 0; i < 2000; i++)
@@ -3272,7 +3257,7 @@ uint32 FindShouldAllowServerSpawnDecoVft()
 
     auto sRefAddr = sRef.Get();
     if (!sRefAddr)
-        return 0; // string absent (e.g. 32.11) — avoid *(0 - i) fault
+        return 0; // unresolved signature: avoid *(0 - i)
 
     uint64 ShouldAllowServerSpawnDecoPart = 0;
 

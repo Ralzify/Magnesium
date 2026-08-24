@@ -1232,7 +1232,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot2.Add(TPair<FString, int>(TEXT("/VampireStakeGameplay/Items/StakeLauncher/WID_VampireStake_Shotgun_SR.WID_VampireStake_Shotgun_SR"), 1));
     }
 
-    if (VersionInfo.FortniteVersion >= 28.00 && VersionInfo.FortniteVersion < 32.00)
+    if (VersionInfo.FortniteVersion >= 28.00)
     {
         Slot2.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaShotgun_Pump/WID_Shotgun_Pump_Paprika_Athena_SR.WID_Shotgun_Pump_Paprika_Athena_SR"), 1));
         Slot2.Add(TPair<FString, int>(TEXT("/PaprikaCoreWeapons/Items/Weapons/PaprikaShotgun_Pump/WID_Shotgun_Pump_Paprika_Athena_VR.WID_Shotgun_Pump_Paprika_Athena_VR"), 1));
@@ -1254,7 +1254,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
 		}
     }
 
-    if (VersionInfo.FortniteVersion >= 29.00 && VersionInfo.FortniteVersion < 32.00)
+    if (VersionInfo.FortniteVersion >= 29.00)
     {
         Slot2.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/CerberusSG/WID_Shotgun_Break_Cerberus_Athena_SR.WID_Shotgun_Break_Cerberus_Athena_SR"), 1));
         Slot2.Add(TPair<FString, int>(TEXT("/SunRoseWeaponsGameplay/Items/Weapons/CerberusSG/WID_Shotgun_Break_Cerberus_Athena_VR.WID_Shotgun_Break_Cerberus_Athena_VR"), 1));
@@ -1559,7 +1559,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot4.Add(TPair<FString, int>(TEXT("/PaprikaConsumables/Gameplay/MedRefresh/WID_Paprika_MedBox.WID_Paprika_MedBox"), 3));
     }
 
-    if (VersionInfo.FortniteVersion >= 28.01 && VersionInfo.FortniteVersion < 32.00)
+    if (VersionInfo.FortniteVersion >= 28.01)
     {
         Slot4.Add(TPair<FString, int>(TEXT("/PaprikaConsumables/Gameplay/TeamSpray/WID_Paprika_TeamSpray_LowGrav.WID_Paprika_TeamSpray_LowGrav"), 1));
     }
@@ -1707,7 +1707,7 @@ TArray<TArray<TPair<FString, int>>> LateGame::GetVersionizedLoadout()
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/RiftItem/Athena_Rift_Item.Athena_Rift_Item"), 2));
     }
 
-    if ((VersionInfo.FortniteVersion >= 5.30 && VersionInfo.FortniteVersion < 7.00) || (VersionInfo.FortniteVersion >= 9.00 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion == 11.31) || (VersionInfo.FortniteVersion >= 14.00 && VersionInfo.FortniteVersion < 17.00) || (VersionInfo.FortniteVersion >= 20.00 && VersionInfo.FortniteVersion < 23.00) || (VersionInfo.FortniteVersion >= 26.00 && VersionInfo.FortniteVersion < 32.00))
+    if ((VersionInfo.FortniteVersion >= 5.30 && VersionInfo.FortniteVersion < 7.00) || (VersionInfo.FortniteVersion >= 9.00 && VersionInfo.FortniteVersion < 11.00) || (VersionInfo.FortniteVersion == 11.31) || (VersionInfo.FortniteVersion >= 14.00 && VersionInfo.FortniteVersion < 17.00) || (VersionInfo.FortniteVersion >= 20.00 && VersionInfo.FortniteVersion < 23.00) || VersionInfo.FortniteVersion >= 26.00)
     {
         Slot5.Add(TPair<FString, int>(TEXT("/Game/Athena/Items/Consumables/ShockwaveGrenade/Athena_ShockGrenade.Athena_ShockGrenade"), 6));
     }

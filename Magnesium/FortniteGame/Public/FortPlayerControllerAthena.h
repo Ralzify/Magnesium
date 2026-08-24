@@ -403,7 +403,7 @@ public:
     DEFINE_PROP(LastSpectatorSyncRotation, FRotator);
     DEFINE_PROP(PlayerState, AFortPlayerStateAthena*);
     // Native elimination credit candidate retained by FortPlayerController.
-    // Reflected on the tested 10.40, 15.30, and 32.11 layouts.
+    // Reflected on the tested supported layouts.
     DEFINE_PROP(LastDamager, AActor*);
     DEFINE_PROP(MyFortPawn, AFortPlayerPawnAthena*);
     DEFINE_PROP(Pawn, AFortPlayerPawnAthena*);

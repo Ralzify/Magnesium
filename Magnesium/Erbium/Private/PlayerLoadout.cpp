@@ -164,8 +164,7 @@ namespace PlayerLoadoutBridgeServer
             if (Index < 0 || Index >= TUObjectArray::Num())
                 return 0;
             auto Item = TUObjectArray::GetItemByIndex(Index);
-            const int32 InvalidFlags =
-                Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+            const int32 InvalidFlags = 0x20;
             if (!Item ||
                 Item->GetObject() != Object ||
                 (Item->GetFlags() & InvalidFlags) ||
@@ -738,7 +737,6 @@ namespace
     constexpr ULONGLONG kAsyncIconLoadTimeoutMs = 12000;
     constexpr ULONGLONG kAsyncIconLiveRetryMs = 10000;
     constexpr ULONGLONG kAsyncIconPickerRetryMs = 30000;
-    constexpr ULONGLONG kSynchronousPreviewLoadIntervalMs = 500;
     constexpr int kReportedQuickbarCapacity = 10;
     constexpr ULONGLONG kReportedMutationPollMs = 100;
     constexpr ULONGLONG kReportedMutationAckTimeoutMs = 6000;
@@ -1180,7 +1178,6 @@ namespace
     std::unordered_set<std::wstring> GAsyncIconAttemptedPaths;
     FAsyncIconLoadSchema GAsyncIconLoadSchema;
     bool GAsyncIconLoadingDisabled = false;
-    bool GSynchronousPreviewLoadingDisabled = false;
     std::unordered_set<uint64_t> GFailedControllerIdentities;
     std::unordered_map<uint64_t, FModernSlotLedger>
         GModernSlotLedgers;
@@ -1254,8 +1251,7 @@ namespace
             return false;
 
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 InvalidFlags =
-            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        const int32 InvalidFlags = 0x20;
         return Item &&
             Item->GetObject() == Object &&
             !(Item->GetFlags() & InvalidFlags) &&
@@ -1375,7 +1371,7 @@ namespace
             return false;
         }
 
-        Out.Offset = DecryptPropOffset(
+        Out.Offset = SDK::ReadPropertyOffset(
             GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal));
         Out.ElementSize = GetFromOffset<uint32>(
@@ -1391,30 +1387,6 @@ namespace
             Out.ElementSize <= 0x10000 &&
             Out.ArrayDimension > 0 &&
             Out.ArrayDimension <= 4096;
-    }
-
-    static bool TryReadReflectedPropertyOffsetUnsafe(
-        const UField* Property,
-        uint32& OutOffset)
-    {
-        OutOffset = UINT32_MAX;
-        if (!Property || !Offsets::Offset_Internal)
-            return false;
-
-        const size_t MetadataBytes =
-            static_cast<size_t>(Offsets::Offset_Internal) +
-            sizeof(uint32);
-        if (MetadataBytes > 0x400 ||
-            !SDK::MemReadable(Property, MetadataBytes))
-        {
-            return false;
-        }
-
-        OutOffset = DecryptPropOffset(
-            GetFromOffset<uint32>(
-                Property, Offsets::Offset_Internal));
-        return OutOffset != UINT32_MAX &&
-            OutOffset <= 0x20000;
     }
 
     static bool TryReadReflectedPropertyView(
@@ -1502,7 +1474,7 @@ namespace
         if (!Property)
             return nullptr;
 
-        const uint32 Offset = DecryptPropOffset(
+        const uint32 Offset = SDK::ReadPropertyOffset(
             GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal));
         if (Offset == UINT32_MAX || Offset > 0x10000)
@@ -2130,7 +2102,6 @@ namespace
         }
 
         uint32 StateOffset = UINT32_MAX;
-        bool RestrictedMemberLayoutVerified = false;
         if (StateStruct)
         {
             auto GuidsProperty = StateStruct->GetProperty(
@@ -2183,93 +2154,10 @@ namespace
                     GReportedQuickbarStateSchema.Strict = true;
                 }
             }
-
-            const bool RestrictedMetadata =
-                VersionInfo.FortniteVersion >= 32.00f ||
-                Offsets::bEncryptedObjects;
-            if (!GReportedQuickbarStateSchema.Strict &&
-                RestrictedMetadata &&
-                GuidsProperty && CountProperty)
-            {
-                uint32 GuidsOffset = UINT32_MAX;
-                uint32 CountOffset = UINT32_MAX;
-                bool FoundGuids = false;
-                bool FoundCount = false;
-                int MemberCount = 0;
-                int Guard = 0;
-                const UField* Member =
-                    VersionInfo.FortniteVersion >= 12.10
-                        ? StateStruct->GetChildProperties()
-                        : StateStruct->GetChildren();
-                while (Member && Guard++ < 8)
-                {
-                    const auto AllocatedName =
-                        VersionInfo.FortniteVersion >= 12.10
-                            ? Member->FField_GetName()
-                                  .ToSDKString()
-                            : Member->GetName()
-                                  .ToSDKString();
-                    const std::string Name(
-                        AllocatedName.c_str());
-                    if (Name == "EquippedItemGuids" &&
-                        !FoundGuids)
-                    {
-                        FoundGuids = true;
-                    }
-                    else if (Name == "NumEnabledSlots" &&
-                             !FoundCount)
-                    {
-                        FoundCount = true;
-                    }
-                    else
-                    {
-                        MemberCount = -100;
-                        break;
-                    }
-                    ++MemberCount;
-                    Member =
-                        VersionInfo.FortniteVersion >= 12.10
-                            ? Member->FField_GetNext()
-                            : Member->GetNext();
-                }
-                RestrictedMemberLayoutVerified =
-                    !Member &&
-                    MemberCount == 2 &&
-                    FoundGuids && FoundCount &&
-                    TryReadReflectedPropertyOffsetUnsafe(
-                        GuidsProperty, GuidsOffset) &&
-                    TryReadReflectedPropertyOffsetUnsafe(
-                        CountProperty, CountOffset) &&
-                    GuidsOffset == 0 &&
-                    CountOffset ==
-                        offsetof(
-                            FReportedQuickbarGuidState,
-                            NumEnabledSlots);
-            }
         }
 
-        const bool RestrictedMetadata =
-            VersionInfo.FortniteVersion >= 32.00f ||
-            Offsets::bEncryptedObjects;
-        if (StateOffset == UINT32_MAX &&
-            RestrictedMetadata &&
-            !TryReadReflectedPropertyOffsetUnsafe(
-                StateProperty, StateOffset))
-        {
-            return false;
-        }
         if (StateOffset == UINT32_MAX)
             return false;
-
-        if (!GReportedQuickbarStateSchema.Strict &&
-            RestrictedMemberLayoutVerified)
-        {
-            // Size/flag metadata is unavailable here, but the struct type,
-            // complete member-name set, and both native offsets exactly match
-            // the known 10-GUID ABI. Runtime count, uniqueness, and live
-            // inventory coverage provide the remaining mutation checks.
-            GReportedQuickbarStateSchema.Strict = true;
-        }
 
         GReportedQuickbarStateSchema.Offset = StateOffset;
         GReportedQuickbarStateSchema.Readable = true;
@@ -2859,11 +2747,8 @@ namespace
         FQuickbarGetterSchema& Out)
     {
         Out = {};
-        if (!Function ||
-            VersionInfo.FortniteVersion >= 32)
-        {
+        if (!Function)
             return false;
-        }
 
         const int32 BufferSize =
             Function->GetPropertiesSize();
@@ -3203,40 +3088,6 @@ namespace
             return false;
         }
 
-        if (VersionInfo.FortniteVersion >= 32.00f)
-        {
-            // These builds relocate/encrypt size and flag metadata, but the
-            // generated native parameter ABI remains pointer/byte/int at
-            // 0/8/12. Require that exact named layout instead of guessing from
-            // the unavailable metadata.
-            if (!TryReadReflectedPropertyOffsetUnsafe(
-                    AddDefinition,
-                    Schema.AddDefinitionOffset) ||
-                !TryReadReflectedPropertyOffsetUnsafe(
-                    AddQuickbar,
-                    Schema.AddQuickbarOffset) ||
-                !TryReadReflectedPropertyOffsetUnsafe(
-                    AddSlot,
-                    Schema.AddSlotOffset) ||
-                !TryReadReflectedPropertyOffsetUnsafe(
-                    RemoveDefinition,
-                    Schema.RemoveDefinitionOffset) ||
-                Schema.AddDefinitionOffset != 0 ||
-                Schema.AddQuickbarOffset !=
-                    sizeof(UFortItemDefinition*) ||
-                Schema.AddSlotOffset != 12 ||
-                Schema.RemoveDefinitionOffset != 0)
-            {
-                return false;
-            }
-            Schema.AddBufferSize = 16;
-            Schema.RemoveBufferSize =
-                sizeof(UFortItemDefinition*);
-            Schema.Valid = true;
-			Schema.NextRetryAt = 0;
-            return true;
-        }
-
         FReflectedPropertyView AddDefinitionView;
         FReflectedPropertyView AddQuickbarView;
         FReflectedPropertyView AddSlotView;
@@ -3441,7 +3292,7 @@ namespace
                 sizeof(uint32)))
         {
             const uint32 ClientQuickbarOffset =
-                DecryptPropOffset(
+                SDK::ReadPropertyOffset(
                     GetFromOffset<uint32>(
                         ClientQuickbarProperty,
                         Offsets::Offset_Internal));
@@ -3507,12 +3358,6 @@ namespace
         {
             return false;
         }
-
-        // FN 32+ reflection can still expose the reported GUID snapshot, but
-        // its function return metadata is not yet trustworthy enough for a
-        // ProcessEvent return buffer. Never probe these getters there.
-        if (VersionInfo.FortniteVersion >= 32)
-            return false;
 
         auto ItemFunction =
             PlayerController->GetFunction(
@@ -4887,10 +4732,7 @@ namespace
 
         auto Item =
             TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 InvalidFlags =
-            Offsets::bEncryptedObjects
-                ? 0x10200000
-                : 0x20;
+        const int32 InvalidFlags = 0x20;
         if (!Item || (Item->GetFlags() & InvalidFlags))
             return false;
 
@@ -5492,7 +5334,7 @@ namespace
             return nullptr;
 
         const uint32 PropertyOffset =
-            DecryptPropOffset(
+            SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property,
                     Offsets::Offset_Internal));
@@ -5703,7 +5545,6 @@ namespace
     static bool BuildAsyncIconLoadSchemaUnsafe()
     {
         if (GAsyncIconLoadingDisabled ||
-            VersionInfo.FortniteVersion >= 32.0 ||
             !SDK::Offsets::StaticFindObject)
             return false;
 
@@ -5961,7 +5802,6 @@ namespace
         *DeferredUntil = 0;
         *StartedLoad = false;
         if (GAsyncIconLoadingDisabled ||
-            VersionInfo.FortniteVersion >= 32.0 ||
             !Reference.Valid || !ItemToken || !ItemIdentity ||
             !IsLiveObject(ExpectedClass) ||
             Reference.Path.empty() || Reference.Path.size() > 2048 ||
@@ -6088,36 +5928,12 @@ namespace
         return true;
     }
 
-    // Kept POD-only so an invalid version-specific native loader address is
-    // contained without requiring C++ unwinding through an SEH boundary.
-    static const UTexture2D* LoadPreviewTextureGuarded(
-        const wchar_t* Path,
-        const UClass* TextureClass)
-    {
-        const UTexture2D* Texture = nullptr;
-        bool Completed = false;
-        __try
-        {
-            Texture = static_cast<const UTexture2D*>(
-                SDK::StaticLoadObject(Path, TextureClass));
-            Completed = true;
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-        }
-
-        if (!Completed)
-            GSynchronousPreviewLoadingDisabled = true;
-        return Completed ? Texture : nullptr;
-    }
-
     static FSoftObjectLoadResult
         ResolveOrRequestSoftObjectUnsafe(
             const void* Owner,
             const void* SoftReference,
             uint32 SoftReferenceSize,
-            const UClass* ExpectedClass,
-            bool AllowSynchronousFallback)
+            const UClass* ExpectedClass)
     {
         FSoftObjectLoadResult Result{
             nullptr,
@@ -6174,62 +5990,20 @@ namespace
         const uintptr_t OwnerToken =
             reinterpret_cast<uintptr_t>(OwnerObject);
         const ULONGLONG Now = GetTickCount64();
-        if (VersionInfo.FortniteVersion < 32.0)
-        {
-            ULONGLONG DeferredUntil = 0;
-            bool StartedLoad = false;
-            if (RequestAsyncIconLoad(
-                    Reference,
-                    OwnerToken,
-                    OwnerIdentity,
-                    ExpectedClass,
-                    false,
-                    &DeferredUntil,
-                    &StartedLoad) &&
-                DeferredUntil > Now)
-            {
-                Result.State = EPreviewTextureLoadState::Pending;
-                Result.RetryAfterMs = DeferredUntil - Now;
-            }
-            return Result;
-        }
-
-        // FN 32 changed the latent LoadAsset reflection ABI. Gameplay callers
-        // explicitly opt out here so an optional deferred cosmetic can never
-        // become a blocking game-thread load. The inventory preview wrapper
-        // retains its guarded, throttled compatibility fallback.
-        if (!AllowSynchronousFallback)
-            return Result;
-
-        const std::wstring StablePath(Path.c_str());
-        if (GAsyncIconAttemptedPaths.find(StablePath) !=
-                GAsyncIconAttemptedPaths.end() ||
-            GSynchronousPreviewLoadingDisabled ||
-            !SDK::Offsets::StaticLoadObject)
-        {
-            return Result;
-        }
-        if (Now - GLastAsyncIconLoadAt <
-                kSynchronousPreviewLoadIntervalMs)
+        ULONGLONG DeferredUntil = 0;
+        bool StartedLoad = false;
+        if (RequestAsyncIconLoad(
+                Reference,
+                OwnerToken,
+                OwnerIdentity,
+                ExpectedClass,
+                false,
+                &DeferredUntil,
+                &StartedLoad) &&
+            DeferredUntil > Now)
         {
             Result.State = EPreviewTextureLoadState::Pending;
-            Result.RetryAfterMs =
-                GLastAsyncIconLoadAt +
-                    kSynchronousPreviewLoadIntervalMs -
-                Now;
-            return Result;
-        }
-
-        // Insert before entering native code so a faulting package path cannot
-        // be retried by every future pawn. World reset clears this cache.
-        GAsyncIconAttemptedPaths.insert(StablePath);
-        GLastAsyncIconLoadAt = Now;
-        auto Loaded = LoadPreviewTextureGuarded(
-            StablePath.c_str(), ExpectedClass);
-        if (IsLiveObject(Loaded) && Loaded->IsA(ExpectedClass))
-        {
-            Result.Object = Loaded;
-            Result.State = EPreviewTextureLoadState::Resident;
+            Result.RetryAfterMs = DeferredUntil - Now;
         }
         return Result;
     }
@@ -6245,8 +6019,7 @@ namespace
             Owner,
             SoftReference,
             SoftReferenceSize,
-            TextureClass,
-            true);
+            TextureClass);
         return {
             static_cast<const UTexture2D*>(Generic.Object),
             Generic.State,
@@ -6295,12 +6068,8 @@ namespace
         const UFortItemDefinition* Definition,
         const char* FunctionName)
     {
-        if (!Definition ||
-            !FunctionName ||
-            VersionInfo.FortniteVersion >= 32)
-        {
+        if (!Definition || !FunctionName)
             return nullptr;
-        }
 
         auto Function =
             Definition->GetFunction(FunctionName);
@@ -13196,7 +12965,6 @@ FPreviewTextureLoadResult ResolveOrRequestPreviewTexture(
         GDisabledWorld.store(1, std::memory_order_release);
         GFaultPublicationPending.store(true, std::memory_order_release);
         GAsyncIconLoadingDisabled = true;
-        GSynchronousPreviewLoadingDisabled = true;
         Result = {
             nullptr,
             EPreviewTextureLoadState::Unavailable,
@@ -13241,8 +13009,7 @@ FSoftObjectLoadResult ResolveOrRequestSoftObject(
                 Owner,
                 SoftReference,
                 SoftReferenceSize,
-                ExpectedClass,
-                false);
+                ExpectedClass);
         }
         else
         {
@@ -13262,7 +13029,6 @@ FSoftObjectLoadResult ResolveOrRequestSoftObject(
         GDisabledWorld.store(1, std::memory_order_release);
         GFaultPublicationPending.store(true, std::memory_order_release);
         GAsyncIconLoadingDisabled = true;
-        GSynchronousPreviewLoadingDisabled = true;
         Result = {
             nullptr,
             EPreviewTextureLoadState::Unavailable,

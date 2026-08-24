@@ -192,7 +192,7 @@ namespace
             return false;
         }
         size_t Size = 0;
-        if (!Offsets::bEncryptedObjects && Offsets::ElementSize)
+        if (Offsets::ElementSize)
         {
             Size = GetFromOffset<uint32>(
                 Property, Offsets::ElementSize);
@@ -250,10 +250,9 @@ namespace
         if (!End)
             return 0;
 
-        // FN 32.x keeps Actor at the head. Later target modes inherit the
-        // object-selection state and move Actor to 0xA0, but the native struct
-        // remains alignas(0x10): its reflected fields end at 0xA8 while its
-        // actual TArray stride is 0xB0. Always preserve that native alignment.
+        // The native selected-actor entry remains alignas(0x10), so preserve
+        // its TArray stride even when the final reflected field ends before
+        // the trailing padding.
         return AlignTo(End, 16u);
     }
 
@@ -278,8 +277,6 @@ namespace
             End = (std::max)(End,
                 Schema.bSpawnedActorIsForPreview + 1u);
         }
-        if (VersionInfo.FortniteVersion >= 32.0 && End > 0)
-            End = (std::max)(End, 0x18u);
         return End ? static_cast<int32>((End + 7u) & ~7u) : 0;
     }
 
@@ -339,7 +336,7 @@ namespace
         Schema.bSpawnedActorIsForPreview = GetOffset(
             Schema.SpawnPair, "bSpawnedActorIsForPreview");
 
-        if (!Offsets::bEncryptedObjects && Schema.SelectedActorInfo)
+        if (Schema.SelectedActorInfo)
         {
             const int32 ReflectedSize =
                 Schema.SelectedActorInfo->GetPropertiesSize();
@@ -355,7 +352,7 @@ namespace
             Schema.SelectedActorSize = AlignTo(
                 static_cast<uint32>(Schema.SelectedActorSize), 16u);
         }
-        if (!Offsets::bEncryptedObjects && Schema.SpawnPair)
+        if (Schema.SpawnPair)
         {
             const int32 ReflectedSize =
                 Schema.SpawnPair->GetPropertiesSize();
@@ -364,12 +361,6 @@ namespace
         }
         if (!Schema.SpawnPairSize)
             Schema.SpawnPairSize = InferSpawnPairSize(Schema);
-        if (VersionInfo.FortniteVersion >= 32.0 &&
-            Schema.SpawnPairSize > 0)
-        {
-            Schema.SpawnPairSize =
-                (std::max)(Schema.SpawnPairSize, 0x18);
-        }
 
         return Schema;
     }
@@ -425,14 +416,11 @@ namespace
         }
 
         uint8 Mask = 1;
-        if (!Offsets::bEncryptedObjects)
+        if (auto Property = Struct->GetProperty(PropertyName))
         {
-            if (auto Property = Struct->GetProperty(PropertyName))
-            {
-                const uint8 ReflectedMask = Property->GetFieldMask();
-                if (ReflectedMask)
-                    Mask = ReflectedMask;
-            }
+            const uint8 ReflectedMask = Property->GetFieldMask();
+            if (ReflectedMask)
+                Mask = ReflectedMask;
         }
         if (Value)
             Buffer[Offset] |= Mask;
@@ -465,8 +453,7 @@ namespace
             return false;
         }
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -521,8 +508,7 @@ namespace
             return false;
         }
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -1202,7 +1188,7 @@ namespace
                 return true;
             case 12:
             case 13:
-                return VersionInfo.FortniteVersion >= 32.0;
+                return false;
             default:
                 break;
             }
@@ -1481,8 +1467,7 @@ namespace
             return false;
         }
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -1743,8 +1728,7 @@ namespace
         if (!Function)
             return false;
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -1802,11 +1786,8 @@ namespace
         if (ValidOffset != InvalidOffset)
             Required = (std::max)(Required, ValidOffset + 1u);
 
-        int32 ReflectedSize = 0;
-        if (!Offsets::bEncryptedObjects)
-            ReflectedSize = BoxStruct->GetPropertiesSize();
-        size_t Size = !Offsets::bEncryptedObjects &&
-                ReflectedSize >= static_cast<int32>(Required) &&
+        const int32 ReflectedSize = BoxStruct->GetPropertiesSize();
+        size_t Size = ReflectedSize >= static_cast<int32>(Required) &&
                 ReflectedSize <= 0x100
             ? static_cast<size_t>(ReflectedSize)
             : static_cast<size_t>((Required + 7u) & ~7u);
@@ -1905,10 +1886,9 @@ namespace
         if (!Function || !MovementMode || Bounds.empty())
             return false;
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize =
-            !Offsets::bEncryptedObjects && ReflectedSize > 0 &&
+            ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize)
             : 0x1000;
@@ -2239,10 +2219,9 @@ namespace
         }
         if (System && Function && Building)
         {
-            const int32 ReflectedSize = Offsets::bEncryptedObjects
-                ? 0 : Function->GetPropertiesSize();
+            const int32 ReflectedSize = Function->GetPropertiesSize();
             const size_t BufferSize =
-                !Offsets::bEncryptedObjects && ReflectedSize > 0 &&
+                ReflectedSize > 0 &&
                     ReflectedSize <= 0x1000
                 ? static_cast<size_t>(ReflectedSize) : 0x1000;
             std::vector<uint8> Params(BufferSize, 0);
@@ -2632,8 +2611,7 @@ namespace
         if (!Function)
             return false;
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -2700,8 +2678,7 @@ namespace
         auto Multicast = InteractionOwner->GetFunction(MulticastName);
         if (Multicast)
         {
-            const int32 ReflectedSize = Offsets::bEncryptedObjects
-                ? 0 : Multicast->GetPropertiesSize();
+            const int32 ReflectedSize = Multicast->GetPropertiesSize();
             const size_t BufferSize = ReflectedSize > 0 &&
                     ReflectedSize <= 0x1000
                 ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -2743,8 +2720,7 @@ namespace
             return false;
         for (const auto& Target : Targets)
         {
-            const int32 ReflectedSize = Offsets::bEncryptedObjects
-                ? 0 : ForceMove->GetPropertiesSize();
+            const int32 ReflectedSize = ForceMove->GetPropertiesSize();
             const size_t BufferSize = ReflectedSize > 0 &&
                     ReflectedSize <= 0x1000
                 ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -3460,8 +3436,7 @@ namespace
         if (!Statics || !Function || !World || !ActorClass)
             return nullptr;
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -3505,8 +3480,7 @@ namespace
         if (!Statics || !Function || !IsLiveObject(Actor))
             return nullptr;
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -3538,8 +3512,7 @@ namespace
         if (!Function)
             return false;
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize = ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize) : 0x1000;
@@ -4450,10 +4423,9 @@ namespace
                 Bounds.data(), Bounds.size());
         }
 
-        const int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : ClientStart->GetPropertiesSize();
+        const int32 ReflectedSize = ClientStart->GetPropertiesSize();
         const size_t BufferSize =
-            !Offsets::bEncryptedObjects && ReflectedSize > 0 &&
+            ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize)
             : 0x1000;

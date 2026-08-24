@@ -43,7 +43,11 @@ namespace
 		FReplicationObjectSnapshot& OutSnapshot)
 	{
 		OutSnapshot = {};
-		if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
+		// Replication runs on the game thread and all callers hand us objects
+		// owned by the driver, object array, or an open channel.  Revalidate the
+		// UObject-array identity without issuing VirtualQuery for every actor on
+		// every connection and every flush.
+		if (!Object)
 			return false;
 
 		const int32 ObjectIndex = Object->Index;
@@ -52,12 +56,10 @@ namespace
 			return false;
 
 		auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-		const int32 InvalidObjectFlags =
-			Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+		constexpr int32 InvalidObjectFlags = 0x20;
 		if (!Item || Item->GetObject() != Object ||
 			(Item->GetFlags() & InvalidObjectFlags) ||
-			!Object->Class ||
-			!SDK::MemReadable(Object->Class, sizeof(UClass)))
+			!Object->Class)
 		{
 			return false;
 		}
@@ -72,24 +74,18 @@ namespace
 		const FReplicationObjectSnapshot& Snapshot)
 	{
 		if (!Snapshot.Object || Snapshot.ObjectIndex < 0 ||
-			Snapshot.ObjectIndex >= TUObjectArray::Num() ||
-			!SDK::MemReadable(Snapshot.Object, sizeof(UObject)))
+			Snapshot.ObjectIndex >= TUObjectArray::Num())
 		{
 			return false;
 		}
 
 		auto Item =
 			TUObjectArray::GetItemByIndex(Snapshot.ObjectIndex);
-		const int32 InvalidObjectFlags =
-			Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+		constexpr int32 InvalidObjectFlags = 0x20;
 		if (!Item || Item->GetObject() != Snapshot.Object ||
 			(Item->GetFlags() & InvalidObjectFlags) ||
 			(Snapshot.ObjectSerialNumber != 0 &&
-			 Item->SerialRef() != Snapshot.ObjectSerialNumber) ||
-			Snapshot.Object->Index != Snapshot.ObjectIndex ||
-			!Snapshot.Object->Class ||
-			!SDK::MemReadable(
-				Snapshot.Object->Class, sizeof(UClass)))
+			 Item->SerialRef() != Snapshot.ObjectSerialNumber))
 		{
 			return false;
 		}
@@ -97,481 +93,71 @@ namespace
 		return true;
 	}
 
-	bool CaptureActorInWorld(
-		const AActor* Actor,
+	bool CaptureNetworkActorInWorld(
+		const FNetworkObjectInfo* NetworkActorInfo,
 		const UWorld* World,
+		AActor*& OutActor,
 		FReplicationObjectSnapshot& OutSnapshot)
 	{
-		if (!World ||
-			!CaptureLiveReplicationObject(Actor, OutSnapshot))
+		OutActor = nullptr;
+		OutSnapshot = {};
+		if (!NetworkActorInfo || !World)
 		{
 			return false;
 		}
 
+		// FNetworkObjectInfo already carries the engine's weak identity. Resolve
+		// through that index/serial pair before dereferencing its raw Actor field,
+		// retaining stale-slot protection without VirtualQuery in the hot loop.
+		const int32 ObjectIndex =
+			NetworkActorInfo->WeakActor.ObjectIndex;
+		const int32 ObjectSerialNumber =
+			NetworkActorInfo->WeakActor.ObjectSerialNumber;
+		if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
+			return false;
+
+		auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+		constexpr int32 InvalidObjectFlags = 0x20;
+		if (!Item ||
+			(ObjectSerialNumber != 0 &&
+				Item->SerialRef() != ObjectSerialNumber) ||
+			(Item->GetFlags() & InvalidObjectFlags) ||
+			Item->GetObject() != NetworkActorInfo->Actor)
+		{
+			return false;
+		}
+
+		auto Actor =
+			const_cast<AActor*>(static_cast<const AActor*>(Item->GetObject()));
+		if (!Actor || !Actor->Class)
+			return false;
+
+		OutSnapshot.Object = Actor;
+		OutSnapshot.ObjectIndex = ObjectIndex;
+		OutSnapshot.ObjectSerialNumber = Item->SerialRef();
+		OutActor = Actor;
+
+		// AActor ownership is rooted directly in its ULevel (or, on a few
+		// transitional builds, the UWorld).  The August safety layer walked and
+		// VirtualQuery-validated as many as eight outers for every network actor
+		// on every replication frame.  Validate the one authoritative owner once
+		// and retain the same cross-world rejection without the hot-path walk.
 		const UObject* Outer = Actor->Outer;
-		for (uint8 Depth = 0; Outer && Depth < 8; ++Depth)
-		{
-			FReplicationObjectSnapshot OuterSnapshot;
-			if (!CaptureLiveReplicationObject(
-					Outer, OuterSnapshot))
-			{
-				return false;
-			}
-			if (Outer == World)
-				return true;
-
-			if (Outer->Class == ULevel::StaticClass())
-			{
-				auto Level = static_cast<const ULevel*>(Outer);
-				if (Level->HasOwningWorld())
-					return Level->OwningWorld == World;
-			}
-
-			Outer = Outer->Outer;
-		}
-
-		return false;
-	}
-
-	bool HasSameReplicationIdentity(
-		const FReplicationObjectSnapshot& Left,
-		const FReplicationObjectSnapshot& Right)
-	{
-		return Left.Object == Right.Object &&
-			Left.ObjectIndex == Right.ObjectIndex &&
-			Left.ObjectSerialNumber == Right.ObjectSerialNumber;
-	}
-
-	struct FCustomCadenceState
-	{
-		FReplicationObjectSnapshot DriverSnapshot;
-		FReplicationObjectSnapshot WorldSnapshot;
-		UWorld* World = nullptr;
-		std::unordered_map<
-			UNetConnection*, FReplicationObjectSnapshot> Connections;
-		double AccumulatedSeconds = 0.0;
-		bool bWasReady = false;
-	};
-
-	std::unordered_map<
-		UNetDriver*, FCustomCadenceState>
-		GCustomCadenceStates;
-	std::atomic<UNetDriver*> GValidatedLoopbackDriver{ nullptr };
-	std::atomic_bool GLoopbackFastFlushPolicyActive{ false };
-
-	constexpr bool SupportsLoopbackFastFlush(bool bUsesIris) noexcept
-	{
-		// Iris native TickFlush consumes state prepared by the explicit view and
-		// PreSendUpdate pass below. It cannot safely run on a native-only frame.
-		return !bUsesIris;
-	}
-
-	static_assert(!SupportsLoopbackFastFlush(true),
-		"Iris requires explicit replication preparation before every native flush");
-	static_assert(SupportsLoopbackFastFlush(false),
-		"The generic replication path supports native-only loopback flush frames");
-
-	UNetDriver* GLoopbackScanDriver = nullptr;
-	FReplicationObjectSnapshot GLoopbackScanDriverSnapshot;
-	std::unordered_map<
-		UNetConnection*, FReplicationObjectSnapshot>
-		GValidatedLoopbackConnections;
-
-	bool IsValidSavedNetworkAddress(
-		AFortPlayerStateAthena* PlayerState,
-		std::string& OutAddress)
-	{
-		OutAddress.clear();
-		FReplicationObjectSnapshot PlayerStateSnapshot;
-		if (!CaptureLiveReplicationObject(
-				PlayerState, PlayerStateSnapshot))
-		{
-			return false;
-		}
-
-		const uint32 AddressOffset =
-			PlayerState->GetOffset("SavedNetworkAddress");
-		if (AddressOffset == static_cast<uint32>(-1))
-			return false;
-
-		const int32 ObjectSize =
-			PlayerState->Class->GetPropertiesSize();
-		if (ObjectSize < static_cast<int32>(sizeof(FString)) ||
-			AddressOffset > static_cast<uint32>(
-				ObjectSize - sizeof(FString)))
-		{
-			return false;
-		}
-
-		const auto AddressField =
-			reinterpret_cast<const FString*>(
-				reinterpret_cast<const uint8*>(PlayerState) +
-				AddressOffset);
-		if (!SDK::MemReadable(AddressField, sizeof(FString)))
-			return false;
-
-		const int32 Length = AddressField->Num();
-		if (Length <= 1 || Length > 128 ||
-			AddressField->Max() < Length ||
-			!AddressField->CStr() ||
-			!SDK::MemReadable(
-				AddressField->CStr(),
-				static_cast<size_t>(Length) * sizeof(wchar_t)) ||
-			AddressField->CStr()[Length - 1] != L'\0')
-		{
-			return false;
-		}
-
-		OutAddress = AddressField->ToString();
-		return !OutAddress.empty();
-	}
-
-	bool IsLoopbackSavedNetworkAddress(const std::string& Address)
-	{
-		return Address == "127.0.0.1" ||
-			Address.starts_with("127.0.0.1:") ||
-			Address == "::1" ||
-			Address.starts_with("[::1]:") ||
-			Address == "0:0:0:0:0:0:0:1" ||
-			Address.starts_with("[0:0:0:0:0:0:0:1]:") ||
-			Address == "::ffff:127.0.0.1" ||
-			Address.starts_with("::ffff:127.0.0.1:") ||
-			Address.starts_with("[::ffff:127.0.0.1]:");
-	}
-
-	bool IsValidatedLoopbackConnection(UNetConnection* Connection)
-	{
-		FReplicationObjectSnapshot ConnectionSnapshot;
-		if (!CaptureLiveReplicationObject(
-				Connection, ConnectionSnapshot))
-		{
-			return false;
-		}
-
-		auto PlayerController = Connection->PlayerController;
-		FReplicationObjectSnapshot ControllerSnapshot;
-		if (!CaptureLiveReplicationObject(
-				PlayerController, ControllerSnapshot) ||
-			!PlayerController->HasPlayerState())
-		{
-			return false;
-		}
-
-		std::string Address;
-		return IsValidSavedNetworkAddress(
-				PlayerController->PlayerState, Address) &&
-			IsLoopbackSavedNetworkAddress(Address);
-	}
-
-	void RefreshValidatedLoopbackState(UNetDriver* Driver)
-	{
-		auto World = UWorld::GetWorld();
-		if (!World || Driver != World->NetDriver)
-			return;
-
-		FReplicationObjectSnapshot DriverSnapshot;
-		if (!CaptureLiveReplicationObject(
-				Driver, DriverSnapshot))
-		{
-			GLoopbackScanDriver = nullptr;
-			GLoopbackScanDriverSnapshot = {};
-			GValidatedLoopbackConnections.clear();
-			GValidatedLoopbackDriver.store(
-				nullptr, std::memory_order_release);
-			return;
-		}
-		const bool bDriverChanged =
-			GLoopbackScanDriver != Driver ||
-			!HasSameReplicationIdentity(
-				GLoopbackScanDriverSnapshot, DriverSnapshot);
-		if (bDriverChanged)
-		{
-			GLoopbackScanDriver = Driver;
-			GLoopbackScanDriverSnapshot = DriverSnapshot;
-			GValidatedLoopbackConnections.clear();
-		}
-
-		std::unordered_map<
-			UNetConnection*, FReplicationObjectSnapshot>
-			CurrentConnections;
-		if (Driver->ClientConnections.Num() > 0)
-		{
-			CurrentConnections.reserve(
-				Driver->ClientConnections.Num());
-		}
-
-		for (auto Connection : Driver->ClientConnections)
-		{
-			FReplicationObjectSnapshot ConnectionSnapshot;
-			if (!CaptureLiveReplicationObject(
-					Connection, ConnectionSnapshot))
-			{
-				continue;
-			}
-
-			CurrentConnections.emplace(
-				Connection, ConnectionSnapshot);
-			auto Validated =
-				GValidatedLoopbackConnections.find(Connection);
-			if (Validated !=
-					GValidatedLoopbackConnections.end() &&
-				!HasSameReplicationIdentity(
-					Validated->second, ConnectionSnapshot))
-			{
-				GValidatedLoopbackConnections.erase(Validated);
-				Validated =
-					GValidatedLoopbackConnections.end();
-			}
-
-			if (Validated ==
-					GValidatedLoopbackConnections.end() &&
-				IsValidatedLoopbackConnection(Connection))
-			{
-				GValidatedLoopbackConnections.emplace(
-					Connection, ConnectionSnapshot);
-			}
-		}
-
-		for (auto It = GValidatedLoopbackConnections.begin();
-			It != GValidatedLoopbackConnections.end();)
-		{
-			auto Current = CurrentConnections.find(It->first);
-			if (Current == CurrentConnections.end() ||
-				!HasSameReplicationIdentity(
-					It->second, Current->second))
-			{
-				It = GValidatedLoopbackConnections.erase(It);
-			}
-			else
-			{
-				++It;
-			}
-		}
-
-		bool bAllLiveParentConnectionsAreLoopback =
-			!CurrentConnections.empty() &&
-			GValidatedLoopbackConnections.size() ==
-				CurrentConnections.size();
-		if (bAllLiveParentConnectionsAreLoopback)
-		{
-			for (const auto& Current : CurrentConnections)
-			{
-				auto Validated =
-					GValidatedLoopbackConnections.find(Current.first);
-				if (Validated ==
-						GValidatedLoopbackConnections.end() ||
-					!HasSameReplicationIdentity(
-						Validated->second, Current.second))
-				{
-					bAllLiveParentConnectionsAreLoopback = false;
-					break;
-				}
-			}
-		}
-
-		UNetDriver* const PublishedDriver =
-			bAllLiveParentConnectionsAreLoopback ? Driver : nullptr;
-		UNetDriver* const PreviousDriver =
-			GValidatedLoopbackDriver.exchange(
-				PublishedDriver, std::memory_order_acq_rel);
-		if (PreviousDriver != PublishedDriver)
-		{
-			SDK::DbgLog(
-				"[ReplicationCadence] loopbackFastFlush=%d "
-				"engineHz=%.0f actorHz=%.0f version=%.2f\n",
-				PublishedDriver ? 1 : 0,
-				PublishedDriver
-					? (FConfiguration::GetClampedMaxTickRate() >
-							FConfiguration::LoopbackFlushTickRate
-							? FConfiguration::GetClampedMaxTickRate()
-							: FConfiguration::LoopbackFlushTickRate)
-					: FConfiguration::GetClampedMaxTickRate(),
-				FConfiguration::GetClampedMaxTickRate(),
-				VersionInfo.FortniteVersion);
-		}
-	}
-
-	bool AreCustomReplicationConnectionsReady(
-		UNetDriver* Driver,
-		UWorld* World)
-	{
-		FReplicationObjectSnapshot GameStateSnapshot;
-		if (!World ||
-			!CaptureLiveReplicationObject(
-				World->GameState, GameStateSnapshot))
-		{
-			return false;
-		}
-
-		for (auto Connection : Driver->ClientConnections)
-		{
-			FReplicationObjectSnapshot ConnectionSnapshot;
-			FReplicationObjectSnapshot ControllerSnapshot;
-			FReplicationObjectSnapshot ViewTargetSnapshot;
-			if (!CaptureLiveReplicationObject(
-					Connection, ConnectionSnapshot) ||
-				!CaptureLiveReplicationObject(
-					Connection->PlayerController,
-					ControllerSnapshot) ||
-				!CaptureLiveReplicationObject(
-					Connection->ViewTarget,
-					ViewTargetSnapshot))
-			{
-				return false;
-			}
-		}
-
-		return Driver->ClientConnections.Num() > 0;
-	}
-
-	bool ShouldRunCustomCadenceFrame(
-		UNetDriver* Driver,
-		float DeltaSeconds,
-		float& OutCustomDeltaSeconds)
-	{
-		OutCustomDeltaSeconds = DeltaSeconds;
-		auto World = UWorld::GetWorld();
-		if (!Driver || !World || Driver != World->NetDriver ||
-			!UNetDriver::HasValidatedLoopbackConnection())
-		{
-			GCustomCadenceStates.erase(Driver);
+		if (Outer == World)
 			return true;
-		}
-		if (Driver->ClientConnections.Num() <= 0)
-		{
-			GCustomCadenceStates.erase(Driver);
-			return true;
-		}
-
-		FReplicationObjectSnapshot DriverSnapshot;
-		FReplicationObjectSnapshot WorldSnapshot;
-		if (!CaptureLiveReplicationObject(Driver, DriverSnapshot) ||
-			!Driver->HasWorld() ||
-			!CaptureLiveReplicationObject(
-				Driver->World, WorldSnapshot))
-		{
-			return true;
-		}
-
-		const float ActorTickRate =
-			FConfiguration::GetClampedMaxTickRate();
-		const double IntervalSeconds =
-			1.0 / static_cast<double>(ActorTickRate);
-		const double SafeDeltaSeconds =
-			std::isfinite(DeltaSeconds) && DeltaSeconds > 0.f
-				? static_cast<double>(DeltaSeconds)
-				: IntervalSeconds;
-
-		auto StateIt =
-			GCustomCadenceStates.find(Driver);
-		const bool bNewDriver =
-			StateIt == GCustomCadenceStates.end();
-		if (bNewDriver)
-		{
-			// Only the active world NetDriver is cadence-gated. Drop a stale
-			// entry left by seamless travel before enrolling its replacement.
-			GCustomCadenceStates.clear();
-			StateIt = GCustomCadenceStates.emplace(
-				Driver, FCustomCadenceState{}).first;
-		}
-
-		auto& State = StateIt->second;
-		const bool bWorldOrDriverChanged =
-			bNewDriver ||
-			!HasSameReplicationIdentity(
-				State.DriverSnapshot, DriverSnapshot) ||
-			State.World != Driver->World ||
-			!HasSameReplicationIdentity(
-				State.WorldSnapshot, WorldSnapshot);
-		if (bWorldOrDriverChanged)
-		{
-			State = {};
-			State.DriverSnapshot = DriverSnapshot;
-			State.WorldSnapshot = WorldSnapshot;
-			State.World = Driver->World;
-		}
-
-		std::unordered_map<
-			UNetConnection*, FReplicationObjectSnapshot>
-			CurrentConnections;
-		CurrentConnections.reserve(
-			Driver->ClientConnections.Num());
-		bool bConnectionsChanged =
-			State.Connections.size() !=
-				static_cast<size_t>(
-					Driver->ClientConnections.Num());
-		for (auto Connection : Driver->ClientConnections)
-		{
-			FReplicationObjectSnapshot ConnectionSnapshot;
-			CaptureLiveReplicationObject(
-				Connection, ConnectionSnapshot);
-			CurrentConnections.emplace(
-				Connection, ConnectionSnapshot);
-
-			auto Previous = State.Connections.find(Connection);
-			if (Previous == State.Connections.end() ||
-				!HasSameReplicationIdentity(
-					Previous->second, ConnectionSnapshot))
-			{
-				bConnectionsChanged = true;
-			}
-		}
-		State.Connections = std::move(CurrentConnections);
-
-		const bool bReady =
-			AreCustomReplicationConnectionsReady(
-				Driver, Driver->World);
-		const bool bReadinessTransition =
-			bReady && !State.bWasReady;
-		State.bWasReady = bReady;
-
-		// New drivers, travel, late joins, and the ready-state transition each
-		// receive an immediate custom/replication pass. Between those edges the
-		// bootstrap is still capped at the configured cadence; sending actors at
-		// 120 Hz while ViewTarget is null can overflow FN21's 256-packet ACK mask.
-		if (bWorldOrDriverChanged || bConnectionsChanged ||
-			bReadinessTransition)
-		{
-			State.AccumulatedSeconds = 0.0;
-			OutCustomDeltaSeconds =
-				static_cast<float>(SafeDeltaSeconds);
-			return true;
-		}
-
-		State.AccumulatedSeconds =
-			State.AccumulatedSeconds + SafeDeltaSeconds < 0.25
-				? State.AccumulatedSeconds + SafeDeltaSeconds
-				: 0.25;
-		if (State.AccumulatedSeconds + 1.0e-6 <
-			IntervalSeconds)
+		FReplicationObjectSnapshot OuterSnapshot;
+		if (!CaptureLiveReplicationObject(Outer, OuterSnapshot) ||
+			Outer->Class != ULevel::StaticClass())
 		{
 			return false;
 		}
 
-		OutCustomDeltaSeconds = static_cast<float>(
-			State.AccumulatedSeconds);
-		State.AccumulatedSeconds = std::fmod(
-			State.AccumulatedSeconds,
-			IntervalSeconds);
-		return true;
+		auto Level = static_cast<const ULevel*>(Outer);
+		return Level->HasOwningWorld() &&
+			Level->OwningWorld == World;
 	}
+
 }
-
-bool UNetDriver::HasValidatedLoopbackConnection()
-{
-	if (!GLoopbackFastFlushPolicyActive.load(
-			std::memory_order_acquire))
-	{
-		return false;
-	}
-
-	auto Driver = GValidatedLoopbackDriver.load(
-		std::memory_order_acquire);
-	auto World = UWorld::GetWorld();
-	return Driver && World && World->NetDriver == Driver;
-}
-
-
 const ULevel* GetLevel(const AActor* Actor)
 {
 	auto Outer = Actor->Outer;
@@ -794,17 +380,17 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 		//	continue;
 
 		auto NetworkActorInfo = ActorInfo.Get();
-		if (!NetworkActorInfo ||
-			!SDK::MemReadable(NetworkActorInfo, sizeof(FNetworkObjectInfo)))
+		if (!NetworkActorInfo)
 		{
 			continue;
 		}
 
-		auto Actor = NetworkActorInfo->Actor;
+		AActor* Actor = nullptr;
 		FReplicationObjectSnapshot ActorSnapshot;
 
-		if (!CaptureActorInWorld(
-				Actor, DriverWorld, ActorSnapshot) ||
+		if (!CaptureNetworkActorInWorld(
+				NetworkActorInfo, DriverWorld,
+				Actor, ActorSnapshot) ||
 			/*!Actor->bActorInitialized || */ Actor->NetDriverName != Driver->NetDriverName)
 		{
 			continue;
@@ -965,7 +551,6 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 		auto& Viewers = ViewerMap[Conn];
 		auto& PriorityActors = PriorityListPair.second;
 		int i = 0;
-
 		if (!Conn->ViewTarget)
 			goto _out;
 
@@ -976,8 +561,8 @@ void ServerReplicateActors(UNetDriver* Driver, float DeltaSeconds)
 
 		if (DestroyedStartupOrDormantActorGUIDsOffset)
 		{
-			static auto& DestroyedStartupOrDormantActors = *(TMap<uint32, FActorDestructionInfo*>*)(__int64(Driver) + DestroyedStartupOrDormantActorsOffset);
-			static auto& DestroyedStartupOrDormantActors_UE53 = *(TMap<uint64, FActorDestructionInfo*>*)(__int64(Driver) + DestroyedStartupOrDormantActorsOffset);
+			auto& DestroyedStartupOrDormantActors = *(TMap<uint32, FActorDestructionInfo*>*)(__int64(Driver) + DestroyedStartupOrDormantActorsOffset);
+			auto& DestroyedStartupOrDormantActors_UE53 = *(TMap<uint64, FActorDestructionInfo*>*)(__int64(Driver) + DestroyedStartupOrDormantActorsOffset);
 			auto& DestroyedStartupOrDormantActorGUIDs = *(TSet<uint32>*)(__int64(Conn) + DestroyedStartupOrDormantActorGUIDsOffset);
 			auto& DestroyedStartupOrDormantActorGUIDs_UE53 = *(TSet<uint64>*)(__int64(Conn) + DestroyedStartupOrDormantActorGUIDsOffset);
 			auto& ClientVisibleLevelNames = *(TSet<int32>*)(__int64(Conn) + ClientVisibleLevelNamesOffset);
@@ -1806,8 +1391,6 @@ namespace
 		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
 			PhaseLogic = nullptr;
 		ULONGLONG NextPhaseLogicResolveMs = 0;
-		int32 PhaseLogicScanCursor = 0;
-		int32 PhaseLogicScanLimit = 0;
 		bool bObservedLiveMatch = false;
 		bool bObservedLegacyLivePhase = false;
 		bool bObservedNativeTerminal = false;
@@ -1819,8 +1402,7 @@ namespace
 
 	bool IsLiveLifecycleObject(const UObject* Object)
 	{
-		if (!Object ||
-			!SDK::MemReadable(Object, sizeof(UObject)))
+		if (!Object)
 		{
 			return false;
 		}
@@ -1834,10 +1416,7 @@ namespace
 
 		auto Item =
 			TUObjectArray::GetItemByIndex(ObjectIndex);
-		const int32 InvalidObjectFlags =
-			Offsets::bEncryptedObjects
-				? 0x10200000
-				: 0x20;
+		constexpr int32 InvalidObjectFlags = 0x20;
 		return Item &&
 			Item->GetObject() == Object &&
 			!(Item->GetFlags() & InvalidObjectFlags) &&
@@ -1894,6 +1473,7 @@ namespace
 
 		UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
 			Candidate = nullptr;
+
 		auto DefaultObject =
 			(const UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)
 				PhaseLogicClass->GetDefaultObj();
@@ -1901,11 +1481,8 @@ namespace
 			DefaultObject->GetFunction("Get"))
 		{
 			Candidate =
-				VersionInfo.FortniteVersion >= 32.00
-					? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-						GetFixed()
-					: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-						Get(World);
+				UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+					Get(World);
 		}
 
 		if (IsLiveLifecycleObject(Candidate) &&
@@ -1913,63 +1490,30 @@ namespace
 				Candidate, GameState))
 		{
 			State.PhaseLogic = Candidate;
-			State.PhaseLogicScanCursor = 0;
-			State.PhaseLogicScanLimit = 0;
 			return Candidate;
 		}
 
-		// Reflection's Get helper is missing or stale on a few component-driven
-		// releases. Resolve only a component owned by the current GameState;
-		// never reuse the first process-wide object across map travel. Bound
-		// each slice so a component-less custom map cannot hitch every second.
-		if (State.PhaseLogicScanLimit <= 0)
+		// A few component-driven releases have a stale reflected Get helper.
+		// The authoritative object must be attached to this GameState, so query
+		// that bounded component list instead of sweeping the global UObject
+		// registry (which repeatedly hitches component-less custom maps).
+		if (IsLiveLifecycleObject(GameState))
 		{
-			State.PhaseLogicScanCursor = 0;
-			State.PhaseLogicScanLimit =
-				TUObjectArray::Num();
-		}
-		constexpr int32 PhaseLogicScanBudget = 2048;
-		const int32 ScanEnd = (std::min)(
-			State.PhaseLogicScanCursor +
-				PhaseLogicScanBudget,
-			State.PhaseLogicScanLimit);
-		for (int32 Index =
-				State.PhaseLogicScanCursor;
-			Index < ScanEnd;
-			Index++)
-		{
-			auto Object =
-				TUObjectArray::GetObjectByIndex(Index);
-			if (!IsLiveLifecycleObject(Object) ||
-				Object->IsDefaultObject() ||
-				!Object->IsA<
-					UFortGameStateComponent_BattleRoyaleGamePhaseLogic>())
-			{
-				continue;
-			}
-
 			Candidate =
 				(UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)
-					Object;
-			if (IsOwnedByLifecycleGameState(
+					GameState->GetComponentByClass(
+						PhaseLogicClass);
+			if (IsLiveLifecycleObject(Candidate) &&
+				!Candidate->IsDefaultObject() &&
+				IsOwnedByLifecycleGameState(
 					Candidate, GameState))
 			{
 				State.PhaseLogic = Candidate;
-				State.PhaseLogicScanCursor = 0;
-				State.PhaseLogicScanLimit = 0;
 				return Candidate;
 			}
 		}
 
-		State.PhaseLogicScanCursor = ScanEnd;
-		if (State.PhaseLogicScanCursor >=
-			State.PhaseLogicScanLimit)
-		{
-			State.PhaseLogicScanCursor = 0;
-			State.PhaseLogicScanLimit = 0;
-			State.NextPhaseLogicResolveMs =
-				Now + 1000;
-		}
+		State.NextPhaseLogicResolveMs = Now + 250;
 		return nullptr;
 	}
 
@@ -2300,19 +1844,13 @@ namespace
 
 void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 {
-	RefreshValidatedLoopbackState(Driver);
-	const float NativeDeltaSeconds = DeltaSeconds;
-	float CustomDeltaSeconds = DeltaSeconds;
-	if (!ShouldRunCustomCadenceFrame(
-			Driver, DeltaSeconds, CustomDeltaSeconds))
+	auto ActiveWorld = UWorld::GetWorld();
+	if (!ActiveWorld || Driver != ActiveWorld->NetDriver)
 	{
-		// The fast loopback frames intentionally do only native connection work:
-		// ACK/control/socket flushing stays responsive while events, compatibility
-		// ticks and custom actor replication retain their configured cadence.
-		TickFlushOG(Driver, NativeDeltaSeconds);
+		TickFlushOG(Driver, DeltaSeconds);
 		return;
 	}
-	DeltaSeconds = CustomDeltaSeconds;
+
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
 	GUI::PlayerNamesGameTick();
 	if (auto World = UWorld::GetWorld();
@@ -2361,9 +1899,6 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 	// and deferred players-left replication.
 	VersionFeatureAdapter::TickServerFrame(Driver);
 
-	// Finalize invalid health states after every custom gameplay producer and
-	// immediately before this path's replication send.
-	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ClientConnections.Num() > 0)
 	{
 		const ULONGLONG ReplicationStartMs = GetTickCount64();
@@ -2444,7 +1979,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 	}
 
 	const ULONGLONG NativeTickFlushStartMs = GetTickCount64();
-	TickFlushOG(Driver, NativeDeltaSeconds);
+	TickFlushOG(Driver, DeltaSeconds);
 	const ULONGLONG NativeTickFlushElapsedMs =
 		GetTickCount64() - NativeTickFlushStartMs;
 	static uint32 SlowNativeTickFlushLogs = 0;
@@ -2471,6 +2006,13 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 uint64_t ServerReplicateActors_;
 void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 {
+	auto ActiveWorld = UWorld::GetWorld();
+	if (!ActiveWorld || Driver != ActiveWorld->NetDriver)
+	{
+		TickFlushOG(Driver, DeltaSeconds);
+		return;
+	}
+
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
 	GUI::PlayerNamesGameTick();
 	if (auto World = UWorld::GetWorld();
@@ -2509,9 +2051,6 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 	if (Driver->ReplicationDriver)
 		AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
-	// Finalize invalid health states after every custom gameplay producer and
-	// immediately before this path's replication send.
-	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ReplicationDriver)
 	{
 		// this is our main netdriver
@@ -2660,14 +2199,15 @@ void SendClientMoveAdjustments(UNetDriver* Driver)
 	}
 }
 
-// Exposed to the 32.11 watchdog (Misc.cpp) so a heartbeat can confirm replication is
-// actually flushing every frame, not just the game thread ticking. Incremented every call.
-volatile long g_tickFlushCounter = 0;
-
 void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 {
 	const float NativeDeltaSeconds = DeltaSeconds;
-	_InterlockedIncrement(&g_tickFlushCounter);
+	auto ActiveWorld = UWorld::GetWorld();
+	if (!ActiveWorld || Driver != ActiveWorld->NetDriver)
+	{
+		TickFlushOG(Driver, NativeDeltaSeconds);
+		return;
+	}
 
 	GUI::SafeZoneMapGameTick(); // drain pending minimap load (game-thread-only)
 	GUI::PlayerNamesGameTick();
@@ -2692,10 +2232,6 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 	SyncErbiumSafeZonePause(Driver);
 	DriveLegacySafeZoneInsideChecks(Driver);
 
-	static int _tf = 0;
-	bool _lg = VersionInfo.FortniteVersion >= 32.00 && _tf < 4;
-	if (_lg) SDK::DbgLog("[TickFlush] #%d ENTER Driver=%p\n", _tf, (void*)Driver);
-
 	// Hold/release the warmup schedule before phase logic consumes it. The
 	// policy has already run after native LTM ticks above, so Auto Bus Start
 	// OFF cannot lose a race to a mutator-authored elapsed deadline.
@@ -2708,29 +2244,21 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 
 	if (VersionInfo.FortniteVersion >= 25.20)
 	{
-		// 32.11: ::Get mis-resolves (returns null though the component exists); use the direct lookup.
-		auto GamePhaseLogic = VersionInfo.FortniteVersion >= 32.00
-			? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed()
-			: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-		if (_lg) SDK::DbgLog("[TickFlush] #%d GamePhaseLogic=%p\n", _tf, (void*)GamePhaseLogic);
+		auto GamePhaseLogic =
+			UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(
+				UWorld::GetWorld());
 		if (GamePhaseLogic)
 			GamePhaseLogic->Tick();
 	}
-	if (_lg) SDK::DbgLog("[TickFlush] #%d post-GamePhase\n", _tf);
 
 	TickAuthoritativeMatchLifecycle(Driver);
 
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
-	if (_lg) SDK::DbgLog("[TickFlush] #%d post-NukeRockets\n", _tf);
 
 	// Shared version-adapter upkeep: work budget, cheat-bot cosmetic queue
 	// and deferred players-left replication.
 	VersionFeatureAdapter::TickServerFrame(Driver);
-	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OnServerTick\n", _tf);
 
-	// Finalize invalid health states after every custom gameplay producer and
-	// immediately before Iris builds its outgoing replication batch.
-	AFortPlayerPawnAthena::TickHealthStateRepair(Driver);
 	if (Driver->ClientConnections.Num() > 0)
 	{
 		auto ReplicationSystem = *(UObject**)(__int64(&Driver->ReplicationDriver) + 8);
@@ -2823,7 +2351,6 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		}
 	}
 
-	if (_lg) { SDK::DbgLog("[TickFlush] #%d pre-OG (calling TickFlushOG)\n", _tf); }
 	const ULONGLONG NativeTickFlushStartMs = GetTickCount64();
 	TickFlushOG(Driver, NativeDeltaSeconds);
 	const ULONGLONG NativeTickFlushElapsedMs =
@@ -2840,8 +2367,6 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 			NativeTickFlushElapsedMs,
 			VersionInfo.FortniteVersion);
 	}
-	if (_lg) SDK::DbgLog("[TickFlush] #%d post-OG done\n", _tf);
-	if (VersionInfo.FortniteVersion >= 32.00 && _tf < 4) _tf++;
 }
 
 void (*SetNetDormancyOG)(AActor* Actor, int NewDormancy);
@@ -2990,18 +2515,11 @@ void UNetDriver::PostLoadHook()
 	{
 		if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
 		{
-			constexpr bool bEnableLoopbackFastFlush =
-				SupportsLoopbackFastFlush(true);
-			GLoopbackFastFlushPolicyActive.store(
-				bEnableLoopbackFastFlush, std::memory_order_release);
-			GValidatedLoopbackDriver.store(
-				nullptr, std::memory_order_release);
 			SDK::DbgLog(
 				"[ReplicationPolicy] version=%.2f model=Iris "
-				"explicitSend=%d nativeSend=1 fastFlush=%d\n",
+				"explicitSend=%d nativeSend=1\n",
 				VersionInfo.FortniteVersion,
-				1,
-				bEnableLoopbackFastFlush ? 1 : 0);
+				1);
 			FindSendClientAdjustment();
 			FindUpdateIrisReplicationViews();
 			FindPreSendUpdate();
@@ -3031,24 +2549,15 @@ void UNetDriver::PostLoadHook()
 
 		GetActorLocation = (void(*)(AActor*, FFrame&, FVector*))AActor::GetDefaultObj()->GetFunction("K2_GetActorLocation")->GetNativeFunc();
 
-		constexpr bool bEnableLoopbackFastFlush =
-			SupportsLoopbackFastFlush(false);
-		GLoopbackFastFlushPolicyActive.store(
-			bEnableLoopbackFastFlush, std::memory_order_release);
 		SDK::DbgLog(
 			"[ReplicationPolicy] version=%.2f model=Generic "
-			"explicitSend=%d nativeSend=1 fastFlush=%d\n",
+			"explicitSend=%d nativeSend=1\n",
 			VersionInfo.FortniteVersion,
-			1,
-			bEnableLoopbackFastFlush ? 1 : 0);
+			1);
 		Utils::Hook(FindTickFlush(), TickFlush, TickFlushOG);
 	}
 	else
 	{
-		GLoopbackFastFlushPolicyActive.store(
-			false, std::memory_order_release);
-		GValidatedLoopbackDriver.store(
-			nullptr, std::memory_order_release);
 		ServerReplicateActors_ = FindServerReplicateActors();
 
 		SDK::DbgLog(

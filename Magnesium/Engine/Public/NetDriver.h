@@ -205,11 +205,6 @@ public:
     DefHookOg(void, TickFlush, UNetDriver*, float);
     static void TickFlush__RepGraph(UNetDriver*, float);
     static void TickFlush__Iris(UNetDriver*, float);
-    // True only while every live parent connection on the active supported
-    // game NetDriver has an authoritative saved address validated as loopback.
-    // Misc uses this to raise native flush cadence without changing the
-    // configured custom/actor-replication rate for remote-capable hosts.
-    static bool HasValidatedLoopbackConnection();
     DefHookOg(void, NotifyActorDestroyed, UNetDriver*, AActor*, bool);
 
     double GetTime()

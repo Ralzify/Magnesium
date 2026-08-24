@@ -305,7 +305,7 @@ void UAbilitySystemComponent::Hook()
     }
 
     SDK::DbgLog("  [ASC] 7 pre-HookEvery(istaIdx=0x%X)\n", istaIdx);
-    // A bad GetVTableIndex (e.g. 32.11 where the resolve fails) yields a garbage index; patching a
+    // A failed GetVTableIndex yields a garbage index; patching a
     // wild vtable slot would corrupt the process. Only install when the index looks sane.
     if (istaIdx != 0 && istaIdx < 0x1000)
         Utils::HookEvery<UAbilitySystemComponent>(istaIdx, InternalServerTryActivateAbility);

@@ -167,8 +167,7 @@ namespace
 			return false;
 
 		auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-		const int32 InvalidObjectFlags =
-			Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+		constexpr int32 InvalidObjectFlags = 0x20;
 		return Item &&
 			Item->GetObject() == Object &&
 			!(Item->GetFlags() & InvalidObjectFlags) &&
@@ -260,7 +259,7 @@ namespace
 			if (!Property)
 				continue;
 
-			const uint32 PropertyOffset = DecryptPropOffset(
+			const uint32 PropertyOffset = SDK::ReadPropertyOffset(
 				GetFromOffset<uint32>(
 					Property,
 					Offsets::Offset_Internal));
@@ -272,8 +271,7 @@ namespace
 
 			const uint32 SoftReferenceSize =
 				GetPlayerMapIconSoftReferenceSize();
-			if (VersionInfo.FortniteVersion < 32.0 &&
-				Offsets::ElementSize &&
+			if (Offsets::ElementSize &&
 				SDK::MemReadable(
 					reinterpret_cast<const uint8_t*>(Property) +
 						Offsets::ElementSize,
@@ -340,8 +338,6 @@ namespace
 		FPlayerMapIconPawnBrushLayout& OutLayout)
 	{
 		OutLayout = {};
-		// FN32 cannot enforce the FField cast filter, so the exact reflected
-		// element-size and owner/struct bounds below remain mandatory there.
 		if (!IsLiveHealthStateObject(Pawn) ||
 			!IsLiveHealthStateObject(Pawn->Class) ||
 			!Offsets::StaticFindObject ||
@@ -413,7 +409,7 @@ namespace
 		}
 
 		const int32 BrushOffset = static_cast<int32>(
-			SDK::DecryptPropOffset(GetFromOffset<uint32>(
+			SDK::ReadPropertyOffset(GetFromOffset<uint32>(
 				BrushProperty, Offsets::Offset_Internal)));
 		const uint32 BrushElementSize = GetFromOffset<uint32>(
 			BrushProperty, Offsets::ElementSize);
@@ -421,7 +417,7 @@ namespace
 			BrushProperty,
 			Offsets::ElementSize - sizeof(int32));
 		const int32 ResourceOffset = static_cast<int32>(
-			SDK::DecryptPropOffset(GetFromOffset<uint32>(
+			SDK::ReadPropertyOffset(GetFromOffset<uint32>(
 				ResourceProperty, Offsets::Offset_Internal)));
 		const uint32 ResourceElementSize = GetFromOffset<uint32>(
 			ResourceProperty, Offsets::ElementSize);
@@ -3403,18 +3399,15 @@ namespace
 				: nullptr;
 		constexpr uint64 CPF_Parm = 0x80;
 		constexpr uint64 CPF_ReturnParm = 0x400;
-		const bool bEncryptedParameterMetadata =
-			VersionInfo.FortniteVersion >= 32.00;
 		const bool bSchemaValid =
 			ReturnParam &&
 			ReturnParam->Name == "ReturnValue" &&
 			ReturnParam->Offset == 0 &&
-			(bEncryptedParameterMetadata ||
-				(Function->GetPropertiesSize() == sizeof(bool) &&
-					Params.Size == sizeof(bool) &&
-					ReturnParam->ElementSize == sizeof(bool) &&
-					(ReturnParam->PropertyFlags & CPF_Parm) &&
-					(ReturnParam->PropertyFlags & CPF_ReturnParm)));
+			Function->GetPropertiesSize() == sizeof(bool) &&
+			Params.Size == sizeof(bool) &&
+			ReturnParam->ElementSize == sizeof(bool) &&
+			(ReturnParam->PropertyFlags & CPF_Parm) &&
+			(ReturnParam->PropertyFlags & CPF_ReturnParm);
 		if (!bSchemaValid)
 			return IsDBNO;
 
@@ -3742,7 +3735,7 @@ namespace
 			}
 
 			const uint32 PropertyOffset =
-				DecryptPropOffset(
+				SDK::ReadPropertyOffset(
 					GetFromOffset<uint32>(
 						Property,
 						Offsets::Offset_Internal));
@@ -6336,8 +6329,7 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 
 	// ReviveFromDBNO is inherited from FortPlayerPawn and keeps this exact pawn
 	// possessed. Use it for a real teammate first, but only after validating the
-	// reflected one-controller ABI. Later builds encrypt size/flag metadata, so
-	// there the stable name and zero offset are the bounded validation surface.
+	// reflected one-controller ABI.
 	auto NativeReviveFunction =
 		Pawn->GetFunction("ReviveFromDBNO");
 	bool bNativeReviveSchemaValid = false;
@@ -6353,21 +6345,17 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 		}
 		constexpr uint64 CPF_Parm = 0x80;
 		constexpr uint64 CPF_ReturnParm = 0x400;
-		const bool bEncryptedParameterMetadata =
-			VersionInfo.FortniteVersion >= 32.00;
 		bNativeReviveSchemaValid =
 			NativeParams.NameOffsetMap.size() == 1 &&
 			InstigatorParam &&
 			InstigatorParam->Offset == 0 &&
-			(bEncryptedParameterMetadata ||
-				(NativeReviveFunction->GetPropertiesSize() ==
-						sizeof(EventInstigator) &&
-					NativeParams.Size == sizeof(EventInstigator) &&
-					InstigatorParam->ElementSize ==
-						sizeof(EventInstigator) &&
-					(InstigatorParam->PropertyFlags & CPF_Parm) &&
-					!(InstigatorParam->PropertyFlags &
-						CPF_ReturnParm)));
+			NativeReviveFunction->GetPropertiesSize() ==
+				sizeof(EventInstigator) &&
+			NativeParams.Size == sizeof(EventInstigator) &&
+			InstigatorParam->ElementSize ==
+				sizeof(EventInstigator) &&
+			(InstigatorParam->PropertyFlags & CPF_Parm) &&
+			!(InstigatorParam->PropertyFlags & CPF_ReturnParm);
 	}
 
 	if (!bSucceeded && bStillDBNO &&
@@ -6431,7 +6419,7 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 
 	// Some builds expose a complete authority-side fallback separately from
 	// ReviveFromDBNO. ForceReviveFromDBNO can take no parameters on older
-	// builds and one EventInstigator controller on newer builds such as 32.11;
+	// builds and one EventInstigator controller on newer supported builds;
 	// validate either reflected schema before invoking it instead of rebuilding
 	// version-sensitive GAS/effect layouts.
 	if (!bSucceeded && bStillDBNO)
@@ -6456,25 +6444,17 @@ bool AFortPlayerPawnAthena::ReviveFromDBNOCompat(
 				if (Param.Name == "EventInstigator")
 					ForceInstigatorParam = &Param;
 			}
-			// FN32 encrypts PropertiesSize/ElementSize/PropertyFlags, but keeps
-			// reflected parameter names and offsets usable.
-			const bool bEncryptedParameterMetadata =
-				VersionInfo.FortniteVersion >= 32.00;
 			const bool bControllerParameterSchema =
 				ForceParams.NameOffsetMap.size() == 1 &&
 				ForceInstigatorParam &&
 				ForceInstigatorParam->Offset == 0 &&
-				(bEncryptedParameterMetadata ||
-					(ForceReviveFunction->GetPropertiesSize() ==
-							sizeof(EventInstigator) &&
-						ForceParams.Size ==
-							sizeof(EventInstigator) &&
-						ForceInstigatorParam->ElementSize ==
-							sizeof(EventInstigator) &&
-						(ForceInstigatorParam->PropertyFlags &
-							CPF_Parm) &&
-						!(ForceInstigatorParam->PropertyFlags &
-							CPF_ReturnParm)));
+				ForceReviveFunction->GetPropertiesSize() ==
+					sizeof(EventInstigator) &&
+				ForceParams.Size == sizeof(EventInstigator) &&
+				ForceInstigatorParam->ElementSize ==
+					sizeof(EventInstigator) &&
+				(ForceInstigatorParam->PropertyFlags & CPF_Parm) &&
+				!(ForceInstigatorParam->PropertyFlags & CPF_ReturnParm);
 			if (bZeroParameterSchema ||
 				bControllerParameterSchema)
 			{

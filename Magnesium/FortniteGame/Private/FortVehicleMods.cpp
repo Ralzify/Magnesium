@@ -580,7 +580,7 @@ namespace
 
         const uint32 ElementSize =
             GetFromOffset<uint32>(Property, Offsets::ElementSize);
-        const uint32 Offset = SDK::DecryptPropOffset(
+        const uint32 Offset = SDK::ReadPropertyOffset(
             GetFromOffset<uint32>(Property, Offsets::Offset_Internal));
         if (ElementSize != ExpectedElementSize ||
             Offset > OwnerSize ||

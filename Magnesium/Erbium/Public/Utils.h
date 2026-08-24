@@ -10,7 +10,7 @@ public:
     template <class _Ot = void*>
     static void Hook(uint64_t _Ptr, void* _Detour, _Ot& _Orig = _NpFH)
     {
-        if (!_Ptr || !SDK::MemReadable((void*)_Ptr, 1)) // unresolved/invalid target (e.g. 32.11 sig miss)
+        if (!_Ptr || !SDK::MemReadable((void*)_Ptr, 1)) // unresolved/invalid target
             return;
         MH_CreateHook((LPVOID)_Ptr, _Detour, (LPVOID*)(std::is_same_v<_Ot, void*> ? nullptr : &_Orig));
     }

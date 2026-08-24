@@ -39,10 +39,6 @@ struct FConfiguration
     static inline std::atomic_bool bReadyToStart{ false };
     static inline constexpr float LegacyMaxTickRate = 30.f;
     static inline constexpr float ModernMaxTickRate = 30.f;
-    // The historical uncapped loop let a local client's control traffic and
-    // acknowledgements flush more often than actor replication. Keep that
-    // low-latency behavior separate from the user-facing server tick rate.
-    static inline constexpr float LoopbackFlushTickRate = 120.f;
     static inline constexpr float MinimumMaxTickRate = 5.f;
     static inline constexpr float MaximumMaxTickRate = 180.f;
     // VersionInfo is populated by SDK::Init, after static initialization, so
@@ -115,7 +111,10 @@ struct FConfiguration
     static inline std::atomic<float> EventStartBaseTime{ 0.f };
     static inline std::atomic_bool bEventStarted{ false };
 
-    static inline std::atomic_bool bAutoDump{ true };
+    // Full UObject item/playlist dumps are a diagnostic action.  Keeping this
+    // opt-in prevents two process-wide registry walks from blocking the first
+    // server-ready transition on modern builds.
+    static inline std::atomic_bool bAutoDump{ false };
 
     static inline std::string BotName = "Magnesium Bot ";
     static inline std::atomic_bool UseCustomBotNames{ false };

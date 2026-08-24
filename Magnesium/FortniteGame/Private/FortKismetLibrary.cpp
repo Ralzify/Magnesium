@@ -71,10 +71,7 @@ namespace
 
 		auto Item = TUObjectArray::GetItemByIndex(
 			ObjectIndex);
-		const int32 InvalidObjectFlags =
-			Offsets::bEncryptedObjects
-				? 0x10200000
-				: 0x20;
+		constexpr int32 InvalidObjectFlags = 0x20;
 		return Item &&
 			Item->GetObject() == Object &&
 			!(Item->GetFlags() & InvalidObjectFlags) &&
@@ -441,8 +438,7 @@ namespace
 			0x0000000000000100ULL;
 		constexpr uint64 CPF_ReturnParm =
 			0x0000000000000400ULL;
-		const bool bReliablePropertyMetadata =
-			VersionInfo.FortniteVersion < 32.00;
+		constexpr bool bReliablePropertyMetadata = true;
 		uint32 ValueOffset = 0;
 		int32 ReturnValueOffset = -1;
 		int32 ValueParameterCount = 0;
@@ -1698,7 +1694,7 @@ namespace
 				ControllerGhostModeData,
 				Offsets::ElementSize);
 		const uint32 ControllerDataOffset =
-			SDK::DecryptPropOffset(GetFromOffset<uint32>(
+			SDK::ReadPropertyOffset(GetFromOffset<uint32>(
 				ControllerGhostModeData,
 				Offsets::Offset_Internal));
 		const int32 ControllerPropertiesSize =

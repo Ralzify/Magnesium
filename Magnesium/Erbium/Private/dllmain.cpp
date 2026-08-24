@@ -303,12 +303,6 @@ namespace
             return;
         }
 
-        // Resolve every named finder before the full patch pass overwrites any
-        // function prologues. The resolved addresses are then reused after the
-        // Start button without rescanning patched code.
-        ValidateFinders();
-        SDK::DbgLog("Main: cp6b (ValidateFinders done)\n");
-
         ApplyResolvedCompatibilityPatches();
         SDK::DbgLog("Main: cp7 (Null/RetTrue patches applied)\n");
     }
@@ -330,18 +324,23 @@ void Main()
         }
     }
 
+    printf("Initializing SDK...\n");
+    if (!SDK::Init())
+    {
+        MessageBoxW(
+            nullptr,
+            L"This Magnesium build supports Fortnite releases through 30.x only.",
+            L"Unsupported Fortnite version",
+            MB_OK | MB_ICONERROR);
+        return;
+    }
+
     if constexpr (FConfiguration::bCustomCrashReporter)
         FCrashReporter::Register();
-
-    printf("Initializing SDK...\n");
-    SDK::Init();
 
     // Restore the complete launch profile before either the GUI or the server
     // start gate can observe configuration values.
     AutoHosting::Initialize();
-
-    if (VersionInfo.FortniteVersion >= 32.00)
-        SDK::DumpObjArrayDiag();
 
     if constexpr (FConfiguration::bGUI)
     {
@@ -415,16 +414,6 @@ void Main()
     {
         UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"net.AllowEncryption 0"), nullptr);
 
-        if (VersionInfo.FortniteVersion >= 32.00)
-        {
-            // 32.11: BlastBerry is a WorldPartition map. On the injected listen server the server-side
-            // streaming thrashes (constant cell add/remove -> ABuildingActor physics re-init) which
-            // grinds the shared game thread. Disable server streaming so cells load once and stay.
-            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"wp.Runtime.EnableServerStreaming 0"), nullptr);
-            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"wp.Runtime.EnableServerStreamingOut 0"), nullptr);
-            SDK::DbgLog("Main: cp2a (wp server streaming disabled for 32.11)\n");
-        }
-
         SDK::DbgLog("Main: cp2 (net.AllowEncryption ok, pre CurieGlobals)\n");
         auto CurieClass = FindClass("CurieGlobals");
         auto DefaultCurieGlobals = CurieClass ? CurieClass->GetDefaultObj() : nullptr;
@@ -459,7 +448,7 @@ void Main()
         }
 
         SDK::DbgLog("Main: cp4 (Iris cvars done, pre FilterConfigs)\n");
-        if (bUseIris && VersionInfo.FortniteVersion >= 29 && VersionInfo.FortniteVersion < 32.00) // 32.11: FObjectReplicationBridgeFilterConfig::Size() is wrong here -> loop hangs; needs the real 32.11 struct layout
+        if (bUseIris && VersionInfo.FortniteVersion >= 29)
         {
             auto ReplicationBridgeConfig = UObjectReplicationBridgeConfig::GetDefaultObj();
 
@@ -564,15 +553,11 @@ void Main()
 
     srand((uint32_t)time(0));
 
-    // 32.11 runs as a LISTEN server (netmode forced to NM_ListenServer): KEEP the local player so the
-    // injecting client is the host — it travels into the terrain and gets a PlayerController, which the
-    // match needs (ReadyPlayers>=1) to start. Removing it (the dedicated-server model used pre-32) leaves
-    // 0 PlayerControllers -> match never starts -> client stuck on "Setting up the server".
-    if (VersionInfo.FortniteVersion < 32.00 && UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Num() > 0)
+    if (UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Num() > 0)
     {
         UWorld::GetWorld()->OwningGameInstance->LocalPlayers.Remove(0);
     }
-    SDK::DbgLog("Main: cp14 (LocalPlayers handled, kept=%d)\n", (int)(VersionInfo.FortniteVersion >= 32.00));
+    SDK::DbgLog("Main: cp14 (LocalPlayers handled)\n");
 
     const wchar_t* terrainOpen = L"open Athena_Terrain";
 
@@ -627,9 +612,7 @@ void Main()
     {
         if (VersionInfo.FortniteVersion >= 27.00)
         {
-            if (VersionInfo.FortniteVersion >= 32.00)
-                terrainOpen = L"open BlastBerry_Terrain"; // Ch5 S4 (32.11) island — net mode forced to DedicatedServer via AttemptDeriveFromURL hook
-            else if (VersionInfo.FortniteVersion >= 28.00)
+            if (VersionInfo.FortniteVersion >= 28.00)
                 terrainOpen = L"open Helios_Terrain";
         }
         else if (VersionInfo.FortniteVersion >= 23.00)
@@ -684,48 +667,6 @@ void Main()
     Misc::bHookedAll = true;
     SDK::DbgLog("Main: cp19 all hooks installed; terrain-open %s (%ls)\n",
         bDeferTerrainOpen ? "pending" : "already issued", terrainOpen);
-
-    // 32.11 ground-truth crash/boot patches (Remix, verified on CL 38202817). These are raw byte
-    // patches whose signatures don't exist in Magnesium's universal scanner; version-gated so no
-    // other build is touched. The two ChangeGameSessionID rets fix the netmode-init read-null AV.
-    if (VersionInfo.FortniteVersion >= 32.00)
-    {
-        auto base = Memcury::PE::GetModuleBase();
-        auto P8  = [&](uintptr_t rva, uint8_t  v) { if (SDK::MemReadable((void*)(base + rva), 1)) Utils::Patch<uint8_t>(base + rva, v); };
-        auto P16 = [&](uintptr_t rva, uint16_t v) { if (SDK::MemReadable((void*)(base + rva), 2)) Utils::Patch<uint16_t>(base + rva, v); };
-        auto P32 = [&](uintptr_t rva, uint32_t v) { if (SDK::MemReadable((void*)(base + rva), 4)) Utils::Patch<uint32_t>(base + rva, v); };
-        SDK::DbgLog("Main: cp19b applying 32.11 crash patches (base=%p)\n", (void*)base);
-        P8(0x537F4A0, 0xC3); // UnsafeEnvironment
-        P8(0x4336BAC, 0xC3); // RequestExit
-        P8(0x27B3958, 0xC3); // ChangeGameSessionID crash 1
-        P8(0x27B3598, 0xC3); // ChangeGameSessionID crash 2 (netmode-init read-null AV)
-        P8(0x1D91EEC, 0xC3); // GFX crash
-        P8(0x2C7D6F0, 0xC3); // Pedestal BeginPlay
-        P8(0x1BED9A8, 0xC3); // KickPlayer
-        P8(0x338C8F8, 0x01); // SpawnServerActor patch
-        P8(0x721A50C, 0xEB);
-        P8(0x2C7736C, 0xC3); // controller disconnected
-        P8(0x3E2C464, 0xC3); // update required
-        P8(0x2C78CDC, 0xC3); // another controller
-        P8(0x3E6E09D, 0xEB); // goofy crash
-        P8(0x27306AC, 0xC3); // more crash
-        P8(0xAF29848, 0xC3); // pawn crash
-        P8(0x19D7D70, 0xC3); // weapon crash
-        P8(0x2CAF22C, 0xC3); // widget crash
-        P8(0x2CB06C8, 0xC3); // widget crash
-        P8(0x1E349CB, 0x85); // gamephase step
-        P16(0xA6E634D, 0xE990); // respawn kick
-        P32(0x20AEF8C, 0xC0FFC031); // localplayer spawnplayactor
-        P8(0x20AEF90, 0xC3);
-        P8(0x9B2A080, 0xC3); // entitlement crash
-        P32(0x7C86D88, 0xC0FFC031); // canactivateability
-        P8(0x7C86D8C, 0xC3);
-        P8(0x6D3E210, 0xC3); // cosmetic crash
-        P8(0xC6A3B28, 0xC3); // fire spread fix
-        if (SDK::MemReadable((void*)(base + 0x12D4E1CA), 1)) *(bool*)(base + 0x12D4E1CA) = false;
-        if (SDK::MemReadable((void*)(base + 0x12D4E166), 1)) *(bool*)(base + 0x12D4E166) = true;
-        SDK::DbgLog("Main: cp19c 32.11 crash patches done\n");
-    }
 
     if (bDeferTerrainOpen)
     {

@@ -164,7 +164,7 @@ namespace Calendar
 			return nullptr;
 
 		// Same reachability filter TUObjectArray::FindObject uses.
-		const int32 SkipFlags = Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+		constexpr int32 SkipFlags = 0x20;
 		const int32 ObjectCount = TUObjectArray::Num();
 
 		std::unordered_map<const UClass*, bool> DrivesSnow;

@@ -1135,8 +1135,7 @@ namespace
 
         const auto Item =
             TUObjectArray::GetItemByIndex(ObjectIndex);
-        const int32 SkipFlags =
-            Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+        constexpr int32 SkipFlags = 0x20;
         return Item &&
             Item->GetObject() == Object &&
             !(Item->GetFlags() & SkipFlags) &&
@@ -1290,7 +1289,7 @@ namespace
             return {};
 
         return {
-            static_cast<int32>(DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property,
                     Offsets::Offset_Internal))),
@@ -1380,7 +1379,7 @@ namespace
         }
 
         const int32 Offset =
-            static_cast<int32>(DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property,
                     Offsets::Offset_Internal)));
@@ -2794,7 +2793,7 @@ namespace
                 Property,
                 Offsets::ElementSize);
         const int32 Offset =
-            static_cast<int32>(DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property,
                     Offsets::Offset_Internal)));
@@ -3637,7 +3636,7 @@ namespace
         }
 
         const int32 Offset =
-            static_cast<int32>(DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property,
                     Offsets::Offset_Internal)));
@@ -3746,7 +3745,7 @@ namespace
         }
 
         const int32 Offset =
-            static_cast<int32>(DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     Property,
                     Offsets::Offset_Internal)));
@@ -4008,7 +4007,7 @@ namespace
             }
 
             const int32 Offset =
-                static_cast<int32>(DecryptPropOffset(
+                static_cast<int32>(SDK::ReadPropertyOffset(
                     GetFromOffset<uint32>(
                         Property,
                         Offsets::Offset_Internal)));
@@ -4200,7 +4199,7 @@ namespace
         }
 
         const int32 ContainersOffset =
-            static_cast<int32>(DecryptPropOffset(
+            static_cast<int32>(SDK::ReadPropertyOffset(
                 GetFromOffset<uint32>(
                     EffectContainersProperty,
                     Offsets::Offset_Internal)));
@@ -6273,7 +6272,6 @@ namespace
         UObject* AbilitySourceObject)
     {
         if (VersionInfo.FortniteVersion < 28.00 ||
-            VersionInfo.FortniteVersion >= 32.00 ||
             !IsUsableObject(AbilitySourceObject))
         {
             return;
@@ -6468,7 +6466,6 @@ namespace
         UObject* AbilitySourceObject)
     {
         if (VersionInfo.FortniteVersion < 28.00 ||
-            VersionInfo.FortniteVersion >= 32.00 ||
             GInsideProjectileVisualRelay ||
             !IsUsableObject(AbilitySourceObject))
         {
@@ -6842,7 +6839,6 @@ namespace
     void TickServerProjectileRelays()
     {
         if (VersionInfo.FortniteVersion < 28.00 ||
-            VersionInfo.FortniteVersion >= 32.00 ||
             GInsideProjectileVisualRelay ||
             !GProjectileRequestSchema.IsValid() ||
             !GLightweightProjectileVisualSchema
@@ -10300,7 +10296,6 @@ void AFortWeaponRanged::
         UObject* AbilitySourceObject)
 {
     if (VersionInfo.FortniteVersion < 28.00 ||
-        VersionInfo.FortniteVersion >= 32.00 ||
         !IsUsableObject(AbilitySourceObject))
     {
         return;
@@ -10944,7 +10939,6 @@ void AFortWeaponRanged::ServerNotifyPawnHit_(
 void AFortWeaponRanged::PostLoadHook()
 {
     if (VersionInfo.FortniteVersion < 28.00 ||
-        VersionInfo.FortniteVersion >= 32.00 ||
         ServerLWProjectile_SetDamageStartAndDirection_OG ||
         ServerLWProjectile_EndActiveAbility_OG ||
         ServerStopProjectileRequest_OG ||

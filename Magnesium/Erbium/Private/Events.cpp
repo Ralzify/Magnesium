@@ -204,8 +204,7 @@ namespace
 			return false;
 
 		auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-		const int32 InvalidObjectFlags =
-			Offsets::bEncryptedObjects ? 0x10200000 : 0x20;
+		constexpr int32 InvalidObjectFlags = 0x20;
 		return Item && Item->GetObject() == Object &&
 			!(Item->GetFlags() & InvalidObjectFlags) &&
 			Object->Class &&

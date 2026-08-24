@@ -216,8 +216,9 @@ public:
         return nullptr;
     }
 
-    // Refreshes authoritative PlayerState display names on the game thread.
-    // The menu renders on its own thread and must not call ProcessEvent there.
+    // Refreshes authoritative PlayerState display names on the game thread
+    // when a cache consumer has requested them. The menu renders on its own
+    // thread and must not call ProcessEvent there.
     static void PlayerNamesGameTick();
     static std::string GetPlayerNameFromConnection(
         UNetConnection* Connection);

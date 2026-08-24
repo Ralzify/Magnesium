@@ -842,7 +842,7 @@ namespace Memcury
             // scan only text section
             DWORD i = 0;
 
-            for (i = 16; i + 48 < textSection.GetSectionSize(); i += 16) // bounded + unaligned (32.11 .text tail safety)
+            for (i = 16; i + 48 < textSection.GetSectionSize(); i += 16) // bounded + unaligned .text tail safety
             {
                 auto bytes = _mm_loadu_si128((const __m128i*)(scanBytes + i));
                 __m128i masked = _mm_and_si128(bytes, s);

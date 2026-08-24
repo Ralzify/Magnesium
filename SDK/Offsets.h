@@ -1,13 +1,32 @@
 #pragma once
 #include "Memcury.h"
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdarg>
+#include <cwctype>
 #include <string>
 #pragma comment(lib, "version.lib")
 
 namespace SDK
 {
+	#if defined(NDEBUG) && !defined(MAGNESIUM_ENABLE_FILE_DIAGNOSTICS)
+	// Production servers used to have no synchronous file logger.  The July
+	// diagnostic logger grew to more than a thousand call sites, each doing an
+	// open/write/flush/close on the game thread.  Keep Release builds on the old
+	// zero-I/O behavior; define MAGNESIUM_ENABLE_FILE_DIAGNOSTICS explicitly
+	// when investigating a local build.
+	inline void DbgLog(const char*, ...) noexcept
+	{
+	}
+
+	// Keep the qualified SDK::DbgLog(...) call syntax while discarding the
+	// complete call expression in production, including argument evaluation.
+	inline void DbgLogElided() noexcept
+	{
+	}
+	#define DbgLog(...) DbgLogElided()
+	#else
 	// Crash-proof diagnostic log: opens/flushes/closes per call so nothing is lost to
 	// buffering or to the stdout->stdout.log redirect that happens after SDK::Init.
 	// Writes to magnesium_debug.log in the game's working directory.
@@ -23,11 +42,11 @@ namespace SDK
 		fflush(f);
 		fclose(f);
 	}
+	#endif
 
-	// Signature-free version detection fallback. When the version-getter function
-	// can't be located (new/obfuscated build), read the engine version from the
-	// exe's VERSIONINFO resource and the Fortnite version + CL from the build string
-	// in .rdata, then reconstruct the string the normal parser expects.
+	// Signature-free version detection fallback. When the version getter cannot
+	// be located, read the executable metadata and release string so unsupported
+	// builds can still be rejected before any engine offsets are touched.
 	inline std::wstring GetBuildStringFromMemory()
 	{
 		std::wstring engineVer;
@@ -56,11 +75,11 @@ namespace SDK
 		if (!ref.Get())
 			return L"";
 
-		std::wstring s = (const wchar_t*)ref.Get(); // "Fortnite+Release-32.11[-CL-38202817]"
+		std::wstring s = (const wchar_t*)ref.Get();
 		auto rp = s.find(L"Release-");
 		if (rp == std::wstring::npos)
 			return L"";
-		std::wstring rest = s.substr(rp + 8); // "32.11..."
+		std::wstring rest = s.substr(rp + 8);
 		size_t d = 0;
 		while (d < rest.size() && (iswdigit(rest[d]) || rest[d] == L'.'))
 			d++;
@@ -84,6 +103,141 @@ namespace SDK
 		int32_t MaxElements;
 	};
 	inline FVersionInfo VersionInfo{};
+	inline constexpr double MaximumSupportedFortniteVersionExclusive = 31.00;
+
+	inline bool TryParsePositiveVersion(
+		const std::wstring& Text,
+		double& OutVersion,
+		bool bAllowZero = false)
+	{
+		if (Text.empty() || !std::iswdigit(Text.front()) || !std::iswdigit(Text.back()))
+			return false;
+
+		bool SawDecimalPoint = false;
+		for (const wchar_t Character : Text)
+		{
+			if (std::iswdigit(Character))
+				continue;
+			if (Character == L'.' && !SawDecimalPoint)
+			{
+				SawDecimalPoint = true;
+				continue;
+			}
+			return false;
+		}
+
+		try
+		{
+			size_t ParsedCharacters = 0;
+			const double ParsedVersion = std::stod(Text, &ParsedCharacters);
+			if (ParsedCharacters != Text.size() ||
+				!std::isfinite(ParsedVersion) ||
+				ParsedVersion < 0.0 ||
+				(!bAllowZero && ParsedVersion == 0.0))
+				return false;
+
+			OutVersion = ParsedVersion;
+			return true;
+		}
+		catch (...)
+		{
+			return false;
+		}
+	}
+
+	inline bool TryParseBuildString(const std::wstring& BuildString, FVersionInfo& OutVersionInfo)
+	{
+		OutVersionInfo = {};
+
+		const size_t FirstDash = BuildString.find(L'-');
+		const size_t FirstPlus = FirstDash == std::wstring::npos
+			? std::wstring::npos
+			: BuildString.find(L'+', FirstDash + 1);
+		constexpr wchar_t ReleaseMarker[] = L"Fortnite+Release-";
+		const size_t ReleasePosition = BuildString.rfind(ReleaseMarker);
+		if (FirstDash == std::wstring::npos || FirstDash == 0 ||
+			FirstPlus == std::wstring::npos || FirstPlus <= FirstDash + 1 ||
+			ReleasePosition == std::wstring::npos)
+		{
+			return false;
+		}
+
+		std::wstring EngineVersionText = BuildString.substr(0, FirstDash);
+		if (EngineVersionText == L"4.26.1")
+			EngineVersionText = L"4.27.0";
+
+		const size_t FirstEngineDot = EngineVersionText.find(L'.');
+		const size_t LastEngineDot = EngineVersionText.rfind(L'.');
+		if (FirstEngineDot != std::wstring::npos && FirstEngineDot != LastEngineDot)
+			EngineVersionText.erase(LastEngineDot);
+
+		if (!TryParsePositiveVersion(EngineVersionText, OutVersionInfo.EngineVersion))
+			return false;
+
+		const std::wstring FortniteCLText = BuildString.substr(
+			FirstDash + 1, FirstPlus - FirstDash - 1);
+		if (FortniteCLText.empty())
+			return false;
+
+		for (const wchar_t Character : FortniteCLText)
+		{
+			if (Character < L'0' || Character > L'9')
+				return false;
+		}
+
+		uint64_t FortniteCL = 0;
+		try
+		{
+			size_t ParsedCharacters = 0;
+			FortniteCL = std::stoull(FortniteCLText, &ParsedCharacters);
+			if (ParsedCharacters != FortniteCLText.size())
+				return false;
+		}
+		catch (...)
+		{
+			return false;
+		}
+
+		if (FortniteCL < 3901517)
+		{
+			// Pre-1.64 Cert builds did not publish a release number.  Erbium
+			// historically represents that supported season-zero range as 0.00.
+			if (FortniteCL < 3668626)
+			{
+				OutVersionInfo.FortniteVersion = 0.00;
+				return true;
+			}
+
+			switch (FortniteCL)
+			{
+			case 3668626: OutVersionInfo.FortniteVersion = 1.64; break;
+			case 3681159: OutVersionInfo.FortniteVersion = 1.7; break;
+			case 3700114: OutVersionInfo.FortniteVersion = 1.72; break;
+			case 3724489: OutVersionInfo.FortniteVersion = 1.8; break;
+			case 3729133: OutVersionInfo.FortniteVersion = 1.81; break;
+			case 3741772: OutVersionInfo.FortniteVersion = 1.82; break;
+			case 3757339: OutVersionInfo.FortniteVersion = 1.9; break;
+			case 3775276: OutVersionInfo.FortniteVersion = 1.91; break;
+			case 3790078: OutVersionInfo.FortniteVersion = 1.10; break;
+			case 3807424: OutVersionInfo.FortniteVersion = 1.11; break;
+			case 3825894: OutVersionInfo.FortniteVersion = 2.1; break;
+			case 3841827: OutVersionInfo.FortniteVersion = 2.2; break;
+			case 3847564: OutVersionInfo.FortniteVersion = 2.3; break;
+			case 3858292: OutVersionInfo.FortniteVersion = 2.4; break;
+			case 3870737: OutVersionInfo.FortniteVersion = 2.42; break;
+			case 3889387: OutVersionInfo.FortniteVersion = 2.5; break;
+			default: return false;
+			}
+			return true;
+		}
+
+		const size_t FortniteVersionPosition = ReleasePosition +
+			(sizeof(ReleaseMarker) / sizeof(ReleaseMarker[0])) - 1;
+		return TryParsePositiveVersion(
+			BuildString.substr(FortniteVersionPosition),
+			OutVersionInfo.FortniteVersion,
+			true);
+	}
 
 	namespace Offsets
 	{
@@ -115,27 +269,29 @@ namespace SDK
 		inline uint32_t FFrame_CurrentNativeFunction = 0;
 		inline uint32_t FFrame_Next = 0;
 
-		// FN 32.11+ (UE 5.5) obfuscation: GObjects ptr, FUObjectItem->Object,
-		// and NumElements are stored encrypted as ~ROR16(value ^ key). Keys are
-		// per-build random constants, resolved by scanning at init (see Init()).
-		inline bool     bEncryptedObjects = false;
-		inline uint32_t EncObjArrayKey = 0;  // GObjects chunk-array pointer key
-		inline uint32_t EncObjNumKey = 0;    // NumElements key
-		inline uint32_t EncObjItemKey = 0;   // FUObjectItem->Object key
-
-		// FN 32.11+ also encrypts reflection linked-list Next pointers (~ROR16(x^key))
-		// and the FProperty byte-offset field (~(x^key)). Keys resolved by scanning.
-		inline uint32_t EncFieldNextKey = 0;  // UField::Next / FField::Next pointer key
-		inline uint32_t EncPropOffsetKey = 0; // FProperty Offset_Internal key
-		inline uint32_t ChildProperties = 0;  // UStruct FField (property) chain head
-		inline bool bEncChildProperties = false; // FN 32.11: ChildProperties head is ~ROR16(x^EncFieldNextKey) encrypted
 	}
 
 	extern void UpdateNumElemsPerChunk();
 	extern void InitializeProcessEventVft(uintptr_t);
 
-	inline void Init()
+	inline bool Init()
 	{
+		VersionInfo = {};
+
+		// The metadata path does not call into engine code.  Use it as an early
+		// ceiling check so a 31+ executable cannot reach a coincidental match for
+		// an older version-getter signature before we reject it.
+		const std::wstring PreflightBuildString =
+			GetBuildStringFromMemory();
+		FVersionInfo PreflightVersionInfo{};
+		if (TryParseBuildString(
+				PreflightBuildString, PreflightVersionInfo) &&
+			PreflightVersionInfo.FortniteVersion >=
+				MaximumSupportedFortniteVersionExclusive)
+		{
+			return false;
+		}
+
 		FStringNoOps OutVar{}; // zero-init: Data stays null if no getter runs
 
 		auto GetEngineVersionMethod1 = Memcury::Scanner::FindPattern("40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 48 8B C8 41 B8 04 ? ? ? 48 8B D3");
@@ -149,133 +305,46 @@ namespace SDK
 		else
 		{
 			auto GetEngineVersionMethod2 = Memcury::Scanner::FindPattern("40 53 48 83 EC ? 33 C0 49 8B D8 48 39 42 ? 0F 95 C0 48 01 42 ? E8 ? ? ? ? 41 B8");
-			auto CopyOfMethod2 = GetEngineVersionMethod2;
+			if (GetEngineVersionMethod2.Get())
+			{
+				auto CopyOfMethod2 = GetEngineVersionMethod2;
+				auto GetStorage = (void* (*)()) GetEngineVersionMethod2.RelativeOffset(23).Get();
+				auto GetEngineVersion2 = (void (*)(void*, FStringNoOps*, int)) CopyOfMethod2.RelativeOffset(42).Get();
 
-			auto GetStorage = (void* (*)()) GetEngineVersionMethod2.RelativeOffset(23).Get();
-			auto GetEngineVersion2 = (void (*)(void*, FStringNoOps*, int)) CopyOfMethod2.RelativeOffset(42).Get();
-
-			if (GetStorage && GetEngineVersion2) // guard: don't call null on builds where the pattern misses
-				GetEngineVersion2(GetStorage(), &OutVar, 4); // no idea why 4 but sure
+				if (GetStorage && GetEngineVersion2)
+				{
+					if (void* Storage = GetStorage())
+						GetEngineVersion2(Storage, &OutVar, 4);
+				}
+			}
 		}
 
 		std::wstring BuildString = OutVar.Data ? OutVar.Data : L"";
-		if (BuildString.empty()) // getter not found (e.g. UE5.5/32.11) — use signature-free fallback
-			BuildString = GetBuildStringFromMemory();
-		DbgLog("BuildString=\"%ws\"\n", BuildString.c_str());
-		std::wstring EngineVersion = BuildString.substr(0, BuildString.find(L'-'));
-		std::wstring FortniteCL = BuildString.substr(BuildString.find(L'-') + 1, BuildString.find(L'+') - BuildString.find(L'-') - 1);
-
-		if (EngineVersion == L"4.26.1")
-			EngineVersion = L"4.27.0";
-
-		if (EngineVersion.find_first_of(L'.') != EngineVersion.find_last_of(L'.'))
-			EngineVersion.erase(EngineVersion.rfind(L'.'));
-
-		auto FortniteCLNum = std::stoull(FortniteCL);
-
-		VersionInfo.EngineVersion = std::stod(EngineVersion);
-		// these builds were just called "Cert"
-		if (FortniteCLNum < 3901517)
+		FVersionInfo ParsedVersionInfo{};
+		if (!TryParseBuildString(BuildString, ParsedVersionInfo))
 		{
-			switch (FortniteCLNum)
+			BuildString = PreflightBuildString;
+			if (!TryParseBuildString(BuildString, ParsedVersionInfo))
 			{
-			case 3668626:
-				VersionInfo.FortniteVersion = 1.64;
-				break;
-			case 3681159:
-				VersionInfo.FortniteVersion = 1.7;
-				break;
-			case 3700114:
-				VersionInfo.FortniteVersion = 1.72;
-				break;
-			case 3724489:
-				VersionInfo.FortniteVersion = 1.8;
-				break;
-			case 3729133:
-				VersionInfo.FortniteVersion = 1.81;
-				break;
-			case 3741772:
-				VersionInfo.FortniteVersion = 1.82;
-				break;
-			case 3757339:
-				VersionInfo.FortniteVersion = 1.9;
-				break;
-			case 3775276:
-				VersionInfo.FortniteVersion = 1.91;
-				break;
-			case 3790078:
-				VersionInfo.FortniteVersion = 1.10;
-				break;
-			case 3807424:
-				VersionInfo.FortniteVersion = 1.11;
-				break;
-			case 3825894:
-				VersionInfo.FortniteVersion = 2.1;
-				break;
-			case 3841827:
-				VersionInfo.FortniteVersion = 2.2;
-				break;
-			case 3847564:
-				VersionInfo.FortniteVersion = 2.3;
-				break;
-			case 3858292:
-				VersionInfo.FortniteVersion = 2.4;
-				break;
-			case 3870737:
-				VersionInfo.FortniteVersion = 2.42;
-				break;
-			case 3889387:
-				VersionInfo.FortniteVersion = 2.5;
-				break;
+				DbgLog("SDK::Init rejected invalid build string \"%ws\"\n", BuildString.c_str());
+				return false;
 			}
 		}
-		else 
-			VersionInfo.FortniteVersion = std::stod(BuildString.substr(BuildString.rfind(L'-') + 1));
+
+		DbgLog("BuildString=\"%ws\"\n", BuildString.c_str());
+		VersionInfo = ParsedVersionInfo;
+
+		// Erbium's supported game-server range ends with the 30.x releases.
+		// Stop before resolving or touching engine internals on newer layouts.
+		if (VersionInfo.FortniteVersion >=
+			MaximumSupportedFortniteVersionExclusive)
+		{
+			return false;
+		}
 
 		bUE51 = VersionInfo.FortniteVersion >= 24.00;
 
 		DbgLog("=== SDK::Init FN=%.2f EV=%.2f  [build " __DATE__ " " __TIME__ "] ===\n", VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
-
-		// FN 32.11+ encrypts the object array. Resolve the per-build keys and the
-		// GObjects struct base by scanning the inlined decrypt idioms. If all parts
-		// resolve, bEncryptedObjects gates the decryption in Core.h's TUObjectArray.
-		if (VersionInfo.FortniteVersion >= 32.00)
-		{
-			// mov r32, ArrayKey ; mov r9, [rip+GObjectsBase] ; xor r9, rax
-			auto ArrayDec = Memcury::Scanner::FindPattern("B8 ? ? ? ? 4C 8B 0D ? ? ? ? 4C 33 C8");
-			if (ArrayDec.Get())
-			{
-				Offsets::EncObjArrayKey = *(uint32_t*)(ArrayDec.Get() + 1);
-				Offsets::GObjectsChunked = ArrayDec.RelativeOffset(8).Get(); // FChunkedFixedUObjectArray base
-			}
-
-			// mov eax, [rip+Num] ; xor eax, NumKey ; not eax
-			auto NumDec = Memcury::Scanner::FindPattern("8B 05 ? ? ? ? 35 ? ? ? ? F7 D0");
-			if (NumDec.Get())
-			{
-				Offsets::EncObjNumKey = *(uint32_t*)(NumDec.Get() + 7);
-				if (!Offsets::GObjectsChunked)
-					Offsets::GObjectsChunked = NumDec.RelativeOffset(2).Get() - 0x14; // NumElements is base+0x14
-			}
-
-			// mov r10, [r?+0x10] ; mov eax, ItemKey ; xor r10, rax ; ror r10, 0x10 ; not r10
-			auto ItemDec = Memcury::Scanner::FindPattern("4C 8B ? 10 B8 ? ? ? ? 4C 33 D0 49 C1 CA 10 49 F7 D2");
-			if (ItemDec.Get())
-				Offsets::EncObjItemKey = *(uint32_t*)(ItemDec.Get() + 5);
-
-			// mov eax, [r?+0x64] ; xor eax, PropOffsetKey ; not eax
-			auto PropOffDec = Memcury::Scanner::FindPattern("8B ? 64 35 ? ? ? ? F7 D0");
-			if (PropOffDec.Get())
-				Offsets::EncPropOffsetKey = *(uint32_t*)(PropOffDec.Get() + 4);
-
-			// mov ecx, FieldNextKey ; lea rdx,[rsp+0x30] ; mov rax,[r8+0x10] ; xor rax, rcx
-			auto FieldNextDec = Memcury::Scanner::FindPattern("B9 ? ? ? ? 48 8D 54 24 30 49 8B 40 10 48 33 C1");
-			if (FieldNextDec.Get())
-				Offsets::EncFieldNextKey = *(uint32_t*)(FieldNextDec.Get() + 1);
-
-			Offsets::bEncryptedObjects = Offsets::GObjectsChunked && Offsets::EncObjArrayKey
-				&& Offsets::EncObjNumKey && Offsets::EncObjItemKey;
-		}
 
 		Offsets::Realloc = Memcury::Scanner::FindPattern("48 89 5C 24 08 48 89 74 24 10 57 48 83 EC ? 48 8B F1 41 8B D8 48 8B 0D ? ? ? ?").Get();
 
@@ -328,11 +397,7 @@ namespace SDK
 		else
 			addr = Memcury::Scanner::FindStringRef(L"UMeshNetworkComponent::ProcessEvent: Invalid mesh network node type: %s", true, 0, VersionInfo.FortniteVersion >= 19.00).ScanFor({ 0xE8 }, true, VersionInfo.FortniteVersion < 19.00 ? 1 : 3, VersionInfo.FortniteVersion == 15.50 ? 7 : 0, 2000).RelativeOffset(1).Get();
 
-		if (Offsets::bEncryptedObjects)
-		{
-			// GObjectsChunked already points at the encrypted array base (resolved above).
-		}
-		else if (VersionInfo.EngineVersion >= 4.21)
+		if (VersionInfo.EngineVersion >= 4.21)
 		{
 			if (VersionInfo.FortniteVersion <= 6.01)
 				UpdateNumElemsPerChunk();
@@ -526,35 +591,6 @@ namespace SDK
 		Offsets::FFrame_PropertyChainForCompiledIn = VersionInfo.FortniteVersion >= 20.20 ? 0x88 : 0x80;
 		Offsets::FFrame_CurrentNativeFunction = VersionInfo.FortniteVersion >= 20.20 ? 0x90 : 0x88;
 		Offsets::FFrame_Next = VersionInfo.FortniteVersion >= 24.30 ? 0x18 : (VersionInfo.FortniteVersion >= 12.10 ? 0x20 : 0x28);
-		Offsets::ChildProperties = 0x50; // pre-32.11 default (UStruct::ChildProperties)
-
-		// FN 32.11 reordered UStruct/FField and encrypts the reflection Next pointers and
-		// the property byte-offset. Confirmed from the exe: Offset_Internal 0x64, FField::Next
-		// 0x10, UField::Next 0x28, Super 0x40, function-chain head 0x78. ChildProperties (FField
-		// property head) and FField_Name are inferred and must be confirmed in-game (see the
-		// diagnostic dump below) or from a Dumper-7 layout of this build.
-		if (VersionInfo.FortniteVersion >= 32.00)
-		{
-			Offsets::Offset_Internal = 0x64;    // encrypted with EncPropOffsetKey
-			// FBoolProperty keeps FieldMask 0x2F bytes after
-			// FProperty::Offset_Internal. The pre-32 value (0x6B) points
-			// inside unrelated metadata once Offset_Internal moves to 0x64.
-			Offsets::FieldMask = Offsets::Offset_Internal + 0x2F;
-			Offsets::FField_Next = 0x10;        // encrypted with EncFieldNextKey
-			Offsets::FField_Name = 0x18;        // INFERRED — verify
-			Offsets::Children = 0x78;           // UField/function chain head (Remix-confirmed)
-			Offsets::ChildProperties = 0x80;    // INFERRED (Children+0x8, consistent +0x30 shift) — verify
-		}
-
-		if (VersionInfo.FortniteVersion >= 32.00)
-		{
-			DbgLog("[32.11] encObjects=%d GObjects=%p ArrKey=%08X NumKey=%08X ItemKey=%08X FieldNextKey=%08X PropOffKey=%08X\n",
-				(int)Offsets::bEncryptedObjects, (void*)Offsets::GObjectsChunked, Offsets::EncObjArrayKey, Offsets::EncObjNumKey,
-				Offsets::EncObjItemKey, Offsets::EncFieldNextKey, Offsets::EncPropOffsetKey);
-			DbgLog("[32.11] reflection: Super=0x%X Children=0x%X ChildProps=0x%X FFieldNext=0x%X FFieldName=0x%X OffInternal=0x%X\n",
-				Offsets::Super, Offsets::Children, Offsets::ChildProperties, Offsets::FField_Next,
-				Offsets::FField_Name, Offsets::Offset_Internal);
-		}
 
 		if (VersionInfo.EngineVersion < 4.22)
 			Offsets::ExecFunction = 0xB0;
@@ -584,7 +620,7 @@ namespace SDK
 			}
 		}
 
-		if (VersionInfo.FortniteVersion < 32.00 && VersionInfo.EngineVersion >= 4.27)
+		if (VersionInfo.EngineVersion >= 4.27)
 		{
 			auto stat = Memcury::Scanner::FindStringRef(L"STAT_SpawnActorTime").Get();
 
@@ -613,38 +649,9 @@ namespace SDK
 				Offsets::SpawnActor = sRef.ScanFor({ 0x4C, 0x8B, 0xDC }, false, 0, 1, 3000).Get();
 		}
 
-		// FN 32.11 (UE5.5) shifted / non-canonically encoded several foundational prologues
-		// so the version-generic scans above miss. Re-authored signatures, each validated to
-		// resolve to the exact function on this build. ProcessEvent is vtable index 0x46.
-		if (VersionInfo.FortniteVersion >= 32.00)
-		{
-			if (auto p = Memcury::Scanner::FindPattern("48 89 5C 24 08 48 89 74 24 10 57 48 83 C4 E0 48 8B F1 48 8B 0D ? ? ? ?").Get())
-				Offsets::Realloc = p;
-			if (auto p = Memcury::Scanner::FindPattern("48 89 5C 24 18 55 56 57 41 54 43 55 43 56 41 57 48 8D AC 24 50 FC FF FF 48 81 C4 50 FB FF FF").Get())
-				Offsets::StaticFindObject = p;
-			if (auto p = Memcury::Scanner::FindPattern("42 55 53 56 57 43 54 43 55 41 56 41 57 48 8D AC 24 58 FB FF FF 48 81 EC A8 05 00 00").Get())
-				Offsets::StaticLoadObject = p;
-			if (auto p = Memcury::Scanner::FindPattern("48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 41 56 48 83 C4 E0 33 DB 48 8B F1 48 8B FA").Get())
-				Offsets::GetInterfaceAddress = p;
-			if (auto p = Memcury::Scanner::FindPattern("4D 8B C8 41 B8 ? ? ? ? 49 8B 41 58 49 33 C0 48 C1 C8 10 48 F7 D0").Get())
-				Offsets::StepExplicitProperty = p;
-			if (auto p = Memcury::Scanner::FindPattern("4A 8B C4 55 53 56 57 43 54 41 55 43 56 43 57 48 8D A8 68 F9 FF FF 48 81 EC 58 07 00 00").Get())
-				Offsets::SpawnActor = p;
-			if (auto p = Memcury::Scanner::FindPattern("48 89 5C 24 08 57 48 83 C4 D0 43 8B F8 4E 8B D2 47 33 C0 48 8B D9").Get())
-				Offsets::FNameConstructor = p;
-			if (auto p = Memcury::Scanner::FindPattern("48 89 5C 24 18 48 89 74 24 20 57 43 56 43 57 4A 83 C4 E0 48 8B FA").Get())
-				Offsets::AppendString = p;
-
-			Offsets::ProcessEventVft = 0x46;
-			DbgLog("[32.11] fns: Realloc=%p FindObj=%p LoadObj=%p IFace=%p StepExpl=%p Spawn=%p FNameCtor=%p AppendStr=%p PEVft=0x%llX\n",
-				(void*)Offsets::Realloc, (void*)Offsets::StaticFindObject, (void*)Offsets::StaticLoadObject,
-				(void*)Offsets::GetInterfaceAddress, (void*)Offsets::StepExplicitProperty, (void*)Offsets::SpawnActor,
-				(void*)Offsets::FNameConstructor, (void*)Offsets::AppendString,
-				(unsigned long long)Offsets::ProcessEventVft);
-		}
-		else
-			InitializeProcessEventVft(addr);
+		InitializeProcessEventVft(addr);
 
 		DbgLog("=== SDK::Init complete ===\n");
+		return true;
 	}
 }

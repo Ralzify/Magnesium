@@ -480,7 +480,7 @@ public:
         // RegenCooldown is a FloatProperty in the older builds (including
         // 4.20) and becomes an FScalableFloat in later builds. The generic
         // FScalableFloat accessor cannot distinguish those layouts.
-        if (Property && VersionInfo.FortniteVersion < 32.00)
+        if (Property)
         {
             auto FloatProperty =
                 GetProperty("RegenCooldown", 0x100);

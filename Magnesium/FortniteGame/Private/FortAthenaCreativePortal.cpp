@@ -20,19 +20,15 @@ namespace
         if (!Struct)
             return 0;
 
-        if (!Offsets::bEncryptedObjects)
+        const int32 ReflectedSize = Struct->GetPropertiesSize();
+        if (ReflectedSize > 0 &&
+            ReflectedSize <= static_cast<int32>(sizeof(FUniqueNetIdRepl)))
         {
-            const int32 ReflectedSize = Struct->GetPropertiesSize();
-            if (ReflectedSize > 0 &&
-                ReflectedSize <= static_cast<int32>(sizeof(FUniqueNetIdRepl)))
-            {
-                return ReflectedSize;
-            }
+            return ReflectedSize;
         }
 
-        // FN 32.11 encrypts PropertiesSize but still exposes the decrypted
-        // property offset. ReplicationBytes is the final member on the
-        // supported FUniqueNetIdRepl layouts.
+        // ReplicationBytes is the final member on the supported layouts, so
+        // retain the bounded inference fallback for older incomplete SDKs.
         const uint32 BytesOffset = Struct->GetOffset("ReplicationBytes");
         if (BytesOffset == static_cast<uint32>(-1))
             return 0;
@@ -106,10 +102,9 @@ namespace
             return false;
         }
 
-        int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Function->GetPropertiesSize();
+        const int32 ReflectedSize = Function->GetPropertiesSize();
         const size_t BufferSize =
-            !Offsets::bEncryptedObjects && ReflectedSize > 0 &&
+            ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize)
             : 0x1000;
@@ -154,10 +149,10 @@ namespace
             if (ReturnOffset != static_cast<uint32>(-1) &&
                 ReturnOffset + IdSize <= 0x1000)
             {
-                int32 ReflectedSize = Offsets::bEncryptedObjects
-                    ? 0 : CloneFunction->GetPropertiesSize();
+                const int32 ReflectedSize =
+                    CloneFunction->GetPropertiesSize();
                 const size_t BufferSize =
-                    !Offsets::bEncryptedObjects && ReflectedSize > 0 &&
+                    ReflectedSize > 0 &&
                         ReflectedSize <= 0x1000
                     ? static_cast<size_t>(ReflectedSize)
                     : 0x1000;
@@ -505,10 +500,9 @@ namespace
             return;
         }
 
-        int32 ReflectedSize = Offsets::bEncryptedObjects
-            ? 0 : Setter->GetPropertiesSize();
+        const int32 ReflectedSize = Setter->GetPropertiesSize();
         const size_t BufferSize =
-            !Offsets::bEncryptedObjects && ReflectedSize > 0 &&
+            ReflectedSize > 0 &&
                 ReflectedSize <= 0x1000
             ? static_cast<size_t>(ReflectedSize)
             : 0x1000;

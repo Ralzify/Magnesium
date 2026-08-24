@@ -1064,8 +1064,7 @@ namespace
 
 bool FFortWeaponMods::IsSupported()
 {
-    return VersionInfo.FortniteVersion >= 28.0 &&
-        VersionInfo.FortniteVersion < 32.0;
+    return VersionInfo.FortniteVersion >= 28.0;
 }
 
 bool FFortWeaponMods::HasEntrySlots(

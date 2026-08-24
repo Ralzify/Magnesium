@@ -72,11 +72,6 @@ public:
 
     DEFINE_STATIC_FUNC(Get, UFortGameStateComponent_BattleRoyaleGamePhaseLogic*);
 
-    // 32.11: the reflection-bound ::Get mis-resolves and returns null even though the component exists
-    // and is attached to the game state (confirmed via object-array enum: count=1, outerIsGS=1). Find
-    // it directly by class and cache. Used on FN>=32 wherever ::Get would return null.
-    static UFortGameStateComponent_BattleRoyaleGamePhaseLogic* GetFixed();
-
 	void SetGamePhase(EAthenaGamePhase GamePhase);
 	void SetGamePhaseStep(EAthenaGamePhaseStep GamePhaseStep);
 	DefHookOg(void, HandleMatchHasStarted, AFortGameMode*);

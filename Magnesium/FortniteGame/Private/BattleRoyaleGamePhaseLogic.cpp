@@ -163,7 +163,7 @@ namespace
 		if (!Property)
 			return false;
 
-		const uint32 Offset = SDK::DecryptPropOffset(
+		const uint32 Offset = SDK::ReadPropertyOffset(
 			GetFromOffset<uint32>(
 				Property, Offsets::Offset_Internal));
 		if (Offset == UINT32_MAX ||
@@ -196,7 +196,7 @@ namespace
 		if (!Property)
 			return false;
 
-		const uint32 Offset = SDK::DecryptPropOffset(
+		const uint32 Offset = SDK::ReadPropertyOffset(
 			GetFromOffset<uint32>(
 				Property, Offsets::Offset_Internal));
 		if (Offset == UINT32_MAX ||
@@ -241,7 +241,7 @@ namespace
 		if (!Property)
 			return false;
 
-		const uint32 Offset = SDK::DecryptPropOffset(
+		const uint32 Offset = SDK::ReadPropertyOffset(
 			GetFromOffset<uint32>(
 				Property, Offsets::Offset_Internal));
 		if (Offset == UINT32_MAX || Offset >= 0x10000)
@@ -271,7 +271,7 @@ namespace
 		if (!Property)
 			return false;
 
-		const uint32 Offset = SDK::DecryptPropOffset(
+		const uint32 Offset = SDK::ReadPropertyOffset(
 			GetFromOffset<uint32>(
 				Property, Offsets::Offset_Internal));
 		if (Offset == UINT32_MAX || Offset >= 0x10000)
@@ -312,10 +312,7 @@ namespace
 
 		auto Item =
 			TUObjectArray::GetItemByIndex(ObjectIndex);
-		const int32 InvalidObjectFlags =
-			Offsets::bEncryptedObjects
-				? 0x10200000
-				: 0x20;
+		constexpr int32 InvalidObjectFlags = 0x20;
 		return Item &&
 			Item->GetObject() == Object &&
 			!(Item->GetFlags() & InvalidObjectFlags) &&
@@ -350,10 +347,7 @@ namespace
 		}
 
 		auto Candidate =
-			VersionInfo.FortniteVersion >= 32.00
-			? UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-				GetFixed()
-			: UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+			UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
 				Get(World);
 		auto GameState =
 			(AFortGameStateAthena*)World->GameState;
@@ -1355,86 +1349,6 @@ namespace
 				Indicator, TimeSeconds);
 		}
 	}
-}
-
-UFortGameStateComponent_BattleRoyaleGamePhaseLogic* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GetFixed()
-{
-	static UFortGameStateComponent_BattleRoyaleGamePhaseLogic* s_cached = nullptr;
-	static TWeakObjectPtr<UWorld> s_scanWorld;
-	static TWeakObjectPtr<AFortGameStateAthena> s_scanGameState;
-	static int32 s_scanCursor = 0;
-	static ULONGLONG s_nextFullScanTimeMs = 0;
-	auto World = UWorld::GetWorld();
-	auto GameState = World
-		? (AFortGameStateAthena*)World->GameState
-		: nullptr;
-	if (s_scanWorld.Get() != World ||
-		s_scanGameState.Get() != GameState)
-	{
-		s_scanWorld = World
-			? TWeakObjectPtr<UWorld>(World)
-			: TWeakObjectPtr<UWorld>{};
-		s_scanGameState = GameState
-			? TWeakObjectPtr<AFortGameStateAthena>(
-				GameState)
-			: TWeakObjectPtr<
-				AFortGameStateAthena>{};
-		s_scanCursor = 0;
-		s_nextFullScanTimeMs = 0;
-		s_cached = nullptr;
-	}
-	if (IsLiveSafeZoneObject(s_cached) &&
-		IsOwnedBySafeZoneGameState(
-			s_cached, GameState))
-	{
-		return s_cached;
-	}
-	s_cached = nullptr;
-
-	if (!GameState)
-		return nullptr;
-
-	const ULONGLONG CurrentTimeMs =
-		GetTickCount64();
-	if (CurrentTimeMs < s_nextFullScanTimeMs)
-		return nullptr;
-
-	const int32 ObjectCount = TUObjectArray::Num();
-	if (s_scanCursor < 0 ||
-		s_scanCursor >= ObjectCount)
-	{
-		s_scanCursor = 0;
-	}
-	constexpr int32 ScanBudget = 2048;
-	const int32 ScanEnd = (std::min)(
-		s_scanCursor + ScanBudget,
-		ObjectCount);
-	for (int32 Index = s_scanCursor;
-		Index < ScanEnd;
-		++Index)
-	{
-		auto Obj =
-			TUObjectArray::GetObjectByIndex(Index);
-		if (IsLiveSafeZoneObject(Obj) &&
-			!Obj->IsDefaultObject() &&
-			Obj->IsA<
-				UFortGameStateComponent_BattleRoyaleGamePhaseLogic>() &&
-			IsOwnedBySafeZoneGameState(
-				Obj, GameState))
-		{
-			s_cached = (UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)Obj;
-			break;
-		}
-	}
-	s_scanCursor = ScanEnd;
-	if (!s_cached &&
-		s_scanCursor >= ObjectCount)
-	{
-		s_scanCursor = 0;
-		s_nextFullScanTimeMs =
-			CurrentTimeMs + 1000ULL;
-	}
-	return s_cached;
 }
 
 bool UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused()
