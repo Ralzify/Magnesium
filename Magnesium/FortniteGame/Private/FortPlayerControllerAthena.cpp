@@ -4241,6 +4241,8 @@ static bool IsLowFrictionIceGameplayEffectDefinition(
 		return true;
 	}
 
+	// The base SurfaceChange GE hands its persistent ice-feet state to the
+	// separate Linger GE, so both definitions are one logical toggle state.
 	const auto EffectName = EffectDefinition->Name.ToWString();
 	if (EffectName ==
 		L"Default__GE_Trap_Ice_LowFriction_Athena_C")
@@ -4263,16 +4265,23 @@ static bool IsSurfaceChangeIceGameplayEffectDefinition(
 		return false;
 	}
 
-	if (EffectDefinition->Name.ToWString() ==
-		L"Default__GE_SurfaceChange_Ice_C")
+	const auto EffectName = EffectDefinition->Name.ToWString();
+	if (EffectName == L"Default__GE_SurfaceChange_Ice_C" ||
+		EffectName == L"Default__GE_SurfaceChange_Ice_Linger_C")
 	{
 		return true;
 	}
 
-	return EffectDefinition->Class &&
-		SDK::MemReadable(EffectDefinition->Class, sizeof(UObject)) &&
-		EffectDefinition->Class->Name.ToWString() ==
-			L"GE_SurfaceChange_Ice_C";
+	if (!EffectDefinition->Class ||
+		!SDK::MemReadable(EffectDefinition->Class, sizeof(UObject)))
+	{
+		return false;
+	}
+
+	const auto EffectClassName =
+		EffectDefinition->Class->Name.ToWString();
+	return EffectClassName == L"GE_SurfaceChange_Ice_C" ||
+		EffectClassName == L"GE_SurfaceChange_Ice_Linger_C";
 }
 
 static bool IsSelectedIceGameplayEffectDefinition(
@@ -4524,20 +4533,6 @@ static FIceGameplayEffectRemovalResult RemoveIceGameplayEffect(
 	return RemoveIceGameplayEffects(
 		PlayerController,
 		EIceGameplayEffectSelection::All);
-}
-
-// Trickshot waypoint cleanup hides the authored ice-feet/surface layer without
-// cancelling the primary low-friction movement effect. Apply the primary
-// effect first so any surface layer created alongside it is included in the
-// removal pass that follows.
-static FIceGameplayEffectRemovalResult
-RemoveIceFeetAndPreserveLowFriction(
-	AFortPlayerControllerAthena* PlayerController)
-{
-	ApplyIceGameplayEffect(PlayerController);
-	return RemoveIceGameplayEffects(
-		PlayerController,
-		EIceGameplayEffectSelection::SurfaceChange);
 }
 
 // One Shot's playlist already supplies its movement/gravity behavior. This
@@ -19256,7 +19251,7 @@ static void ApplyWaypointTeleportEffects(
 		FConfiguration::bRemoveIceOnWaypointTP.load(
 			std::memory_order_acquire))
 	{
-		RemoveIceFeetAndPreserveLowFriction(PlayerController);
+		RemoveIceGameplayEffect(PlayerController);
 	}
 }
 
@@ -25659,7 +25654,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				if (!CollectIceGameplayEffectHandles(
 						AbilitySystemComponent,
 						GetIceGameplayEffectClass(),
-						EIceGameplayEffectSelection::LowFriction,
+						EIceGameplayEffectSelection::All,
 						IceHandles))
 				{
 					PlayerController->ClientMessage(
