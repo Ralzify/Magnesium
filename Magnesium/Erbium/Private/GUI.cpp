@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "../../Resource.h"
 #include "../Public/GUI.h"
 #include <d3d11.h>
 #include "../../ImGui/imgui.h"
@@ -23,15 +24,18 @@
 #include "../../FortniteGame/Public/FortPlayerStateAthena.h"
 #include "../../FortniteGame/Public/FortGameStateAthena.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
+#include "../../FortniteGame/Public/CustomSafeZoneRuntime.h"
 #include "../../Engine/Public/Texture.h"
 #include <sstream>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <atomic>
 #include <Windows.h>
 #include <Shellapi.h>
 #include <chrono>
 #include <algorithm>
+#include <cassert>
 #include <filesystem>
 #include <cmath>
 #include <vector>
@@ -58,6 +62,7 @@ UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 
 static std::atomic<ULONGLONG> GServerJoinableAtMs{ 0 };
 static unsigned int GPreferenceEditorGeneration = 0;
+static bool GAutoHostPausedBySafeZoneValidation = false;
 
 namespace TrickshotManager
 {
@@ -1440,6 +1445,7 @@ void GUI::MarkServerJoinable()
 
 void GUI::ResetServerLifecycle()
 {
+    FConfiguration::ReleaseCustomSafeZoneSequenceForMatch();
     GServerJoinableAtMs.store(
         0, std::memory_order_release);
     gsStatus.store(
@@ -1589,6 +1595,51 @@ namespace SafeZoneMap
         float AxisVY = 0.f;
     };
 
+    enum class EMapTransformProvenance : uint8_t
+    {
+        None,
+        // MapInfo supplies a center, but the axes still come from a version
+        // guess. This is suitable for the frontend preview, never for freezing
+        // normalized geometry on a nonlegacy island.
+        ProvisionalMapInfo,
+        // Chapter 1's cooked Athena capture is a verified compatibility
+        // transform shared by the supported legacy builds.
+        LegacyAthenaCapture,
+        WorldSettingsExtents,
+        PoiCalibration,
+        NativeMapSampling,
+    };
+
+    static bool IsAuthoritativeProjection(
+        EMapTransformProvenance provenance)
+    {
+        return provenance ==
+                EMapTransformProvenance::LegacyAthenaCapture ||
+            provenance ==
+                EMapTransformProvenance::WorldSettingsExtents ||
+            provenance ==
+                EMapTransformProvenance::PoiCalibration ||
+            provenance ==
+                EMapTransformProvenance::NativeMapSampling;
+    }
+
+    // Game-thread-only cache shared by preflight readiness and batch
+    // projection. It is populated only by a verified transform, so compiling
+    // 32 authored nodes never repeats reflective actor scans or ProcessEvent
+    // sampling for each point.
+    struct VerifiedProjectionCache
+    {
+        UWorld* World = nullptr;
+        AFortAthenaMapInfo* MapInfo = nullptr;
+        MapTransform Transform{};
+        EMapTransformProvenance Provenance =
+            EMapTransformProvenance::None;
+        ULONGLONG NextProbeMs = 0;
+        bool bReady = false;
+    };
+
+    static VerifiedProjectionCache g_VerifiedProjectionCache{};
+
     // MapInfo is owned by the game thread while the editor is rendered on the GUI
     // thread. A small sequence lock publishes a coherent snapshot without ever
     // handing an Unreal object to the GUI thread.
@@ -1621,7 +1672,8 @@ namespace SafeZoneMap
         // Fortnite's native 10.40 world-to-map converter resolves the shared
         // Chapter 1 capture to this center and half-span. This includes the
         // image border outside the ten labeled grid cells.
-        const float v = VersionInfo.FortniteVersion;
+        const float v = static_cast<float>(
+            VersionInfo.FortniteVersion);
         if (UsesLegacyAthenaCapture())
             return { 32000.f, -25744.f, 0.f, 129760.4f, -129760.4f, 0.f };
 
@@ -1690,6 +1742,96 @@ namespace SafeZoneMap
         g_HasNormalizedSelection.store(false, std::memory_order_release);
     }
 
+    static FCustomSafeZoneNode LegacyNodeFromConfiguration()
+    {
+        return FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+    }
+
+    static FCustomSafeZoneSequence EditableSequenceSnapshot()
+    {
+        const auto snapshot =
+            FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+        if (snapshot && !snapshot->Nodes.empty())
+            return *snapshot;
+
+        FCustomSafeZoneSequence fallback;
+        fallback.Nodes.assign(1, LegacyNodeFromConfiguration());
+        return fallback;
+    }
+
+    static void MirrorFirstNormalizedSelection(
+        const FCustomSafeZoneSequence& sequence)
+    {
+        if (sequence.Nodes.empty() ||
+            !sequence.Nodes.front().bHasNormalizedCenter)
+        {
+            ForgetNormalizedSelection();
+            return;
+        }
+
+        RememberSelection(
+            sequence.Nodes.front().NormalizedU,
+            sequence.Nodes.front().NormalizedV);
+    }
+
+    static bool ClampRadiiToNonIncreasing(
+        FCustomSafeZoneSequence& sequence)
+    {
+        bool changed = false;
+        for (size_t index = 1; index < sequence.Nodes.size(); ++index)
+        {
+            const float maximumRadius =
+                sequence.Nodes[index - 1].RadiusCm;
+            if (sequence.Nodes[index].RadiusCm > maximumRadius)
+            {
+                sequence.Nodes[index].RadiusCm = maximumRadius;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    static bool PublishSequence(
+        FCustomSafeZoneSequence sequence,
+        bool bEnableMovingZone)
+    {
+        // Inactive authored steps are preserved while the ordinary one-circle
+        // editor is in use. Keep that retained tail valid as circle one changes
+        // so it can never block a stationary publication.
+        ClampRadiiToNonIncreasing(sequence);
+        if (!FConfiguration::PublishCustomSafeZoneSequence(
+                sequence, bEnableMovingZone))
+        {
+            return false;
+        }
+
+        MirrorFirstNormalizedSelection(sequence);
+        if (FConfiguration::bReadyToStart.load(
+                std::memory_order_acquire) &&
+            CustomSafeZoneRuntime::GetStatus().
+                bCanCorrectBeforeListen)
+        {
+            AutoHosting::RequestCustomSafeZonePreferenceRefresh();
+        }
+        return true;
+    }
+
+    static bool HasAnyNormalizedSelection()
+    {
+        const auto snapshot =
+            FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+        if (snapshot)
+        {
+            for (const auto& node : snapshot->Nodes)
+            {
+                if (node.bHasNormalizedCenter)
+                    return true;
+            }
+        }
+
+        return g_HasNormalizedSelection.load(std::memory_order_acquire);
+    }
+
     // Always display the complete capture. FortWorldSettings::PvPMapWorldWidth
     // is the playable rectangle, while the cooked minimap commonly includes
     // additional capture space around it. Cropping a fixed number of texels and
@@ -1741,143 +1883,528 @@ namespace SafeZoneMap
 
     static void ReprojectRememberedSelection(const MapTransform& map)
     {
-        if (!g_HasNormalizedSelection.load(std::memory_order_acquire))
+        // A pre-listen rejection deliberately reopens the GUI editor. Do not
+        // let a concurrent game-thread projection race that correction; the
+        // next preflight projects normalized nodes directly from its snapshot.
+        if (FConfiguration::bReadyToStart.load(
+                std::memory_order_acquire) &&
+            CustomSafeZoneRuntime::GetStatus().
+                bCanCorrectBeforeListen)
+        {
+            return;
+        }
+
+        const auto sourceSnapshot =
+            FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+        FCustomSafeZoneSequence sequence = sourceSnapshot
+            ? *sourceSnapshot
+            : EditableSequenceSnapshot();
+
+        // Legacy preference files predate the sequence snapshot. Adopt their
+        // remembered image position into node one only when the snapshot has
+        // no normalized positions of its own.
+        bool hasSequenceSelection = false;
+        for (const auto& node : sequence.Nodes)
+            hasSequenceSelection |= node.bHasNormalizedCenter;
+        if (!hasSequenceSelection &&
+            g_HasNormalizedSelection.load(std::memory_order_acquire) &&
+            !sequence.Nodes.empty())
+        {
+            sequence.Nodes.front().bHasNormalizedCenter = true;
+            sequence.Nodes.front().NormalizedU =
+                g_SelectedU.load(std::memory_order_relaxed);
+            sequence.Nodes.front().NormalizedV =
+                g_SelectedV.load(std::memory_order_relaxed);
+        }
+
+        int reprojected = 0;
+		bool changed = false;
+        for (auto& node : sequence.Nodes)
+        {
+            if (!node.bHasNormalizedCenter)
+                continue;
+
+            float worldX = 0.f;
+            float worldY = 0.f;
+            PixelToWorld(
+                node.NormalizedU, node.NormalizedV, 1.f, map,
+                worldX, worldY);
+			if (std::abs(node.Center.X - (double)worldX) > 0.01 ||
+				std::abs(node.Center.Y - (double)worldY) > 0.01)
+			{
+				node.Center.X = worldX;
+				node.Center.Y = worldY;
+				changed = true;
+			}
+            ++reprojected;
+        }
+        if (!reprojected || !changed)
             return;
 
-        const float u = g_SelectedU.load(std::memory_order_relaxed);
-        const float v = g_SelectedV.load(std::memory_order_relaxed);
-        float worldX, worldY;
-        PixelToWorld(u, v, 1.f, map, worldX, worldY);
-        FConfiguration::CustomSafeZoneCenter.X = worldX;
-        FConfiguration::CustomSafeZoneCenter.Y = worldY;
+        const bool bEnableMovingZone = sequence.bMovingZoneEnabled;
+        const bool bPublished = sourceSnapshot
+            ? FConfiguration::PublishCustomSafeZoneSequenceIfCurrent(
+                sourceSnapshot, sequence, bEnableMovingZone)
+            : FConfiguration::PublishCustomSafeZoneSequence(
+                sequence, bEnableMovingZone);
+        if (!bPublished)
+            return;
+        MirrorFirstNormalizedSelection(sequence);
 
         // Radius is an actual gameplay distance, not an image coordinate. The
         // frontend uses a provisional map span while the match is loading. If
         // the drag endpoint is reprojected with the later runtime span, a 240 m
         // circle can silently become a 550 m circle. Reproject only the center;
         // preserve the exact distance selected by the user.
-        SDK::DbgLog("[SafeZoneMap] reprojected selection uv=(%.5f, %.5f) to world=(%.1f, %.1f), radius-preserved=%.1f\n",
-            u, v, worldX, worldY,
-            FConfiguration::CustomSafeZoneRadius.load(
-                std::memory_order_relaxed));
+        SDK::DbgLog(
+            "[SafeZoneMap] reprojected %d authored circle(s); world radii preserved\n",
+            reprojected);
     }
 
-    // Shade the part of rect [rmin,rmax] outside a world-space circle. It may
-    // project as an ellipse when the runtime map bounds are not perfectly square.
-    // Horizontal strips avoid the anti-aliased shared edges that made the old
-    // angular fan look like purple rays radiating away from the safe zone.
-    static void FillOutsideEllipse(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
-                                   const ImVec2& c, const ImVec2& radius, ImU32 col)
+    struct ProjectedCircle
     {
-        if (radius.x <= 0.f || radius.y <= 0.f)
-        {
-            dl->AddRectFilled(rmin, rmax, col);
+        size_t NodeIndex = 0;
+        ImVec2 Center{};
+        ImVec2 Radius{};
+    };
+
+    struct StormInterval
+    {
+        float Begin = 0.f;
+        float End = 0.f;
+    };
+
+    static void MergeStormIntervals(
+        std::vector<StormInterval>& intervals)
+    {
+        if (intervals.size() < 2)
             return;
+
+        std::sort(
+            intervals.begin(), intervals.end(),
+            [](const StormInterval& left, const StormInterval& right)
+            {
+                return left.Begin < right.Begin;
+            });
+
+        size_t writeIndex = 0;
+        for (size_t readIndex = 1;
+            readIndex < intervals.size(); ++readIndex)
+        {
+            auto& merged = intervals[writeIndex];
+            const auto& candidate = intervals[readIndex];
+            if (candidate.Begin <= merged.End)
+            {
+                merged.End = (std::max)(merged.End, candidate.End);
+                continue;
+            }
+            intervals[++writeIndex] = candidate;
         }
+        intervals.resize(writeIndex + 1);
+    }
+
+    static void CollectHorizontalCircleUnionIntervals(
+        const std::vector<ProjectedCircle>& circles,
+        float minimumY,
+        float maximumY,
+        float minimumX,
+        float maximumX,
+        std::vector<StormInterval>& intervals)
+    {
+        intervals.clear();
+        for (const auto& circle : circles)
+        {
+            if (circle.Radius.x <= 0.f || circle.Radius.y <= 0.f)
+                continue;
+            // Use the widest cross-section touched anywhere by this scan row.
+            // This makes the clear area conservative: a whole filled rectangle
+            // can never intrude into the true ellipse between row endpoints.
+            const float sampleY = Clamp(
+                circle.Center.y,
+                (std::min)(minimumY, maximumY),
+                (std::max)(minimumY, maximumY));
+            const float normalizedY =
+                (sampleY - circle.Center.y) / circle.Radius.y;
+            if (fabsf(normalizedY) >= 1.f)
+                continue;
+            const float extent = circle.Radius.x * sqrtf(
+                (std::max)(0.f, 1.f - normalizedY * normalizedY));
+            const float begin = Clamp(
+                circle.Center.x - extent, minimumX, maximumX);
+            const float end = Clamp(
+                circle.Center.x + extent, minimumX, maximumX);
+            if (end > begin)
+                intervals.push_back({ begin, end });
+        }
+        MergeStormIntervals(intervals);
+    }
+
+    // Draw the storm exactly once outside the union of every authored circle.
+    // A point covered by any circle stays clear, including circle intersections.
+    static void FillOutsideCircleUnion(
+        ImDrawList* dl,
+        const ImVec2& rmin,
+        const ImVec2& rmax,
+        const std::vector<ProjectedCircle>& circles,
+        ImU32 color)
+    {
+        if (circles.empty())
+            return;
 
         const ImDrawListFlags oldFlags = dl->Flags;
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
 
-        const float ellipseTop = c.y - radius.y;
-        const float ellipseBottom = c.y + radius.y;
-        const float clippedTop = Clamp(ellipseTop, rmin.y, rmax.y);
-        const float clippedBottom = Clamp(ellipseBottom, rmin.y, rmax.y);
+        const float height = (std::max)(0.f, rmax.y - rmin.y);
+        const int rowCount = (std::max)(
+            64, (std::min)(512, (int)ceilf(height)));
+        const float rowHeight = height / (float)rowCount;
+        std::vector<StormInterval> intervals;
+        intervals.reserve(circles.size());
 
-        if (clippedTop > rmin.y)
-            dl->AddRectFilled(rmin, ImVec2(rmax.x, clippedTop), col);
-        if (clippedBottom < rmax.y)
-            dl->AddRectFilled(ImVec2(rmin.x, clippedBottom), rmax, col);
-
-        const int N = 128;
-        if (clippedBottom > clippedTop)
+        for (int row = 0; row < rowCount; ++row)
         {
-            const float step = (clippedBottom - clippedTop) / (float)N;
-            for (int i = 0; i < N; ++i)
-            {
-                const float y0 = clippedTop + step * (float)i;
-                const float y1 = (i + 1 == N) ? clippedBottom : y0 + step;
-                const float ny0 = (y0 - c.y) / radius.y;
-                const float ny1 = (y1 - c.y) / radius.y;
-                const float extent0 = radius.x * sqrtf((std::max)(0.f, 1.f - ny0 * ny0));
-                const float extent1 = radius.x * sqrtf((std::max)(0.f, 1.f - ny1 * ny1));
-                const float left0 = Clamp(c.x - extent0, rmin.x, rmax.x);
-                const float left1 = Clamp(c.x - extent1, rmin.x, rmax.x);
-                const float right0 = Clamp(c.x + extent0, rmin.x, rmax.x);
-                const float right1 = Clamp(c.x + extent1, rmin.x, rmax.x);
+            const float y0 = rmin.y + rowHeight * (float)row;
+            const float y1 = row + 1 == rowCount
+                ? rmax.y
+                : y0 + rowHeight;
+            CollectHorizontalCircleUnionIntervals(
+                circles, y0, y1, rmin.x, rmax.x, intervals);
 
-                if (left0 > rmin.x || left1 > rmin.x)
-                    dl->AddQuadFilled(ImVec2(rmin.x, y0), ImVec2(left0, y0),
-                                      ImVec2(left1, y1), ImVec2(rmin.x, y1), col);
-                if (right0 < rmax.x || right1 < rmax.x)
-                    dl->AddQuadFilled(ImVec2(right0, y0), ImVec2(rmax.x, y0),
-                                      ImVec2(rmax.x, y1), ImVec2(right1, y1), col);
+            float stormBegin = rmin.x;
+            for (const auto& interval : intervals)
+            {
+                if (interval.Begin > stormBegin)
+                {
+                    dl->AddRectFilled(
+                        ImVec2(stormBegin, y0),
+                        ImVec2(interval.Begin, y1), color);
+                }
+                stormBegin = (std::max)(stormBegin, interval.End);
+                if (stormBegin >= rmax.x)
+                    break;
+            }
+            if (stormBegin < rmax.x)
+            {
+                dl->AddRectFilled(
+                    ImVec2(stormBegin, y0),
+                    ImVec2(rmax.x, y1), color);
             }
         }
 
         dl->Flags = oldFlags;
     }
 
-    // Draw one line, omitting the portion that lies inside the safe ellipse.
-    static void AddLineOutsideEllipse(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1,
-                                      const ImVec2& c, const ImVec2& radius,
-                                      ImU32 col, float thickness)
+    // Draw one band segment while removing the union of all intersections
+    // between that segment and the authored ellipses.
+    static void CollectLineCircleUnionIntervals(
+        const ImVec2& p0,
+        const ImVec2& p1,
+        const std::vector<ProjectedCircle>& circles,
+        std::vector<StormInterval>& covered,
+        float radiusPadding = 0.f)
     {
-        const ImVec2 d((p1.x - p0.x) / radius.x, (p1.y - p0.y) / radius.y);
-        const ImVec2 f((p0.x - c.x) / radius.x, (p0.y - c.y) / radius.y);
-        const float a = d.x * d.x + d.y * d.y;
-        const float b = 2.f * (f.x * d.x + f.y * d.y);
-        const float cc = f.x * f.x + f.y * f.y - 1.f;
-        const float discriminant = b * b - 4.f * a * cc;
-
-        float cuts[4] = { 0.f, 1.f, 0.f, 0.f };
-        int cutCount = 2;
-        if (a > 0.f && discriminant > 0.f)
+        covered.clear();
+        for (const auto& circle : circles)
         {
-            const float root = sqrtf(discriminant);
-            const float t0 = (-b - root) / (2.f * a);
-            const float t1 = (-b + root) / (2.f * a);
-            if (t0 > 0.f && t0 < 1.f) cuts[cutCount++] = t0;
-            if (t1 > 0.f && t1 < 1.f) cuts[cutCount++] = t1;
-        }
-        std::sort(cuts, cuts + cutCount);
-
-        const ImVec2 screenD(p1.x - p0.x, p1.y - p0.y);
-        for (int i = 0; i + 1 < cutCount; ++i)
-        {
-            const float begin = cuts[i], end = cuts[i + 1];
-            const float mid = (begin + end) * 0.5f;
-            const float mx = f.x + d.x * mid;
-            const float my = f.y + d.y * mid;
-            if (mx * mx + my * my < 1.f)
+            if (circle.Radius.x <= 0.f || circle.Radius.y <= 0.f)
                 continue;
-            dl->AddLine(ImVec2(p0.x + screenD.x * begin, p0.y + screenD.y * begin),
-                        ImVec2(p0.x + screenD.x * end, p0.y + screenD.y * end), col, thickness);
+            const float radiusX = circle.Radius.x + radiusPadding;
+            const float radiusY = circle.Radius.y + radiusPadding;
+            const ImVec2 d(
+                (p1.x - p0.x) / radiusX,
+                (p1.y - p0.y) / radiusY);
+            const ImVec2 f(
+                (p0.x - circle.Center.x) / radiusX,
+                (p0.y - circle.Center.y) / radiusY);
+            const float a = d.x * d.x + d.y * d.y;
+            const float b = 2.f * (f.x * d.x + f.y * d.y);
+            const float c = f.x * f.x + f.y * f.y - 1.f;
+            const float discriminant = b * b - 4.f * a * c;
+            if (a <= 0.000001f || discriminant <= 0.f)
+                continue;
+            const float root = sqrtf(discriminant);
+            const float begin = Clamp(
+                (-b - root) / (2.f * a), 0.f, 1.f);
+            const float end = Clamp(
+                (-b + root) / (2.f * a), 0.f, 1.f);
+            if (end > begin)
+                covered.push_back({ begin, end });
+        }
+        MergeStormIntervals(covered);
+    }
+
+    static void AddLineOutsideCircleUnion(
+        ImDrawList* dl,
+        const ImVec2& p0,
+        const ImVec2& p1,
+        const std::vector<ProjectedCircle>& circles,
+        ImU32 color,
+        float thickness)
+    {
+        std::vector<StormInterval> covered;
+        covered.reserve(circles.size());
+        CollectLineCircleUnionIntervals(
+            p0, p1, circles, covered,
+            thickness * 0.5f + 1.f);
+        const ImVec2 delta(p1.x - p0.x, p1.y - p0.y);
+        float visibleBegin = 0.f;
+        for (const auto& interval : covered)
+        {
+            if (interval.Begin > visibleBegin)
+            {
+                dl->AddLine(
+                    ImVec2(p0.x + delta.x * visibleBegin,
+                           p0.y + delta.y * visibleBegin),
+                    ImVec2(p0.x + delta.x * interval.Begin,
+                           p0.y + delta.y * interval.Begin),
+                    color, thickness);
+            }
+            visibleBegin = (std::max)(visibleBegin, interval.End);
+            if (visibleBegin >= 1.f)
+                return;
+        }
+        if (visibleBegin < 1.f)
+        {
+            dl->AddLine(
+                ImVec2(p0.x + delta.x * visibleBegin,
+                       p0.y + delta.y * visibleBegin),
+                p1, color, thickness);
         }
     }
 
-    // Fortnite's storm map uses parallel bands running from bottom-left to
-    // top-right. Keep them clipped to the storm area outside the safe ellipse.
-    static void DrawStormBands(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
-                               const ImVec2& c, const ImVec2& radius, ImU32 col)
+    static void DrawStormBandsOutsideCircleUnion(
+        ImDrawList* dl,
+        const ImVec2& rmin,
+        const ImVec2& rmax,
+        const std::vector<ProjectedCircle>& circles,
+        ImU32 color)
     {
         const float width = rmax.x - rmin.x;
         const float height = rmax.y - rmin.y;
         const float spacing = (std::max)(28.f, width / 10.f);
-        for (float diagonal = 0.f; diagonal <= width + height; diagonal += spacing)
+        for (float diagonal = 0.f;
+            diagonal <= width + height;
+            diagonal += spacing)
         {
-            ImVec2 p0, p1;
+            ImVec2 p0;
+            ImVec2 p1;
             if (diagonal <= height)
                 p0 = ImVec2(rmin.x, rmin.y + diagonal);
             else
                 p0 = ImVec2(rmin.x + diagonal - height, rmax.y);
-
             if (diagonal <= width)
                 p1 = ImVec2(rmin.x + diagonal, rmin.y);
             else
                 p1 = ImVec2(rmax.x, rmin.y + diagonal - width);
 
-            AddLineOutsideEllipse(dl, p0, p1, c, radius, col, 4.f);
+            AddLineOutsideCircleUnion(
+                dl, p0, p1, circles, color, 4.f);
         }
+    }
+
+    // The storm background is owned exclusively by circle one. Selection and
+    // the number of future outlines can never increase this pass count.
+    static constexpr int StormBackgroundPassCount(size_t circleCount)
+    {
+        return circleCount == 0 ? 0 : 1;
+    }
+
+    static inline float ScreenLength(const ImVec2& value)
+    {
+        return sqrtf(value.x * value.x + value.y * value.y);
+    }
+
+    static inline ImVec2 ScreenNormal(const ImVec2& value)
+    {
+        const float length = ScreenLength(value);
+        return length > 0.001f
+            ? ImVec2(value.x / length, value.y / length)
+            : ImVec2(1.f, 0.f);
+    }
+
+    static float EllipseDistanceInDirection(
+        const ImVec2& radius,
+        const ImVec2& unitDirection)
+    {
+        const float rx = (std::max)(radius.x, 1.f);
+        const float ry = (std::max)(radius.y, 1.f);
+        const float denominator = sqrtf(
+            unitDirection.x * unitDirection.x / (rx * rx) +
+            unitDirection.y * unitDirection.y / (ry * ry));
+        return denominator > 0.0001f ? 1.f / denominator : 0.f;
+    }
+
+    static bool ProjectedCirclesOverlapOrTouch(
+        const ProjectedCircle& from,
+        const ProjectedCircle& to)
+    {
+        // Every map circle is projected through the same transform, so their
+        // axis-aligned ellipses share an aspect ratio. Scaling by the sum of
+        // their axes therefore reduces intersection and containment to one
+        // unit-circle distance test.
+        const float sumRadiusX = (std::max)(
+            fabsf(from.Radius.x) + fabsf(to.Radius.x), 0.001f);
+        const float sumRadiusY = (std::max)(
+            fabsf(from.Radius.y) + fabsf(to.Radius.y), 0.001f);
+        const float deltaX = to.Center.x - from.Center.x;
+        const float deltaY = to.Center.y - from.Center.y;
+        const float normalizedDistanceSquared =
+            deltaX * deltaX / (sumRadiusX * sumRadiusX) +
+            deltaY * deltaY / (sumRadiusY * sumRadiusY);
+        return normalizedDistanceSquared <= 1.f;
+    }
+
+    static constexpr float TransitionArrowHeadLength = 10.f;
+    static constexpr float TransitionArrowBoundaryPadding = 3.f;
+    static constexpr float TransitionArrowMinimumVisibleShaft = 8.f;
+
+    struct StraightTransitionArrow
+    {
+        ImVec2 Direction{ 1.f, 0.f };
+        ImVec2 ShaftStart{};
+        ImVec2 Tip{};
+        bool bVisible = false;
+        bool bDrawShaft = false;
+    };
+
+    // Build one straight, center-directed transition. Intersecting and
+    // contained circles do not receive an arrow. When a positive exterior gap
+    // is too short for both a useful shaft and the head, place only a head
+    // between the circles.
+    static StraightTransitionArrow BuildStraightTransitionArrow(
+        const ProjectedCircle& from,
+        const ProjectedCircle& to)
+    {
+        StraightTransitionArrow arrow;
+        if (ProjectedCirclesOverlapOrTouch(from, to))
+            return arrow;
+
+        const ImVec2 delta(
+            to.Center.x - from.Center.x,
+            to.Center.y - from.Center.y);
+        const float centerDistance = ScreenLength(delta);
+        const float minimumArrowSpan =
+            TransitionArrowHeadLength +
+            TransitionArrowMinimumVisibleShaft;
+
+        arrow.Direction = ScreenNormal(delta);
+        const ImVec2 reverseDirection(
+            -arrow.Direction.x, -arrow.Direction.y);
+        const float fromBoundary = EllipseDistanceInDirection(
+            from.Radius, arrow.Direction);
+        const float toBoundary = EllipseDistanceInDirection(
+            to.Radius, reverseDirection);
+        const ImVec2 sourceBoundaryPoint(
+            from.Center.x + arrow.Direction.x * fromBoundary,
+            from.Center.y + arrow.Direction.y * fromBoundary);
+        const ImVec2 targetBoundaryPoint(
+            to.Center.x - arrow.Direction.x * toBoundary,
+            to.Center.y - arrow.Direction.y * toBoundary);
+        const float boundaryGap =
+            centerDistance - fromBoundary - toBoundary;
+
+        // Keep a numeric guard around the independently calculated trim gap.
+        if (boundaryGap <= 0.f)
+            return arrow;
+
+        arrow.bVisible = true;
+        const float availableSpan = boundaryGap -
+            TransitionArrowBoundaryPadding * 2.f;
+
+        if (availableSpan >= minimumArrowSpan)
+        {
+            arrow.ShaftStart = ImVec2(
+                sourceBoundaryPoint.x + arrow.Direction.x *
+                    TransitionArrowBoundaryPadding,
+                sourceBoundaryPoint.y + arrow.Direction.y *
+                    TransitionArrowBoundaryPadding);
+            arrow.Tip = ImVec2(
+                targetBoundaryPoint.x - arrow.Direction.x *
+                    TransitionArrowBoundaryPadding,
+                targetBoundaryPoint.y - arrow.Direction.y *
+                    TransitionArrowBoundaryPadding);
+            arrow.bDrawShaft = true;
+            return arrow;
+        }
+
+        // A positive but tiny exterior gap receives only an arrowhead centered
+        // exactly between its facing boundaries.
+        const ImVec2 headCenter(
+            (sourceBoundaryPoint.x + targetBoundaryPoint.x) * 0.5f,
+            (sourceBoundaryPoint.y + targetBoundaryPoint.y) * 0.5f);
+        arrow.ShaftStart = headCenter;
+        arrow.Tip = ImVec2(
+            headCenter.x + arrow.Direction.x *
+                (TransitionArrowHeadLength * 0.5f),
+            headCenter.y + arrow.Direction.y *
+                (TransitionArrowHeadLength * 0.5f));
+        return arrow;
+    }
+
+    static void DrawArrowHead(
+        ImDrawList* dl,
+        const ImVec2& tip,
+        const ImVec2& tangent,
+        ImU32 color)
+    {
+        const ImVec2 direction = ScreenNormal(tangent);
+        const ImVec2 side(-direction.y, direction.x);
+        const float halfWidth = 5.f;
+        const ImVec2 base(
+            tip.x - direction.x * TransitionArrowHeadLength,
+            tip.y - direction.y * TransitionArrowHeadLength);
+        dl->AddTriangleFilled(
+            tip,
+            ImVec2(base.x + side.x * halfWidth,
+                   base.y + side.y * halfWidth),
+            ImVec2(base.x - side.x * halfWidth,
+                   base.y - side.y * halfWidth),
+            color);
+    }
+
+    // Draw an edge behind the circle outlines. Every route is straight; when
+    // circles are too close for a readable shaft, the arrowhead alone carries
+    // the direction.
+    static void DrawTransitionArrow(
+        ImDrawList* dl,
+        const ProjectedCircle& from,
+        const ProjectedCircle& to,
+        ImU32 color)
+    {
+        const auto arrow = BuildStraightTransitionArrow(from, to);
+        if (!arrow.bVisible)
+            return;
+
+        if (arrow.bDrawShaft)
+        {
+            dl->AddLine(
+                arrow.ShaftStart, arrow.Tip,
+                color, 3.f);
+        }
+        DrawArrowHead(dl, arrow.Tip, arrow.Direction, color);
+    }
+
+    static void DrawStepNumberAtCenter(
+        ImDrawList* dl,
+        const ProjectedCircle& circle,
+        int number,
+        bool bSelected)
+    {
+        char text[16];
+        sprintf_s(text, "%d", number);
+        const ImVec2 textSize = ImGui::CalcTextSize(text);
+        const ImVec2 position(
+            circle.Center.x - textSize.x * 0.5f,
+            circle.Center.y - textSize.y * 0.5f);
+        dl->AddText(
+            ImVec2(position.x + 1.f, position.y + 1.f),
+            IM_COL32(8, 12, 24, 235), text);
+        dl->AddText(
+            position,
+            bSelected
+                ? IM_COL32(255, 220, 95, 255)
+                : IM_COL32(255, 255, 255, 255),
+            text);
     }
 
     // Manual override for tuning on a specific engine version (0 = auto-detect).
@@ -3509,9 +4036,11 @@ namespace SafeZoneMap
     static bool ReadWorldSettingsTransformUnsafe(UWorld* world,
                                                   const UObject* preferredManager,
                                                   MapTransform& out,
-                                                  const UObject*& settingsOut)
+                                                  const UObject*& settingsOut,
+                                                  bool& hasAuthoritativeExtents)
     {
         settingsOut = nullptr;
+        hasAuthoritativeExtents = false;
         if (!world || !world->HasPersistentLevel() || !world->PersistentLevel ||
             !world->PersistentLevel->Class)
             return false;
@@ -3575,6 +4104,8 @@ namespace SafeZoneMap
             std::isfinite(width) && width >= 50000.f && width <= 1000000.f;
         const bool validHeight =
             std::isfinite(height) && height >= 50000.f && height <= 1000000.f;
+        bool resolvedExtentU = validWidth;
+        bool resolvedExtentV = validHeight;
         if (validWidth)
             extentU = width * 0.5f;
         if (validHeight)
@@ -3616,6 +4147,8 @@ namespace SafeZoneMap
             {
                 extentU = scaledExtentU;
                 extentV = scaledExtentV;
+                resolvedExtentU = true;
+                resolvedExtentV = true;
                 usedFullCaptureScale = true;
             }
         }
@@ -3627,10 +4160,16 @@ namespace SafeZoneMap
             const float scaleExtent = 0.5f / absoluteScale;
             if (scaleExtent >= 25000.f && scaleExtent <= 500000.f)
             {
-                if (!validWidth)
+                if (!resolvedExtentU)
+                {
                     extentU = scaleExtent;
-                if (!validHeight)
+                    resolvedExtentU = true;
+                }
+                if (!resolvedExtentV)
+                {
                     extentV = scaleExtent;
+                    resolvedExtentV = true;
+                }
             }
         }
 
@@ -3644,6 +4183,8 @@ namespace SafeZoneMap
         {
             extentU = sceneCaptureWidth * 0.5f;
             extentV = sceneCaptureWidth * 0.5f;
+            resolvedExtentU = true;
+            resolvedExtentV = true;
         }
 
         // Read the capture orientation supplied by this map. At zero yaw the
@@ -3693,23 +4234,28 @@ namespace SafeZoneMap
         }
         out = result;
         settingsOut = settings;
+        hasAuthoritativeExtents =
+            resolvedExtentU && resolvedExtentV;
         return true;
     }
 
     static bool ReadWorldSettingsTransform(UWorld* world,
                                            const UObject* preferredManager,
                                            MapTransform& out,
-                                           const UObject*& settingsOut)
+                                           const UObject*& settingsOut,
+                                           bool& hasAuthoritativeExtents)
     {
         __try
         {
             return ReadWorldSettingsTransformUnsafe(
-                world, preferredManager, out, settingsOut);
+                world, preferredManager, out, settingsOut,
+                hasAuthoritativeExtents);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
             SDK::DbgLog("[SafeZoneMap] WorldSettings map transform faulted (SEH)\n");
             settingsOut = nullptr;
+            hasAuthoritativeExtents = false;
             return false;
         }
     }
@@ -4451,7 +4997,7 @@ namespace SafeZoneMap
 
     static bool FinalizeSelectionForMapInfo(AFortAthenaMapInfo* mapInfo)
     {
-        if (!mapInfo || !g_HasNormalizedSelection.load(std::memory_order_acquire))
+        if (!mapInfo || !HasAnyNormalizedSelection())
             return false;
 
         FVector center;
@@ -4470,9 +5016,15 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool ReadRuntimeTransform(MapTransform& out, const UObject*& managerOut)
+    static bool ReadRuntimeTransform(
+        MapTransform& out,
+        const UObject*& managerOut,
+        EMapTransformProvenance* provenanceOut = nullptr,
+        AFortAthenaMapInfo* expectedMapInfo = nullptr)
     {
         managerOut = nullptr;
+        if (provenanceOut)
+            *provenanceOut = EMapTransformProvenance::None;
         UWorld* world = UWorld::GetWorld();
         if (!world || !world->HasGameState() || !world->GameState)
             return false;
@@ -4494,6 +5046,8 @@ namespace SafeZoneMap
         const UClass* mapInfoClass = AFortAthenaMapInfo::StaticClass();
         if (!mapInfoClass || !mapInfo->Class || !mapInfo->IsA(mapInfoClass))
             return false;
+        if (expectedMapInfo && mapInfo != expectedMapInfo)
+            return false;
 
         FVector center;
         if (!ReadMapCenter(mapInfo, center))
@@ -4501,6 +5055,10 @@ namespace SafeZoneMap
 
         MapTransform fallbackTransform = TransformFromMapInfoCenter(center);
         const UObject* fallbackSource = mapInfo;
+        EMapTransformProvenance fallbackProvenance =
+            UsesLegacyAthenaCapture()
+                ? EMapTransformProvenance::LegacyAthenaCapture
+                : EMapTransformProvenance::ProvisionalMapInfo;
 
         // FortGameStateZone owns the map manager used by this match when one is
         // created. Dedicated/NullRHI servers commonly leave it null, but reading
@@ -4529,8 +5087,10 @@ namespace SafeZoneMap
 
         MapTransform worldSettingsTransform;
         const UObject* worldSettings = nullptr;
+        bool hasAuthoritativeWorldSettingsExtents = false;
         if (ReadWorldSettingsTransform(
-                world, manager, worldSettingsTransform, worldSettings))
+                world, manager, worldSettingsTransform, worldSettings,
+                hasAuthoritativeWorldSettingsExtents))
         {
             // MapInfo belongs to this match and can carry a non-zero island
             // origin. Original Athena is the exception: its gameplay origin is
@@ -4542,6 +5102,11 @@ namespace SafeZoneMap
             }
             fallbackTransform = worldSettingsTransform;
             fallbackSource = worldSettings;
+            if (hasAuthoritativeWorldSettingsExtents)
+            {
+                fallbackProvenance =
+                    EMapTransformProvenance::WorldSettingsExtents;
+            }
 
             // Builds before BPWorldLocationToMapLocation exposed no callable
             // world-to-map helper. Their WorldSettings map labels and POI
@@ -4553,12 +5118,16 @@ namespace SafeZoneMap
             {
                 fallbackTransform = poiCalibratedTransform;
                 fallbackSource = worldSettings;
+                fallbackProvenance =
+                    EMapTransformProvenance::PoiCalibration;
             }
         }
         auto useFallbackTransform = [&]() -> bool
         {
             out = fallbackTransform;
             managerOut = fallbackSource;
+            if (provenanceOut)
+                *provenanceOut = fallbackProvenance;
             return true;
         };
 
@@ -4651,6 +5220,107 @@ namespace SafeZoneMap
 
         out = candidate;
         managerOut = manager;
+        if (provenanceOut)
+        {
+            *provenanceOut =
+                EMapTransformProvenance::NativeMapSampling;
+        }
+        return true;
+    }
+
+    static bool TryGetVerifiedRuntimeTransform(
+        AFortAthenaMapInfo* mapInfo,
+        MapTransform& out,
+        bool throttleUnavailableProbe)
+    {
+        if (!mapInfo)
+            return false;
+
+        UWorld* world = UWorld::GetWorld();
+        auto& cache = g_VerifiedProjectionCache;
+        if (world != cache.World || mapInfo != cache.MapInfo)
+        {
+            cache = {};
+            cache.World = world;
+            cache.MapInfo = mapInfo;
+        }
+        if (cache.bReady)
+        {
+            out = cache.Transform;
+            return true;
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (throttleUnavailableProbe && cache.NextProbeMs != 0 &&
+            now < cache.NextProbeMs)
+        {
+            return false;
+        }
+        cache.NextProbeMs = now + 100ULL;
+
+        MapTransform candidate;
+        const UObject* source = nullptr;
+        EMapTransformProvenance provenance =
+            EMapTransformProvenance::None;
+        bool resolved = ReadRuntimeTransform(
+            candidate, source, &provenance, mapInfo);
+        if (!resolved && UsesLegacyAthenaCapture())
+        {
+            FVector mapCenter;
+            if (ReadMapCenter(mapInfo, mapCenter))
+            {
+                candidate = TransformFromMapInfoCenter(mapCenter);
+                provenance =
+                    EMapTransformProvenance::LegacyAthenaCapture;
+                resolved = true;
+            }
+        }
+        if (!resolved || !IsAuthoritativeProjection(provenance))
+        {
+            return false;
+        }
+
+        cache.Transform = candidate;
+        cache.Provenance = provenance;
+        cache.bReady = true;
+        PublishTransform(candidate);
+        out = candidate;
+        return true;
+    }
+
+    static bool ProjectSafeZoneNodes(
+        const MapTransform& map,
+        const std::vector<FCustomSafeZoneNode>& nodes,
+        std::vector<FVector>& outCenters)
+    {
+        std::vector<FVector> projected;
+        projected.reserve(nodes.size());
+        for (const auto& node : nodes)
+        {
+            FVector center(node.Center);
+            if (node.bHasNormalizedCenter)
+            {
+                if (!std::isfinite(node.NormalizedU) ||
+                    !std::isfinite(node.NormalizedV))
+                {
+                    return false;
+                }
+
+                float worldX = 0.f;
+                float worldY = 0.f;
+                PixelToWorld(
+                    Clamp(node.NormalizedU, 0.f, 1.f),
+                    Clamp(node.NormalizedV, 0.f, 1.f),
+                    1.f, map, worldX, worldY);
+                if (!std::isfinite(worldX) || !std::isfinite(worldY))
+                    return false;
+                center.X = worldX;
+                center.Y = worldY;
+            }
+            projected.push_back(center);
+        }
+
+        outCenters.swap(projected);
         return true;
     }
 
@@ -4761,7 +5431,8 @@ namespace SafeZoneMap
     // ship the asset under more than one mount, so we list fallbacks.
     static int MinimapPathsForVersion(const wchar_t** out, int cap)
     {
-        const float v = VersionInfo.FortniteVersion;
+        const float v = static_cast<float>(
+            VersionInfo.FortniteVersion);
         int n = 0;
         auto add = [&](const wchar_t* p) { if (n < cap) out[n++] = p; };
 
@@ -5231,7 +5902,7 @@ bool GameTextureBridge::ExtractToRGBA(
 
 void GUI::ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo)
 {
-    if (!SafeZoneMap::g_HasNormalizedSelection.load(std::memory_order_acquire))
+    if (!SafeZoneMap::HasAnyNormalizedSelection())
         return;
 
     SafeZoneMap::MapTransform map;
@@ -5250,6 +5921,367 @@ void GUI::ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo)
 
     SafeZoneMap::FinalizeSelectionForMapInfo(MapInfo);
 }
+
+bool GUI::IsCustomSafeZoneMapProjectionReady(
+    AFortAthenaMapInfo* MapInfo)
+{
+    if (!MapInfo)
+        return false;
+
+    // ReadyToStartMatch can query this every frame while native map objects
+    // are still appearing. The shared verified cache throttles misses and
+    // accepts only this exact MapInfo plus known legacy, reflected extents,
+    // POI calibration, or native map sampling.
+    SafeZoneMap::MapTransform map;
+    return SafeZoneMap::TryGetVerifiedRuntimeTransform(
+        MapInfo, map, true);
+}
+
+bool GUI::TryResolveSafeZoneMapPoint(
+    AFortAthenaMapInfo* MapInfo,
+    float U,
+    float V,
+    FVector& OutCenter)
+{
+    if (!MapInfo || !std::isfinite(U) || !std::isfinite(V))
+        return false;
+
+    SafeZoneMap::MapTransform map;
+    if (!SafeZoneMap::TryGetVerifiedRuntimeTransform(
+            MapInfo, map, false))
+        return false;
+
+    float worldX = 0.f;
+    float worldY = 0.f;
+    SafeZoneMap::PixelToWorld(
+        SafeZoneMap::Clamp(U, 0.f, 1.f),
+        SafeZoneMap::Clamp(V, 0.f, 1.f),
+        1.f, map, worldX, worldY);
+    if (!std::isfinite(worldX) || !std::isfinite(worldY))
+        return false;
+
+    // Z is intentionally caller-owned. The map projection is a 2D affine
+    // transform and phase/runtime code may already hold a meaningful height.
+    OutCenter.X = worldX;
+    OutCenter.Y = worldY;
+    return true;
+}
+
+bool GUI::TryResolveSafeZoneMapPoints(
+    AFortAthenaMapInfo* MapInfo,
+    const std::vector<FCustomSafeZoneNode>& Nodes,
+    std::vector<FVector>& OutCenters)
+{
+    const bool needsProjection = std::any_of(
+        Nodes.begin(), Nodes.end(),
+        [](const FCustomSafeZoneNode& Node)
+        {
+            return Node.bHasNormalizedCenter;
+        });
+
+    SafeZoneMap::MapTransform map{};
+    if (needsProjection &&
+        (!MapInfo ||
+         !SafeZoneMap::TryGetVerifiedRuntimeTransform(
+             MapInfo, map, false)))
+    {
+        return false;
+    }
+
+    return SafeZoneMap::ProjectSafeZoneNodes(
+        map, Nodes, OutCenters);
+}
+
+#if defined(_DEBUG)
+void GUI::RunCustomSafeZoneRenderSelfTests()
+{
+    static bool bRan = false;
+    if (bRan)
+        return;
+    bRan = true;
+
+    const auto nearlyEqual = [](float left, float right)
+    {
+        return fabsf(left - right) <= 0.01f;
+    };
+
+    // A rotated, non-square capture must round-trip points and project a world
+    // circle to independent pixel radii. Doubling the canvas models zoom and
+    // must double both radii without changing their aspect ratio.
+    const SafeZoneMap::MapTransform nonSquare{
+        100.f, -50.f,
+        0.f, 200.f,
+        -100.f, 0.f
+    };
+    float worldX = 0.f;
+    float worldY = 0.f;
+    SafeZoneMap::PixelToWorld(
+        0.75f, 0.25f, 1.f, nonSquare, worldX, worldY);
+    assert(nearlyEqual(worldX, 150.f));
+    assert(nearlyEqual(worldY, 50.f));
+    float pixelX = 0.f;
+    float pixelY = 0.f;
+    SafeZoneMap::WorldToPixel(
+        worldX, worldY, 400.f, nonSquare, pixelX, pixelY);
+    assert(nearlyEqual(pixelX, 300.f));
+    assert(nearlyEqual(pixelY, 100.f));
+    const ImVec2 ordinaryRadius =
+        SafeZoneMap::RadiusToPixelAxes(50.f, 400.f, nonSquare);
+    const ImVec2 zoomedRadius =
+        SafeZoneMap::RadiusToPixelAxes(50.f, 800.f, nonSquare);
+    assert(nearlyEqual(ordinaryRadius.x, 50.f));
+    assert(nearlyEqual(ordinaryRadius.y, 100.f));
+    assert(nearlyEqual(zoomedRadius.x, ordinaryRadius.x * 2.f));
+    assert(nearlyEqual(zoomedRadius.y, ordinaryRadius.y * 2.f));
+
+    SafeZoneMap::WorldToPixel(
+        100000.f, 100000.f, 400.f,
+        nonSquare, pixelX, pixelY);
+    assert(pixelX < 0.f || pixelX > 400.f ||
+           pixelY < 0.f || pixelY > 400.f);
+
+    FCustomSafeZoneNode normalized;
+    normalized.Center.X = 1.f;
+    normalized.Center.Y = 2.f;
+    normalized.Center.Z = 333.f;
+    normalized.bHasNormalizedCenter = true;
+    normalized.NormalizedU = 0.75f;
+    normalized.NormalizedV = 0.25f;
+    FCustomSafeZoneNode numeric;
+    numeric.Center.X = 7.f;
+    numeric.Center.Y = 8.f;
+    numeric.Center.Z = 9.f;
+    std::vector<FCustomSafeZoneNode> nodes{
+        normalized, numeric
+    };
+    std::vector<FVector> centers;
+    assert(SafeZoneMap::ProjectSafeZoneNodes(
+        nonSquare, nodes, centers));
+    assert(centers.size() == 2);
+    assert(nearlyEqual((float)centers[0].X, 150.f));
+    assert(nearlyEqual((float)centers[0].Y, 50.f));
+    assert(nearlyEqual((float)centers[0].Z, 333.f));
+    assert(nearlyEqual((float)centers[1].X, 7.f));
+    assert(nearlyEqual((float)centers[1].Y, 8.f));
+
+    const SafeZoneMap::ProjectedCircle from{
+        0, ImVec2(50.f, 50.f), ImVec2(20.f, 20.f)
+    };
+    const SafeZoneMap::ProjectedCircle farCircle{
+        1, ImVec2(150.f, 50.f), ImVec2(20.f, 20.f)
+    };
+    const SafeZoneMap::ProjectedCircle overlapping{
+        1, ImVec2(75.f, 50.f), ImVec2(30.f, 30.f)
+    };
+    const SafeZoneMap::ProjectedCircle concentric{
+        1, ImVec2(50.f, 50.f), ImVec2(45.f, 30.f)
+    };
+    const SafeZoneMap::ProjectedCircle nearContained{
+        1, ImVec2(55.f, 50.f), ImVec2(6.f, 6.f)
+    };
+
+    const auto HeadCenter = [](
+        const SafeZoneMap::StraightTransitionArrow& arrow)
+    {
+        return ImVec2(
+            arrow.Tip.x - arrow.Direction.x *
+                (SafeZoneMap::TransitionArrowHeadLength * 0.5f),
+            arrow.Tip.y - arrow.Direction.y *
+                (SafeZoneMap::TransitionArrowHeadLength * 0.5f));
+    };
+
+    const auto farArrow = SafeZoneMap::BuildStraightTransitionArrow(
+        from, farCircle);
+    assert(!SafeZoneMap::ProjectedCirclesOverlapOrTouch(
+        from, farCircle));
+    assert(farArrow.bVisible);
+    assert(farArrow.bDrawShaft);
+    assert(nearlyEqual(farArrow.Direction.x, 1.f));
+    assert(nearlyEqual(farArrow.Direction.y, 0.f));
+    assert(nearlyEqual(farArrow.ShaftStart.x, 73.f));
+    assert(nearlyEqual(farArrow.Tip.x, 127.f));
+    assert(nearlyEqual(farArrow.ShaftStart.y, farArrow.Tip.y));
+
+    const SafeZoneMap::ProjectedCircle tinyGap{
+        1, ImVec2(92.f, 50.f), ImVec2(20.f, 20.f)
+    };
+    const auto tinyGapArrow =
+        SafeZoneMap::BuildStraightTransitionArrow(
+            from, tinyGap);
+    assert(!SafeZoneMap::ProjectedCirclesOverlapOrTouch(
+        from, tinyGap));
+    assert(tinyGapArrow.bVisible);
+    assert(!tinyGapArrow.bDrawShaft);
+    const ImVec2 tinyGapHeadCenter = HeadCenter(tinyGapArrow);
+    assert(nearlyEqual(tinyGapHeadCenter.x, 71.f));
+    assert(nearlyEqual(tinyGapHeadCenter.y, 50.f));
+
+    const auto overlapArrow =
+        SafeZoneMap::BuildStraightTransitionArrow(
+            from, overlapping);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
+        from, overlapping));
+    assert(!overlapArrow.bVisible);
+    assert(!overlapArrow.bDrawShaft);
+
+    const auto containedArrow =
+        SafeZoneMap::BuildStraightTransitionArrow(
+            from, nearContained);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
+        from, nearContained));
+    assert(!containedArrow.bVisible);
+    assert(!containedArrow.bDrawShaft);
+
+    const SafeZoneMap::ProjectedCircle concentricOuter{
+        0, ImVec2(50.f, 50.f), ImVec2(45.f, 45.f)
+    };
+    const SafeZoneMap::ProjectedCircle concentricInner{
+        1, ImVec2(50.f, 50.f), ImVec2(20.f, 20.f)
+    };
+    const auto concentricArrow =
+        SafeZoneMap::BuildStraightTransitionArrow(
+            concentricOuter, concentricInner);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
+        concentricOuter, concentricInner));
+    assert(!concentricArrow.bVisible);
+    assert(!concentricArrow.bDrawShaft);
+
+    const auto equalConcentricArrow =
+        SafeZoneMap::BuildStraightTransitionArrow(
+            from, from);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(from, from));
+    assert(!equalConcentricArrow.bVisible);
+    assert(!equalConcentricArrow.bDrawShaft);
+
+    const SafeZoneMap::ProjectedCircle touching{
+        1, ImVec2(90.f, 50.f), ImVec2(20.f, 20.f)
+    };
+    const auto touchingArrow =
+        SafeZoneMap::BuildStraightTransitionArrow(from, touching);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
+        from, touching));
+    assert(!touchingArrow.bVisible);
+    assert(!touchingArrow.bDrawShaft);
+
+    const SafeZoneMap::ProjectedCircle diagonalFrom{
+        0, ImVec2(20.f, 30.f), ImVec2(30.f, 12.f)
+    };
+    const SafeZoneMap::ProjectedCircle diagonalTo{
+        1, ImVec2(180.f, 130.f), ImVec2(18.f, 28.f)
+    };
+    const auto diagonalArrow =
+        SafeZoneMap::BuildStraightTransitionArrow(
+            diagonalFrom, diagonalTo);
+    assert(diagonalArrow.bVisible);
+    assert(diagonalArrow.bDrawShaft);
+    const ImVec2 diagonalShaft(
+        diagonalArrow.Tip.x - diagonalArrow.ShaftStart.x,
+        diagonalArrow.Tip.y - diagonalArrow.ShaftStart.y);
+    assert(fabsf(
+        diagonalShaft.x * diagonalArrow.Direction.y -
+        diagonalShaft.y * diagonalArrow.Direction.x) < 0.01f);
+    assert(diagonalShaft.x * diagonalArrow.Direction.x +
+        diagonalShaft.y * diagonalArrow.Direction.y > 0.f);
+
+    // The fill and stripe clippers operate on the same merged union. Verify
+    // separation, overlap lenses, containment, off-screen clipping, and a
+    // non-square projected circle without requiring a live ImDrawList.
+    std::vector<SafeZoneMap::StormInterval> intervals;
+    intervals.reserve(4);
+    SafeZoneMap::CollectHorizontalCircleUnionIntervals(
+        { from, farCircle }, 50.f, 50.f,
+        0.f, 200.f, intervals);
+    assert(intervals.size() == 2);
+    assert(nearlyEqual(intervals[0].Begin, 30.f));
+    assert(nearlyEqual(intervals[0].End, 70.f));
+    assert(nearlyEqual(intervals[1].Begin, 130.f));
+    assert(nearlyEqual(intervals[1].End, 170.f));
+
+    SafeZoneMap::CollectHorizontalCircleUnionIntervals(
+        { from, overlapping }, 50.f, 50.f,
+        0.f, 200.f, intervals);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 30.f));
+    assert(nearlyEqual(intervals[0].End, 105.f));
+
+    SafeZoneMap::CollectHorizontalCircleUnionIntervals(
+        { from, concentric }, 50.f, 50.f,
+        0.f, 200.f, intervals);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 5.f));
+    assert(nearlyEqual(intervals[0].End, 95.f));
+
+    const SafeZoneMap::ProjectedCircle partlyOffscreen{
+        2, ImVec2(-5.f, 50.f), ImVec2(20.f, 20.f)
+    };
+    SafeZoneMap::CollectHorizontalCircleUnionIntervals(
+        { partlyOffscreen }, 50.f, 50.f,
+        0.f, 200.f, intervals);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 0.f));
+    assert(nearlyEqual(intervals[0].End, 15.f));
+
+    const SafeZoneMap::ProjectedCircle projectedEllipse{
+        3, ImVec2(50.f, 50.f), ImVec2(20.f, 10.f)
+    };
+    SafeZoneMap::CollectHorizontalCircleUnionIntervals(
+        { projectedEllipse }, 55.f, 55.f,
+        0.f, 200.f, intervals);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 32.6795f));
+    assert(nearlyEqual(intervals[0].End, 67.3205f));
+
+    // A row approaching an ellipse must reserve the widest endpoint, not its
+    // midpoint, so the filled rectangle cannot nick the clear boundary.
+    SafeZoneMap::CollectHorizontalCircleUnionIntervals(
+        { from }, 30.f, 31.f, 0.f, 200.f, intervals);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 43.755f));
+    assert(nearlyEqual(intervals[0].End, 56.245f));
+
+    SafeZoneMap::CollectLineCircleUnionIntervals(
+        ImVec2(0.f, 50.f), ImVec2(200.f, 50.f),
+        { from, overlapping }, intervals);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 0.15f));
+    assert(nearlyEqual(intervals[0].End, 0.525f));
+    SafeZoneMap::CollectLineCircleUnionIntervals(
+        ImVec2(0.f, 50.f), ImVec2(200.f, 50.f),
+        { from, overlapping }, intervals, 3.f);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 0.135f));
+    assert(nearlyEqual(intervals[0].End, 0.54f));
+    SafeZoneMap::CollectLineCircleUnionIntervals(
+        ImVec2(40.f, 50.f), ImVec2(60.f, 50.f),
+        { from }, intervals);
+    assert(intervals.size() == 1);
+    assert(nearlyEqual(intervals[0].Begin, 0.f));
+    assert(nearlyEqual(intervals[0].End, 1.f));
+
+    FCustomSafeZoneSequence clampedRadii;
+    clampedRadii.Nodes.resize(4);
+    clampedRadii.Nodes[0].RadiusCm = 1000.f;
+    clampedRadii.Nodes[1].RadiusCm = 1200.f;
+    clampedRadii.Nodes[2].RadiusCm = 800.f;
+    clampedRadii.Nodes[3].RadiusCm = 900.f;
+    assert(SafeZoneMap::ClampRadiiToNonIncreasing(clampedRadii));
+    assert(clampedRadii.Nodes[1].RadiusCm == 1000.f);
+    assert(clampedRadii.Nodes[2].RadiusCm == 800.f);
+    assert(clampedRadii.Nodes[3].RadiusCm == 800.f);
+    assert(!SafeZoneMap::ClampRadiiToNonIncreasing(clampedRadii));
+
+    assert(SafeZoneMap::StormBackgroundPassCount(0) == 0);
+    for (size_t selected = 0; selected < 32; ++selected)
+    {
+        (void)selected;
+        assert(SafeZoneMap::StormBackgroundPassCount(32) == 1);
+    }
+    assert(!SafeZoneMap::IsAuthoritativeProjection(
+        SafeZoneMap::EMapTransformProvenance::ProvisionalMapInfo));
+    assert(SafeZoneMap::IsAuthoritativeProjection(
+        SafeZoneMap::EMapTransformProvenance::WorldSettingsExtents));
+}
+#endif
 
 bool GUI::GetNormalizedSafeZoneSelection(
     float& U,
@@ -5383,6 +6415,383 @@ static bool AtomicCheckbox(
         Setting.store(Value, std::memory_order_release);
     }
     return bChanged;
+}
+
+static bool OptionalSafeZoneDurationEditor(
+    const char* Label,
+    const char* ModeId,
+    const char* ValueId,
+    std::optional<float>& Duration,
+    float Width,
+    float CustomDefault)
+{
+    bool changed = false;
+    ImGui::TextUnformatted(Label);
+
+    int source = Duration.has_value() ? 1 : 0;
+    ImGui::SetNextItemWidth(Width);
+    if (ImGui::Combo(
+            ModeId, &source,
+            "Native timing\0Custom timing\0"))
+    {
+        if (source == 0)
+            Duration.reset();
+        else
+            Duration = CustomDefault;
+        changed = true;
+    }
+
+    if (Duration.has_value())
+    {
+        float value = *Duration;
+        if (!std::isfinite(value))
+            value = CustomDefault;
+        value = SafeZoneMap::Clamp(
+            value,
+            FCustomSafeZoneSequence::MinimumDurationSeconds,
+            FCustomSafeZoneSequence::MaximumDurationSeconds);
+        ImGui::SetNextItemWidth(Width);
+        if (ImGui::SliderFloat(
+                ValueId, &value,
+                FCustomSafeZoneSequence::MinimumDurationSeconds,
+                FCustomSafeZoneSequence::MaximumDurationSeconds,
+                "%.0f sec",
+                ImGuiSliderFlags_AlwaysClamp))
+        {
+            *Duration = SafeZoneMap::Clamp(
+                value,
+                FCustomSafeZoneSequence::MinimumDurationSeconds,
+                FCustomSafeZoneSequence::MaximumDurationSeconds);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+static bool IsCustomMovingZoneVersionSupported()
+{
+    const double version = VersionInfo.FortniteVersion;
+    return std::isfinite(version) && version >= 0.f && version < 31.f;
+}
+
+static bool HasCustomMovingZoneTransition(
+    const FCustomSafeZoneSequence& Sequence)
+{
+    return Sequence.Nodes.size() > 1 ||
+        Sequence.bCloseFinalCircle;
+}
+
+static bool IsCorrectableCustomMovingZoneRuntimeFailure(
+    ECustomSafeZoneRuntimeFailure Failure)
+{
+    switch (Failure)
+    {
+    case ECustomSafeZoneRuntimeFailure::None:
+    case ECustomSafeZoneRuntimeFailure::NotRequested:
+        return false;
+    default:
+        // Every hard runtime rejection can at least be recovered by turning
+        // Moving Zone off. Geometry, radius, timing, and capacity failures
+        // can also be corrected in-place without reopening other launch data.
+        return true;
+    }
+}
+
+static bool IsMatchingCustomMovingZoneRuntimeFailure(
+    const std::shared_ptr<const FCustomSafeZoneSequence>& Snapshot,
+    const FCustomSafeZoneRuntimeStatus& Status)
+{
+    return FConfiguration::bReadyToStart.load(
+            std::memory_order_acquire) &&
+        FConfiguration::bLateGame.load(
+            std::memory_order_acquire) &&
+        FConfiguration::bCustomSafeZone.load(
+            std::memory_order_acquire) &&
+        Snapshot && Snapshot->bMovingZoneEnabled &&
+        HasCustomMovingZoneTransition(*Snapshot) &&
+        Status.bCanCorrectBeforeListen &&
+        IsCorrectableCustomMovingZoneRuntimeFailure(Status.Failure) &&
+        Status.RuntimeStartPhase ==
+            CustomSafeZoneRuntime::ResolveRuntimeStartPhase() &&
+        Status.NodeCount == (int32)Snapshot->Nodes.size() &&
+        Status.bCloseFinalCircle == Snapshot->bCloseFinalCircle;
+}
+
+static bool IsCustomMovingZoneRuntimeCorrectionAllowed()
+{
+    const auto Snapshot =
+        FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+    return IsMatchingCustomMovingZoneRuntimeFailure(
+        Snapshot, CustomSafeZoneRuntime::GetStatus());
+}
+
+static bool ValidateCustomMovingZoneForStart(
+    std::string& Error)
+{
+    Error.clear();
+    const auto snapshot =
+        FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+    if (!FConfiguration::bLateGame.load(
+            std::memory_order_acquire) ||
+        !FConfiguration::bCustomSafeZone.load(
+            std::memory_order_acquire) ||
+        !snapshot || !snapshot->bMovingZoneEnabled)
+    {
+        return true;
+    }
+
+    char message[512]{};
+    const double version = VersionInfo.FortniteVersion;
+    if (!IsCustomMovingZoneVersionSupported())
+    {
+        snprintf(
+            message, sizeof(message),
+            "Custom Moving Zone is unavailable in Fortnite %.2f. "
+            "Use a version from Fortnite 0 through 30, or turn it off.",
+            (double)version);
+        Error = message;
+        return false;
+    }
+
+    if (FConfiguration::bLateGameLongZone.load(
+            std::memory_order_acquire))
+    {
+        Error =
+            "Custom Moving Zone and Long Zone cannot be enabled together.";
+        return false;
+    }
+
+    const size_t count = snapshot->Nodes.size();
+    if (count < FCustomSafeZoneSequence::MinimumNodeCount ||
+        count > FCustomSafeZoneSequence::MaximumNodeCount)
+    {
+        snprintf(
+            message, sizeof(message),
+            "Unable to use %zu zone steps. Add between %zu and %zu steps.",
+            count,
+            FCustomSafeZoneSequence::MinimumNodeCount,
+            FCustomSafeZoneSequence::MaximumNodeCount);
+        Error = message;
+        return false;
+    }
+
+	const bool publisherAvailable =
+		CustomSafeZoneRuntime::
+			IsAuthoritativePhasePublisherCapabilityKnown()
+			? CustomSafeZoneRuntime::
+				IsAuthoritativePhasePublisherAvailable()
+			: AFortGameMode::ProbeMovingSafeZonePhasePublisher();
+	if (HasCustomMovingZoneTransition(*snapshot) &&
+        !publisherAvailable)
+	{
+		snprintf(
+			message, sizeof(message),
+			"Moving zones are unavailable in Fortnite %.2f because its "
+            "storm controller could not be initialized. Turn Custom "
+            "Moving Zone off to start normally.",
+			version);
+		Error = message;
+		return false;
+	}
+
+    const auto DurationIsValid = [](const std::optional<float>& value)
+    {
+        return !value.has_value() ||
+            (std::isfinite(*value) &&
+             *value >=
+                 FCustomSafeZoneSequence::MinimumDurationSeconds &&
+             *value <=
+                 FCustomSafeZoneSequence::MaximumDurationSeconds);
+    };
+
+    for (size_t index = 0; index < count; ++index)
+    {
+        const auto& node = snapshot->Nodes[index];
+        const bool validCenter =
+            std::isfinite(node.Center.X) &&
+            std::isfinite(node.Center.Y) &&
+            std::isfinite(node.Center.Z);
+        const bool validNormalized =
+            std::isfinite(node.NormalizedU) &&
+            std::isfinite(node.NormalizedV) &&
+            (!node.bHasNormalizedCenter ||
+             (node.NormalizedU >= 0.f && node.NormalizedU <= 1.f &&
+              node.NormalizedV >= 0.f && node.NormalizedV <= 1.f));
+        const bool validRadius =
+            std::isfinite(node.RadiusCm) &&
+            node.RadiusCm >=
+                FCustomSafeZoneSequence::MinimumRadiusCm &&
+            node.RadiusCm <=
+                FCustomSafeZoneSequence::MaximumRadiusCm;
+        if (!validCenter || !validNormalized || !validRadius)
+        {
+            snprintf(
+                message, sizeof(message),
+                "Zone step %zu has an invalid position or radius. Redraw "
+                "that step, or enter valid coordinates below.",
+                index + 1);
+            Error = message;
+            return false;
+        }
+
+        if (index > 0 &&
+            node.RadiusCm > snapshot->Nodes[index - 1].RadiusCm)
+        {
+            snprintf(
+                message, sizeof(message),
+                "Step %zu cannot be larger than step %zu.",
+                index + 1, index);
+            Error = message;
+            return false;
+        }
+
+        if (!DurationIsValid(node.HoldBeforeNextSeconds) ||
+            !DurationIsValid(node.MoveToNextSeconds))
+        {
+            snprintf(
+                message, sizeof(message),
+                "Zone step %zu has invalid timing. Enter a value from 0 "
+                "through 3600 seconds, or select Native timing.",
+                index + 1);
+            Error = message;
+            return false;
+        }
+    }
+
+    if (FConfiguration::bReadyToStart.load(
+            std::memory_order_acquire))
+    {
+        const auto status = CustomSafeZoneRuntime::GetStatus();
+        if (IsMatchingCustomMovingZoneRuntimeFailure(
+                snapshot, status))
+        {
+            switch (status.Failure)
+            {
+            case ECustomSafeZoneRuntimeFailure::RadiusIncreaseNotAllowed:
+            {
+                const int32 offendingEdge = status.OffendingEdge;
+                if (offendingEdge >= 0 &&
+                    offendingEdge + 1 < status.NodeCount &&
+                    (size_t)(offendingEdge + 1) < count)
+                {
+                    snprintf(
+                        message, sizeof(message),
+                        "Step %d cannot be larger than step %d.",
+                        offendingEdge + 2, offendingEdge + 1);
+                }
+                else
+                {
+                    snprintf(
+                        message, sizeof(message),
+                        "Moving-zone steps cannot increase in size.");
+                }
+                break;
+            }
+            case ECustomSafeZoneRuntimeFailure::
+                InsufficientPhaseCapacity:
+            {
+                const int effectiveCapacity = (std::max)(
+                    0,
+                    status.PhaseCapacity -
+                        status.RuntimeStartPhase + 1);
+                const int maximumAuthoredSteps = (std::max)(
+                    0,
+                    effectiveCapacity -
+                        (snapshot->bCloseFinalCircle ? 1 : 0));
+                const int visibleStartingZone =
+                    FConfiguration::LateGameZone.load(
+                        std::memory_order_acquire);
+                if (maximumAuthoredSteps > 0)
+                {
+                    const int stepsToRemove = (std::max)(
+                        1, (int)count - maximumAuthoredSteps);
+                    snprintf(
+                        message, sizeof(message),
+                        "Unable to use this many zones. This map supports up "
+                        "to %d zone step%s from Starting Zone %d%s, but you "
+                        "added %zu. Remove %d step%s or choose an earlier "
+                        "Starting Zone%s.",
+                        maximumAuthoredSteps,
+                        maximumAuthoredSteps == 1 ? "" : "s",
+                        visibleStartingZone,
+                        snapshot->bCloseFinalCircle
+                            ? " when Fully Close is enabled"
+                            : "",
+                        count,
+                        stepsToRemove,
+                        stepsToRemove == 1 ? "" : "s",
+                        snapshot->bCloseFinalCircle
+                            ? ", or select the final step and turn off "
+                                "Fully Close Final Zone"
+                            : "");
+                }
+                else if (snapshot->bCloseFinalCircle)
+                {
+                    snprintf(
+                        message, sizeof(message),
+                        "Unable to fully close the final zone from Starting "
+                        "Zone %d because this map has no storm phase left for "
+                        "the close. Choose an earlier Starting Zone, or select "
+                        "the final step and turn off Fully Close Final Zone.",
+                        visibleStartingZone);
+                }
+                else
+                {
+                    snprintf(
+                        message, sizeof(message),
+                        "Unable to create a moving zone from Starting Zone %d "
+                        "because this map has no storm phase left for another "
+                        "step. Choose an earlier Starting Zone or turn Custom "
+                        "Moving Zone off.",
+                        visibleStartingZone);
+                }
+                break;
+            }
+            case ECustomSafeZoneRuntimeFailure::MissingMapInfo:
+                snprintf(
+                    message, sizeof(message),
+                    "Unable to load this map's storm data in time. Turn Custom "
+                    "Moving Zone off to start normally, then try it again on "
+                    "another map or playlist.");
+                break;
+            case ECustomSafeZoneRuntimeFailure::MissingPhasePublisher:
+                snprintf(
+                    message, sizeof(message),
+                    "Moving zones could not connect to Fortnite %.2f's storm "
+                    "controller. Turn Custom Moving Zone off to start normally.",
+                    version);
+                break;
+            case ECustomSafeZoneRuntimeFailure::MissingPhaseFields:
+            case ECustomSafeZoneRuntimeFailure::MissingIndicatorFields:
+                snprintf(
+                    message, sizeof(message),
+                    "This Fortnite %.2f build does not provide the storm data "
+                    "needed for custom movement. Turn Custom Moving Zone off "
+                    "to start normally.",
+                    version);
+                break;
+            case ECustomSafeZoneRuntimeFailure::MapProjectionUnavailable:
+                Error =
+                    "A zone step could not be placed on this map. Redraw it, "
+                    "enter valid coordinates, or turn Custom Moving Zone off.";
+                return false;
+            default:
+                snprintf(
+                    message, sizeof(message),
+                    "The custom zones could not be set up for Fortnite %.2f. "
+                    "Adjust the zone steps or turn Custom Moving Zone off; "
+                    "setup will retry automatically.",
+                    version);
+                break;
+            }
+            Error = message;
+            return false;
+        }
+    }
+
+    // A one-node sequence stays stationary unless the final-close option adds
+    // one implicit outgoing transition.
+    return true;
 }
 
 static void ApplyInitialTrickshotDefaults()
@@ -6013,7 +7422,7 @@ static void SanitizeNativeLTMSelection(int SelectedPlaylist)
         // survive both selecting an LTM and its subsequent native setup.
         FConfiguration::SetLateGameEnabled(false);
         FConfiguration::bIsCustomMap = false;
-        FConfiguration::bCustomSafeZone = false;
+        FConfiguration::SetCustomSafeZoneEnabled(false);
         FConfiguration::HasCustomRespawnPoint = false;
         if (SelectedPlaylist ==
             static_cast<int>(
@@ -6251,6 +7660,48 @@ namespace TrickshotManager
     char GAsyncName[kAsyncNameCapacity]{};
     char GAsyncResultName[kAsyncNameCapacity]{};
     char GAsyncResultMessage[kAsyncMessageCapacity]{};
+
+    struct FBuiltInPresetDefinition
+    {
+        const char* Id;
+        const char* Name;
+        const char* DisplayName;
+        int ResourceId;
+    };
+
+    constexpr FBuiltInPresetDefinition kBuiltInPresets[]{
+        {
+            "builtin:block-winner-8-24-26-15bandit",
+            "Block Winner 8-24-26 (15Bandit)",
+            "Block Winner 8-24-26 (15Bandit) (Built-in, FN 10.40)",
+            IDR_TRICKSHOT_BLOCK_WINNER_15BANDIT
+        }
+    };
+
+    struct FPresetEntry
+    {
+        std::string Id;
+        std::string Name;
+        std::string DisplayName;
+        bool BuiltIn = false;
+
+        bool operator==(const FPresetEntry&) const = default;
+    };
+
+    const FBuiltInPresetDefinition* FindBuiltInPreset(
+        const std::string& Id)
+    {
+        const auto Found = std::find_if(
+            std::begin(kBuiltInPresets),
+            std::end(kBuiltInPresets),
+            [&](const FBuiltInPresetDefinition& Preset)
+            {
+                return Id == Preset.Id;
+            });
+        return Found == std::end(kBuiltInPresets)
+            ? nullptr
+            : &*Found;
+    }
 
     constexpr const char* kTrickshotTireClassPath =
         "/Game/Athena/Items/Consumables/TowerGrenade/"
@@ -7580,6 +9031,54 @@ namespace TrickshotManager
         return Names;
     }
 
+    inline FPresetEntry MakeSavedPresetEntry(
+        const std::string& SavedName)
+    {
+        std::string DisplayName = SavedName;
+        const bool CollidesWithBuiltIn = std::any_of(
+            std::begin(kBuiltInPresets),
+            std::end(kBuiltInPresets),
+            [&](const FBuiltInPresetDefinition& BuiltIn)
+            {
+                return SavedName == BuiltIn.Name;
+            });
+        if (CollidesWithBuiltIn)
+            DisplayName += " (Saved)";
+
+        return {
+            "saved:" + SavedName,
+            SavedName,
+            std::move(DisplayName),
+            false
+        };
+    }
+
+    inline std::vector<FPresetEntry> GetAvailablePresets(
+        bool* bSavedPresetScanSucceeded = nullptr)
+    {
+        bool bScanSucceeded = false;
+        const auto SavedNames = GetSavedNames(&bScanSucceeded);
+        if (bSavedPresetScanSucceeded)
+            *bSavedPresetScanSucceeded = bScanSucceeded;
+
+        std::vector<FPresetEntry> Presets;
+        Presets.reserve(
+            std::size(kBuiltInPresets) + SavedNames.size());
+        for (const auto& BuiltIn : kBuiltInPresets)
+        {
+            Presets.push_back({
+                BuiltIn.Id,
+                BuiltIn.Name,
+                BuiltIn.DisplayName,
+                true
+            });
+        }
+
+        for (const auto& SavedName : SavedNames)
+            Presets.push_back(MakeSavedPresetEntry(SavedName));
+        return Presets;
+    }
+
     inline bool Delete(const std::string& Name, std::string& Message)
     {
         const auto Directory = GetDirectory();
@@ -8095,13 +9594,56 @@ namespace TrickshotManager
         return true;
     }
 
-    inline bool Load(const std::string& Name, std::string& Message)
+    inline bool ReadBuiltInPreset(
+        const FBuiltInPresetDefinition& Preset,
+        nlohmann::json& Root,
+        std::string& Message)
+    {
+        HMODULE Module = nullptr;
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&GAsyncState),
+                &Module))
+        {
+            Message = "Could not access the built-in trickshot data.";
+            return false;
+        }
+
+        const HRSRC Resource = FindResourceW(
+            Module,
+            MAKEINTRESOURCEW(Preset.ResourceId),
+            RT_RCDATA);
+        if (!Resource)
+        {
+            Message = "The built-in trickshot data is unavailable.";
+            return false;
+        }
+
+        const DWORD ResourceSize = SizeofResource(Module, Resource);
+        const HGLOBAL LoadedResource = LoadResource(Module, Resource);
+        const auto Data = static_cast<const char*>(
+            LoadedResource ? LockResource(LoadedResource) : nullptr);
+        if (!Data || ResourceSize == 0)
+        {
+            Message = "The built-in trickshot data is unavailable.";
+            return false;
+        }
+
+        Root = nlohmann::json::parse(
+            Data, Data + ResourceSize);
+        return true;
+    }
+
+    inline bool ReadSavedPreset(
+        const std::string& Name,
+        nlohmann::json& Root,
+        std::string& Message)
     {
         const auto Directory = GetDirectory();
-        auto Controller = GetHostController();
-        if (Name.empty() || Directory.empty() || !Controller)
+        if (Directory.empty())
         {
-            Message = Name.empty() ? "Select a saved trickshot." : "A connected player is required to load builds.";
+            Message = "Could not open the trickshot folder.";
             return false;
         }
 
@@ -8115,13 +9657,60 @@ namespace TrickshotManager
             return false;
         }
 
+        // Keep ReadGuard alive while parsing so an external writer cannot
+        // replace or modify the file between the readiness check and read.
+        std::ifstream File(PresetPath);
+        if (!File || !(File >> Root))
+        {
+            Message = "The selected trickshot file is invalid.";
+            return false;
+        }
+        return true;
+    }
+
+    inline bool Load(
+        const std::string& PresetId,
+        std::string& Message)
+    {
+        if (PresetId.empty())
+        {
+            Message = "Select a trickshot preset.";
+            return false;
+        }
+
+        auto Controller = GetHostController();
+        if (!Controller)
+        {
+            Message = "A connected player is required to load builds.";
+            return false;
+        }
+
         try
         {
-            // Keep ReadGuard alive while parsing so an external writer cannot
-            // replace or modify the file between the readiness check and read.
-            std::ifstream File(PresetPath);
             nlohmann::json Root;
-            if (!File || !(File >> Root) || !Root.contains("builds") || !Root["builds"].is_array())
+            std::string PresetName;
+            if (const auto BuiltIn = FindBuiltInPreset(PresetId))
+            {
+                PresetName = BuiltIn->Name;
+                if (!ReadBuiltInPreset(*BuiltIn, Root, Message))
+                    return false;
+            }
+            else
+            {
+                constexpr std::string_view SavedPrefix = "saved:";
+                PresetName = PresetId.rfind(
+                    SavedPrefix.data(), 0) == 0
+                    ? PresetId.substr(SavedPrefix.size())
+                    : PresetId;
+                if (PresetName.empty() ||
+                    !ReadSavedPreset(PresetName, Root, Message))
+                {
+                    return false;
+                }
+            }
+
+            if (!Root.contains("builds") ||
+                !Root["builds"].is_array())
             {
                 Message = "The selected trickshot file is invalid.";
                 return false;
@@ -8780,7 +10369,7 @@ namespace TrickshotManager
 
             FTrickshotLoadJob Job;
             Job.Active = true;
-            Job.Name = Name;
+            Job.Name = PresetId;
             Job.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
             Job.Controller =
                 TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
@@ -9675,8 +11264,35 @@ void GUI::Init()
         if (done)
             break;
 
-        // Keep the countdown independent of rendering. In particular, a
-        // minimized or occluded launcher must not pause Auto Hosting.
+        // Keep the countdown independent of rendering. Invalid authored storm
+        // data pauses Auto Hosting before it can cross the same Start boundary
+        // guarded by the manual CTA; fixing the sequence resumes a fresh
+        // countdown instead of starting with partially accepted data.
+        std::string SafeZoneAutoHostError;
+        const bool bSafeZoneAutoHostValid =
+            ValidateCustomMovingZoneForStart(
+                SafeZoneAutoHostError);
+        if (!bSafeZoneAutoHostValid)
+        {
+            if (AutoHosting::IsCountdownActive())
+                AutoHosting::CancelCountdown();
+            GAutoHostPausedBySafeZoneValidation =
+                FConfiguration::bAutoHost.load(
+                    std::memory_order_acquire);
+        }
+        else if (GAutoHostPausedBySafeZoneValidation)
+        {
+            if (FConfiguration::bAutoHost.load(
+                    std::memory_order_acquire) &&
+                !FConfiguration::bReadyToStart.load(
+                    std::memory_order_acquire))
+            {
+                AutoHosting::ArmCountdown();
+            }
+            GAutoHostPausedBySafeZoneValidation = false;
+        }
+
+        // A minimized or occluded launcher does not otherwise pause hosting.
         AutoHosting::TickCountdown();
         AutoHosting::TickPostMatchShutdown();
         const bool bAutoHostCountdownThisFrame =
@@ -9771,7 +11387,7 @@ void GUI::Init()
             ImGui::SameLine(0.f, 8.f);
             ImGui::SetCursorPosY(TitleY);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.46f, 0.48f, 0.54f, 1.f));
-            ImGui::TextUnformatted("v2.5.0");
+            ImGui::TextUnformatted("v2.6.0");
             ImGui::PopStyleColor();
 
             // FN / UE versions on the right, aligned to the visible viewport so they
@@ -9814,7 +11430,7 @@ void GUI::Init()
             struct TabDef { const char* label; int ui; bool show; };
             TabDef tabs[] = {
                 { "Match",      0, true },
-                { "Lategame",   3, inMatch },
+                { "Lategame",   3, true },
                 { "Playlist",   1, inMatch },
                 { "Creative",   5, inMatch && SelectedPlaylist == static_cast<int>(Playlist::Creative) },
                 { "Custom Map", 6, inMatch && FConfiguration::bIsCustomMap },
@@ -9852,15 +11468,42 @@ void GUI::Init()
                 const float bW = SidebarW - bMargin * 2.f;
                 const bool bAutoHostCountdown =
                     bAutoHostCountdownThisFrame;
+                std::string SafeZoneStartError;
+                const bool bSafeZoneStartValid =
+                    ValidateCustomMovingZoneForStart(
+                        SafeZoneStartError);
                 // Anchor to the visible viewport height (the window is taller than the
                 // actual client area, so using H would push this off-screen).
                 const float visH = ImGui::GetIO().DisplaySize.y;
-                ImGui::SetCursorPos(ImVec2(bMargin, (visH - TopBarH) - bH - bMargin));
+                const float buttonY =
+                    (visH - TopBarH) - bH - bMargin;
+                if (!bSafeZoneStartValid)
+                {
+                    const ImVec2 errorSize = ImGui::CalcTextSize(
+                        SafeZoneStartError.c_str(), nullptr,
+                        false, bW);
+                    ImGui::SetCursorPos(ImVec2(
+                        bMargin,
+                        (std::max)(
+                            8.f,
+                            buttonY - errorSize.y - 10.f)));
+                    ImGui::PushTextWrapPos(
+                        ImGui::GetCursorPosX() + bW);
+                    ImGui::TextColored(
+                        ImVec4(1.f, 0.32f, 0.28f, 1.f),
+                        "%s", SafeZoneStartError.c_str());
+                    ImGui::PopTextWrapPos();
+                }
+                ImGui::SetCursorPos(ImVec2(bMargin, buttonY));
                 const ImVec2 bp = ImGui::GetCursorScreenPos();
                 if (bAutoHostCountdown)
                 {
                     // The normal CTA becomes a display-only countdown while
                     // Auto Hosting owns startup.
+                    ImGui::Dummy(ImVec2(bW, bH));
+                }
+                else if (!bSafeZoneStartValid)
+                {
                     ImGui::Dummy(ImVec2(bW, bH));
                 }
                 else if (ImGui::InvisibleButton(
@@ -9874,14 +11517,18 @@ void GUI::Init()
                 }
                 const bool bHov =
                     !bAutoHostCountdown &&
+                    bSafeZoneStartValid &&
                     ImGui::IsItemHovered();
                 const bool bAct =
                     !bAutoHostCountdown &&
+                    bSafeZoneStartValid &&
                     ImGui::IsItemActive();
                 ImDrawList* bdl = ImGui::GetWindowDrawList();
                 const ImVec4 fillC =
                     bAutoHostCountdown
                         ? ImVec4(0.28f, 0.31f, 0.38f, 1.f)
+                        : (!bSafeZoneStartValid
+                               ? ImVec4(0.34f, 0.16f, 0.18f, 1.f)
                         : (bAct
                                ? ImVec4(
                                      0.62f, 0.66f,
@@ -9890,7 +11537,7 @@ void GUI::Init()
                                       ? ImVec4(
                                             0.88f, 0.91f,
                                             0.97f, 1.f)
-                                      : Accent()));
+                                      : Accent())));
                 bdl->AddRectFilled(bp, ImVec2(bp.x + bW, bp.y + bH), ImGui::GetColorU32(fillC), 6.f);
 
                 char CountdownLabel[48]{};
@@ -9904,12 +11551,18 @@ void GUI::Init()
                         AutoHostCountdownSecondsThisFrame);
                     bLbl = CountdownLabel;
                 }
+                else if (!bSafeZoneStartValid)
+                {
+                    bLbl = "FIX ZONE SETUP";
+                }
                 const ImVec2 bts = ImGui::CalcTextSize(bLbl);
                 const ImVec2 tpos(bp.x + (bW - bts.x) * 0.5f, bp.y + (bH - bts.y) * 0.5f);
                 const ImU32 tcol =
                     bAutoHostCountdown
                         ? ImGui::GetColorU32(Accent())
-                        : IM_COL32(16, 18, 22, 255);
+                        : (!bSafeZoneStartValid
+                               ? IM_COL32(255, 205, 205, 255)
+                               : IM_COL32(16, 18, 22, 255));
                 bdl->AddText(tpos, tcol, bLbl);
                 bdl->AddText(ImVec2(tpos.x + 1.f, tpos.y), tcol, bLbl); // faux-bold
             }
@@ -12238,35 +13891,98 @@ void GUI::Init()
         }
         case 3:
         {
+            enum class ESafeZoneMapGesture
+            {
+                None,
+                PlaceNew
+            };
+            static ESafeZoneMapGesture s_ArmedGesture =
+                ESafeZoneMapGesture::None;
+            static ESafeZoneMapGesture s_DragGesture =
+                ESafeZoneMapGesture::None;
+            static unsigned int s_SafeZoneGestureGeneration =
+                GPreferenceEditorGeneration;
+            if (s_SafeZoneGestureGeneration !=
+                GPreferenceEditorGeneration)
+            {
+                s_ArmedGesture = ESafeZoneMapGesture::None;
+                s_DragGesture = ESafeZoneMapGesture::None;
+                s_SafeZoneGestureGeneration =
+                    GPreferenceEditorGeneration;
+            }
+
+            const bool bLaunchCommitted =
+                FConfiguration::bReadyToStart.load(
+                    std::memory_order_acquire);
+            const EGSStatus currentServerStatus =
+                gsStatus.load(std::memory_order_acquire);
+            const bool bSafeZoneRuntimeCorrectionAllowed =
+                bLaunchCommitted &&
+                currentServerStatus < StartedMatch &&
+                IsCustomMovingZoneRuntimeCorrectionAllowed();
+            const bool bSafeZoneDraftLocked =
+                bLaunchCommitted &&
+                !bSafeZoneRuntimeCorrectionAllowed;
+
             SectionHeader("Lategame Options", SectionWidth);
             BeginSectionBody();
 
-            if (gsStatus < StartedMatch)
+            if (currentServerStatus < StartedMatch || bLaunchCommitted)
             {
                 // Special maps and native objective modes require their normal
                 // phase flow.
                 const bool bLockLateGame =
                     LocksLateGameForSelection(
                         SelectedPlaylist);
-                if (bLockLateGame)
+                if (bLockLateGame && !bLaunchCommitted)
+                {
                     FConfiguration::SetLateGameEnabled(false);
+                    s_ArmedGesture = ESafeZoneMapGesture::None;
+                    s_DragGesture = ESafeZoneMapGesture::None;
+                }
 
-                ImGui::BeginDisabled(bLockLateGame);
+                ImGui::BeginDisabled(
+                    bLockLateGame || bLaunchCommitted);
                 bool bLateGameEnabled = FConfiguration::bLateGame;
                 if (ImGui::Checkbox("Late Game", &bLateGameEnabled))
+                {
                     FConfiguration::SetLateGameEnabled(bLateGameEnabled);
+                    if (!bLateGameEnabled)
+                    {
+                        s_ArmedGesture = ESafeZoneMapGesture::None;
+                        s_DragGesture = ESafeZoneMapGesture::None;
+                    }
+                }
                 ImGui::EndDisabled();
 
                 if (FConfiguration::bLateGame)
                 {
+                    ImGui::BeginDisabled(bLaunchCommitted);
                     if (VersionInfo.FortniteVersion > 2.50)
                         AtomicCheckbox(
                             "Use Moving Bus",
                             FConfiguration::bMovingBus);
 
+                    const bool bMovingZoneOwnsTiming =
+                        FConfiguration::bCustomSafeZone.load(
+                            std::memory_order_acquire) &&
+                        FConfiguration::
+                            IsCustomMovingZoneSnapshotEnabled() &&
+                        IsCustomMovingZoneVersionSupported();
+                    if (bMovingZoneOwnsTiming &&
+                        !bSafeZoneDraftLocked)
+                    {
+                        FConfiguration::bLateGameLongZone.store(
+                            false, std::memory_order_release);
+                    }
+                    ImGui::BeginDisabled(bMovingZoneOwnsTiming);
                     AtomicCheckbox(
                         "Use Long Zone",
                         FConfiguration::bLateGameLongZone);
+                    ImGui::EndDisabled();
+                    if (bMovingZoneOwnsTiming)
+                        ImGui::TextDisabled(
+                            "Long Zone is unavailable while Custom Moving Zone is active.");
                     if (AtomicCheckbox(
                             "Use Versionized Lategame Loadouts",
                             FConfiguration::
@@ -12287,21 +14003,45 @@ void GUI::Init()
                         FConfiguration::
                             bUseVersionizedLoadout = false;
                     }
-                    AtomicCheckbox(
-                        "Custom Safe Zone",
-                        FConfiguration::bCustomSafeZone);
+                    ImGui::EndDisabled();
+
+                    // The parent bit is part of the launch transaction and
+                    // never reopens after commitment. Recovery unlocks only
+                    // the nested moving-zone draft, whose shared_ptr identity
+                    // participates in the preflight freeze handshake.
+                    ImGui::BeginDisabled(bLaunchCommitted);
+                    bool bCustomSafeZoneEnabled =
+                        FConfiguration::bCustomSafeZone.load(
+                            std::memory_order_acquire);
+                    if (ImGui::Checkbox(
+                            "Custom Safe Zone",
+                            &bCustomSafeZoneEnabled) &&
+                        FConfiguration::SetCustomSafeZoneEnabled(
+                            bCustomSafeZoneEnabled) &&
+                        !bCustomSafeZoneEnabled)
+                    {
+                        s_ArmedGesture = ESafeZoneMapGesture::None;
+                        s_DragGesture = ESafeZoneMapGesture::None;
+                    }
+                    ImGui::EndDisabled();
 
                     if (!FConfiguration::bCustomSafeZone)
+                    {
+                        ImGui::BeginDisabled(bLaunchCommitted);
                         AtomicLabeledSliderInt(
                             "Starting Zone",
                             "##starting-zone",
                             FConfiguration::LateGameZone,
                             1, 7, Width);
+                        ImGui::EndDisabled();
+                    }
                     else
                     {
-                        // Interactive minimap: click to place the zone center, drag
-                        // out to set the radius. The numeric inputs below stay live as
-                        // a fine-tune and as a fallback if the map image is unavailable.
+                        // Interactive minimap. Stationary mode deliberately keeps
+                        // its original click-to-place/drag-to-size gesture. Moving
+                        // mode uses an explicit selected node and latched edit mode
+                        // so clicking an overlapping preview cannot move it by
+                        // accident.
                         static ID3D11ShaderResourceView* s_MapSRV = nullptr;
                         static int s_MapW = 0, s_MapH = 0;
                         static int s_RetryIn = 0;
@@ -12309,6 +14049,380 @@ void GUI::Init()
                         static ImVec2 s_MapPan(0.f, 0.f);
                         static bool s_MapPanning = false;
                         static bool s_MapPanningMiddle = false;
+                        static size_t s_SelectedNode = 0;
+                        static size_t s_DragNode = 0;
+
+                        if (bSafeZoneDraftLocked)
+                        {
+                            s_ArmedGesture = ESafeZoneMapGesture::None;
+                            s_DragGesture = ESafeZoneMapGesture::None;
+                        }
+                        ImGui::BeginDisabled(bSafeZoneDraftLocked);
+
+                        FCustomSafeZoneSequence sequence =
+                            SafeZoneMap::EditableSequenceSnapshot();
+                        if (sequence.Nodes.empty())
+                            sequence.Nodes.assign(
+                                1,
+                                SafeZoneMap::LegacyNodeFromConfiguration());
+
+                        const bool bSupportsMovingZone =
+                            IsCustomMovingZoneVersionSupported();
+                        if (!bSupportsMovingZone &&
+                            sequence.bMovingZoneEnabled)
+                        {
+                            if (!bSafeZoneDraftLocked)
+                            {
+                                SafeZoneMap::PublishSequence(
+                                    sequence, false);
+                            }
+                            sequence.bMovingZoneEnabled = false;
+                        }
+
+                        bool bMovingZone = bSupportsMovingZone &&
+                            sequence.bMovingZoneEnabled;
+                        if (bMovingZone &&
+                            SafeZoneMap::ClampRadiiToNonIncreasing(sequence) &&
+                            !bSafeZoneDraftLocked)
+                        {
+                            SafeZoneMap::PublishSequence(sequence, true);
+                        }
+                        ImGui::Indent(12.f);
+                        ImGui::BeginDisabled(!bSupportsMovingZone);
+                        bool bRequestedMovingZone = bMovingZone;
+                        if (ImGui::Checkbox(
+                                "Custom Moving Zone",
+                                &bRequestedMovingZone))
+                        {
+                            if (bRequestedMovingZone)
+                            {
+                                // Node one is the compatibility circle. Adopt any
+                                // stationary edits made since this sequence was
+                                // last active while retaining its outgoing timing.
+                                const auto oldFirst = sequence.Nodes.front();
+                                auto legacy =
+                                    SafeZoneMap::LegacyNodeFromConfiguration();
+                                legacy.HoldBeforeNextSeconds =
+                                    oldFirst.HoldBeforeNextSeconds;
+                                legacy.MoveToNextSeconds =
+                                    oldFirst.MoveToNextSeconds;
+                                sequence.Nodes.front() = legacy;
+                                SafeZoneMap::ClampRadiiToNonIncreasing(
+                                    sequence);
+                                if (SafeZoneMap::PublishSequence(
+                                        sequence, true))
+                                {
+                                    FConfiguration::bLateGameLongZone.store(
+                                        false, std::memory_order_release);
+                                    bMovingZone = true;
+                                }
+                            }
+                            else
+                            {
+                                SafeZoneMap::PublishSequence(sequence, false);
+                                bMovingZone = false;
+                                s_ArmedGesture =
+                                    ESafeZoneMapGesture::None;
+                                s_DragGesture =
+                                    ESafeZoneMapGesture::None;
+                            }
+                        }
+                        ImGui::EndDisabled();
+                        if (!bSupportsMovingZone)
+                        {
+                            ImGui::TextDisabled(
+                                "Moving zones are supported through Fortnite 30.");
+                        }
+                        ImGui::Unindent(12.f);
+
+                        if (!bMovingZone)
+                        {
+                            // Keep the display copy in lock-step with the legacy
+                            // fields without discarding an inactive authored list.
+                            const auto oldFirst = sequence.Nodes.front();
+                            auto legacy =
+                                SafeZoneMap::LegacyNodeFromConfiguration();
+                            legacy.HoldBeforeNextSeconds =
+                                oldFirst.HoldBeforeNextSeconds;
+                            legacy.MoveToNextSeconds =
+                                oldFirst.MoveToNextSeconds;
+                            sequence.Nodes.front() = legacy;
+                            s_SelectedNode = 0;
+                            s_ArmedGesture = ESafeZoneMapGesture::None;
+                        }
+                        else
+                        {
+                            s_SelectedNode = (std::min)(
+                                s_SelectedNode,
+                                sequence.Nodes.size() - 1);
+
+                            // Zone Steps is a peer of Lategame Options visually,
+                            // even though it shares the same configuration scope.
+                            ImGui::Unindent(10.f);
+                            SectionHeader("Zone Steps", SectionWidth);
+                            BeginSectionBody();
+                            ImGui::TextUnformatted("Selected Step");
+                            char selectedCirclePreview[64]{};
+                            snprintf(
+                                selectedCirclePreview,
+                                sizeof(selectedCirclePreview),
+                                s_SelectedNode + 1 == sequence.Nodes.size()
+                                    ? "Step %d of %d (Final)"
+                                    : "Step %d of %d",
+                                (int)s_SelectedNode + 1,
+                                (int)sequence.Nodes.size());
+                            ImGui::SetNextItemWidth(Width);
+                            if (ImGui::BeginCombo(
+                                    "##selected-zone-step",
+                                    selectedCirclePreview))
+                            {
+                                for (size_t index = 0;
+                                    index < sequence.Nodes.size(); ++index)
+                                {
+                                    char circleLabel[64]{};
+                                    if (index + 1 == sequence.Nodes.size())
+                                    {
+                                        snprintf(
+                                            circleLabel,
+                                            sizeof(circleLabel),
+                                            "Step %d  (Final, %.0f m)",
+                                            (int)index + 1,
+                                            sequence.Nodes[index].RadiusCm /
+                                                100.f);
+                                    }
+                                    else
+                                    {
+                                        snprintf(
+                                            circleLabel,
+                                            sizeof(circleLabel),
+                                            "Step %d  (%.0f m)",
+                                            (int)index + 1,
+                                            sequence.Nodes[index].RadiusCm /
+                                                100.f);
+                                    }
+                                    const bool selected =
+                                        index == s_SelectedNode;
+                                    if (ImGui::Selectable(
+                                            circleLabel, selected))
+                                    {
+                                        s_SelectedNode = index;
+                                        s_ArmedGesture =
+                                            ESafeZoneMapGesture::None;
+                                        s_DragGesture =
+                                            ESafeZoneMapGesture::None;
+                                    }
+                                    if (selected)
+                                        ImGui::SetItemDefaultFocus();
+                                }
+                                ImGui::EndCombo();
+                            }
+
+                            const bool canAdd =
+                                sequence.Nodes.size() <
+                                FCustomSafeZoneSequence::MaximumNodeCount;
+                            ImGui::BeginDisabled(!canAdd);
+                            if (ImGui::Button("Add Step"))
+                            {
+                                FCustomSafeZoneNode added =
+                                    sequence.Nodes.back();
+                                added.HoldBeforeNextSeconds.reset();
+                                added.MoveToNextSeconds.reset();
+                                sequence.Nodes.push_back(added);
+                                s_SelectedNode = sequence.Nodes.size() - 1;
+                                s_ArmedGesture =
+                                    ESafeZoneMapGesture::PlaceNew;
+                                SafeZoneMap::PublishSequence(sequence, true);
+                            }
+                            ImGui::EndDisabled();
+                            ImGui::SameLine();
+                            ImGui::BeginDisabled(
+                                sequence.Nodes.size() <= 1);
+                            if (ImGui::Button("Remove Step"))
+                            {
+                                sequence.Nodes.erase(
+                                    sequence.Nodes.begin() + s_SelectedNode);
+                                s_SelectedNode = (std::min)(
+                                    s_SelectedNode,
+                                    sequence.Nodes.size() - 1);
+                                s_ArmedGesture =
+                                    ESafeZoneMapGesture::None;
+                                s_DragGesture =
+                                    ESafeZoneMapGesture::None;
+                                SafeZoneMap::PublishSequence(sequence, true);
+                            }
+                            ImGui::EndDisabled();
+
+                            const bool selectedFinalStep =
+                                s_SelectedNode + 1 == sequence.Nodes.size();
+                            if (selectedFinalStep)
+                            {
+                                bool closeFinalCircle =
+                                    sequence.bCloseFinalCircle;
+                                if (ImGui::Checkbox(
+                                        "Fully Close Final Zone",
+                                        &closeFinalCircle))
+                                {
+                                    sequence.bCloseFinalCircle =
+                                        closeFinalCircle;
+                                    SafeZoneMap::PublishSequence(
+                                        sequence, true);
+                                }
+                            }
+
+                            const bool selectedStepHasTransition =
+                                !selectedFinalStep ||
+                                sequence.bCloseFinalCircle;
+                            if (selectedStepHasTransition)
+                            {
+                                ImGui::PushID((int)s_SelectedNode);
+                                bool timingChanged = false;
+                                timingChanged |=
+                                    OptionalSafeZoneDurationEditor(
+                                        selectedFinalStep
+                                            ? "Hold before closing"
+                                            : "Hold before next circle",
+                                        "##safe-zone-hold-mode",
+                                        "##safe-zone-hold-value",
+                                        sequence.Nodes[s_SelectedNode]
+                                            .HoldBeforeNextSeconds,
+                                        Width, 30.f);
+                                timingChanged |=
+                                    OptionalSafeZoneDurationEditor(
+                                        selectedFinalStep
+                                            ? "Time to fully close"
+                                            : "Move to next circle",
+                                        "##safe-zone-move-mode",
+                                        "##safe-zone-move-value",
+                                        sequence.Nodes[s_SelectedNode]
+                                            .MoveToNextSeconds,
+                                        Width, 30.f);
+                                if (timingChanged)
+                                {
+                                    SafeZoneMap::PublishSequence(
+                                        sequence, true);
+                                }
+                                ImGui::PopID();
+                            }
+
+                            std::string sequenceStartError;
+                            if (!bLaunchCommitted &&
+                                !ValidateCustomMovingZoneForStart(
+                                    sequenceStartError))
+                            {
+                                ImGui::PushTextWrapPos(0.f);
+                                ImGui::TextColored(
+                                    ImVec4(1.f, 0.32f, 0.28f, 1.f),
+                                    "Unable to start: %s",
+                                    sequenceStartError.c_str());
+                                ImGui::PopTextWrapPos();
+                            }
+                            EndSectionBody();
+                            ImGui::Indent(10.f);
+
+                            // Playlist-specific phase capacity is only known
+                            // after the native phase array becomes available on
+                            // the game thread. Surface that synchronized runtime
+                            // result during setup instead of guessing a capacity
+                            // from the Fortnite version.
+                            if (bLaunchCommitted)
+                            {
+                                if (bSafeZoneDraftLocked)
+                                    ImGui::EndDisabled();
+                                ImGui::Unindent(10.f);
+                                SectionHeader(
+                                    "Runtime Validation",
+                                    SectionWidth);
+                                BeginSectionBody();
+                                const auto runtimeStatus =
+                                    CustomSafeZoneRuntime::GetStatus();
+                                const int authoredNodeCount =
+                                    (int)sequence.Nodes.size();
+                                const bool hasTransition =
+                                    HasCustomMovingZoneTransition(sequence);
+
+                                ImGui::PushTextWrapPos(0.f);
+                                if (!hasTransition)
+                                {
+                                    ImGui::TextColored(
+                                        ImVec4(0.45f, 0.88f, 0.58f, 1.f),
+                                        "Custom safe zone is ready. The final "
+                                        "circle will stay open while normal "
+                                        "storm phases continue.");
+                                }
+                                else if (runtimeStatus.Failure ==
+                                    ECustomSafeZoneRuntimeFailure::NotRequested)
+                                {
+                                    ImGui::TextColored(
+                                        ImVec4(1.f, 0.76f, 0.28f, 1.f),
+                                        "Checking that this map has enough "
+                                        "storm phases for your zone steps...");
+                                }
+                                else if (runtimeStatus.Failure ==
+                                    ECustomSafeZoneRuntimeFailure::None &&
+                                    runtimeStatus.NodeCount == authoredNodeCount &&
+                                    runtimeStatus.bCloseFinalCircle ==
+                                        sequence.bCloseFinalCircle)
+                                {
+                                    if (sequence.bCloseFinalCircle)
+                                    {
+                                        ImGui::TextColored(
+                                            ImVec4(0.45f, 0.88f, 0.58f, 1.f),
+                                            "Custom moving zone is ready. All "
+                                            "%d zone steps and the final full "
+                                            "close fit this map's storm sequence.",
+                                            authoredNodeCount);
+                                    }
+                                    else
+                                    {
+                                        ImGui::TextColored(
+                                            ImVec4(0.45f, 0.88f, 0.58f, 1.f),
+                                            "Custom moving zone is ready. All "
+                                            "%d zone steps fit this map, and "
+                                            "the final circle will stay open.",
+                                            authoredNodeCount);
+                                    }
+                                }
+                                else if (runtimeStatus.Failure ==
+                                    ECustomSafeZoneRuntimeFailure::None)
+                                {
+                                    ImGui::TextColored(
+                                        ImVec4(1.f, 0.76f, 0.28f, 1.f),
+                                        "Rechecking your latest zone changes...");
+                                }
+                                else
+                                {
+                                    std::string runtimeError;
+                                    if (ValidateCustomMovingZoneForStart(
+                                            runtimeError) ||
+                                        runtimeError.empty())
+                                    {
+                                        runtimeError =
+                                            "The custom zones could not be set "
+                                            "up. Adjust the zone steps or turn "
+                                            "Custom Moving Zone off; setup will "
+                                            "retry automatically.";
+                                    }
+                                    ImGui::TextColored(
+                                        ImVec4(1.f, 0.32f, 0.28f, 1.f),
+                                        "Unable to start: %s",
+                                        runtimeError.c_str());
+                                }
+                                ImGui::PopTextWrapPos();
+                                if (bSafeZoneRuntimeCorrectionAllowed)
+                                {
+                                    ImGui::PushTextWrapPos(0.f);
+                                    ImGui::TextDisabled(
+                                        "Edit the zone steps above. Server setup "
+                                        "will retry automatically after each change.");
+                                    ImGui::PopTextWrapPos();
+                                }
+                                EndSectionBody();
+                                ImGui::Indent(10.f);
+                                if (bSafeZoneDraftLocked)
+                                    ImGui::BeginDisabled(true);
+                            }
+                        }
+
                         if (!s_MapSRV) // retry until the minimap texture becomes resident
                         {
                             // Pixels produced by TickFlush should be uploaded on the
@@ -12322,6 +14436,24 @@ void GUI::Init()
                         }
 
                         const SafeZoneMap::MapTransform map = SafeZoneMap::GetTransform();
+
+                        if (bMovingZone)
+                        {
+                            if (s_ArmedGesture ==
+                                ESafeZoneMapGesture::PlaceNew)
+                            {
+                                ImGui::TextDisabled(
+                                    "Click and drag to place step %d.",
+                                    (int)s_SelectedNode + 1);
+                            }
+                        }
+
+                        // A committed draft is read-only, but the map remains
+                        // an interactive preview. Temporarily leave the disabled
+                        // scope for navigation, then explicitly suppress every
+                        // geometry-edit gesture below.
+                        if (bSafeZoneDraftLocked)
+                            ImGui::EndDisabled();
 
                         if (s_MapSRV)
                         {
@@ -12340,6 +14472,43 @@ void GUI::Init()
                                 s_MapPan.y = SafeZoneMap::Clamp(s_MapPan.y, minPan, 0.f);
                             };
                             ClampMapPan();
+
+                            auto BuildProjectedCircles = [&]()
+                            {
+                                std::vector<SafeZoneMap::ProjectedCircle>
+                                    projected;
+                                const size_t count = bMovingZone
+                                    ? sequence.Nodes.size()
+                                    : (std::min)(
+                                        (size_t)1,
+                                        sequence.Nodes.size());
+                                projected.reserve(count);
+                                for (size_t i = 0; i < count; ++i)
+                                {
+                                    const auto& node = sequence.Nodes[i];
+                                    float lx = 0.f;
+                                    float ly = 0.f;
+                                    SafeZoneMap::WorldToPixel(
+                                        (float)node.Center.X,
+                                        (float)node.Center.Y,
+                                        S, map, lx, ly);
+                                    ImVec2 radius =
+                                        SafeZoneMap::RadiusToPixelAxes(
+                                            node.RadiusCm, S, map);
+                                    radius.x *= s_MapZoom;
+                                    radius.y *= s_MapZoom;
+                                    projected.push_back({
+                                        i,
+                                        ImVec2(
+                                            r0.x + s_MapPan.x +
+                                                lx * s_MapZoom,
+                                            r0.y + s_MapPan.y +
+                                                ly * s_MapZoom),
+                                        radius
+                                    });
+                                }
+                                return projected;
+                            };
 
                             // Ctrl + wheel zooms toward the mouse so the point under
                             // the cursor remains stationary. The canvas itself stays
@@ -12396,64 +14565,229 @@ void GUI::Init()
                                     ClampMapPan();
                                 }
                             }
-                            // Press => set center; drag => set radius from that center.
-                            else
+                            else if (!bSafeZoneDraftLocked)
                             {
-                                if (ImGui::IsItemActivated())
+                                const auto MouseToNormalized =
+                                    [&](const ImVec2& mouse,
+                                        float& u,
+                                        float& v)
                                 {
-                                    const ImVec2 m = io.MousePos;
-                                    const float u = SafeZoneMap::Clamp(
-                                        (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
-                                    const float v = SafeZoneMap::Clamp(
-                                        (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
-                                    SafeZoneMap::RememberSelection(u, v);
-                                    float wx, wy;
-                                    SafeZoneMap::PixelToWorld(u, v, 1.f, map, wx, wy);
-                                    FConfiguration::CustomSafeZoneCenter.X = wx;
-                                    FConfiguration::CustomSafeZoneCenter.Y = wy;
+                                    u = SafeZoneMap::Clamp(
+                                        (mouse.x - r0.x - s_MapPan.x) /
+                                            (S * s_MapZoom),
+                                        0.f, 1.f);
+                                    v = SafeZoneMap::Clamp(
+                                        (mouse.y - r0.y - s_MapPan.y) /
+                                            (S * s_MapZoom),
+                                        0.f, 1.f);
+                                };
+                                const auto SetNodeCenter =
+                                    [&](FCustomSafeZoneNode& node,
+                                        const ImVec2& mouse)
+                                {
+                                    float u = 0.5f;
+                                    float v = 0.5f;
+                                    MouseToNormalized(mouse, u, v);
+                                    float worldX = 0.f;
+                                    float worldY = 0.f;
+                                    SafeZoneMap::PixelToWorld(
+                                        u, v, 1.f, map,
+                                        worldX, worldY);
+                                    node.Center.X = worldX;
+                                    node.Center.Y = worldY;
+                                    node.bHasNormalizedCenter = true;
+                                    node.NormalizedU = u;
+                                    node.NormalizedV = v;
+                                };
+                                const auto SetNodeRadius =
+                                    [&](FCustomSafeZoneNode& node,
+                                        size_t nodeIndex,
+                                        const ImVec2& mouse)
+                                {
+                                    float u = 0.5f;
+                                    float v = 0.5f;
+                                    MouseToNormalized(mouse, u, v);
+                                    float mouseX = 0.f;
+                                    float mouseY = 0.f;
+                                    SafeZoneMap::PixelToWorld(
+                                        u, v, 1.f, map,
+                                        mouseX, mouseY);
+                                    const float dx = mouseX -
+                                        (float)node.Center.X;
+                                    const float dy = mouseY -
+                                        (float)node.Center.Y;
+                                    const float maximumRadius = nodeIndex > 0
+                                        ? sequence.Nodes[nodeIndex - 1].RadiusCm
+                                        : FCustomSafeZoneSequence::
+                                            MaximumRadiusCm;
+                                    node.RadiusCm = SafeZoneMap::Clamp(
+                                        sqrtf(dx * dx + dy * dy),
+                                        FCustomSafeZoneSequence::
+                                            MinimumRadiusCm,
+                                        maximumRadius);
+                                };
+
+                                if (!bMovingZone)
+                                {
+                                    // Original stationary interaction: press sets
+                                    // center and the same drag sets radius.
+                                    if (ImGui::IsItemActivated())
+                                    {
+                                        auto node =
+                                            SafeZoneMap::LegacyNodeFromConfiguration();
+                                        SetNodeCenter(node, io.MousePos);
+                                        sequence.Nodes.front().Center =
+                                            node.Center;
+                                        sequence.Nodes.front()
+                                            .bHasNormalizedCenter = true;
+                                        sequence.Nodes.front().NormalizedU =
+                                            node.NormalizedU;
+                                        sequence.Nodes.front().NormalizedV =
+                                            node.NormalizedV;
+                                        SafeZoneMap::PublishSequence(
+                                            sequence, false);
+                                    }
+                                    if (ImGui::IsItemActive() &&
+                                        ImGui::IsMouseDragging(
+                                            ImGuiMouseButton_Left))
+                                    {
+                                        auto node =
+                                            SafeZoneMap::LegacyNodeFromConfiguration();
+                                        SetNodeRadius(node, 0, io.MousePos);
+                                        sequence.Nodes.front().RadiusCm =
+                                            node.RadiusCm;
+                                        SafeZoneMap::PublishSequence(
+                                            sequence, false);
+                                    }
                                 }
-                                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                                else
                                 {
-                                    const ImVec2 m = io.MousePos;
-                                    const float u = SafeZoneMap::Clamp(
-                                        (m.x - r0.x - s_MapPan.x) / (S * s_MapZoom), 0.f, 1.f);
-                                    const float v = SafeZoneMap::Clamp(
-                                        (m.y - r0.y - s_MapPan.y) / (S * s_MapZoom), 0.f, 1.f);
-                                    float mouseX, mouseY;
-                                    SafeZoneMap::PixelToWorld(u, v, 1.f, map, mouseX, mouseY);
-                                    const float dx = mouseX - (float)FConfiguration::CustomSafeZoneCenter.X;
-                                    const float dy = mouseY - (float)FConfiguration::CustomSafeZoneCenter.Y;
-                                    FConfiguration::CustomSafeZoneRadius =
-                                        SafeZoneMap::Clamp(sqrtf(dx * dx + dy * dy), 500.f, 100000.f);
+                                    bool sequenceChanged = false;
+                                    if (ImGui::IsItemActivated())
+                                    {
+                                        s_DragNode = s_SelectedNode;
+                                        s_DragGesture =
+                                            ESafeZoneMapGesture::PlaceNew;
+                                        s_ArmedGesture =
+                                            ESafeZoneMapGesture::None;
+                                        SetNodeCenter(
+                                            sequence.Nodes[s_DragNode],
+                                            io.MousePos);
+                                        sequenceChanged = true;
+                                    }
+
+                                    if (ImGui::IsItemActive() &&
+                                        s_DragGesture ==
+                                            ESafeZoneMapGesture::PlaceNew &&
+                                        s_DragNode < sequence.Nodes.size() &&
+                                        ImGui::IsMouseDragging(
+                                            ImGuiMouseButton_Left))
+                                    {
+                                        SetNodeRadius(
+                                            sequence.Nodes[s_DragNode],
+                                            s_DragNode,
+                                            io.MousePos);
+                                        SafeZoneMap::ClampRadiiToNonIncreasing(
+                                            sequence);
+                                        sequenceChanged = true;
+                                    }
+                                    if (!ImGui::IsItemActive())
+                                    {
+                                        s_DragGesture =
+                                            ESafeZoneMapGesture::None;
+                                    }
+
+                                    if (sequenceChanged)
+                                    {
+                                        SafeZoneMap::PublishSequence(
+                                            sequence, true);
+                                    }
                                 }
                             }
 
-                            // Overlay the stored center + radius every frame (also when idle).
+                            if (!bMovingZone)
+                            {
+                                const auto oldFirst = sequence.Nodes.front();
+                                auto legacy =
+                                    SafeZoneMap::LegacyNodeFromConfiguration();
+                                legacy.HoldBeforeNextSeconds =
+                                    oldFirst.HoldBeforeNextSeconds;
+                                legacy.MoveToNextSeconds =
+                                    oldFirst.MoveToNextSeconds;
+                                sequence.Nodes.front() = legacy;
+                            }
+
+                            // Render one storm pass outside the union of every
+                            // step. Circle interiors and their intersections stay
+                            // clear regardless of selection or overlap.
                             ImDrawList* dl = ImGui::GetWindowDrawList();
                             dl->PushClipRect(r0, r1, true);
                             const ImVec2 imageMin(r0.x + s_MapPan.x, r0.y + s_MapPan.y);
                             const ImVec2 imageMax(imageMin.x + S * s_MapZoom, imageMin.y + S * s_MapZoom);
                             dl->AddImage((void*)s_MapSRV, imageMin, imageMax, uv0, uv1);
-                            float lx, ly;
-                            SafeZoneMap::WorldToPixel((float)FConfiguration::CustomSafeZoneCenter.X,
-                                                      (float)FConfiguration::CustomSafeZoneCenter.Y, S, map, lx, ly);
-                            const ImVec2 c(r0.x + s_MapPan.x + lx * s_MapZoom,
-                                           r0.y + s_MapPan.y + ly * s_MapZoom);
-                            ImVec2 rpx = SafeZoneMap::RadiusToPixelAxes(
-                                FConfiguration::CustomSafeZoneRadius, S, map);
-                            rpx.x *= s_MapZoom;
-                            rpx.y *= s_MapZoom;
-                            // Storm shading: everything outside the safe circle is purple (~0.5 alpha).
-                            SafeZoneMap::FillOutsideEllipse(dl, r0, r1, c, rpx, IM_COL32(140, 40, 200, 128));
-                            SafeZoneMap::DrawStormBands(dl, r0, r1, c, rpx, IM_COL32(205, 80, 235, 105));
-                            dl->AddEllipseFilled(c, rpx, IM_COL32(90, 160, 255, 40), 0.f, 96);
-                            dl->AddEllipse(c, rpx, IM_COL32(130, 200, 255, 230), 0.f, 96, 2.f);
-                            // Center marker (dot).
-                            dl->AddCircleFilled(c, 4.f, IM_COL32(255, 255, 255, 235));
-                            dl->AddCircle(c, 4.f, IM_COL32(20, 30, 60, 200), 0, 1.5f);
+                            const auto projected = BuildProjectedCircles();
+                            if (SafeZoneMap::StormBackgroundPassCount(
+                                    projected.size()) == 1)
+                            {
+                                SafeZoneMap::FillOutsideCircleUnion(
+                                    dl, r0, r1, projected,
+                                    IM_COL32(140, 40, 200, 128));
+                                SafeZoneMap::DrawStormBandsOutsideCircleUnion(
+                                    dl, r0, r1, projected,
+                                    IM_COL32(205, 80, 235, 105));
+                            }
+
+                            if (bMovingZone)
+                            {
+                                for (size_t i = 0;
+                                    i + 1 < projected.size(); ++i)
+                                {
+                                    SafeZoneMap::DrawTransitionArrow(
+                                        dl, projected[i], projected[i + 1],
+                                        IM_COL32(255, 205, 80, 235));
+                                }
+                            }
+
+                            for (size_t i = 0; i < projected.size(); ++i)
+                            {
+                                const bool selected =
+                                    bMovingZone && i == s_SelectedNode;
+                                const ImU32 outline = selected
+                                    ? IM_COL32(255, 205, 80, 245)
+                                    : IM_COL32(110, 195, 255, 240);
+                                dl->AddEllipse(
+                                    projected[i].Center,
+                                    projected[i].Radius,
+                                    outline, 0.f, 96,
+                                    2.f);
+                            }
+
+                            if (bMovingZone)
+                            {
+                                for (size_t i = 0;
+                                    i < projected.size(); ++i)
+                                {
+                                    SafeZoneMap::DrawStepNumberAtCenter(
+                                        dl, projected[i],
+                                        (int)i + 1,
+                                        i == s_SelectedNode);
+                                }
+                            }
+                            else if (!projected.empty())
+                            {
+                                dl->AddCircleFilled(
+                                    projected.front().Center, 4.f,
+                                    IM_COL32(255, 255, 255, 235));
+                                dl->AddCircle(
+                                    projected.front().Center, 4.f,
+                                    IM_COL32(20, 30, 60, 200),
+                                    0, 1.5f);
+                            }
                             dl->PopClipRect();
 
-                            ImGui::TextDisabled("Ctrl + wheel to zoom  |  Ctrl + drag to pan  |  %.0f%%", s_MapZoom * 100.f);
+                            ImGui::TextDisabled(
+                                "Ctrl + wheel to zoom  |  Ctrl/middle drag to pan  |  %.0f%%",
+                                s_MapZoom * 100.f);
                             ImGui::Spacing();
                         }
                         else
@@ -12464,36 +14798,81 @@ void GUI::Init()
                                 ImGui::TextDisabled("Map image unavailable - set coordinates manually.");
                         }
 
-                        // Numeric readout + fine-tune (always available).
-                        float cx = (float)FConfiguration::CustomSafeZoneCenter.X;
-                        float cy = (float)FConfiguration::CustomSafeZoneCenter.Y;
+                        if (bSafeZoneDraftLocked)
+                            ImGui::BeginDisabled(true);
+
+                        // Numeric fine-tuning remains available without a map.
+                        s_SelectedNode = (std::min)(
+                            s_SelectedNode,
+                            sequence.Nodes.size() - 1);
+                        const size_t editIndex =
+                            bMovingZone ? s_SelectedNode : 0;
+                        auto editedNode = sequence.Nodes[editIndex];
+                        float cx = (float)editedNode.Center.X;
+                        float cy = (float)editedNode.Center.Y;
+                        bool nodeChanged = false;
+
+                        if (bMovingZone)
+                        {
+                            ImGui::Text(
+                                "Step %d",
+                                (int)editIndex + 1);
+                        }
 
                         ImGui::SetNextItemWidth(Width);
                         if (ImGui::InputFloat("Center X", &cx))
                         {
-                            SafeZoneMap::ForgetNormalizedSelection();
-                            FConfiguration::CustomSafeZoneCenter.X = cx;
+                            editedNode.Center.X = cx;
+                            editedNode.bHasNormalizedCenter = false;
+                            nodeChanged = true;
                         }
                         ImGui::SetNextItemWidth(Width);
                         if (ImGui::InputFloat("Center Y", &cy))
                         {
-                            SafeZoneMap::ForgetNormalizedSelection();
-                            FConfiguration::CustomSafeZoneCenter.Y = cy;
+                            editedNode.Center.Y = cy;
+                            editedNode.bHasNormalizedCenter = false;
+                            nodeChanged = true;
                         }
 
-                        float RadiusMeters = FConfiguration::CustomSafeZoneRadius / 100.f;
-                        if (LabeledSliderFloat("Radius", "##custom-sz-radius", &RadiusMeters, 5.f, 1000.f, "%.0f m", Width))
+                        float RadiusMeters = editedNode.RadiusCm / 100.f;
+                        const float maximumRadiusCm =
+                            bMovingZone && editIndex > 0
+                            ? sequence.Nodes[editIndex - 1].RadiusCm
+                            : FCustomSafeZoneSequence::MaximumRadiusCm;
+                        if (LabeledSliderFloat(
+                                "Radius", "##custom-sz-radius",
+                                &RadiusMeters,
+                                FCustomSafeZoneSequence::MinimumRadiusCm /
+                                    100.f,
+                                maximumRadiusCm / 100.f,
+                                "%.0f m", Width))
                         {
-                            FConfiguration::CustomSafeZoneRadius = RadiusMeters * 100.f;
+                            editedNode.RadiusCm = RadiusMeters * 100.f;
+                            nodeChanged = true;
                         }
+
+                        if (nodeChanged)
+                        {
+                            sequence.Nodes[editIndex] = editedNode;
+                            if (bMovingZone)
+                            {
+                                SafeZoneMap::ClampRadiiToNonIncreasing(
+                                    sequence);
+                            }
+                            SafeZoneMap::PublishSequence(
+                                sequence, bMovingZone);
+                        }
+
+                        ImGui::EndDisabled();
                     }
                 }
             }
 
             EndSectionBody();
 
-            if (gsStatus < StartedMatch && FConfiguration::bLateGame)
+            if (FConfiguration::bLateGame)
             {
+            ImGui::BeginDisabled(bLaunchCommitted);
             static char PrimaryWeaponBuffer[256] = { 0 };
             static char SecondaryWeaponBuffer[256] = { 0 };
             static char TertiaryWeaponBuffer[256] = { 0 };
@@ -12664,7 +15043,8 @@ void GUI::Init()
 
                 EndSectionBody();
             }
-            } // gsStatus < StartedMatch
+            ImGui::EndDisabled();
+            } // Lategame loadout preview
 
             break;
         }
@@ -13249,7 +15629,8 @@ void GUI::Init()
             BeginSectionBody();
 
             static char TrickshotName[128]{};
-            static std::vector<std::string> SavedTrickshots;
+            static std::vector<TrickshotManager::FPresetEntry>
+                TrickshotPresets;
             static int SelectedTrickshot = -1;
             static std::string TrickshotMessage;
             static bool InitializedTrickshotList = false;
@@ -13259,29 +15640,34 @@ void GUI::Init()
             if (!InitializedTrickshotList ||
                 NowMs >= NextTrickshotListRefreshAtMs)
             {
-                const std::string SelectedName =
+                const std::string SelectedId =
                     SelectedTrickshot >= 0 &&
-                    SelectedTrickshot < SavedTrickshots.size()
-                        ? SavedTrickshots[SelectedTrickshot]
+                    SelectedTrickshot < TrickshotPresets.size()
+                        ? TrickshotPresets[SelectedTrickshot].Id
                         : "";
                 bool bRefreshSucceeded = false;
-                auto RefreshedTrickshots =
-                    TrickshotManager::GetSavedNames(
+                auto RefreshedPresets =
+                    TrickshotManager::GetAvailablePresets(
                         &bRefreshSucceeded);
-                if (bRefreshSucceeded &&
-                    RefreshedTrickshots != SavedTrickshots)
+                if ((bRefreshSucceeded ||
+                        !InitializedTrickshotList) &&
+                    RefreshedPresets != TrickshotPresets)
                 {
-                    SavedTrickshots =
-                        std::move(RefreshedTrickshots);
-                    auto Selected = std::find(
-                        SavedTrickshots.begin(),
-                        SavedTrickshots.end(), SelectedName);
+                    TrickshotPresets =
+                        std::move(RefreshedPresets);
+                    auto Selected = std::find_if(
+                        TrickshotPresets.begin(),
+                        TrickshotPresets.end(),
+                        [&](const TrickshotManager::FPresetEntry& Entry)
+                        {
+                            return Entry.Id == SelectedId;
+                        });
                     SelectedTrickshot =
-                        SelectedName.empty() ||
-                        Selected == SavedTrickshots.end()
+                        SelectedId.empty() ||
+                        Selected == TrickshotPresets.end()
                             ? -1
                             : static_cast<int>(std::distance(
-                                SavedTrickshots.begin(), Selected));
+                                TrickshotPresets.begin(), Selected));
                 }
                 InitializedTrickshotList = true;
                 NextTrickshotListRefreshAtMs = NowMs + 500ULL;
@@ -13306,31 +15692,50 @@ void GUI::Init()
                     const std::string SavedName =
                         TrickshotManager::SanitizeName(
                             CompletedName.c_str());
+                    const std::string SavedId =
+                        "saved:" + SavedName;
                     bool bRefreshSucceeded = false;
-                    auto RefreshedTrickshots =
-                        TrickshotManager::GetSavedNames(
+                    auto RefreshedPresets =
+                        TrickshotManager::GetAvailablePresets(
                             &bRefreshSucceeded);
                     if (bRefreshSucceeded)
-                        SavedTrickshots =
-                            std::move(RefreshedTrickshots);
-                    if (std::find(
-                            SavedTrickshots.begin(),
-                            SavedTrickshots.end(), SavedName) ==
-                        SavedTrickshots.end())
+                        TrickshotPresets =
+                            std::move(RefreshedPresets);
+                    const auto HasSavedPreset = std::find_if(
+                        TrickshotPresets.begin(),
+                        TrickshotPresets.end(),
+                        [&](const TrickshotManager::FPresetEntry& Entry)
+                        {
+                            return Entry.Id == SavedId;
+                        });
+                    if (HasSavedPreset == TrickshotPresets.end())
                     {
-                        SavedTrickshots.push_back(SavedName);
-                        std::sort(
-                            SavedTrickshots.begin(),
-                            SavedTrickshots.end());
+                        TrickshotPresets.push_back(
+                            TrickshotManager::MakeSavedPresetEntry(
+                                SavedName));
+                        std::stable_sort(
+                            TrickshotPresets.begin(),
+                            TrickshotPresets.end(),
+                            [](const TrickshotManager::FPresetEntry& Left,
+                               const TrickshotManager::FPresetEntry& Right)
+                            {
+                                if (Left.BuiltIn != Right.BuiltIn)
+                                    return Left.BuiltIn;
+                                return Left.Name < Right.Name;
+                            });
                     }
-                    auto It = std::find(
-                        SavedTrickshots.begin(),
-                        SavedTrickshots.end(), SavedName);
+                    auto It = std::find_if(
+                        TrickshotPresets.begin(),
+                        TrickshotPresets.end(),
+                        [&](const TrickshotManager::FPresetEntry& Entry)
+                        {
+                            return Entry.Id == SavedId;
+                        });
                     SelectedTrickshot =
-                        It == SavedTrickshots.end()
+                        It == TrickshotPresets.end()
                             ? -1
                             : static_cast<int>(std::distance(
-                                SavedTrickshots.begin(), It));
+                                TrickshotPresets.begin(), It));
                 }
             }
 
@@ -13338,14 +15743,21 @@ void GUI::Init()
             ImGui::InputTextWithHint("##trickshot-name", "Trickshot Name", TrickshotName, IM_ARRAYSIZE(TrickshotName));
 
             ImGui::SetNextItemWidth(Width);
-            const char* Preview = SelectedTrickshot >= 0 && SelectedTrickshot < SavedTrickshots.size()
-                ? SavedTrickshots[SelectedTrickshot].c_str() : "Select Saved Trickshot";
+            const char* Preview = SelectedTrickshot >= 0 &&
+                SelectedTrickshot < TrickshotPresets.size()
+                ? TrickshotPresets[SelectedTrickshot]
+                    .DisplayName.c_str()
+                : "Select Trickshot Preset";
             if (ImGui::BeginCombo("##saved-trickshots", Preview))
             {
-                for (int Index = 0; Index < SavedTrickshots.size(); ++Index)
+                for (int Index = 0;
+                    Index < TrickshotPresets.size(); ++Index)
                 {
                     const bool Selected = Index == SelectedTrickshot;
-                    if (ImGui::Selectable(SavedTrickshots[Index].c_str(), Selected))
+                    if (ImGui::Selectable(
+                            TrickshotPresets[Index]
+                                .DisplayName.c_str(),
+                            Selected))
                         SelectedTrickshot = Index;
                     if (Selected)
                         ImGui::SetItemDefaultFocus();
@@ -13364,12 +15776,17 @@ void GUI::Init()
             {
                 TrickshotManager::RequestLoad(
                     SelectedTrickshot >= 0 &&
-                        SelectedTrickshot < SavedTrickshots.size()
-                        ? SavedTrickshots[SelectedTrickshot]
+                        SelectedTrickshot < TrickshotPresets.size()
+                        ? TrickshotPresets[SelectedTrickshot].Id
                         : "",
                     TrickshotMessage);
             }
 
+            const bool SelectedBuiltInPreset =
+                SelectedTrickshot >= 0 &&
+                SelectedTrickshot < TrickshotPresets.size() &&
+                TrickshotPresets[SelectedTrickshot].BuiltIn;
+            ImGui::BeginDisabled(SelectedBuiltInPreset);
             if (ImGui::Button("Delete", ImVec2(ButtonWidth, Height)))
             {
                 if (TrickshotManager::IsBusy())
@@ -13381,33 +15798,40 @@ void GUI::Init()
                 {
                     const std::string SelectedName =
                         SelectedTrickshot >= 0 &&
-                            SelectedTrickshot < SavedTrickshots.size()
-                            ? SavedTrickshots[SelectedTrickshot]
+                            SelectedTrickshot < TrickshotPresets.size() &&
+                            !TrickshotPresets[SelectedTrickshot].BuiltIn
+                            ? TrickshotPresets[SelectedTrickshot].Name
                             : "";
                     if (TrickshotManager::Delete(
                             SelectedName, TrickshotMessage))
                     {
-                        SavedTrickshots.erase(
-                            std::remove(
-                                SavedTrickshots.begin(),
-                                SavedTrickshots.end(), SelectedName),
-                            SavedTrickshots.end());
+                        TrickshotPresets.erase(
+                            std::remove_if(
+                                TrickshotPresets.begin(),
+                                TrickshotPresets.end(),
+                                [&](const TrickshotManager::FPresetEntry& Entry)
+                                {
+                                    return !Entry.BuiltIn &&
+                                        Entry.Name == SelectedName;
+                                }),
+                            TrickshotPresets.end());
                         bool bRefreshSucceeded = false;
-                        auto RefreshedTrickshots =
-                            TrickshotManager::GetSavedNames(
+                        auto RefreshedPresets =
+                            TrickshotManager::GetAvailablePresets(
                                 &bRefreshSucceeded);
                         if (bRefreshSucceeded)
-                            SavedTrickshots =
-                                std::move(RefreshedTrickshots);
-                        SelectedTrickshot = SavedTrickshots.empty()
+                            TrickshotPresets =
+                                std::move(RefreshedPresets);
+                        SelectedTrickshot = TrickshotPresets.empty()
                             ? -1
                             : (std::min)(
                                 SelectedTrickshot,
                                 static_cast<int>(
-                                    SavedTrickshots.size()) - 1);
+                                    TrickshotPresets.size()) - 1);
                     }
                 }
             }
+            ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::Button("Open Folder", ImVec2(ButtonWidth, Height)))
                 TrickshotManager::OpenDirectory(TrickshotMessage);
@@ -13464,7 +15888,7 @@ void GUI::Init()
             ImGui::TextUnformatted("MAGNESIUM");
             ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 1.f));
-            ImGui::TextUnformatted("Gameserver  -  v2.5.0");
+            ImGui::TextUnformatted("Gameserver  -  v2.6.0");
             ImGui::PopStyleColor();
             ImGui::EndGroup();
 

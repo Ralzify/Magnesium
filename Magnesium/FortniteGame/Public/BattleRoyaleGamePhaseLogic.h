@@ -44,6 +44,7 @@ public:
 	static void RequestSafeZonePaused(bool bPaused);
 	static void SetSafeZonePaused(bool bPaused);
 	static void TickSafeZonePause();
+	static void ResetSafeZonePauseForMatch(UWorld* World);
 
 	DEFINE_PROP(WarmupCountdownStartTime, float);
 	DEFINE_PROP(WarmupCountdownEndTime, float);

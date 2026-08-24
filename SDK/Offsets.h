@@ -95,6 +95,8 @@ namespace SDK
 	{
 		double EngineVersion = 0.f;
 		double FortniteVersion = 0.f;
+		uint64_t FortniteChangelist = 0;
+		bool bExactBuildIdentity = false;
 	};
 	struct FStringNoOps
 	{
@@ -197,6 +199,9 @@ namespace SDK
 		{
 			return false;
 		}
+		OutVersionInfo.FortniteChangelist = FortniteCL;
+		OutVersionInfo.bExactBuildIdentity =
+			FortniteCL != 99999999;
 
 		if (FortniteCL < 3901517)
 		{

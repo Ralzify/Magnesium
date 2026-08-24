@@ -6,8 +6,10 @@
 #include <Shellapi.h>
 #include <atomic>
 #include <string>
+#include <vector>
 
 class AFortAthenaMapInfo;
+struct FCustomSafeZoneNode;
 
 enum EGSStatus
 {
@@ -166,6 +168,30 @@ public:
     // server tick hooks; it also refreshes the authoritative map transform.
     static void SafeZoneMapGameTick();
     static void ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo);
+    // Reports whether normalized moving-zone nodes can be projected using a
+    // stable transform for this match. Original Athena has a known capture
+    // transform; newer maps must publish runtime map data beyond MapInfo's
+    // provisional center-only fallback.
+    static bool IsCustomSafeZoneMapProjectionReady(
+        AFortAthenaMapInfo* MapInfo);
+    // Game-thread-only pure projection helper for authored moving-zone nodes.
+    // Resolves normalized minimap coordinates without mutating configuration;
+    // the caller's Z component is preserved.
+    static bool TryResolveSafeZoneMapPoint(
+        AFortAthenaMapInfo* MapInfo,
+        float U,
+        float V,
+        FVector& OutCenter);
+    // Resolves a complete immutable draft with one authoritative transform
+    // lookup. Non-normalized nodes are copied unchanged and the output is
+    // replaced only after every normalized node projects successfully.
+    static bool TryResolveSafeZoneMapPoints(
+        AFortAthenaMapInfo* MapInfo,
+        const std::vector<FCustomSafeZoneNode>& Nodes,
+        std::vector<FVector>& OutCenters);
+#if defined(_DEBUG)
+    static void RunCustomSafeZoneRenderSelfTests();
+#endif
 
     // Records an actor created by the authoritative `spawn`/`summon` command
     // while Trickshot mode and spawned-object tracking are enabled. The preset

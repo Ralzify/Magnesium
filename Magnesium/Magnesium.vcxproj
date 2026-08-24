@@ -77,6 +77,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)$(Platform)\Debug\</OutDir>
     <IntDir>$(Platform)\Debug\</IntDir>
+    <IncludePath>.;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -192,6 +193,7 @@
     <ClInclude Include="Erbium\Support\Public\SupportTypes.h" />
     <ClInclude Include="Erbium\Support\Public\VersionFeatureAdapter.h" />
     <ClInclude Include="FortniteGame\Public\BattleRoyaleGamePhaseLogic.h" />
+    <ClInclude Include="FortniteGame\Public\CustomSafeZoneRuntime.h" />
     <ClInclude Include="FortniteGame\Public\BuildingContainer.h" />
     <ClInclude Include="FortniteGame\Public\BuildingFoundation.h" />
     <ClInclude Include="FortniteGame\Public\FortAthenaSpawningPolicyManager.h" />
@@ -235,6 +237,7 @@
     <ClInclude Include="ImGui\imgui_stdlib.h" />
     <ClInclude Include="json.hpp" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="Resource.h" />
     <ClInclude Include="SplashImage.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="stb_image_write.h" />
@@ -254,6 +257,7 @@
     <ClCompile Include="Erbium\Private\Misc.cpp" />
     <ClCompile Include="Erbium\Support\Private\VersionFeatureAdapter.cpp" />
     <ClCompile Include="FortniteGame\Private\BattleRoyaleGamePhaseLogic.cpp" />
+    <ClCompile Include="FortniteGame\Private\CustomSafeZoneRuntime.cpp" />
     <ClCompile Include="FortniteGame\Private\BuildingFoundation.cpp" />
     <ClCompile Include="FortniteGame\Private\BuildingSMActor.cpp" />
     <ClCompile Include="FortniteGame\Private\FortAthenaCreativePortal.cpp" />
@@ -285,6 +289,12 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Resources.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Erbium\Resources\TrickshotPresets\BlockWinner_15Bandit.json" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

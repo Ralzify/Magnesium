@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Public/FortGameMode.h"
+#include "../Public/CustomSafeZoneRuntime.h"
 #include "../Public/LevelStreamingDynamic.h"
 #include "../../Erbium/Public/Finders.h"
 #include "../../Engine/Public/NetDriver.h"
@@ -2190,6 +2191,18 @@ static const UFortPlaylistAthena* GetLegacySafeZonePlaylist(AFortGameMode* GameM
         L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
 }
 
+static const UFortPlaylistAthena* GetConfiguredSafeZonePlaylist()
+{
+    // ReadyToStartMatch runs before SetupPlaylist publishes the selected
+    // playlist to GameState. Resolve the same configured asset and fallback
+    // used by SetupPlaylist so preflight never validates a stale/default
+    // CurrentPlaylistInfo from the travel world.
+    auto Playlist =
+        FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+    return Playlist ? Playlist : FindObject<UFortPlaylistAthena>(
+        L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
+}
+
 static int GetLegacySafeZoneLocationCount(AFortGameMode* GameMode)
 {
     int RequiredLocationCount = 0;
@@ -2219,6 +2232,92 @@ static int GetLegacySafeZoneLocationCount(AFortGameMode* GameMode)
     if (RequiredLocationCount < MinimumLocationCount)
         RequiredLocationCount = MinimumLocationCount;
     return RequiredLocationCount;
+}
+
+// FN21.10-25.19 may keep its managed phase schedule outside the indicator.
+// Tag that process-static fallback with its exact world/map generation so a
+// previous travel's smaller array cannot falsely constrain startup preflight.
+TArray<FFortSafeZonePhaseInfo> Phases;
+static TWeakObjectPtr<UWorld> GManagedSafeZonePhasesWorld;
+static TWeakObjectPtr<AFortAthenaMapInfo> GManagedSafeZonePhasesMapInfo;
+
+int32 AFortGameMode::ResolveMovingSafeZonePreflightCapacity(
+	AFortGameMode* GameMode,
+	AFortAthenaMapInfo* MapInfo)
+{
+	int32 Capacity =
+		CustomSafeZoneRuntime::ResolveNativePhaseCapacity(MapInfo);
+
+	// Native-owned early builds can expose their already-sized center array
+	// instead of the later SafeZoneDefinition.Count field. Only a populated
+	// native array is exact enough for this strict gate; the legacy helper's
+	// synthetic 12-entry fallback must never be treated as capacity evidence.
+	if (VersionInfo.FortniteVersion < 21.10f && GameMode &&
+		GameMode->HasSafeZoneLocations() &&
+		GameMode->SafeZoneLocations.IsValid())
+	{
+		const int32 LocationCount =
+			GameMode->SafeZoneLocations.Num();
+		if (LocationCount > 0 && LocationCount <= 64)
+		{
+			Capacity = Capacity > 0
+				? (std::min)(Capacity, LocationCount)
+				: LocationCount;
+		}
+	}
+
+	// LastSafeZoneIndex is inclusive. A non-negative playlist override can
+	// shorten the phases reachable from the map's schedule, but -1 explicitly
+	// means that the live map Count remains authoritative.
+	const auto Playlist = GetConfiguredSafeZonePlaylist();
+	if (Playlist && Playlist->HasLastSafeZoneIndex() &&
+		Playlist->LastSafeZoneIndex >= 0 &&
+		Playlist->LastSafeZoneIndex < 64)
+	{
+		const int32 PlaylistCapacity =
+			Playlist->LastSafeZoneIndex + 1;
+		Capacity = Capacity > 0
+			? (std::min)(Capacity, PlaylistCapacity)
+			: PlaylistCapacity;
+	}
+
+	auto TightenToPopulatedArray = [&](const int32 Count)
+	{
+		if (Count <= 0 || Count > 64)
+			return;
+		Capacity = Capacity > 0
+			? (std::min)(Capacity, Count)
+			: Count;
+	};
+
+	AFortSafeZoneIndicator* Indicator = nullptr;
+	if (VersionInfo.FortniteVersion >= 25.20f)
+	{
+		auto PhaseLogic =
+			CustomSafeZoneRuntime::ResolveLiveComponentPhaseLogic(
+				UWorld::GetWorld());
+		if (PhaseLogic && PhaseLogic->HasSafeZoneIndicator())
+			Indicator = PhaseLogic->SafeZoneIndicator;
+	}
+	else if (GameMode && GameMode->HasSafeZoneIndicator())
+	{
+		Indicator = GameMode->SafeZoneIndicator;
+	}
+
+	if (Indicator && Indicator->HasSafeZonePhases() &&
+		Indicator->SafeZonePhases.IsValid())
+	{
+		TightenToPopulatedArray(Indicator->SafeZonePhases.Num());
+	}
+	else if (VersionInfo.FortniteVersion >= 21.10f &&
+		VersionInfo.FortniteVersion < 25.20f && Phases.IsValid() &&
+		GManagedSafeZonePhasesWorld.Get() == UWorld::GetWorld() &&
+		GManagedSafeZonePhasesMapInfo.Get() == MapInfo)
+	{
+		TightenToPopulatedArray(Phases.Num());
+	}
+
+	return Capacity;
 }
 
 static float GetLegacySafeZonePhaseRadius(
@@ -2626,6 +2725,44 @@ static void EnsureLegacySafeZoneDamageEffect(AFortGameMode* GameMode)
             (void*)GameMode, (void*)DefaultGameMode, (void*)OutsideSafeZoneEffect);
 }
 
+static bool GHasNativeLateGameSafeZonePhaseHook = false;
+static bool GHasManagedMovingSafeZonePhaseHooks = false;
+
+static bool HasNativeMovingSafeZonePhasePublisher()
+{
+	return GHasNativeLateGameSafeZonePhaseHook ||
+		VersionInfo.FortniteVersion == 2.50 ||
+		VersionInfo.FortniteVersion == 7.30;
+}
+
+bool AFortGameMode::ProbeMovingSafeZonePhasePublisher()
+{
+	static double CachedVersion = -1.0;
+	static bool bCachedAvailable = false;
+	if (CachedVersion == VersionInfo.FortniteVersion)
+		return bCachedAvailable;
+
+	CachedVersion = VersionInfo.FortniteVersion;
+	if (VersionInfo.FortniteVersion >= 25.20)
+	{
+		bCachedAvailable = true;
+	}
+	else if (VersionInfo.FortniteVersion >= 21.10)
+	{
+		bCachedAvailable =
+			FindSpawnInitialSafeZone() != 0 &&
+			FindUpdateSafeZonesPhase() != 0;
+	}
+	else
+	{
+		bCachedAvailable =
+			VersionInfo.FortniteVersion == 2.50 ||
+			VersionInfo.FortniteVersion == 7.30 ||
+			FindHandlePostSafeZonePhaseChanged() != 0;
+	}
+	return bCachedAvailable;
+}
+
 static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
 {
     if (!GameMode || VersionInfo.FortniteVersion >= 7.00 || !FConfiguration::bLateGame)
@@ -2639,15 +2776,38 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
         !GameMode->HasSafeZoneLocations())
         return;
 
-    const bool bUseCustomCenter = FConfiguration::bCustomSafeZone;
+	const bool bUseCustomCenter = FConfiguration::bCustomSafeZone;
     if (bUseCustomCenter)
     {
         auto GameState = GameMode->GameState
             ? (AFortGameStateAthena*)GameMode->GameState
             : nullptr;
-        if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
-            GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
-    }
+		if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
+			GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+	}
+	const auto LegacyCustomZone =
+		FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+
+	if (bUseCustomCenter &&
+		CustomSafeZoneRuntime::IsMovingModeRequested())
+	{
+		auto GameState = GameMode->GameState
+			? (AFortGameStateAthena*)GameMode->GameState
+			: nullptr;
+		const int RequiredLocationCount =
+			GetLegacySafeZoneLocationCount(GameMode);
+		if (CustomSafeZoneRuntime::ApplyToLegacyLocations(
+				GameMode,
+				GameState && GameState->HasMapInfo()
+					? GameState->MapInfo
+					: nullptr,
+				RequiredLocationCount,
+				HasNativeMovingSafeZonePhasePublisher()))
+		{
+			AFortGameMode::SafeZoneLoc = FVector{};
+			return;
+		}
+	}
 
     // Season 6 already receives native playlist locations. Leave those alone
     // unless the user explicitly selected a custom circle; custom geometry has
@@ -2677,7 +2837,7 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
 
     if (bUseCustomCenter)
     {
-        Center = FConfiguration::CustomSafeZoneCenter;
+        Center = FVector(LegacyCustomZone.Center);
         // (0, 0) is a valid deliberate map selection. Only reject corrupt
         // coordinates; the generated-center path below still rejects zero.
         bHasCenter = std::isfinite(Center.X) && std::isfinite(Center.Y) &&
@@ -2760,7 +2920,7 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
         SDK::DbgLog("[SafeZoneMap] initialized lower native custom locations %d -> %d at (%.1f, %.1f, %.1f) radius=%.1f\n",
             ExistingLocationCount, GameMode->SafeZoneLocations.Num(),
             Center.X, Center.Y, Center.Z,
-            FConfiguration::CustomSafeZoneRadius.load());
+            LegacyCustomZone.RadiusCm);
     else if (ExistingLocationCount < RequiredLocationCount)
     {
         const int CurrentIndex = (std::min)(
@@ -6136,6 +6296,18 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         *Ret = false;
         return;
     }
+	auto World = UWorld::GetWorld();
+
+	// A reused UWorld has no second listen boundary. Its lifecycle tick keeps
+	// retrying the same strict moving-zone preflight while this native readiness
+	// hook holds the restarted match in pregame for visible editor correction.
+	// Scope the latch to the exact world/GameMode/GameState generation so travel
+	// can never inherit a rejected restart's hold.
+	if (CustomSafeZoneRuntime::IsMatchRestartPreflightPending(World))
+	{
+		*Ret = false;
+		return;
+	}
 
     // Pumped here as well as from TickFlush: this runs from the moment the
     // athena game mode has a game state, so the Calendar tab's snow value is
@@ -6152,7 +6324,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     static bool bListenSucceeded = false;
     static TWeakObjectPtr<UWorld> SetupWorld;
     static ULONGLONG NextListenRetryTimeMs = 0;
-    auto World = UWorld::GetWorld();
+    static ULONGLONG MovingZonePreflightPendingSinceMs = 0;
     if (SetupWorld.Get() != World)
     {
         SetupWorld = World
@@ -6161,6 +6333,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         setup = false;
         bListenSucceeded = false;
         NextListenRetryTimeMs = 0;
+        MovingZonePreflightPendingSinceMs = 0;
     }
 
     auto InitializeListenDriver =
@@ -6258,6 +6431,66 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     // can initialize it to one natively, which skipped server creation forever.
     if (!setup && CurrentListenTimeMs >= NextListenRetryTimeMs)
     {
+		// An exact phase capacity does not exist in the frontend. Validate against
+		// the live Athena map and playlist here, before a NetDriver is created or
+		// any native phase geometry is touched. Invalid drafts return control to
+		// the still-live editor; pending MapInfo simply retries next frame.
+		if (!FConfiguration::bReadyToStart.load(
+				std::memory_order_acquire))
+		{
+			*Ret = false;
+			return;
+		}
+		if (CustomSafeZoneRuntime::IsMovingModeRequested())
+		{
+			auto AthenaGameState = GameState &&
+				GameState->IsA(
+					AFortGameStateAthena::StaticClass())
+				? (AFortGameStateAthena*)GameState
+				: nullptr;
+			auto MapInfo = AthenaGameState &&
+				AthenaGameState->HasMapInfo()
+					? AthenaGameState->MapInfo
+					: nullptr;
+			if (MovingZonePreflightPendingSinceMs == 0)
+			{
+				MovingZonePreflightPendingSinceMs =
+					CurrentListenTimeMs;
+			}
+			const bool bPreflightTimedOut =
+				MovingZonePreflightPendingSinceMs != 0 &&
+				CurrentListenTimeMs -
+					MovingZonePreflightPendingSinceMs >= 15000ULL;
+			const int32 PhaseCapacity = MapInfo
+				? AFortGameMode::ResolveMovingSafeZonePreflightCapacity(
+					GameMode, MapInfo)
+				: 0;
+			const auto Preflight =
+				CustomSafeZoneRuntime::PreflightForServerStart(
+					World, GameMode, MapInfo, PhaseCapacity,
+					bPreflightTimedOut);
+			if (Preflight ==
+				ECustomSafeZonePreflightResult::Pending)
+			{
+				*Ret = false;
+				return;
+			}
+			if (Preflight ==
+				ECustomSafeZonePreflightResult::Invalid)
+			{
+				// Travel, playlist, and transport settings are already committed.
+				// Keep that launch transaction intact; the GUI selectively unlocks
+				// only this sequence until the next preflight succeeds.
+				*Ret = false;
+				return;
+			}
+			MovingZonePreflightPendingSinceMs = 0;
+		}
+		else
+		{
+			MovingZonePreflightPendingSinceMs = 0;
+		}
+
         setup = true;
 
         //if (!FindListenCall())
@@ -7584,8 +7817,8 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
 
 static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source)
 {
-    if (!GameMode || !GameMode->SafeZoneIndicator ||
-        !FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone)
+	if (!GameMode || !GameMode->SafeZoneIndicator ||
+		!FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone)
         return;
 
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
@@ -7593,8 +7826,10 @@ static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source
         GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
 
     AFortSafeZoneIndicator* Indicator = GameMode->SafeZoneIndicator;
-    FVector Center = FConfiguration::CustomSafeZoneCenter;
-    float Radius = FConfiguration::CustomSafeZoneRadius;
+    const auto LegacyCustomZone =
+        FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+    FVector Center(LegacyCustomZone.Center);
+    float Radius = LegacyCustomZone.RadiusCm;
 
     // Old native storm code interpolates Last/Previous -> Next, while newer
     // versions also replicate NextNext (and sometimes a separate current
@@ -7648,13 +7883,11 @@ static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source
 static UWorld* GLegacyCustomZoneAppliedWorld = nullptr;
 static AFortSafeZoneIndicator* GLegacyCustomZoneAppliedIndicator = nullptr;
 static int GLegacyCustomZoneAppliedPhase = -1;
-static bool GHasNativeLateGameSafeZonePhaseHook = false;
-
 static void ApplyLegacyCustomSafeZoneAtTargetPhase(AFortGameMode* GameMode,
-    int SafeZonePhase)
+	int SafeZonePhase)
 {
-    if (!GameMode || VersionInfo.FortniteVersion >= 7.00 ||
-        !FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone ||
+	if (!GameMode || VersionInfo.FortniteVersion >= 7.00 ||
+		!FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone ||
         SafeZonePhase < FConfiguration::LateGameZone || !GameMode->SafeZoneIndicator)
     {
         return;
@@ -7679,8 +7912,10 @@ static void ApplyLegacyCustomSafeZoneAtTargetPhase(AFortGameMode* GameMode,
     if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
         GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
 
-    FVector Center = FConfiguration::CustomSafeZoneCenter;
-    float Radius = FConfiguration::CustomSafeZoneRadius;
+    const auto LegacyCustomZone =
+        FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+    FVector Center(LegacyCustomZone.Center);
+    float Radius = LegacyCustomZone.RadiusCm;
     if (!std::isfinite(Center.X) || !std::isfinite(Center.Y) ||
         !std::isfinite(Center.Z) || !std::isfinite(Radius) || Radius <= 0.f)
     {
@@ -7821,17 +8056,35 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
 
     // Original Erbium reapplies its fallback anchor after every native phase
     // change, including phases after the selected starting phase.
-    if (CurrentPhase != LastAlignedPhase)
-    {
-        if (FConfiguration::bCustomSafeZone &&
-            CurrentPhase >= TargetPhase)
-        {
-            if (VersionInfo.FortniteVersion < 7.00)
-            {
+	if (CurrentPhase != LastAlignedPhase)
+	{
+		const bool bMovingCustomZone =
+			CustomSafeZoneRuntime::IsMovingModeRequested();
+		const int32 CustomAlignmentPhase = bMovingCustomZone
+			? CustomSafeZoneRuntime::ResolveRuntimeStartPhase() - 1
+			: TargetPhase;
+		if (FConfiguration::bCustomSafeZone &&
+			CurrentPhase >= CustomAlignmentPhase)
+		{
+			auto ActiveMapInfo =
+				GameState->HasMapInfo()
+					? GameState->MapInfo
+					: nullptr;
+			bool bMovingApplied = false;
+			if (bMovingCustomZone)
+			{
+				bMovingApplied = CustomSafeZoneRuntime::ApplyNativePhase(
+					GameMode, ActiveMapInfo, CurrentPhase,
+					TimeSeconds,
+					"late-game-phase-fallback", true);
+			}
+			if (!bMovingApplied &&
+				VersionInfo.FortniteVersion < 7.00)
+			{
                 ApplyLegacyCustomSafeZoneAtTargetPhase(
                     GameMode, CurrentPhase);
             }
-            else
+            else if (!bMovingApplied)
             {
                 ApplyCustomSafeZoneState(
                     GameMode,
@@ -8254,14 +8507,19 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
         ResolveLegacySafeZonePhaseAfterTransition(
             GameMode, GameState, GameMode->SafeZoneIndicator,
             NewSafeZonePhase_Inp);
-    float TimeSeconds =
-        (float)UGameplayStatics::GetTimeSeconds(GameState);
-
-    // Keep the original Erbium/native zone data untouched on Chapter 1 builds.
-    // The custom-zone path writes every circle representation at once, which is
-    // incompatible with the old indicator's distinct current/preview fields.
-    if (VersionInfo.FortniteVersion >= 7.00 && FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
-        ApplyCustomSafeZoneState(GameMode, "native-phase-change");
+	float TimeSeconds =
+		(float)UGameplayStatics::GetTimeSeconds(GameState);
+	auto ActiveMapInfo = GameState && GameState->HasMapInfo()
+		? GameState->MapInfo
+		: nullptr;
+	const auto TryPublishMovingZone = [&]()
+	{
+		return CustomSafeZoneRuntime::IsMovingModeRequested() &&
+			CustomSafeZoneRuntime::ApplyNativePhase(
+				GameMode, ActiveMapInfo, ActiveSafeZonePhase,
+				TimeSeconds, "native-phase-change", true);
+	};
+	bool bMovingCustomZone = false;
 
     if (FConfiguration::bLateGame &&
         ActiveSafeZonePhase >= 0 &&
@@ -8270,6 +8528,15 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
         GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = TimeSeconds;
         GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + 0.15f;
         GameMode->SafeZoneIndicator->ForceNetUpdate();
+		bMovingCustomZone = TryPublishMovingZone();
+		if (!bMovingCustomZone &&
+			VersionInfo.FortniteVersion >= 7.00 &&
+			FConfiguration::bLateGame &&
+			FConfiguration::bCustomSafeZone)
+		{
+			ApplyCustomSafeZoneState(
+				GameMode, "native-phase-change-fallback");
+		}
         return;
     }
 
@@ -8316,15 +8583,31 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
             }
         }
     }
+
+	// Native timing is now known (or repaired). Overlay explicit authored zero
+	// and non-zero edge durations only after this point so repair cannot erase
+	// them, while omitted values inherit the native schedule.
+	bMovingCustomZone = TryPublishMovingZone();
+	if (!bMovingCustomZone &&
+		VersionInfo.FortniteVersion >= 7.00 &&
+		FConfiguration::bLateGame &&
+		FConfiguration::bCustomSafeZone)
+	{
+		ApplyCustomSafeZoneState(
+			GameMode, "native-phase-change-fallback");
+	}
+
     // Original Erbium applies the selected late-game center only after the
     // native fast-forward reaches its target phase. Applying it to each skipped
     // phase makes the old client's current and preview circles disagree.
-    if (VersionInfo.FortniteVersion < 7.00 && FConfiguration::bLateGame &&
+	if (!bMovingCustomZone &&
+		VersionInfo.FortniteVersion < 7.00 && FConfiguration::bLateGame &&
         FConfiguration::bCustomSafeZone)
     {
         ApplyLegacyCustomSafeZoneAtTargetPhase(GameMode, ActiveSafeZonePhase);
     }
-    else if (VersionInfo.FortniteVersion < 7.00 &&
+	else if (!bMovingCustomZone &&
+		VersionInfo.FortniteVersion < 7.00 &&
         FConfiguration::bLateGame &&
         (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
     {
@@ -9517,11 +9800,8 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             return Ret;
 
         FVector Loc;
-        const int LocationPhaseOffset =
-            VersionInfo.FortniteVersion >= 24 ? 3 : 0;
         const int AnchorIndex =
-            FConfiguration::LateGameZone.load() +
-            LocationPhaseOffset - 1;
+            CustomSafeZoneRuntime::ResolveRuntimeStartPhase() - 1;
         const int PreviewIndex = AnchorIndex + 1;
         const bool bHasAnchorLocation =
             GameMode->SafeZoneLocations.IsValidIndex(
@@ -9572,10 +9852,25 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             }
         }
 
-        if (FConfiguration::bCustomSafeZone)
-        {
-            Loc = FConfiguration::CustomSafeZoneCenter;
-            // Lower builds consume the pre-seeded native array and the
+		if (FConfiguration::bCustomSafeZone)
+		{
+			const auto LegacyCustomZone =
+				FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+			Loc = FVector(LegacyCustomZone.Center);
+			if (CustomSafeZoneRuntime::IsMovingModeRequested())
+			{
+				float SourceRadius = 0.f;
+				CustomSafeZoneRuntime::TryGetSourceCircle(
+					World,
+					GameState && GameState->HasMapInfo()
+						? GameState->MapInfo
+						: nullptr,
+					Loc, SourceRadius,
+					GameMode->SafeZoneLocations.Num(),
+					VersionInfo.FortniteVersion >= 21.10 ||
+						HasNativeMovingSafeZonePhasePublisher());
+			}
+			// Lower builds consume the pre-seeded native array and the
             // phase-aware custom-radius path. Keeping this fallback clear
             // prevents it from fighting the native current/preview state.
             if (VersionInfo.FortniteVersion >= 7.00)
@@ -9771,8 +10066,6 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
     }
 }
 
-TArray<FFortSafeZonePhaseInfo> Phases;
-
 AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
 {
     // thanks heliato
@@ -9786,10 +10079,18 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
         {
             if (FConfiguration::bCustomSafeZone && GameState->HasMapInfo())
                 GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+            const auto LegacyCustomZone =
+                FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
             FFortSafeZoneDefinition& SafeZoneDefinition = GameState->MapInfo->SafeZoneDefinition;
             float SafeZoneCount = SafeZoneDefinition.Count.Evaluate();
 
             auto& Array = SafeZoneIndicator->HasSafeZonePhases() ? SafeZoneIndicator->SafeZonePhases : Phases;
+			const bool bUsesStableProcessArray = &Array == &Phases;
+			// Setup is the sole producer of the fallback array. Clear its tag
+			// while rebuilding so preflight cannot consume partial or stale data.
+			GManagedSafeZonePhasesWorld = TWeakObjectPtr<UWorld>{};
+			GManagedSafeZonePhasesMapInfo =
+				TWeakObjectPtr<AFortAthenaMapInfo>{};
 
 
             if (Array.IsValid())
@@ -9797,7 +10098,9 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
 
             const float Time = (float)UGameplayStatics::GetTimeSeconds(GameState);
 
-            for (float i = 0; i < SafeZoneCount; i++)
+			const bool bMovingCustomZone =
+				CustomSafeZoneRuntime::IsMovingModeRequested();
+			for (float i = 0; i < SafeZoneCount; i++)
             {
                 auto PhaseInfo = (FFortSafeZonePhaseInfo*)malloc(FFortSafeZonePhaseInfo::Size());
                 memset((PBYTE)PhaseInfo, 0, FFortSafeZonePhaseInfo::Size());
@@ -9823,10 +10126,12 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
                 if (GameMode->SafeZoneLocations.GetData() && GameMode->SafeZoneLocations.Num() > i)
                     PhaseInfo->Center = GameMode->SafeZoneLocations.Get((int)i, FVector::Size());
 
-                if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+				if (FConfiguration::bLateGame &&
+					FConfiguration::bCustomSafeZone &&
+					!bMovingCustomZone)
                 {
-                    PhaseInfo->Center = FConfiguration::CustomSafeZoneCenter;
-                    PhaseInfo->Radius = FConfiguration::CustomSafeZoneRadius;
+                    PhaseInfo->Center = FVector(LegacyCustomZone.Center);
+                    PhaseInfo->Radius = float(LegacyCustomZone.RadiusCm);
                     if (i == 0.f)
                         SDK::DbgLog("[SafeZoneMap] applying custom zone center=(%.1f, %.1f, %.1f) radius=%.1f\n",
                             PhaseInfo->Center.X, PhaseInfo->Center.Y, PhaseInfo->Center.Z,
@@ -9836,8 +10141,41 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
                 Array.Add(*PhaseInfo, FFortSafeZonePhaseInfo::Size());
                 free(PhaseInfo);
 
-                SafeZoneIndicator->PhaseCount++;
-            }
+				SafeZoneIndicator->PhaseCount++;
+			}
+			if (bUsesStableProcessArray)
+			{
+				GManagedSafeZonePhasesWorld =
+					TWeakObjectPtr<UWorld>(UWorld::GetWorld());
+				GManagedSafeZonePhasesMapInfo =
+					TWeakObjectPtr<AFortAthenaMapInfo>(GameState->MapInfo);
+			}
+
+			bool bMovingCustomZoneApplied = false;
+			if (bMovingCustomZone)
+			{
+				bMovingCustomZoneApplied =
+					CustomSafeZoneRuntime::ApplyToPhaseArray(
+					UWorld::GetWorld(), GameState->MapInfo,
+					SafeZoneIndicator, Array,
+					"gamemode-managed-setup",
+					bUsesStableProcessArray);
+			}
+			if (bMovingCustomZone && !bMovingCustomZoneApplied &&
+				FConfiguration::bLateGame &&
+				FConfiguration::bCustomSafeZone)
+			{
+				for (int32 PhaseIndex = 0;
+					PhaseIndex < Array.Num(); ++PhaseIndex)
+				{
+					auto& PhaseInfo = Array.Get(
+						PhaseIndex, FFortSafeZonePhaseInfo::Size());
+					PhaseInfo.Center =
+						FVector(LegacyCustomZone.Center);
+					PhaseInfo.Radius =
+						float(LegacyCustomZone.RadiusCm);
+				}
+			}
 
             SafeZoneIndicator->OnRep_PhaseCount();
 
@@ -9859,8 +10197,11 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
 void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool bInitial = false)
 {
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-    float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(GameState);
-    auto& Array = GameMode->SafeZoneIndicator->HasSafeZonePhases() ? GameMode->SafeZoneIndicator->SafeZonePhases : Phases;
+	float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(GameState);
+	auto& Array = GameMode->SafeZoneIndicator->HasSafeZonePhases() ? GameMode->SafeZoneIndicator->SafeZonePhases : Phases;
+	const bool bMovingCustomZoneRequested =
+		CustomSafeZoneRuntime::IsMovingModeRequested();
+	bool bMovingCustomZone = bMovingCustomZoneRequested;
 
     if (Array.IsValidIndex(NewSafeZonePhase))
     {
@@ -9873,12 +10214,16 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
         }
 
         auto& PhaseInfo = Array.Get(NewSafeZonePhase, FFortSafeZonePhaseInfo::Size());
-        if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+		if (FConfiguration::bLateGame &&
+			FConfiguration::bCustomSafeZone &&
+			!bMovingCustomZone)
         {
             if (GameState->HasMapInfo() && GameState->MapInfo)
                 GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
-            PhaseInfo.Center = FConfiguration::CustomSafeZoneCenter;
-            PhaseInfo.Radius = FConfiguration::CustomSafeZoneRadius;
+            const auto LegacyCustomZone =
+                FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+            PhaseInfo.Center = FVector(LegacyCustomZone.Center);
+            PhaseInfo.Radius = float(LegacyCustomZone.RadiusCm);
         }
 
         GameMode->SafeZoneIndicator->NextCenter = PhaseInfo.Center;
@@ -9908,11 +10253,38 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
 
             GameMode->SafeZoneIndicator->NextNextCenter = NextPhaseInfo.Center;
             GameMode->SafeZoneIndicator->NextNextRadius = NextPhaseInfo.Radius;
-            GameMode->SafeZoneIndicator->NextNextMegaStormGridCellThickness = NextPhaseInfo.MegaStormGridCellThickness;
-        }
+			GameMode->SafeZoneIndicator->NextNextMegaStormGridCellThickness = NextPhaseInfo.MegaStormGridCellThickness;
+		}
+
+		if (bMovingCustomZoneRequested)
+		{
+			bMovingCustomZone =
+				CustomSafeZoneRuntime::PublishManagedPhase(
+				UWorld::GetWorld(),
+				GameState && GameState->HasMapInfo()
+					? GameState->MapInfo
+					: nullptr,
+				GameMode->SafeZoneIndicator,
+				NewSafeZonePhase,
+				"gamemode-managed-phase-start",
+				&Array,
+				&Array == &Phases);
+		}
 
         GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = TimeSeconds + PhaseInfo.WaitTime;
         GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + PhaseInfo.ShrinkTime;
+		if (bMovingCustomZone)
+		{
+			VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+				GameMode->SafeZoneIndicator,
+				L"SafeZoneStartShrinkTime");
+			VersionFeatureAdapter::MarkReplicatedPropertyDirty(
+				GameMode->SafeZoneIndicator,
+				L"SafeZoneFinishShrinkTime");
+			// Publish after both deadlines have been assigned. ForceNetUpdate alone
+			// is insufficient for unmarked push-model/Iris properties.
+			GameMode->SafeZoneIndicator->ForceNetUpdate();
+		}
 
         GameMode->SafeZoneIndicator->CurrentDamageInfo = PhaseInfo.DamageInfo;
         GameMode->SafeZoneIndicator->OnRep_CurrentDamageInfo();
@@ -9929,7 +10301,9 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
         if (GameMode->SafeZoneIndicator->HasSafezoneStateChangedDelegate())
             GameMode->SafeZoneIndicator->SafezoneStateChangedDelegate.Process(GameMode->SafeZoneIndicator, 2);
 
-        if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+		if (FConfiguration::bLateGame &&
+			FConfiguration::bCustomSafeZone &&
+			!bMovingCustomZone)
             ApplyCustomSafeZoneState(GameMode, "managed-phase-start");
 
         if (FConfiguration::bLateGame &&
@@ -9960,7 +10334,12 @@ void SpawnInitialSafeZone(AFortGameMode* GameMode)
     SafeZoneIndicator->OnSafeZonePhaseChanged.Bind(GameMode, FName(L"HandlePostSafeZonePhaseChanged"));
     GameMode->OnSafeZoneIndicatorSpawned.Process(SafeZoneIndicator);
 
-    StartNewSafeZonePhase(GameMode, FConfiguration::bLateGame ? (FConfiguration::LateGameZone + (VersionInfo.FortniteVersion >= 24 ? 3 : 0)) : 1, true);
+    StartNewSafeZonePhase(
+        GameMode,
+        FConfiguration::bLateGame
+            ? CustomSafeZoneRuntime::ResolveRuntimeStartPhase()
+            : 1,
+        true);
 
 
     //return SpawnInitialSafeZoneOG(GameMode);
@@ -10468,11 +10847,63 @@ void AFortGameMode::PostLoadHook()
     {
         if (VersionInfo.FortniteVersion < 25.20)
         {
-            Utils::Hook(FindSpawnInitialSafeZone(), SpawnInitialSafeZone, SpawnInitialSafeZoneOG);
-            Utils::Hook(FindUpdateSafeZonesPhase(), UpdateSafeZonesPhase, UpdateSafeZonesPhaseOG);
+            const auto SpawnInitialSafeZoneAddress =
+                FindSpawnInitialSafeZone();
+            const auto UpdateSafeZonesPhaseAddress =
+                FindUpdateSafeZonesPhase();
+            Utils::Hook(
+                SpawnInitialSafeZoneAddress,
+                SpawnInitialSafeZone,
+                SpawnInitialSafeZoneOG);
+            Utils::Hook(
+                UpdateSafeZonesPhaseAddress,
+                UpdateSafeZonesPhase,
+                UpdateSafeZonesPhaseOG);
+            GHasManagedMovingSafeZonePhaseHooks =
+                SpawnInitialSafeZoneAddress != 0 &&
+                UpdateSafeZonesPhaseAddress != 0 &&
+                SpawnInitialSafeZoneOG != nullptr &&
+                UpdateSafeZonesPhaseOG != nullptr;
+            if (!GHasManagedMovingSafeZonePhaseHooks)
+            {
+                SDK::DbgLog(
+                    "[CustomSafeZonePlan] managed phase owner unavailable "
+                    "version=%.2f spawn=%p update=%p spawnOG=%p updateOG=%p\n",
+                    VersionInfo.FortniteVersion,
+                    (void*)SpawnInitialSafeZoneAddress,
+                    (void*)UpdateSafeZonesPhaseAddress,
+                    (void*)SpawnInitialSafeZoneOG,
+                    (void*)UpdateSafeZonesPhaseOG);
+            }
         }
         Utils::ExecHook(L"/Script/FortniteGame.FortSafeZoneIndicator.GetPhaseInfo", GetPhaseInfo);
     }
+
+    const bool bHasAuthoritativeMovingZonePublisher =
+        VersionInfo.FortniteVersion >= 25.20
+            ? true
+            : (VersionInfo.FortniteVersion >= 21.10
+                ? GHasManagedMovingSafeZonePhaseHooks
+                : HasNativeMovingSafeZonePhasePublisher());
+    ECustomSafeZoneLegacyPhaseOwnerPath LegacyOwnerPath =
+        ECustomSafeZoneLegacyPhaseOwnerPath::Unavailable;
+    if (VersionInfo.FortniteVersion < 21.10)
+    {
+        if (GHasNativeLateGameSafeZonePhaseHook)
+        {
+            LegacyOwnerPath =
+                ECustomSafeZoneLegacyPhaseOwnerPath::NativePhaseHook;
+        }
+        else if (VersionInfo.FortniteVersion == 2.50 ||
+            VersionInfo.FortniteVersion == 7.30)
+        {
+            LegacyOwnerPath =
+                ECustomSafeZoneLegacyPhaseOwnerPath::DeadlineFallback;
+        }
+    }
+    CustomSafeZoneRuntime::SetLegacyPhaseOwnerPath(LegacyOwnerPath);
+    CustomSafeZoneRuntime::SetAuthoritativePhasePublisherAvailable(
+        bHasAuthoritativeMovingZonePublisher);
 
     //if (VersionInfo.FortniteVersion >= 15)
 //    Utils::ExecHook(AFortGameModeAthena::GetDefaultObj()->GetFunction("PlayerCanRestart"), PlayerCanRestart);

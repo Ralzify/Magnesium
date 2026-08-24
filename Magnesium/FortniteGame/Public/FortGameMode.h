@@ -127,6 +127,12 @@ public:
     DefUHookOg(OnAircraftExitedDropZone_);
     DefHookOg(void, FinishWorldInitialization, AFortGameMode*, AActor*);
     static int GetLateSafeZoneIndex();
+    static bool ProbeMovingSafeZonePhasePublisher();
+    // Returns only exact live/map/playlist evidence; it never uses the legacy
+    // synthetic 12-phase construction fallback.
+    static int32 ResolveMovingSafeZonePreflightCapacity(
+        AFortGameMode* GameMode,
+        AFortAthenaMapInfo* MapInfo);
     static void TickLateGameSafeZonePhaseFallback(UNetDriver* Driver);
     static void TickPendingVehicleSpawns();
     static void TickSupplyDropSuppression(bool bForceDiscovery = false);

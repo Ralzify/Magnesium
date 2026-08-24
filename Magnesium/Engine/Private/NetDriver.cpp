@@ -6,6 +6,7 @@
 #include "../../Erbium/Public/Finders.h"
 #include "../../Erbium/Public/GUI.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
+#include "../../FortniteGame/Public/CustomSafeZoneRuntime.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
 #include "../../FortniteGame/Public/FortAthenaMutator.h"
 #include "../../FortniteGame/Public/FortInventory.h"
@@ -1259,6 +1260,56 @@ static void SyncErbiumSafeZonePause(UNetDriver* Driver)
 		TickSafeZonePause();
 }
 
+static void TickModernGamePhaseLogicOnce(UNetDriver* Driver)
+{
+	if (VersionInfo.FortniteVersion < 25.20 || !Driver)
+		return;
+
+	auto World = UWorld::GetWorld();
+	if (!World || Driver != World->NetDriver)
+		return;
+
+	struct FModernPhaseTickGuard
+	{
+		UWorld* World = nullptr;
+		UNetDriver* Driver = nullptr;
+		AFortGameStateAthena* GameState = nullptr;
+		double DriverTime = -1.0;
+		bool bHasDriverTime = false;
+	};
+	static FModernPhaseTickGuard Guard;
+	auto GameState = (AFortGameStateAthena*)World->GameState;
+	const double DriverTime = Driver->GetTime();
+	if (Guard.World != World || Guard.Driver != Driver ||
+		Guard.GameState != GameState ||
+		!std::isfinite(DriverTime) ||
+		(Guard.bHasDriverTime && DriverTime < Guard.DriverTime))
+	{
+		Guard = {};
+		Guard.World = World;
+		Guard.Driver = Driver;
+		Guard.GameState = GameState;
+	}
+
+	// All TickFlush models call this at the same authoritative pre-replication
+	// seam. Driver time advances once per native network cycle, so equality also
+	// prevents an accidental nested/duplicate TickFlush from advancing a storm
+	// phase twice without depending on an engine-version-specific frame global.
+	if (Guard.bHasDriverTime &&
+		std::isfinite(DriverTime) &&
+		DriverTime == Guard.DriverTime)
+	{
+		return;
+	}
+	Guard.DriverTime = DriverTime;
+	Guard.bHasDriverTime = std::isfinite(DriverTime);
+
+	auto GamePhaseLogic =
+		CustomSafeZoneRuntime::ResolveLiveComponentPhaseLogic(World);
+	if (GamePhaseLogic)
+		GamePhaseLogic->Tick();
+}
+
 static void DriveLegacySafeZoneInsideChecks(UNetDriver* Driver)
 {
 	// The old Erbium path through Season 6 can reach SafeZones without arming
@@ -1395,6 +1446,8 @@ namespace
 		bool bObservedLegacyLivePhase = false;
 		bool bObservedNativeTerminal = false;
 		bool bEndLatched = false;
+		bool bRestartPreflightBlocking = false;
+		ULONGLONG NextRestartPreflightMs = 0;
 	};
 
 	FAuthoritativeMatchLifecycleState
@@ -1782,17 +1835,64 @@ namespace
 			AFortPlayerControllerAthena::
 				ResetRespawnCameraForMatchRestart();
 			GUI::ResetServerLifecycle();
-			if (bWaitingToStart)
-				GUI::MarkServerJoinable();
-			else if (bPhaseLive ||
-				bMatchStateInProgress)
-			{
-				GUI::gsStatus.store(
-					StartedMatch,
-					std::memory_order_release);
-			}
+			UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+				ResetSafeZonePauseForMatch(World);
+			CustomSafeZoneRuntime::ResetForMatch(World);
+			// Run the common completion branch even when Moving Zone is off so
+			// ResetServerLifecycle cannot leave an ordinary restart at NotReady.
+			State.bRestartPreflightBlocking = true;
+			State.NextRestartPreflightMs = 0;
 			SDK::DbgLog(
 				"[MatchLifecycle] Same-world match restart detected; lifecycle reset\n");
+		}
+
+		if (State.bRestartPreflightBlocking)
+		{
+			const ULONGLONG Now = GetTickCount64();
+			if (CustomSafeZoneRuntime::
+					IsMatchRestartPreflightPending(World) &&
+				Now >= State.NextRestartPreflightMs)
+			{
+				auto MapInfo = GameState->HasMapInfo()
+					? GameState->MapInfo
+					: nullptr;
+				const int32 PhaseCapacity = MapInfo
+					? AFortGameMode::
+						ResolveMovingSafeZonePreflightCapacity(
+							GameMode, MapInfo)
+					: 0;
+				const auto Preflight = CustomSafeZoneRuntime::
+					PreflightForServerStart(
+						World, GameMode, MapInfo,
+						PhaseCapacity, true, true);
+				State.NextRestartPreflightMs = Now + 100ULL;
+				SDK::DbgLog(
+					"[MatchLifecycle] held restart moving-zone "
+					"preflight=%d capacity=%d\n",
+					(int)Preflight, PhaseCapacity);
+			}
+
+			if (CustomSafeZoneRuntime::
+					IsMatchRestartPreflightPending(World))
+			{
+				GUI::gsStatus.store(
+					NotReady, std::memory_order_release);
+			}
+			else
+			{
+				State.bRestartPreflightBlocking = false;
+				if (bWaitingToStart)
+					GUI::MarkServerJoinable();
+				else if (bPhaseLive ||
+					bMatchStateInProgress)
+				{
+					GUI::gsStatus.store(
+						StartedMatch,
+						std::memory_order_release);
+				}
+				SDK::DbgLog(
+					"[MatchLifecycle] held restart preflight accepted; phase flow resumed\n");
+			}
 		}
 
 		const EGSStatus CurrentStatus =
@@ -1866,33 +1966,34 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
 		AFortMinigame::TickCreativeMinigames();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
+	// Detect/reset a same-world match generation before any native, fallback,
+	// or component-owned storm publisher can consume the prior match plan.
+	TickAuthoritativeMatchLifecycle(Driver);
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
-	// Consume a new UI request before a legacy phase fallback can advance.
-	SyncErbiumSafeZonePause(Driver);
-	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
-	// The late-game compatibility path can rewrite legacy geometry/deadlines.
-	// Apply pause last so the frozen snapshot is the final state replicated.
-	SyncErbiumSafeZonePause(Driver);
-	DriveLegacySafeZoneInsideChecks(Driver);
-
-	// Apply the authoritative warmup hold/release after native LTM ticks but
-	// before phase logic consumes the countdown.
-	if (auto World = UWorld::GetWorld();
-		World && Driver == World->NetDriver)
+	if (!CustomSafeZoneRuntime::IsMatchRestartPreflightPending(
+			Driver ? Driver->World : nullptr))
 	{
-		AFortGameMode::TickGameplayConfigurationPolicy(
-			DeltaSeconds);
-	}
+		// Consume a new UI request before a legacy phase fallback can advance.
+		SyncErbiumSafeZonePause(Driver);
+		AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
+		// The late-game compatibility path can rewrite legacy geometry/deadlines.
+		// Apply pause last so the frozen snapshot is the final state replicated.
+		SyncErbiumSafeZonePause(Driver);
+		DriveLegacySafeZoneInsideChecks(Driver);
 
-	if (VersionInfo.FortniteVersion >= 25.20)
-	{
-		auto GamePhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(UWorld::GetWorld());
-		if (GamePhaseLogic)
-			GamePhaseLogic->Tick();
+		// Apply the authoritative warmup hold/release after native LTM ticks but
+		// before phase logic consumes the countdown.
+		if (auto World = UWorld::GetWorld();
+			World && Driver == World->NetDriver)
+		{
+			AFortGameMode::TickGameplayConfigurationPolicy(
+				DeltaSeconds);
+		}
+
+		TickModernGamePhaseLogicOnce(Driver);
 	}
-	TickAuthoritativeMatchLifecycle(Driver);
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 
 	// Shared version-adapter upkeep: work budget, cheat-bot cosmetic queue
@@ -2028,21 +2129,25 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
 		AFortMinigame::TickCreativeMinigames();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
+	TickAuthoritativeMatchLifecycle(Driver);
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
-	SyncErbiumSafeZonePause(Driver);
-	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
-	SyncErbiumSafeZonePause(Driver);
-	DriveLegacySafeZoneInsideChecks(Driver);
-	if (auto World = UWorld::GetWorld();
-		World && Driver == World->NetDriver)
+	if (!CustomSafeZoneRuntime::IsMatchRestartPreflightPending(
+			Driver ? Driver->World : nullptr))
 	{
-		AFortGameMode::TickGameplayConfigurationPolicy(
-			DeltaSeconds);
+		SyncErbiumSafeZonePause(Driver);
+		AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
+		SyncErbiumSafeZonePause(Driver);
+		DriveLegacySafeZoneInsideChecks(Driver);
+		if (auto World = UWorld::GetWorld();
+			World && Driver == World->NetDriver)
+		{
+			AFortGameMode::TickGameplayConfigurationPolicy(
+				DeltaSeconds);
+		}
+		TickModernGamePhaseLogicOnce(Driver);
 	}
-
-	TickAuthoritativeMatchLifecycle(Driver);
 
 	// Shared version-adapter upkeep: work budget, cheat-bot cosmetic queue
 	// and deferred players-left replication.
@@ -2224,34 +2329,30 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
 		AFortMinigame::TickCreativeMinigames();
 		Calendar::TickSnow(); // drain the Calendar tab's snow request
 	}
+	TickAuthoritativeMatchLifecycle(Driver);
 	FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
 	FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
-	SyncErbiumSafeZonePause(Driver);
-	AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
-	SyncErbiumSafeZonePause(Driver);
-	DriveLegacySafeZoneInsideChecks(Driver);
-
-	// Hold/release the warmup schedule before phase logic consumes it. The
-	// policy has already run after native LTM ticks above, so Auto Bus Start
-	// OFF cannot lose a race to a mutator-authored elapsed deadline.
-	if (auto World = UWorld::GetWorld();
-		World && Driver == World->NetDriver)
+	if (!CustomSafeZoneRuntime::IsMatchRestartPreflightPending(
+			Driver ? Driver->World : nullptr))
 	{
-		AFortGameMode::TickGameplayConfigurationPolicy(
-			DeltaSeconds);
-	}
+		SyncErbiumSafeZonePause(Driver);
+		AFortGameMode::TickLateGameSafeZonePhaseFallback(Driver);
+		SyncErbiumSafeZonePause(Driver);
+		DriveLegacySafeZoneInsideChecks(Driver);
 
-	if (VersionInfo.FortniteVersion >= 25.20)
-	{
-		auto GamePhaseLogic =
-			UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(
-				UWorld::GetWorld());
-		if (GamePhaseLogic)
-			GamePhaseLogic->Tick();
-	}
+		// Hold/release the warmup schedule before phase logic consumes it. The
+		// policy has already run after native LTM ticks above, so Auto Bus Start
+		// OFF cannot lose a race to a mutator-authored elapsed deadline.
+		if (auto World = UWorld::GetWorld();
+			World && Driver == World->NetDriver)
+		{
+			AFortGameMode::TickGameplayConfigurationPolicy(
+				DeltaSeconds);
+		}
 
-	TickAuthoritativeMatchLifecycle(Driver);
+		TickModernGamePhaseLogicOnce(Driver);
+	}
 
 	AFortPlayerControllerAthena::TickNukeRockets(DeltaSeconds);
 

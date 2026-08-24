@@ -24,6 +24,7 @@
 #include "../Public/FortControllerComponent_VictoryCrowns.h"
 #include "../Public/FortWeaponMods.h"
 #include "../Public/FortVehicleMods.h"
+#include "../Public/CustomSafeZoneRuntime.h"
 
 #include <d3d11.h>
 #include <sstream>
@@ -2426,15 +2427,12 @@ static UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
 	GetRespawnSafeZonePhaseLogic()
 {
 	auto World = UWorld::GetWorld();
-	if (!World || VersionInfo.FortniteVersion < 25.20)
-		return nullptr;
-
 	// From 25.20 onward the game-state component is the authoritative storm
-	// owner. The older GameMode/GameState pointers can remain populated with the
-	// superseded indicator during an owner hand-off, which is how a respawn can
-	// be sent to an old (occasionally still-zero) circle on modern builds.
+	// owner. Reuse the owner-validated resolver so a stale reflected Get result
+	// or an old GameMode indicator cannot choose a respawn circle during the
+	// component hand-off.
 	auto PhaseLogic =
-		UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
+		CustomSafeZoneRuntime::ResolveLiveComponentPhaseLogic(World);
 	return IsUsableDeathObject(PhaseLogic) ? PhaseLogic : nullptr;
 }
 
@@ -2452,6 +2450,13 @@ static AFortSafeZoneIndicator* GetRespawnSafeZoneIndicator(
 		IsUsableDeathObject(PhaseLogic->SafeZoneIndicator))
 	{
 		return PhaseLogic->SafeZoneIndicator;
+	}
+	if (PhaseLogic || VersionInfo.FortniteVersion >= 25.20f)
+	{
+		// Component-owned builds have no safe legacy-owner fallback. During the
+		// hand-off those pointers can still reference the previous indicator, so
+		// wait for the current component instead of respawning at stale geometry.
+		return nullptr;
 	}
 
 	if (!IsUsableDeathObject(GameMode))
@@ -2546,62 +2551,12 @@ static bool TryGetSafeZonePhaseCenter(
 	if (!std::isfinite(PhaseInfo.Center.X) ||
 		!std::isfinite(PhaseInfo.Center.Y) ||
 		!std::isfinite(PhaseInfo.Center.Z) ||
-		!std::isfinite(PhaseInfo.Radius) || PhaseInfo.Radius <= 0.f)
+		!std::isfinite(PhaseInfo.Radius) || PhaseInfo.Radius < 0.f)
 	{
 		return false;
 	}
 
 	OutCenter = PhaseInfo.Center;
-	return true;
-}
-
-static bool TryGetSafeZoneLocationCenter(
-	AFortGameMode* GameMode,
-	int32 SafeZonePhase,
-	FVector& OutCenter,
-	bool bAllowZero = false)
-{
-	if (!GameMode || !GameMode->HasSafeZoneLocations())
-		return false;
-	if (GameMode->HasbSafeZoneLocationsInitialized() &&
-		!GameMode->bSafeZoneLocationsInitialized)
-	{
-		return false;
-	}
-
-	auto& Locations = GameMode->SafeZoneLocations;
-	const int32 LocationCount = Locations.Num();
-	const int32 LocationCapacity = Locations.Max();
-	const int32 VectorSize = FVector::Size();
-	if (LocationCount <= 0 || LocationCount > 64 ||
-		LocationCapacity < LocationCount || LocationCapacity > 128 ||
-		VectorSize <= 0 || VectorSize > 0x40 ||
-		!SDK::MemReadable(
-			Locations.GetData(),
-			static_cast<size_t>(LocationCount) * VectorSize))
-	{
-		return false;
-	}
-
-	// Phase zero is the full-map current circle. Before the indicator publishes
-	// phase one, SafeZoneLocations[1] is already the first visible white target.
-	// Once phases advance, the phase number itself is the white-target index on
-	// both the legacy Last/Next schema and the component-driven schema.
-	int32 TargetIndex = SafeZonePhase;
-	if (TargetIndex < 0)
-		TargetIndex = LocationCount > 1 ? 1 : 0;
-	else if (TargetIndex == 0 && LocationCount > 1)
-		TargetIndex = 1;
-
-	if (!Locations.IsValidIndex(TargetIndex))
-		return false;
-
-	auto& Candidate = Locations.Get(TargetIndex, VectorSize);
-	if (!IsFiniteRespawnLocation(Candidate) ||
-		(!bAllowZero && Candidate.IsZero()))
-		return false;
-
-	OutCenter = Candidate;
 	return true;
 }
 
@@ -2664,15 +2619,194 @@ static bool TryCallRespawnSafeZoneVectorGetter(
 		(!bAllowZero && Candidate.IsZero()))
 		return false;
 
-	OutCenter = Candidate;
+	OutCenter = FVector(Candidate);
 	return true;
 }
 
-static bool IsConfiguredRespawnSafeZoneOrigin()
+static bool TryUseRespawnSafeZoneCenter(
+	const FVector& Candidate,
+	bool bAllowZero,
+	FVector& OutCenter)
 {
-	return FConfiguration::bLateGame && FConfiguration::bCustomSafeZone &&
-		IsFiniteRespawnLocation(FConfiguration::CustomSafeZoneCenter) &&
-		FConfiguration::CustomSafeZoneCenter.IsZero();
+	if (!IsFiniteRespawnLocation(Candidate) ||
+		(!bAllowZero && Candidate.IsZero()))
+	{
+		return false;
+	}
+
+	OutCenter = FVector(Candidate);
+	return true;
+}
+
+static bool CanUseWorldOriginRespawnSafeZoneCenter(
+	AFortSafeZoneIndicator* SafeZoneIndicator,
+	int32 SafeZonePhase)
+{
+	if (SafeZonePhase > 0)
+		return true;
+
+	if (!SafeZoneIndicator)
+		return false;
+
+	const auto IsPositiveFiniteRadius = [](float Radius)
+	{
+		return std::isfinite(Radius) && Radius > 0.f;
+	};
+	if ((SafeZoneIndicator->HasRadius() &&
+		 IsPositiveFiniteRadius(SafeZoneIndicator->Radius)) ||
+		(SafeZoneIndicator->HasLastRadius() &&
+		 IsPositiveFiniteRadius(SafeZoneIndicator->LastRadius)) ||
+		(SafeZoneIndicator->HasPreviousRadius() &&
+		 IsPositiveFiniteRadius(SafeZoneIndicator->PreviousRadius)))
+	{
+		return true;
+	}
+
+	// A committed moving plan may legitimately end at radius zero. Its physical
+	// publication is sufficient initialization evidence even when its final
+	// center is the world origin.
+	return CustomSafeZoneRuntime::IsMovingPlanActive(
+		UWorld::GetWorld(), SafeZoneIndicator);
+}
+
+static float CalculateRespawnSafeZoneInterpolationAlpha(
+	float StartTime,
+	float FinishTime,
+	float TimeSeconds)
+{
+	if (FinishTime <= StartTime + 0.001f)
+		return TimeSeconds >= FinishTime ? 1.f : 0.f;
+
+	return (std::clamp)(
+		(TimeSeconds - StartTime) / (FinishTime - StartTime),
+		0.f, 1.f);
+}
+
+static FVector InterpolateRespawnSafeZoneCenter(
+	const FVector& SourceCenter,
+	const FVector& TargetCenter,
+	float Alpha)
+{
+	return SourceCenter +
+		(TargetCenter - SourceCenter) * Alpha;
+}
+
+#if defined(_DEBUG)
+static void RunMidZoneRespawnCenterSelfTests()
+{
+	static bool bRan = false;
+	if (bRan)
+		return;
+	bRan = true;
+
+	const auto NearlyEqual = [](double Left, double Right)
+	{
+		return std::abs(Left - Right) <= 0.001;
+	};
+	assert(NearlyEqual(
+		CalculateRespawnSafeZoneInterpolationAlpha(
+			100.f, 140.f, 90.f),
+		0.f));
+	assert(NearlyEqual(
+		CalculateRespawnSafeZoneInterpolationAlpha(
+			100.f, 140.f, 120.f),
+		0.5f));
+	assert(NearlyEqual(
+		CalculateRespawnSafeZoneInterpolationAlpha(
+			100.f, 140.f, 150.f),
+		1.f));
+	assert(NearlyEqual(
+		CalculateRespawnSafeZoneInterpolationAlpha(
+			100.f, 100.f, 99.f),
+		0.f));
+	assert(NearlyEqual(
+		CalculateRespawnSafeZoneInterpolationAlpha(
+			100.f, 100.f, 100.f),
+		1.f));
+
+	const FVector Source(100.f, 200.f, 300.f);
+	const FVector WhiteTarget(900.f, 600.f, 500.f);
+	const FVector Halfway = InterpolateRespawnSafeZoneCenter(
+		Source, WhiteTarget, 0.5f);
+	assert(NearlyEqual(Halfway.X, 500.f));
+	assert(NearlyEqual(Halfway.Y, 400.f));
+	assert(NearlyEqual(Halfway.Z, 400.f));
+}
+#endif
+
+static bool TryGetRespawnSafeZoneInterpolationAlpha(
+	AFortSafeZoneIndicator* SafeZoneIndicator,
+	int32 SafeZonePhase,
+	float& OutAlpha)
+{
+	if (!SafeZoneIndicator ||
+		!SafeZoneIndicator->HasSafeZoneStartShrinkTime() ||
+		!SafeZoneIndicator->HasSafeZoneFinishShrinkTime())
+	{
+		return false;
+	}
+
+	const float StartTime =
+		SafeZoneIndicator->SafeZoneStartShrinkTime;
+	const float FinishTime =
+		SafeZoneIndicator->SafeZoneFinishShrinkTime;
+	auto World = UWorld::GetWorld();
+	if (!World)
+		return false;
+	const float TimeSeconds = static_cast<float>(
+		UGameplayStatics::GetTimeSeconds(World));
+	if (!std::isfinite(StartTime) || StartTime < 0.f ||
+		!std::isfinite(FinishTime) || FinishTime < 0.f ||
+		!std::isfinite(TimeSeconds) || TimeSeconds < 0.f ||
+		(SafeZonePhase <= 0 && StartTime == 0.f && FinishTime == 0.f))
+	{
+		return false;
+	}
+
+	OutAlpha = CalculateRespawnSafeZoneInterpolationAlpha(
+		StartTime, FinishTime, TimeSeconds);
+	return true;
+}
+
+static bool TryGetRespawnSafeZoneSourceCenter(
+	AFortSafeZoneIndicator* SafeZoneIndicator,
+	int32 SafeZonePhase,
+	bool bAllowZero,
+	FVector& OutCenter)
+{
+	if (!SafeZoneIndicator)
+		return false;
+
+	if (SafeZoneIndicator->HasLastCenter() &&
+		TryUseRespawnSafeZoneCenter(
+			SafeZoneIndicator->LastCenter,
+			bAllowZero,
+			OutCenter))
+	{
+		return true;
+	}
+
+	if (SafeZoneIndicator->HasPreviousCenter() &&
+		TryUseRespawnSafeZoneCenter(
+			SafeZoneIndicator->PreviousCenter,
+			bAllowZero,
+			OutCenter))
+	{
+		return true;
+	}
+
+	// SafeZonePhases[CurrentPhase] is the white target. Only the preceding
+	// entry may be used as a source-circle fallback.
+	FVector PreviousPhaseCenter{};
+	return SafeZonePhase > 0 &&
+		TryGetSafeZonePhaseCenter(
+			SafeZoneIndicator,
+			SafeZonePhase - 1,
+			PreviousPhaseCenter) &&
+		TryUseRespawnSafeZoneCenter(
+			PreviousPhaseCenter,
+			bAllowZero,
+			OutCenter);
 }
 
 static bool TryGetSafeZoneRespawnCenter(
@@ -2682,98 +2816,85 @@ static bool TryGetSafeZoneRespawnCenter(
 	UFortGameStateComponent_BattleRoyaleGamePhaseLogic* PhaseLogic = nullptr;
 	auto SafeZoneIndicator = GetRespawnSafeZoneIndicator(
 		GameMode, &PhaseLogic);
-
-	// A few early builds fill SafeZoneLocations before publishing an indicator.
-	// That source is still sufficient to resolve their first white circle.
-	if (!SafeZoneIndicator)
-	{
-		const int32 SafeZonePhase = GetRespawnSafeZonePhase(
-			GameMode, nullptr);
-		auto GameState = GameMode ? GameMode->GameState : nullptr;
-		const bool bAllowConfiguredOrigin =
-			IsConfiguredRespawnSafeZoneOrigin();
-		return TryCallRespawnSafeZoneVectorGetter(
-				PhaseLogic, "GetSafeZoneNextCenter", OutCenter,
-				SafeZonePhase > 0 || bAllowConfiguredOrigin) ||
-			TryCallRespawnSafeZoneVectorGetter(
-				GameState, "GetSafeZoneNextCenter", OutCenter,
-				SafeZonePhase > 0 || bAllowConfiguredOrigin) ||
-			TryGetSafeZoneLocationCenter(
-				GameMode, SafeZonePhase, OutCenter,
-				bAllowConfiguredOrigin);
-	}
-
-	auto TryUseCenter = [&](FVector Center, bool bAllowZero) -> bool
-	{
-		if (!IsFiniteRespawnLocation(Center) || (!bAllowZero && Center.IsZero()))
-			return false;
-
-		OutCenter = Center;
-		return true;
-	};
-
+	auto GameState = GameMode ? GameMode->GameState : nullptr;
+	auto LegacyGameStateCenterOwner =
+		VersionInfo.FortniteVersion < 25.20f
+			? GameState
+			: nullptr;
 	const int32 SafeZonePhase = GetRespawnSafeZonePhase(
 		GameMode, SafeZoneIndicator);
-	FVector PhaseCenter{};
-	const bool bHasPhaseCenter = TryGetSafeZonePhaseCenter(
-		SafeZoneIndicator, SafeZonePhase, PhaseCenter);
-	const bool bAllowConfiguredOrigin =
-		IsConfiguredRespawnSafeZoneOrigin();
-	const bool bHasActiveTargetPhase = SafeZonePhase > 0;
+	const bool bAllowZero =
+		CanUseWorldOriginRespawnSafeZoneCenter(
+			SafeZoneIndicator, SafeZonePhase);
 
-	// NextCenter is the center of the white target circle. GetSafeZoneCenter is
-	// the interpolated/live blue wall on legacy builds, so it must never outrank
-	// NextCenter or the phase/location target.
-	if (SafeZoneIndicator->HasNextCenter())
+	// Mid-Zone Respawning follows the physical purple storm circle, including
+	// its live interpolated position during lateral movement. Never substitute
+	// NextCenter, GetSafeZoneNextCenter, or the current phase-array entry here:
+	// each of those is the white preview circle.
+	if (TryCallRespawnSafeZoneVectorGetter(
+			SafeZoneIndicator,
+			"GetSafeZoneCenter",
+			OutCenter,
+			bAllowZero) ||
+		TryCallRespawnSafeZoneVectorGetter(
+			PhaseLogic,
+			"GetSafeZoneCenter",
+			OutCenter,
+			bAllowZero) ||
+		TryCallRespawnSafeZoneVectorGetter(
+			LegacyGameStateCenterOwner,
+			"GetSafeZoneCenter",
+			OutCenter,
+			bAllowZero))
 	{
-		const bool bHasPublishedNextRadius =
-			SafeZoneIndicator->HasNextRadius() &&
-			std::isfinite(SafeZoneIndicator->NextRadius) &&
-			SafeZoneIndicator->NextRadius > 0.f;
-		if (TryUseCenter(
-			SafeZoneIndicator->NextCenter,
-			bAllowConfiguredOrigin ||
-			(bHasActiveTargetPhase && bHasPublishedNextRadius)))
+		return true;
+	}
+
+	if (!SafeZoneIndicator)
+		return false;
+
+	// Older indicators without the getter still move their physical actor with
+	// the wall. This is the same authoritative fallback used by storm pausing.
+	if (TryUseRespawnSafeZoneCenter(
+			SafeZoneIndicator->K2_GetActorLocation(),
+			bAllowZero,
+			OutCenter))
+	{
+		return true;
+	}
+
+	FVector SourceCenter{};
+	if (!TryGetRespawnSafeZoneSourceCenter(
+			SafeZoneIndicator,
+			SafeZonePhase,
+			bAllowZero,
+			SourceCenter))
+	{
+		return false;
+	}
+
+	// Last/Previous is the purple source and Next is only an endpoint here. If
+	// both deadlines are available, interpolate them at respawn time; otherwise
+	// use the source circle rather than silently reverting to the white target.
+	float Alpha = 0.f;
+	if (SafeZoneIndicator->HasNextCenter() &&
+		TryGetRespawnSafeZoneInterpolationAlpha(
+			SafeZoneIndicator, SafeZonePhase, Alpha))
+	{
+		const FVector Candidate =
+			InterpolateRespawnSafeZoneCenter(
+				SourceCenter,
+				SafeZoneIndicator->NextCenter,
+				Alpha);
+		if (TryUseRespawnSafeZoneCenter(
+				Candidate, bAllowZero, OutCenter))
 		{
 			return true;
 		}
 	}
 
-	if (PhaseLogic && TryCallRespawnSafeZoneVectorGetter(
-		PhaseLogic, "GetSafeZoneNextCenter", OutCenter,
-		bHasActiveTargetPhase || bAllowConfiguredOrigin))
-	{
-		return true;
-	}
-
-	auto GameState = GameMode ? GameMode->GameState : nullptr;
-	if (TryCallRespawnSafeZoneVectorGetter(
-		GameState, "GetSafeZoneNextCenter", OutCenter,
-		bHasActiveTargetPhase || bAllowConfiguredOrigin) ||
-		TryCallRespawnSafeZoneVectorGetter(
-			SafeZoneIndicator, "GetSafeZoneNextCenter", OutCenter,
-			bHasActiveTargetPhase || bAllowConfiguredOrigin))
-	{
-		return true;
-	}
-
-	if (bHasPhaseCenter && TryUseCenter(
-		PhaseCenter, bHasActiveTargetPhase || bAllowConfiguredOrigin))
-		return true;
-
-	if (TryGetSafeZoneLocationCenter(
-		GameMode, SafeZonePhase, OutCenter,
-		bAllowConfiguredOrigin))
-	{
-		return true;
-	}
-
-	// GetSafeZoneCenter/LastCenter represent the interpolated blue wall on
-	// legacy builds, not the white target requested by Mid-Zone Respawning.
-	// Fail closed if no target representation was published instead of silently
-	// respawning at the wrong circle (or at an uninitialized origin).
-
-	return false;
+	return TryUseRespawnSafeZoneCenter(
+		SourceCenter, bAllowZero, OutCenter);
 }
 
 static bool TryGetConfiguredRespawnLocation(AFortGameMode* GameMode, FVector& OutLocation)
@@ -4089,7 +4210,22 @@ static UAbilitySystemComponent* GetIceGameplayEffectAbilitySystem(
 		: nullptr;
 }
 
-static bool IsIceGameplayEffectDefinition(
+enum class EIceGameplayEffectSelection : uint8
+{
+	LowFriction = 1 << 0,
+	SurfaceChange = 1 << 1,
+	All = (1 << 0) | (1 << 1)
+};
+
+static bool IncludesIceGameplayEffectSelection(
+	EIceGameplayEffectSelection Selection,
+	EIceGameplayEffectSelection Candidate)
+{
+	return (static_cast<uint8>(Selection) &
+		static_cast<uint8>(Candidate)) != 0;
+}
+
+static bool IsLowFrictionIceGameplayEffectDefinition(
 	UGameplayEffect* EffectDefinition,
 	const UClass* IceGameplayEffectClass)
 {
@@ -4118,9 +4254,49 @@ static bool IsIceGameplayEffectDefinition(
 			L"GE_Trap_Ice_LowFriction_Athena_C";
 }
 
+static bool IsSurfaceChangeIceGameplayEffectDefinition(
+	UGameplayEffect* EffectDefinition)
+{
+	if (!EffectDefinition ||
+		!SDK::MemReadable(EffectDefinition, sizeof(UObject)))
+	{
+		return false;
+	}
+
+	if (EffectDefinition->Name.ToWString() ==
+		L"Default__GE_SurfaceChange_Ice_C")
+	{
+		return true;
+	}
+
+	return EffectDefinition->Class &&
+		SDK::MemReadable(EffectDefinition->Class, sizeof(UObject)) &&
+		EffectDefinition->Class->Name.ToWString() ==
+			L"GE_SurfaceChange_Ice_C";
+}
+
+static bool IsSelectedIceGameplayEffectDefinition(
+	UGameplayEffect* EffectDefinition,
+	const UClass* IceGameplayEffectClass,
+	EIceGameplayEffectSelection Selection)
+{
+	return
+		(IncludesIceGameplayEffectSelection(
+			Selection,
+			EIceGameplayEffectSelection::LowFriction) &&
+			IsLowFrictionIceGameplayEffectDefinition(
+				EffectDefinition, IceGameplayEffectClass)) ||
+		(IncludesIceGameplayEffectSelection(
+			Selection,
+			EIceGameplayEffectSelection::SurfaceChange) &&
+			IsSurfaceChangeIceGameplayEffectDefinition(
+				EffectDefinition));
+}
+
 static bool CollectIceGameplayEffectHandles(
 	UAbilitySystemComponent* AbilitySystemComponent,
 	const UClass* IceGameplayEffectClass,
+	EIceGameplayEffectSelection Selection,
 	std::vector<FActiveGameplayEffectHandle>& OutHandles,
 	std::vector<UClass*>* OutEffectClasses = nullptr)
 {
@@ -4175,8 +4351,10 @@ static bool CollectIceGameplayEffectHandles(
 		auto& ActiveEffect = Effects.Get(
 			EffectIndex, ActiveEffectSize);
 		auto EffectDefinition = ActiveEffect.Spec.Def;
-		if (!IsIceGameplayEffectDefinition(
-				EffectDefinition, IceGameplayEffectClass))
+		if (!IsSelectedIceGameplayEffectDefinition(
+				EffectDefinition,
+				IceGameplayEffectClass,
+				Selection))
 		{
 			continue;
 		}
@@ -4214,6 +4392,7 @@ static EIceGameplayEffectApplyResult ApplyIceGameplayEffect(
 	if (CollectIceGameplayEffectHandles(
 			AbilitySystemComponent,
 			IceGameplayEffectClass,
+			EIceGameplayEffectSelection::LowFriction,
 			ExistingHandles) &&
 		!ExistingHandles.empty())
 	{
@@ -4239,8 +4418,9 @@ static EIceGameplayEffectApplyResult ApplyIceGameplayEffect(
 	return EIceGameplayEffectApplyResult::Applied;
 }
 
-static FIceGameplayEffectRemovalResult RemoveIceGameplayEffect(
-	AFortPlayerControllerAthena* PlayerController)
+static FIceGameplayEffectRemovalResult RemoveIceGameplayEffects(
+	AFortPlayerControllerAthena* PlayerController,
+	EIceGameplayEffectSelection Selection)
 {
 	FIceGameplayEffectRemovalResult Result;
 	if (VersionInfo.FortniteVersion < 6.01)
@@ -4265,6 +4445,7 @@ static FIceGameplayEffectRemovalResult RemoveIceGameplayEffect(
 	if (!CollectIceGameplayEffectHandles(
 			AbilitySystemComponent,
 			IceGameplayEffectClass,
+			Selection,
 			Handles,
 			&EffectClasses))
 	{
@@ -4321,6 +4502,7 @@ static FIceGameplayEffectRemovalResult RemoveIceGameplayEffect(
 	if (!CollectIceGameplayEffectHandles(
 			AbilitySystemComponent,
 			IceGameplayEffectClass,
+			Selection,
 			RemainingHandles))
 	{
 		Result.bInspectionAvailable = false;
@@ -4334,6 +4516,28 @@ static FIceGameplayEffectRemovalResult RemoveIceGameplayEffect(
 	PlayerController->PlayerState->ForceNetUpdate();
 	PlayerController->ForceNetUpdate();
 	return Result;
+}
+
+static FIceGameplayEffectRemovalResult RemoveIceGameplayEffect(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	return RemoveIceGameplayEffects(
+		PlayerController,
+		EIceGameplayEffectSelection::All);
+}
+
+// Trickshot waypoint cleanup hides the authored ice-feet/surface layer without
+// cancelling the primary low-friction movement effect. Apply the primary
+// effect first so any surface layer created alongside it is included in the
+// removal pass that follows.
+static FIceGameplayEffectRemovalResult
+RemoveIceFeetAndPreserveLowFriction(
+	AFortPlayerControllerAthena* PlayerController)
+{
+	ApplyIceGameplayEffect(PlayerController);
+	return RemoveIceGameplayEffects(
+		PlayerController,
+		EIceGameplayEffectSelection::SurfaceChange);
 }
 
 // One Shot's playlist already supplies its movement/gravity behavior. This
@@ -17329,7 +17533,7 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
 		if (IsUsableDeathObject(KillerPlayerState) &&
 			(GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) &&
-			VersionInfo.FortniteVersion < 20.40) // crashes on 20.40, test other versions
+			VersionInfo.FortniteVersion < 17.30) // crashes on 17.30, 18.40, 20.40, test other versions
 		{
 			KillerPlayerState->ClientReportTournamentStatUpdate();
 		}
@@ -19052,7 +19256,7 @@ static void ApplyWaypointTeleportEffects(
 		FConfiguration::bRemoveIceOnWaypointTP.load(
 			std::memory_order_acquire))
 	{
-		RemoveIceGameplayEffect(PlayerController);
+		RemoveIceFeetAndPreserveLowFriction(PlayerController);
 	}
 }
 
@@ -25455,6 +25659,7 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
 				if (!CollectIceGameplayEffectHandles(
 						AbilitySystemComponent,
 						GetIceGameplayEffectClass(),
+						EIceGameplayEffectSelection::LowFriction,
 						IceHandles))
 				{
 					PlayerController->ClientMessage(
@@ -34062,6 +34267,10 @@ void AFortPlayerControllerAthena::ServerPlaySquadQuickChatMessage(UObject* Conte
 
 void AFortPlayerControllerAthena::PostLoadHook()
 {
+#if defined(_DEBUG)
+	RunMidZoneRespawnCenterSelfTests();
+#endif
+
 	const uint64 ClientStreamingReadinessAddress =
 		FindHasStreamingLevelsCompletedLoadingUnLoading();
 	Utils::Hook(

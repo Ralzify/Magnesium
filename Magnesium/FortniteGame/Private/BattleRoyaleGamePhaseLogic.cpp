@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Public/BattleRoyaleGamePhaseLogic.h"
+#include "../Public/CustomSafeZoneRuntime.h"
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/GUI.h"
@@ -1581,6 +1582,31 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(bool 
 }
 
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
+	ResetSafeZonePauseForMatch(UWorld* World)
+{
+	ResetSafeZonePauseStateForWorld(World);
+	if (GSafeZonePauseState.bHasRequest &&
+		GSafeZonePauseState.bRequestedPaused)
+	{
+		// Restore captured deadlines and clear every reflected owner/wall flag
+		// before discarding the prior match's pause bookkeeping.
+		SetSafeZonePaused(false);
+	}
+
+	GSafeZonePauseRequest.store(-1, std::memory_order_release);
+	GSafeZonePauseState = {};
+	GSafeZonePauseState.World = World;
+	GSafeZonePauseState.GameState = World
+		? (AFortGameStateAthena*)World->GameState
+		: nullptr;
+	bPausedZone = false;
+	GSafeZonePauseSnapshot.store(false, std::memory_order_release);
+	SDK::DbgLog(
+		"[SafeZone] pause state reset for match world=%p\n",
+		(void*)World);
+}
+
+void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
 	TickSafeZonePause()
 {
 	auto World = UWorld::GetWorld();
@@ -2090,6 +2116,8 @@ AFortSafeZoneIndicator* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Setu
 			auto GameState = (AFortGameStateAthena*) UWorld::GetWorld()->GameState;
 			if (FConfiguration::bCustomSafeZone)
 				GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+			const auto LegacyCustomZone =
+				FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
 			FFortSafeZoneDefinition& SafeZoneDefinition = GameState->MapInfo->SafeZoneDefinition;
 			float SafeZoneCount = SafeZoneDefinition.Count.Evaluate();
 
@@ -2100,6 +2128,8 @@ AFortSafeZoneIndicator* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Setu
 
 			const float Time = (float)UGameplayStatics::GetTimeSeconds(GameState);
 
+			const bool bMovingCustomZone =
+				CustomSafeZoneRuntime::IsMovingModeRequested();
 			for (float i = 0; i < SafeZoneCount; i++)
 			{
 				auto PhaseInfo = (FFortSafeZonePhaseInfo*)malloc(FFortSafeZonePhaseInfo::Size());
@@ -2125,10 +2155,12 @@ AFortSafeZoneIndicator* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Setu
 
 				PhaseInfo->Center = StormCircles[(int)i].Center;
 
-				if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+				if (FConfiguration::bLateGame &&
+					FConfiguration::bCustomSafeZone &&
+					!bMovingCustomZone)
 				{
-					PhaseInfo->Center = FConfiguration::CustomSafeZoneCenter;
-					PhaseInfo->Radius = FConfiguration::CustomSafeZoneRadius;
+					PhaseInfo->Center = FVector(LegacyCustomZone.Center);
+					PhaseInfo->Radius = float(LegacyCustomZone.RadiusCm);
 					if (i == 0.f)
 						SDK::DbgLog("[SafeZoneMap] applying custom zone center=(%.1f, %.1f, %.1f) radius=%.1f\n",
 							PhaseInfo->Center.X, PhaseInfo->Center.Y, PhaseInfo->Center.Z,
@@ -2139,6 +2171,31 @@ AFortSafeZoneIndicator* UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Setu
 				free(PhaseInfo);
 
 				SafeZoneIndicator->PhaseCount++;
+			}
+
+			bool bMovingCustomZoneApplied = false;
+			if (bMovingCustomZone)
+			{
+				bMovingCustomZoneApplied =
+					CustomSafeZoneRuntime::ApplyToPhaseArray(
+					UWorld::GetWorld(), GameState->MapInfo,
+					SafeZoneIndicator, Array,
+					"component-setup");
+			}
+			if (bMovingCustomZone && !bMovingCustomZoneApplied &&
+				FConfiguration::bLateGame &&
+				FConfiguration::bCustomSafeZone)
+			{
+				for (int32 PhaseIndex = 0;
+					PhaseIndex < Array.Num(); ++PhaseIndex)
+				{
+					auto& PhaseInfo = Array.Get(
+						PhaseIndex, FFortSafeZonePhaseInfo::Size());
+					PhaseInfo.Center =
+						FVector(LegacyCustomZone.Center);
+					PhaseInfo.Radius =
+						float(LegacyCustomZone.RadiusCm);
+				}
 			}
 
 			SafeZoneIndicator->OnRep_PhaseCount();
@@ -2161,6 +2218,9 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 {
 	float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
 	auto& Array = SafeZoneIndicator->SafeZonePhases;
+	const bool bMovingCustomZoneRequested =
+		CustomSafeZoneRuntime::IsMovingModeRequested();
+	bool bMovingCustomZone = bMovingCustomZoneRequested;
 
 	if (Array.IsValidIndex(NewSafeZonePhase))
 	{
@@ -2173,13 +2233,17 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 		}
 
 		auto& PhaseInfo = Array.Get(NewSafeZonePhase, FFortSafeZonePhaseInfo::Size());
-		if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+		if (FConfiguration::bLateGame &&
+			FConfiguration::bCustomSafeZone &&
+			!bMovingCustomZone)
 		{
 			auto GameState = (AFortGameStateAthena*)UWorld::GetWorld()->GameState;
 			if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
 				GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
-			PhaseInfo.Center = FConfiguration::CustomSafeZoneCenter;
-			PhaseInfo.Radius = FConfiguration::CustomSafeZoneRadius;
+			const auto LegacyCustomZone =
+				FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+			PhaseInfo.Center = FVector(LegacyCustomZone.Center);
+			PhaseInfo.Radius = float(LegacyCustomZone.RadiusCm);
 		}
 
 		SafeZoneIndicator->NextCenter = PhaseInfo.Center;
@@ -2201,8 +2265,35 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 			SafeZoneIndicator->NextNextMegaStormGridCellThickness = NextPhaseInfo.MegaStormGridCellThickness;
 		}
 
+		if (bMovingCustomZoneRequested)
+		{
+			auto World = UWorld::GetWorld();
+			auto GameState = World
+				? (AFortGameStateAthena*)World->GameState
+				: nullptr;
+			bMovingCustomZone =
+				CustomSafeZoneRuntime::PublishManagedPhase(
+				World,
+				GameState && GameState->HasMapInfo()
+					? GameState->MapInfo
+					: nullptr,
+				SafeZoneIndicator, NewSafeZonePhase,
+				"component-phase-start",
+				&Array);
+		}
+
 		SafeZoneIndicator->SafeZoneStartShrinkTime = TimeSeconds + PhaseInfo.WaitTime;
 		SafeZoneIndicator->SafeZoneFinishShrinkTime = SafeZoneIndicator->SafeZoneStartShrinkTime + PhaseInfo.ShrinkTime;
+		if (bMovingCustomZone)
+		{
+			MarkSafeZoneIndicatorDirty(
+				SafeZoneIndicator, L"SafeZoneStartShrinkTime");
+			MarkSafeZoneIndicatorDirty(
+				SafeZoneIndicator, L"SafeZoneFinishShrinkTime");
+			// Publish after both deadlines have been assigned. ForceNetUpdate alone
+			// is insufficient for unmarked push-model/Iris properties.
+			SafeZoneIndicator->ForceNetUpdate();
+		}
 
 		SafeZoneIndicator->CurrentDamageInfo = PhaseInfo.DamageInfo;
 		SafeZoneIndicator->OnRep_CurrentDamageInfo();
@@ -2220,10 +2311,14 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartNewSafeZonePhase(i
 		SafeZoneIndicator->OnSafeZoneStateChange(2, bInitial);
 		SafeZoneIndicator->SafezoneStateChangedDelegate.Process(SafeZoneIndicator, 2);
 
-		if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+		if (FConfiguration::bLateGame &&
+			FConfiguration::bCustomSafeZone &&
+			!bMovingCustomZone)
 		{
-			FVector Center = FConfiguration::CustomSafeZoneCenter;
-			float Radius = FConfiguration::CustomSafeZoneRadius;
+			const auto LegacyCustomZone =
+				FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+			FVector Center(LegacyCustomZone.Center);
+			float Radius = LegacyCustomZone.RadiusCm;
 			if (SafeZoneIndicator->HasLastCenter()) SafeZoneIndicator->LastCenter = Center;
 			if (SafeZoneIndicator->HasPreviousCenter()) SafeZoneIndicator->PreviousCenter = Center;
 			if (SafeZoneIndicator->HasNextCenter()) SafeZoneIndicator->NextCenter = Center;
@@ -2332,16 +2427,34 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StartAircraftPhase()
 
 			GenerateStormCircles(GameState->MapInfo);
 			
-			if (StormCircles.size() < FConfiguration::LateGameZone)
+			const int32 SourceCircleIndex =
+				CustomSafeZoneRuntime::ResolveRuntimeStartPhase() - 1;
+			if (SourceCircleIndex < 0 ||
+				(size_t)SourceCircleIndex >= StormCircles.size())
 			{
-				printf("LateGame is not supported on this version!\n");
+				printf(
+					"LateGame source phase %d is not supported by "
+					"this %zu-circle schedule!\n",
+					SourceCircleIndex, StormCircles.size());
 				return;
 			}
 
-			FVector Loc = StormCircles[FConfiguration::LateGameZone + 2].Center;
+			FVector Loc = StormCircles[SourceCircleIndex].Center;
 
 			if (FConfiguration::bCustomSafeZone)
-				Loc = FConfiguration::CustomSafeZoneCenter;
+			{
+				const auto LegacyCustomZone = FConfiguration::
+					GetLegacyCustomSafeZoneNodeSnapshot();
+				Loc = FVector(LegacyCustomZone.Center);
+				if (CustomSafeZoneRuntime::IsMovingModeRequested())
+				{
+					float SourceRadius = 0.f;
+					CustomSafeZoneRuntime::TryGetSourceCircle(
+						UWorld::GetWorld(), GameState->MapInfo,
+						Loc, SourceRadius,
+						(int32)StormCircles.size());
+				}
+			}
 
 			Loc.Z = 25000.f;
 
@@ -2595,7 +2708,11 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 				{
 					formedZone = true;
 					auto SafeZoneIndicator = SetupSafeZoneIndicator();
-					StartNewSafeZonePhase(FConfiguration::bLateGame ? FConfiguration::LateGameZone + 3 : 1, true);
+					StartNewSafeZonePhase(
+						FConfiguration::bLateGame
+							? CustomSafeZoneRuntime::ResolveRuntimeStartPhase()
+							: 1,
+						true);
 					return;
 				}
 			}
@@ -2691,6 +2808,10 @@ void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Tick()
 
 void UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Hook()
 {
+#if defined(_DEBUG)
+	CustomSafeZoneRuntime::RunMappingSelfTests();
+	GUI::RunCustomSafeZoneRenderSelfTests();
+#endif
 	if (!GetDefaultObj())
 		return;
 

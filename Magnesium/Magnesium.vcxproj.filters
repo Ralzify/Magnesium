@@ -96,6 +96,9 @@
     <ClInclude Include="FortniteGame\Public\FortSafeZoneIndicator.h">
       <Filter>FortniteGame\Public</Filter>
     </ClInclude>
+    <ClInclude Include="FortniteGame\Public\CustomSafeZoneRuntime.h">
+      <Filter>FortniteGame\Public</Filter>
+    </ClInclude>
     <ClInclude Include="FortniteGame\Public\LevelStreamingDynamic.h">
       <Filter>FortniteGame\Public</Filter>
     </ClInclude>
@@ -389,6 +392,9 @@
     <ClCompile Include="FortniteGame\Private\BattleRoyaleGamePhaseLogic.cpp">
       <Filter>FortniteGame\Private</Filter>
     </ClCompile>
+    <ClCompile Include="FortniteGame\Private\CustomSafeZoneRuntime.cpp">
+      <Filter>FortniteGame\Private</Filter>
+    </ClCompile>
     <ClCompile Include="FortniteGame\Private\FortAthenaCreativePortal.cpp">
       <Filter>FortniteGame\Private</Filter>
     </ClCompile>
@@ -426,5 +432,18 @@
     <ClCompile Include="Erbium\Support\Private\VersionFeatureAdapter.cpp">
       <Filter>Magnesium\Support\Private</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Resource.h">
+      <Filter>Magnesium\Public</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Resources.rc">
+      <Filter>Magnesium</Filter>
+    </ResourceCompile>
+    <None Include="Erbium\Resources\TrickshotPresets\BlockWinner_15Bandit.json">
+      <Filter>Magnesium</Filter>
+    </None>
   </ItemGroup>
 </Project>

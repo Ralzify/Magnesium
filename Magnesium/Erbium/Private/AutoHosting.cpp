@@ -7,6 +7,7 @@
 
 #include <ShlObj.h>
 #include <algorithm>
+#include <cassert>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -27,6 +28,7 @@ namespace AutoHosting
         std::atomic<ULONGLONG> GCountdownDeadlineMs{ 0 };
         std::atomic<ULONGLONG> GPostMatchShutdownDeadlineMs{ 0 };
         std::atomic_bool GRestoredPreferences{ false };
+        std::atomic_bool GCustomSafeZoneRefreshRequested{ false };
 
         nlohmann::json GDocument = nlohmann::json::object();
         nlohmann::json GDefaultPreferences =
@@ -113,6 +115,540 @@ namespace AutoHosting
                 ? *It
                 : Empty;
         }
+
+        bool TryReadFiniteNumber(
+            const nlohmann::json& Object,
+            const char* Key,
+            double& Value)
+        {
+            const auto It = Object.find(Key);
+            if (It == Object.end() || !It->is_number())
+                return false;
+
+            try
+            {
+                const double ParsedValue = It->get<double>();
+                if (!std::isfinite(ParsedValue))
+                    return false;
+
+                Value = ParsedValue;
+                return true;
+            }
+            catch (const std::exception&)
+            {
+                return false;
+            }
+        }
+
+        bool TryReadRequiredBool(
+            const nlohmann::json& Object,
+            const char* Key,
+            bool& Value)
+        {
+            const auto It = Object.find(Key);
+            if (It == Object.end() || !It->is_boolean())
+                return false;
+
+            Value = It->get<bool>();
+            return true;
+        }
+
+        bool TryReadRequiredInt(
+            const nlohmann::json& Object,
+            const char* Key,
+            int& Value)
+        {
+            const auto It = Object.find(Key);
+            if (It == Object.end() ||
+                !It->is_number_integer())
+            {
+                return false;
+            }
+
+            try
+            {
+                Value = It->get<int>();
+                return true;
+            }
+            catch (const std::exception&)
+            {
+                return false;
+            }
+        }
+
+        bool TryReadOptionalDuration(
+            const nlohmann::json& Object,
+            const char* Key,
+            std::optional<float>& Value)
+        {
+            const auto It = Object.find(Key);
+            if (It == Object.end() || It->is_null())
+            {
+                Value.reset();
+                return true;
+            }
+
+            double ParsedValue = 0.0;
+            if (!TryReadFiniteNumber(Object, Key, ParsedValue) ||
+                ParsedValue <
+                    FCustomSafeZoneSequence::MinimumDurationSeconds ||
+                ParsedValue >
+                    FCustomSafeZoneSequence::MaximumDurationSeconds)
+            {
+                return false;
+            }
+
+            Value = static_cast<float>(ParsedValue);
+            return true;
+        }
+
+        bool TryReadCustomSafeZoneSequence(
+            const nlohmann::json& LateGame,
+            FCustomSafeZoneSequence& Sequence,
+            bool bAllowLegacyRadiusIncreases = false)
+        {
+            const auto SequenceIt =
+                LateGame.find("safe_zone_sequence");
+            if (SequenceIt == LateGame.end() ||
+                !SequenceIt->is_object())
+            {
+                return false;
+            }
+
+            const auto& SavedSequence = *SequenceIt;
+            int SequenceSchemaVersion = -1;
+            if (!TryReadRequiredInt(
+                    SavedSequence,
+                    "schema_version",
+                    SequenceSchemaVersion) ||
+                SequenceSchemaVersion !=
+                    FCustomSafeZoneSequence::SchemaVersion)
+            {
+                return false;
+            }
+
+            const auto NodesIt = SavedSequence.find("nodes");
+            if (NodesIt == SavedSequence.end() ||
+                !NodesIt->is_array() ||
+                NodesIt->size() <
+                    FCustomSafeZoneSequence::MinimumNodeCount ||
+                NodesIt->size() >
+                    FCustomSafeZoneSequence::MaximumNodeCount)
+            {
+                return false;
+            }
+
+            FCustomSafeZoneSequence ParsedSequence;
+            const auto CloseFinalIt =
+                SavedSequence.find("close_final_circle");
+            if (CloseFinalIt != SavedSequence.end())
+            {
+                if (!CloseFinalIt->is_boolean())
+                    return false;
+                ParsedSequence.bCloseFinalCircle =
+                    CloseFinalIt->get<bool>();
+            }
+            ParsedSequence.Nodes.clear();
+            ParsedSequence.Nodes.reserve(NodesIt->size());
+            for (const auto& SavedNode : *NodesIt)
+            {
+                if (!SavedNode.is_object())
+                    return false;
+
+                double WorldX = 0.0;
+                double WorldY = 0.0;
+                double WorldZ = 0.0;
+                double NormalizedU = 0.0;
+                double NormalizedV = 0.0;
+                double RadiusCm = 0.0;
+                bool bHasNormalized = false;
+                if (!TryReadFiniteNumber(
+                        SavedNode, "world_x", WorldX) ||
+                    !TryReadFiniteNumber(
+                        SavedNode, "world_y", WorldY) ||
+                    !TryReadFiniteNumber(
+                        SavedNode, "world_z", WorldZ) ||
+                    !TryReadRequiredBool(
+                        SavedNode,
+                        "has_normalized",
+                        bHasNormalized) ||
+                    !TryReadFiniteNumber(
+                        SavedNode, "u", NormalizedU) ||
+                    !TryReadFiniteNumber(
+                        SavedNode, "v", NormalizedV) ||
+                    !TryReadFiniteNumber(
+                        SavedNode, "radius_cm", RadiusCm))
+                {
+                    return false;
+                }
+
+                FCustomSafeZoneNode Node;
+                Node.Center = FVector(WorldX, WorldY, WorldZ);
+                Node.bHasNormalizedCenter = bHasNormalized;
+                Node.NormalizedU = static_cast<float>(ClampValue(
+                    NormalizedU, 0.0, 1.0));
+                Node.NormalizedV = static_cast<float>(ClampValue(
+                    NormalizedV, 0.0, 1.0));
+                Node.RadiusCm = static_cast<float>(ClampValue(
+                    RadiusCm,
+                    static_cast<double>(
+                        FCustomSafeZoneSequence::MinimumRadiusCm),
+                    static_cast<double>(
+                        FCustomSafeZoneSequence::MaximumRadiusCm)));
+                if (!TryReadOptionalDuration(
+                        SavedNode,
+                        "hold_before_next_seconds",
+                        Node.HoldBeforeNextSeconds) ||
+                    !TryReadOptionalDuration(
+                        SavedNode,
+                        "move_to_next_seconds",
+                        Node.MoveToNextSeconds))
+                {
+                    return false;
+                }
+
+                ParsedSequence.Nodes.push_back(std::move(Node));
+            }
+
+            // Only the profile migration path may read the old expansion
+            // semantics. Every ordinary reader fails closed instead of
+            // publishing a sequence that violates the current invariant.
+            if (!bAllowLegacyRadiusIncreases &&
+                ParsedSequence.FindFirstRadiusIncreaseEdge().has_value())
+                return false;
+
+            Sequence = std::move(ParsedSequence);
+            return true;
+        }
+
+        nlohmann::json CaptureCustomSafeZoneSequence(
+            const FCustomSafeZoneSequence& Sequence)
+        {
+            nlohmann::json SavedNodes = nlohmann::json::array();
+            for (const auto& Node : Sequence.Nodes)
+            {
+                nlohmann::json SavedNode = {
+                    { "world_x", Node.Center.X },
+                    { "world_y", Node.Center.Y },
+                    { "world_z", Node.Center.Z },
+                    {
+                        "has_normalized",
+                        Node.bHasNormalizedCenter
+                    },
+                    { "u", Node.NormalizedU },
+                    { "v", Node.NormalizedV },
+                    { "radius_cm", Node.RadiusCm }
+                };
+                SavedNode["hold_before_next_seconds"] =
+                    Node.HoldBeforeNextSeconds.has_value()
+                        ? nlohmann::json(
+                            *Node.HoldBeforeNextSeconds)
+                        : nlohmann::json(nullptr);
+                SavedNode["move_to_next_seconds"] =
+                    Node.MoveToNextSeconds.has_value()
+                        ? nlohmann::json(
+                            *Node.MoveToNextSeconds)
+                        : nlohmann::json(nullptr);
+                SavedNodes.push_back(std::move(SavedNode));
+            }
+
+            return {
+                {
+                    "schema_version",
+                    FCustomSafeZoneSequence::SchemaVersion
+                },
+                {
+                    "close_final_circle",
+                    Sequence.bCloseFinalCircle
+                },
+                { "nodes", std::move(SavedNodes) }
+            };
+        }
+
+        FCustomSafeZoneNode ReadLegacyCustomSafeZoneNode(
+            const nlohmann::json& LateGame)
+        {
+            double WorldX = 0.0;
+            double WorldY = 0.0;
+            double WorldZ = 0.0;
+            double RadiusCm = 100000.0;
+            double NormalizedU = 0.5;
+            double NormalizedV = 0.5;
+            TryReadFiniteNumber(
+                LateGame, "safe_zone_center_x", WorldX);
+            TryReadFiniteNumber(
+                LateGame, "safe_zone_center_y", WorldY);
+            TryReadFiniteNumber(
+                LateGame, "safe_zone_center_z", WorldZ);
+            TryReadFiniteNumber(
+                LateGame, "safe_zone_radius", RadiusCm);
+            TryReadFiniteNumber(
+                LateGame, "safe_zone_u", NormalizedU);
+            TryReadFiniteNumber(
+                LateGame, "safe_zone_v", NormalizedV);
+
+            FCustomSafeZoneNode Node;
+            Node.Center = FVector(WorldX, WorldY, WorldZ);
+            if (!std::isfinite(Node.Center.X) ||
+                !std::isfinite(Node.Center.Y) ||
+                !std::isfinite(Node.Center.Z))
+            {
+                Node.Center = FVector{};
+            }
+            Node.bHasNormalizedCenter = ReadBool(
+                LateGame, "has_normalized_safe_zone", false);
+            Node.NormalizedU = ClampValue(
+                static_cast<float>(NormalizedU), 0.f, 1.f);
+            Node.NormalizedV = ClampValue(
+                static_cast<float>(NormalizedV), 0.f, 1.f);
+            Node.RadiusCm = ClampValue(
+                static_cast<float>(RadiusCm),
+                FCustomSafeZoneSequence::MinimumRadiusCm,
+                FCustomSafeZoneSequence::MaximumRadiusCm);
+            return Node;
+        }
+
+        // Root schema 1 remains unchanged. Upgrade every stored version
+        // profile in-place so switching Fortnite builds cannot resurrect an
+        // unmigrated scalar-only custom zone.
+        bool MigrateCustomSafeZonePreferences(
+            nlohmann::json& Preferences)
+        {
+            if (!Preferences.is_object())
+                return false;
+
+            auto& LateGame = Preferences["lategame"];
+            if (!LateGame.is_object())
+                LateGame = nlohmann::json::object();
+
+            const FCustomSafeZoneNode LegacyNode =
+                ReadLegacyCustomSafeZoneNode(LateGame);
+            FCustomSafeZoneSequence Sequence;
+            bool bMovingZone = false;
+            const bool bHasMovingFlag = TryReadRequiredBool(
+                LateGame, "custom_moving_zone", bMovingZone);
+            const bool bHasValidSequence =
+                TryReadCustomSafeZoneSequence(
+                    LateGame, Sequence, true);
+            if (!bHasValidSequence)
+            {
+                Sequence = FCustomSafeZoneSequence{};
+                Sequence.Nodes.assign(1, LegacyNode);
+                bMovingZone = false;
+            }
+            else if (!bHasMovingFlag)
+            {
+                bMovingZone = false;
+            }
+
+            // Schema version 1 did allow big -> small -> big. Preserve the
+            // authored centers and timings while making every legacy increase
+            // equal to its preceding radius. The normalized sequence is then
+            // written back into the same profile before it can be applied.
+            for (size_t Index = 1; Index < Sequence.Nodes.size(); ++Index)
+            {
+                Sequence.Nodes[Index].RadiusCm = (std::min)(
+                    Sequence.Nodes[Index].RadiusCm,
+                    Sequence.Nodes[Index - 1].RadiusCm);
+            }
+
+            Sequence.bMovingZoneEnabled = bMovingZone;
+            const auto& First = Sequence.Nodes.front();
+            LateGame["custom_moving_zone"] = bMovingZone;
+            LateGame["safe_zone_center_x"] = First.Center.X;
+            LateGame["safe_zone_center_y"] = First.Center.Y;
+            LateGame["safe_zone_center_z"] = First.Center.Z;
+            LateGame["safe_zone_radius"] = First.RadiusCm;
+            LateGame["has_normalized_safe_zone"] =
+                First.bHasNormalizedCenter;
+            LateGame["safe_zone_u"] = First.NormalizedU;
+            LateGame["safe_zone_v"] = First.NormalizedV;
+            LateGame["safe_zone_sequence"] =
+                CaptureCustomSafeZoneSequence(Sequence);
+            return true;
+        }
+
+        void MigrateAllCustomSafeZoneProfiles(
+            nlohmann::json& Profiles)
+        {
+            if (!Profiles.is_object())
+                return;
+
+            for (auto& Entry : Profiles.items())
+            {
+                auto& Profile = Entry.value();
+                if (!Profile.is_object())
+                    continue;
+                auto PreferencesIt = Profile.find("preferences");
+                if (PreferencesIt == Profile.end() ||
+                    !PreferencesIt->is_object())
+                {
+                    continue;
+                }
+                MigrateCustomSafeZonePreferences(*PreferencesIt);
+            }
+        }
+
+#if defined(_DEBUG)
+        void RunCustomSafeZoneJsonSelfTests()
+        {
+            static bool bRan = false;
+            if (bRan)
+                return;
+            bRan = true;
+
+            nlohmann::json LegacyPreferences = {
+                { "lategame", {
+                    { "safe_zone_center_x", 1234.0 },
+                    { "safe_zone_center_y", -5678.0 },
+                    { "safe_zone_center_z", 42.0 },
+                    { "safe_zone_radius", 25000.0 },
+                    { "has_normalized_safe_zone", true },
+                    { "safe_zone_u", 0.25 },
+                    { "safe_zone_v", 0.75 }
+                } }
+            };
+            assert(MigrateCustomSafeZonePreferences(LegacyPreferences));
+            auto& MigratedLateGame = LegacyPreferences["lategame"];
+            assert(!MigratedLateGame["custom_moving_zone"].get<bool>());
+            FCustomSafeZoneSequence MigratedSequence;
+            assert(TryReadCustomSafeZoneSequence(
+                MigratedLateGame, MigratedSequence));
+            assert(MigratedSequence.Nodes.size() == 1);
+            assert(MigratedSequence.Nodes[0].Center.X == 1234.0);
+            assert(MigratedSequence.Nodes[0].RadiusCm == 25000.f);
+            assert(!MigratedSequence.bCloseFinalCircle);
+
+            FCustomSafeZoneSequence Authored;
+            Authored.Nodes.resize(2);
+            Authored.Nodes[0].RadiusCm = 40000.f;
+            Authored.Nodes[0].HoldBeforeNextSeconds = 0.f;
+            Authored.Nodes[0].MoveToNextSeconds = 12.5f;
+            Authored.Nodes[1].Center = FVector(5000.f, -8000.f, 10.f);
+            Authored.Nodes[1].RadiusCm = 35000.f;
+            Authored.bCloseFinalCircle = true;
+            nlohmann::json RoundTripLateGame = {
+                { "custom_moving_zone", true },
+                { "safe_zone_sequence",
+                    CaptureCustomSafeZoneSequence(Authored) }
+            };
+            FCustomSafeZoneSequence RoundTrip;
+            assert(TryReadCustomSafeZoneSequence(
+                RoundTripLateGame, RoundTrip));
+            assert(RoundTrip.Nodes.size() == 2);
+            assert(RoundTrip.Nodes[0].HoldBeforeNextSeconds == 0.f);
+            assert(RoundTrip.Nodes[0].MoveToNextSeconds == 12.5f);
+            assert(RoundTrip.Nodes[1].RadiusCm == 35000.f);
+            assert(RoundTrip.bCloseFinalCircle);
+
+            // Existing schema-one objects predate this optional flag. They
+            // continue to mean "leave the final circle open".
+            auto LegacySequenceObject =
+                CaptureCustomSafeZoneSequence(Authored);
+            LegacySequenceObject.erase("close_final_circle");
+            FCustomSafeZoneSequence LegacySequenceRoundTrip;
+            assert(TryReadCustomSafeZoneSequence(
+                nlohmann::json{
+                    { "safe_zone_sequence", LegacySequenceObject }
+                },
+                LegacySequenceRoundTrip));
+            assert(!LegacySequenceRoundTrip.bCloseFinalCircle);
+
+            auto InvalidCloseObject =
+                CaptureCustomSafeZoneSequence(Authored);
+            InvalidCloseObject["close_final_circle"] = "yes";
+            FCustomSafeZoneSequence InvalidCloseSequence;
+            assert(!TryReadCustomSafeZoneSequence(
+                nlohmann::json{
+                    { "safe_zone_sequence", InvalidCloseObject }
+                },
+                InvalidCloseSequence));
+            nlohmann::json InvalidClosePreferences = {
+                { "lategame", {
+                    { "custom_moving_zone", true },
+                    { "safe_zone_center_x", 91.0 },
+                    { "safe_zone_radius", 17000.0 },
+                    { "safe_zone_sequence", InvalidCloseObject }
+                } }
+            };
+            assert(MigrateCustomSafeZonePreferences(
+                InvalidClosePreferences));
+            auto& InvalidCloseFallback =
+                InvalidClosePreferences["lategame"];
+            assert(!InvalidCloseFallback[
+                "custom_moving_zone"].get<bool>());
+            FCustomSafeZoneSequence InvalidCloseFallbackSequence;
+            assert(TryReadCustomSafeZoneSequence(
+                InvalidCloseFallback,
+                InvalidCloseFallbackSequence));
+            assert(!InvalidCloseFallbackSequence.bCloseFinalCircle);
+            assert(InvalidCloseFallbackSequence.Nodes.size() == 1);
+            assert(InvalidCloseFallbackSequence.Nodes[0].Center.X == 91.0);
+
+            // Previously-authored expanding sequences preserve their geometry
+            // and timing, but each larger radius is reduced to its predecessor.
+            FCustomSafeZoneSequence Expanding = Authored;
+            Expanding.Nodes[1].RadiusCm = 65000.f;
+            nlohmann::json ExpandingPreferences = {
+                { "lategame", {
+                    { "custom_moving_zone", true },
+                    { "safe_zone_center_x", 77.0 },
+                    { "safe_zone_radius", 18000.0 },
+                    { "safe_zone_sequence",
+                        CaptureCustomSafeZoneSequence(Expanding) }
+                } }
+            };
+            assert(MigrateCustomSafeZonePreferences(
+                ExpandingPreferences));
+            auto& NormalizedExpandingLateGame =
+                ExpandingPreferences["lategame"];
+            assert(NormalizedExpandingLateGame[
+                "custom_moving_zone"].get<bool>());
+            FCustomSafeZoneSequence NormalizedExpanding;
+            assert(TryReadCustomSafeZoneSequence(
+                NormalizedExpandingLateGame, NormalizedExpanding));
+            assert(NormalizedExpanding.Nodes.size() == 2);
+            assert(NormalizedExpanding.Nodes[0].RadiusCm == 40000.f);
+            assert(NormalizedExpanding.Nodes[1].RadiusCm == 40000.f);
+            assert(NormalizedExpanding.Nodes[1].Center.X == 5000.f);
+            assert(NormalizedExpanding.bCloseFinalCircle);
+
+            nlohmann::json MalformedPreferences = {
+                { "lategame", {
+                    { "custom_moving_zone", true },
+                    { "safe_zone_center_x", 99.0 },
+                    { "safe_zone_radius", 15000.0 },
+                    { "safe_zone_sequence", {
+                        { "schema_version", 1 },
+                        { "nodes", nlohmann::json::array() }
+                    } }
+                } }
+            };
+            assert(MigrateCustomSafeZonePreferences(
+                MalformedPreferences));
+            auto& FallbackLateGame = MalformedPreferences["lategame"];
+            assert(!FallbackLateGame["custom_moving_zone"].get<bool>());
+            FCustomSafeZoneSequence Fallback;
+            assert(TryReadCustomSafeZoneSequence(
+                FallbackLateGame, Fallback));
+            assert(Fallback.Nodes.size() == 1);
+            assert(Fallback.Nodes[0].Center.X == 99.0);
+            assert(Fallback.Nodes[0].RadiusCm == 15000.f);
+
+            nlohmann::json Profiles = {
+                { "fn_2.50", { { "preferences", LegacyPreferences } } },
+                { "fn_30.00", { { "preferences", MalformedPreferences } } }
+            };
+            MigrateAllCustomSafeZoneProfiles(Profiles);
+            for (const auto& Entry : Profiles.items())
+            {
+                const auto& LateGame =
+                    Entry.value()["preferences"]["lategame"];
+                assert(LateGame.contains("custom_moving_zone"));
+                assert(LateGame.contains("safe_zone_sequence"));
+            }
+        }
+#endif
 
         std::string WideToUtf8(const wchar_t* Value)
         {
@@ -259,6 +795,17 @@ namespace AutoHosting
                 { "snow_value", FConfiguration::SnowValue.load(std::memory_order_acquire) }
             };
 
+            auto SafeZoneSequence =
+                FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+            if (!SafeZoneSequence ||
+                SafeZoneSequence->Nodes.empty())
+            {
+                SafeZoneSequence =
+                    std::make_shared<const FCustomSafeZoneSequence>();
+            }
+            const auto& LegacySafeZoneNode =
+                SafeZoneSequence->Nodes.front();
+
             Preferences["lategame"] = {
                 { "enabled", FConfiguration::bLateGame.load(std::memory_order_acquire) },
                 { "moving_bus", FConfiguration::bMovingBus.load(std::memory_order_acquire) },
@@ -267,21 +814,21 @@ namespace AutoHosting
                 { "custom_loadout", FConfiguration::bUseCustomLoadout.load(std::memory_order_acquire) },
                 { "starting_zone", FConfiguration::LateGameZone.load(std::memory_order_acquire) },
                 { "custom_safe_zone", FConfiguration::bCustomSafeZone.load(std::memory_order_acquire) },
-                { "safe_zone_center_x", FConfiguration::CustomSafeZoneCenter.X },
-                { "safe_zone_center_y", FConfiguration::CustomSafeZoneCenter.Y },
-                { "safe_zone_center_z", FConfiguration::CustomSafeZoneCenter.Z },
-                { "safe_zone_radius", FConfiguration::CustomSafeZoneRadius.load(std::memory_order_acquire) }
+                { "custom_moving_zone", SafeZoneSequence->bMovingZoneEnabled },
+                { "safe_zone_center_x", LegacySafeZoneNode.Center.X },
+                { "safe_zone_center_y", LegacySafeZoneNode.Center.Y },
+                { "safe_zone_center_z", LegacySafeZoneNode.Center.Z },
+                { "safe_zone_radius", LegacySafeZoneNode.RadiusCm }
             };
 
-            float SafeZoneU = 0.5f;
-            float SafeZoneV = 0.5f;
-            const bool bHasNormalizedSafeZone =
-                GUI::GetNormalizedSafeZoneSelection(
-                    SafeZoneU, SafeZoneV);
             Preferences["lategame"]["has_normalized_safe_zone"] =
-                bHasNormalizedSafeZone;
-            Preferences["lategame"]["safe_zone_u"] = SafeZoneU;
-            Preferences["lategame"]["safe_zone_v"] = SafeZoneV;
+                LegacySafeZoneNode.bHasNormalizedCenter;
+            Preferences["lategame"]["safe_zone_u"] =
+                LegacySafeZoneNode.NormalizedU;
+            Preferences["lategame"]["safe_zone_v"] =
+                LegacySafeZoneNode.NormalizedV;
+            Preferences["lategame"]["safe_zone_sequence"] =
+                CaptureCustomSafeZoneSequence(*SafeZoneSequence);
 
             Preferences["loadout"] = {
                 { "primary", FStringToUtf8(FConfiguration::Primary) },
@@ -568,6 +1115,41 @@ namespace AutoHosting
                     std::memory_order_acquire);
         }
 
+        void RefreshStoredCustomSafeZonePreferences()
+        {
+            if (!GStoredPreferences.is_object() ||
+                GStoredPreferences.empty())
+            {
+                return;
+            }
+
+            const auto Sequence =
+                FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+            if (!Sequence || Sequence->Nodes.empty())
+                return;
+
+            auto& LateGame = GStoredPreferences["lategame"];
+            if (!LateGame.is_object())
+                LateGame = nlohmann::json::object();
+
+            const auto& First = Sequence->Nodes.front();
+            LateGame["custom_safe_zone"] =
+                FConfiguration::bCustomSafeZone.load(
+                    std::memory_order_acquire);
+            LateGame["custom_moving_zone"] =
+                Sequence->bMovingZoneEnabled;
+            LateGame["safe_zone_center_x"] = First.Center.X;
+            LateGame["safe_zone_center_y"] = First.Center.Y;
+            LateGame["safe_zone_center_z"] = First.Center.Z;
+            LateGame["safe_zone_radius"] = First.RadiusCm;
+            LateGame["has_normalized_safe_zone"] =
+                First.bHasNormalizedCenter;
+            LateGame["safe_zone_u"] = First.NormalizedU;
+            LateGame["safe_zone_v"] = First.NormalizedV;
+            LateGame["safe_zone_sequence"] =
+                CaptureCustomSafeZoneSequence(*Sequence);
+        }
+
         bool ApplyPreferences(const nlohmann::json& Preferences)
         {
             if (!Preferences.is_object())
@@ -746,54 +1328,61 @@ namespace AutoHosting
                 std::memory_order_release);
             FConfiguration::LateGameZone.store(
                 ClampValue(
-                    ReadInt(LateGame, "starting_zone", 4),
+                    ReadInt(
+                        LateGame,
+                        "starting_zone",
+                        FConfiguration::LateGameZone.load(
+                            std::memory_order_acquire)),
                     1, 7),
                 std::memory_order_release);
-            FConfiguration::bCustomSafeZone.store(
+            FConfiguration::SetCustomSafeZoneEnabled(
                 ReadBool(
                     LateGame,
                     "custom_safe_zone",
-                    false),
-                std::memory_order_release);
-            FConfiguration::CustomSafeZoneCenter =
-                FVector(
-                    ReadDouble(
-                        LateGame,
-                        "safe_zone_center_x",
-                        0.0),
-                    ReadDouble(
-                        LateGame,
-                        "safe_zone_center_y",
-                        0.0),
-                    ReadDouble(
-                        LateGame,
-                        "safe_zone_center_z",
-                        0.0));
-            FConfiguration::CustomSafeZoneRadius.store(
-                ClampValue(
-                    ReadFloat(
-                        LateGame,
-                        "safe_zone_radius",
-                        100000.f),
-                    500.f, 100000.f),
-                std::memory_order_release);
-            GUI::RestoreNormalizedSafeZoneSelection(
+                    false));
+
+            // Build a fully valid legacy node first. It is the atomic fallback
+            // for old profiles and for any malformed nested moving-zone data.
+            const FCustomSafeZoneNode LegacySafeZoneNode =
+                ReadLegacyCustomSafeZoneNode(LateGame);
+
+            FCustomSafeZoneSequence SavedSafeZoneSequence;
+            const bool bEnableCustomMovingZone =
                 ReadBool(
                     LateGame,
-                    "has_normalized_safe_zone",
-                    false),
-                ClampValue(
-                    ReadFloat(
-                        LateGame,
-                        "safe_zone_u",
-                        0.5f),
-                    0.f, 1.f),
-                ClampValue(
-                    ReadFloat(
-                        LateGame,
-                        "safe_zone_v",
-                        0.5f),
-                    0.f, 1.f));
+                    "custom_moving_zone",
+                    false);
+            const bool bHasValidSafeZoneSequence =
+                TryReadCustomSafeZoneSequence(
+                    LateGame, SavedSafeZoneSequence) &&
+                FConfiguration::PublishCustomSafeZoneSequence(
+                    std::move(SavedSafeZoneSequence),
+                    bEnableCustomMovingZone);
+            if (!bHasValidSafeZoneSequence)
+            {
+                // PublishLegacyCustomSafeZone disables moving before replacing
+                // the immutable snapshot, so a bad nested object can never be
+                // observed as an enabled partial sequence.
+                FConfiguration::PublishLegacyCustomSafeZone(
+                    LegacySafeZoneNode);
+            }
+            else if (bEnableCustomMovingZone)
+            {
+                // Moving sequences need native phase deadlines to advance.
+                // Enforce the same mutual exclusion as the GUI for Auto Host
+                // profiles that can start before the editor gets a frame.
+                FConfiguration::bLateGameLongZone.store(
+                    false, std::memory_order_release);
+            }
+
+            const auto PublishedSafeZoneSequence =
+                FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+            const auto& PublishedLegacyNode =
+                PublishedSafeZoneSequence->Nodes.front();
+            GUI::RestoreNormalizedSafeZoneSelection(
+                PublishedLegacyNode.bHasNormalizedCenter,
+                PublishedLegacyNode.NormalizedU,
+                PublishedLegacyNode.NormalizedV);
 
             const auto& Loadout =
                 ReadObject(Preferences, "loadout");
@@ -1218,6 +1807,7 @@ namespace AutoHosting
 
             if (!Document["profiles"].is_object())
                 Document["profiles"] = nlohmann::json::object();
+            MigrateAllCustomSafeZoneProfiles(Document["profiles"]);
 
             auto& Profile =
                 Document["profiles"][CurrentProfileKey()];
@@ -1342,6 +1932,11 @@ namespace AutoHosting
         {
             try
             {
+                if (GCustomSafeZoneRefreshRequested.exchange(
+                        false, std::memory_order_acq_rel))
+                {
+                    RefreshStoredCustomSafeZonePreferences();
+                }
                 const nlohmann::json Document =
                     BuildDocument(
                         ForcePreferenceSnapshot);
@@ -1363,6 +1958,9 @@ namespace AutoHosting
 
     void Initialize()
     {
+#if defined(_DEBUG)
+        RunCustomSafeZoneJsonSelfTests();
+#endif
         FConfiguration::bAutoHost.store(
             false, std::memory_order_release);
         FConfiguration::bSaveAutoHostSettings.store(
@@ -1376,6 +1974,8 @@ namespace AutoHosting
         FConfiguration::bMaxTickRateUserOverride.store(
             false, std::memory_order_release);
         GRestoredPreferences.store(
+            false, std::memory_order_release);
+        GCustomSafeZoneRefreshRequested.store(
             false, std::memory_order_release);
         GCountdownDeadlineMs.store(
             0, std::memory_order_release);
@@ -1392,6 +1992,10 @@ namespace AutoHosting
         FConfiguration::bAutoDump.store(
             false,
             std::memory_order_release);
+        FConfiguration::PublishLegacyCustomSafeZone(
+            FCustomSafeZoneNode{});
+        GUI::RestoreNormalizedSafeZoneSelection(
+            false, 0.5f, 0.5f);
         GDefaultPreferences = CapturePreferences();
 
         const fs::path Path = SettingsPath();
@@ -1417,7 +2021,16 @@ namespace AutoHosting
                 return;
             }
 
+            // Normalize every legacy moving-zone profile before selecting and
+            // applying the current version. Keep the on-disk serialization as
+            // the comparison baseline so the next save persists any migration.
             GLastSerializedDocument = GDocument.dump();
+            auto ProfilesIt = GDocument.find("profiles");
+            if (ProfilesIt != GDocument.end() &&
+                ProfilesIt->is_object())
+            {
+                MigrateAllCustomSafeZoneProfiles(*ProfilesIt);
+            }
             const auto& Profiles =
                 ReadObject(GDocument, "profiles");
             const auto ProfileIt =
@@ -1670,6 +2283,12 @@ namespace AutoHosting
     void SaveNow(bool ForcePreferenceSnapshot)
     {
         SaveInternal(ForcePreferenceSnapshot);
+    }
+
+    void RequestCustomSafeZonePreferenceRefresh()
+    {
+        GCustomSafeZoneRefreshRequested.store(
+            true, std::memory_order_release);
     }
 
     void ResetPreferences()

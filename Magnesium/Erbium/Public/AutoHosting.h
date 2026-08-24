@@ -28,6 +28,10 @@ namespace AutoHosting
     void SaveIfChanged();
     void SaveNow(bool ForcePreferenceSnapshot = false);
 
+    // Queue a safe-zone-only refresh of the committed preference snapshot.
+    // Used when pre-listen validation selectively reopens that editor.
+    void RequestCustomSafeZonePreferenceRefresh();
+
     // Restores Magnesium defaults and removes every saved version profile.
     // Before server start this also refreshes the live launcher controls.
     void ResetPreferences();

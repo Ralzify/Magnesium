@@ -2,6 +2,87 @@
 
 #include "../../../SDK/Engine.h"
 #include <atomic>
+#include <cmath>
+#include <memory>
+#include <optional>
+#include <vector>
+
+struct FCustomSafeZoneNode
+{
+    FVector Center{ 0.f, 0.f, 0.f };
+    bool bHasNormalizedCenter{ false };
+    float NormalizedU{ 0.5f };
+    float NormalizedV{ 0.5f };
+    float RadiusCm{ 100000.f };
+    // These describe the outgoing edge. On the last authored node they are
+    // used only when bCloseFinalCircle adds its implicit radius-zero target.
+    std::optional<float> HoldBeforeNextSeconds;
+    std::optional<float> MoveToNextSeconds;
+
+    FCustomSafeZoneNode() = default;
+    FCustomSafeZoneNode(const FCustomSafeZoneNode&) = default;
+
+    // SDK::FVector's legacy assignment operator accepts a non-const source.
+    // Copy its reflected components explicitly so this otherwise ordinary POD
+    // remains usable in std::vector copy/assign operations.
+    FCustomSafeZoneNode& operator=(
+        const FCustomSafeZoneNode& Other)
+    {
+        if (this == &Other)
+            return *this;
+
+        Center.X = Other.Center.X;
+        Center.Y = Other.Center.Y;
+        Center.Z = Other.Center.Z;
+        bHasNormalizedCenter = Other.bHasNormalizedCenter;
+        NormalizedU = Other.NormalizedU;
+        NormalizedV = Other.NormalizedV;
+        RadiusCm = Other.RadiusCm;
+        HoldBeforeNextSeconds = Other.HoldBeforeNextSeconds;
+        MoveToNextSeconds = Other.MoveToNextSeconds;
+        return *this;
+    }
+};
+
+struct FCustomSafeZoneSequence
+{
+    static inline constexpr int SchemaVersion = 1;
+    static inline constexpr size_t MinimumNodeCount = 1;
+    static inline constexpr size_t MaximumNodeCount = 32;
+    static inline constexpr float MinimumRadiusCm = 500.f;
+    static inline constexpr float MaximumRadiusCm = 100000.f;
+    static inline constexpr float MinimumDurationSeconds = 0.f;
+    static inline constexpr float MaximumDurationSeconds = 3600.f;
+
+    // One node is the legacy stationary custom-zone representation. Keeping a
+    // valid node in the default snapshot lets every consumer avoid nullable or
+    // empty-sequence special cases.
+    //
+    // Keep the enabled bit in this immutable object as well as in the legacy
+    // atomic mirror below. Consumers that need a coherent moving-zone state
+    // read this bit and the nodes from the same shared_ptr publication.
+    bool bMovingZoneEnabled{ false };
+    // When enabled, runtime adds one implicit transition from the last
+    // authored circle to radius zero at that circle's center. Keeping this on
+    // the immutable sequence makes the choice part of the same per-match
+    // snapshot as geometry and timing. Missing persisted data defaults to the
+    // historical behavior: leave the final circle open.
+    bool bCloseFinalCircle{ false };
+    std::vector<FCustomSafeZoneNode> Nodes{ FCustomSafeZoneNode{} };
+
+    // Every authored transition may retain or reduce the current radius, but
+    // may never expand it. Return the source-node index so persistence,
+    // preflight, and the editor can all identify the same offending arrow.
+    std::optional<size_t> FindFirstRadiusIncreaseEdge() const
+    {
+        for (size_t Index = 1; Index < Nodes.size(); ++Index)
+        {
+            if (Nodes[Index].RadiusCm > Nodes[Index - 1].RadiusCm)
+                return Index - 1;
+        }
+        return std::nullopt;
+    }
+};
 
 struct FConfiguration
 {
@@ -129,6 +210,309 @@ struct FConfiguration
     static inline std::atomic_bool bCustomSafeZone{ false };
     static inline auto CustomSafeZoneCenter = FVector(0.f, 0.f, 0.f);
     static inline std::atomic<float> CustomSafeZoneRadius{ 100000.f };
+    static inline std::atomic_bool bCustomMovingZone{ false };
+
+private:
+    // Publications are rare editor/profile operations. Serializing them lets
+    // runtime atomically accept one exact snapshot and close the last race in
+    // which a GUI edit could land between validation and match capture. Use a
+    // Win32 SRW lock instead of std::mutex: Magnesium is injected into games
+    // that may already have a different MSVCP140 runtime loaded, so crossing
+    // that runtime boundary for an STL mutex is unsafe. The intentionally
+    // process-lifetime state also avoids DLL static-destruction ordering races.
+    struct FCustomSafeZonePublicationState
+    {
+        SRWLOCK Lock = SRWLOCK_INIT;
+        std::shared_ptr<const FCustomSafeZoneSequence> Snapshot{
+            std::make_shared<const FCustomSafeZoneSequence>()
+        };
+        bool bFrozenForMatch{ false };
+    };
+
+    class FCustomSafeZoneExclusiveLock
+    {
+    public:
+        explicit FCustomSafeZoneExclusiveLock(
+            SRWLOCK& InLock) noexcept
+            : Lock(&InLock)
+        {
+            AcquireSRWLockExclusive(Lock);
+        }
+
+        ~FCustomSafeZoneExclusiveLock() noexcept
+        {
+            ReleaseSRWLockExclusive(Lock);
+        }
+
+        FCustomSafeZoneExclusiveLock(
+            const FCustomSafeZoneExclusiveLock&) = delete;
+        FCustomSafeZoneExclusiveLock& operator=(
+            const FCustomSafeZoneExclusiveLock&) = delete;
+
+    private:
+        SRWLOCK* Lock;
+    };
+
+    class FCustomSafeZoneSharedLock
+    {
+    public:
+        explicit FCustomSafeZoneSharedLock(
+            SRWLOCK& InLock) noexcept
+            : Lock(&InLock)
+        {
+            AcquireSRWLockShared(Lock);
+        }
+
+        ~FCustomSafeZoneSharedLock() noexcept
+        {
+            ReleaseSRWLockShared(Lock);
+        }
+
+        FCustomSafeZoneSharedLock(
+            const FCustomSafeZoneSharedLock&) = delete;
+        FCustomSafeZoneSharedLock& operator=(
+            const FCustomSafeZoneSharedLock&) = delete;
+
+    private:
+        SRWLOCK* Lock;
+    };
+
+    static inline FCustomSafeZonePublicationState&
+        GetCustomSafeZonePublicationState()
+    {
+        static auto* const State =
+            new FCustomSafeZonePublicationState();
+        return *State;
+    }
+
+    static inline float ClampCustomSafeZoneValue(
+        float Value,
+        float Minimum,
+        float Maximum)
+    {
+        return Value < Minimum
+            ? Minimum
+            : (Value > Maximum ? Maximum : Value);
+    }
+
+    static inline bool ValidateAndClampCustomSafeZoneSequence(
+        FCustomSafeZoneSequence& Sequence)
+    {
+        if (Sequence.Nodes.size() <
+                FCustomSafeZoneSequence::MinimumNodeCount ||
+            Sequence.Nodes.size() >
+                FCustomSafeZoneSequence::MaximumNodeCount)
+        {
+            return false;
+        }
+
+        for (auto& Node : Sequence.Nodes)
+        {
+            if (!std::isfinite(Node.Center.X) ||
+                !std::isfinite(Node.Center.Y) ||
+                !std::isfinite(Node.Center.Z) ||
+                !std::isfinite(Node.NormalizedU) ||
+                !std::isfinite(Node.NormalizedV) ||
+                !std::isfinite(Node.RadiusCm))
+            {
+                return false;
+            }
+
+            Node.NormalizedU = ClampCustomSafeZoneValue(
+                Node.NormalizedU, 0.f, 1.f);
+            Node.NormalizedV = ClampCustomSafeZoneValue(
+                Node.NormalizedV, 0.f, 1.f);
+            Node.RadiusCm = ClampCustomSafeZoneValue(
+                Node.RadiusCm,
+                FCustomSafeZoneSequence::MinimumRadiusCm,
+                FCustomSafeZoneSequence::MaximumRadiusCm);
+
+            const auto ClampDuration = [](
+                std::optional<float>& Duration)
+            {
+                if (!Duration.has_value())
+                    return true;
+                if (!std::isfinite(*Duration) ||
+                    *Duration <
+                        FCustomSafeZoneSequence::
+                            MinimumDurationSeconds ||
+                    *Duration >
+                        FCustomSafeZoneSequence::
+                            MaximumDurationSeconds)
+                {
+                    return false;
+                }
+                return true;
+            };
+
+            if (!ClampDuration(Node.HoldBeforeNextSeconds) ||
+                !ClampDuration(Node.MoveToNextSeconds))
+            {
+                return false;
+            }
+        }
+
+        // Radius ordering is a schema invariant, not a version capability.
+        // Validate after clamping so the immutable publication contains the
+        // exact effective radii that were compared.
+        if (Sequence.FindFirstRadiusIncreaseEdge().has_value())
+            return false;
+
+        return true;
+    }
+
+public:
+    // The parent enable bit participates in the same serialized publication
+    // transaction as the immutable sequence.  This prevents a recovery-mode
+    // checkbox write from racing the final preflight/freeze handshake.
+    static inline bool SetCustomSafeZoneEnabled(bool bEnabled)
+    {
+        auto& State = GetCustomSafeZonePublicationState();
+        FCustomSafeZoneExclusiveLock Guard(State.Lock);
+        if (State.bFrozenForMatch)
+            return false;
+
+        bCustomSafeZone.store(
+            bEnabled, std::memory_order_release);
+        return true;
+    }
+
+    // Publishes a complete immutable copy. The shared snapshot is the coherent
+    // source of truth; the raw scalar/atomic members below are compatibility
+    // mirrors for older out-of-tree consumers.
+    static inline bool PublishCustomSafeZoneSequence(
+        FCustomSafeZoneSequence Sequence,
+        bool bEnableMovingZone)
+    {
+        auto& State = GetCustomSafeZonePublicationState();
+        FCustomSafeZoneExclusiveLock Guard(State.Lock);
+        if (State.bFrozenForMatch)
+            return false;
+        if (!ValidateAndClampCustomSafeZoneSequence(Sequence))
+            return false;
+
+        Sequence.bMovingZoneEnabled = bEnableMovingZone;
+        auto Published =
+            std::make_shared<const FCustomSafeZoneSequence>(
+                std::move(Sequence));
+        const auto& LegacyNode = Published->Nodes.front();
+
+        State.Snapshot = Published;
+
+        // Keep the old single-zone API synchronized with node one. Older
+        // runtime paths and downgraded settings files continue to see the same
+        // first circle while moving-zone consumers use the immutable snapshot.
+        CustomSafeZoneCenter.X = LegacyNode.Center.X;
+        CustomSafeZoneCenter.Y = LegacyNode.Center.Y;
+        CustomSafeZoneCenter.Z = LegacyNode.Center.Z;
+        CustomSafeZoneRadius.store(
+            LegacyNode.RadiusCm, std::memory_order_release);
+        bCustomMovingZone.store(
+            bEnableMovingZone, std::memory_order_release);
+
+        return true;
+    }
+
+    // Conditional publication is used by game-thread map reprojection. It can
+    // update the draft it actually read, but can never overwrite a newer GUI
+    // correction with a stale whole-sequence copy.
+    static inline bool PublishCustomSafeZoneSequenceIfCurrent(
+        std::shared_ptr<const FCustomSafeZoneSequence> Expected,
+        FCustomSafeZoneSequence Sequence,
+        bool bEnableMovingZone)
+    {
+        auto& State = GetCustomSafeZonePublicationState();
+        FCustomSafeZoneExclusiveLock Guard(State.Lock);
+        if (State.bFrozenForMatch)
+            return false;
+        if (!Expected ||
+            !ValidateAndClampCustomSafeZoneSequence(Sequence))
+        {
+            return false;
+        }
+
+        Sequence.bMovingZoneEnabled = bEnableMovingZone;
+        auto Published =
+            std::make_shared<const FCustomSafeZoneSequence>(
+                std::move(Sequence));
+        if (State.Snapshot != Expected)
+            return false;
+        State.Snapshot = Published;
+
+        const auto& LegacyNode = Published->Nodes.front();
+        CustomSafeZoneCenter.X = LegacyNode.Center.X;
+        CustomSafeZoneCenter.Y = LegacyNode.Center.Y;
+        CustomSafeZoneCenter.Z = LegacyNode.Center.Z;
+        CustomSafeZoneRadius.store(
+            LegacyNode.RadiusCm, std::memory_order_release);
+        bCustomMovingZone.store(
+            bEnableMovingZone, std::memory_order_release);
+        return true;
+    }
+
+    // Atomically verifies and freezes the exact immutable draft accepted by
+    // preflight. All later publications are rejected until the match lifecycle
+    // explicitly releases the barrier.
+    static inline bool FreezeCustomSafeZoneSequenceForMatch(
+        const std::shared_ptr<const FCustomSafeZoneSequence>& Expected)
+    {
+        if (!Expected)
+            return false;
+
+        auto& State = GetCustomSafeZonePublicationState();
+        FCustomSafeZoneExclusiveLock Guard(State.Lock);
+        if (State.bFrozenForMatch ||
+            State.Snapshot != Expected ||
+            !bCustomSafeZone.load(std::memory_order_acquire) ||
+            !Expected->bMovingZoneEnabled)
+        {
+            return false;
+        }
+
+        State.bFrozenForMatch = true;
+        return true;
+    }
+
+    static inline void ReleaseCustomSafeZoneSequenceForMatch()
+    {
+        auto& State = GetCustomSafeZonePublicationState();
+        FCustomSafeZoneExclusiveLock Guard(State.Lock);
+        State.bFrozenForMatch = false;
+    }
+
+    static inline std::shared_ptr<const FCustomSafeZoneSequence>
+        GetCustomSafeZoneSequenceSnapshot()
+    {
+        auto& State = GetCustomSafeZonePublicationState();
+        FCustomSafeZoneSharedLock Guard(State.Lock);
+        return State.Snapshot;
+    }
+
+    static inline bool IsCustomMovingZoneSnapshotEnabled()
+    {
+        const auto Snapshot = GetCustomSafeZoneSequenceSnapshot();
+        return Snapshot && Snapshot->bMovingZoneEnabled;
+    }
+
+    // The old scalar members remain synchronized for source compatibility,
+    // but all in-tree readers use node one from a single immutable snapshot so
+    // they cannot observe X/Y/Z/radius from different GUI publications.
+    static inline FCustomSafeZoneNode GetLegacyCustomSafeZoneNodeSnapshot()
+    {
+        const auto Snapshot = GetCustomSafeZoneSequenceSnapshot();
+        return Snapshot && !Snapshot->Nodes.empty()
+            ? Snapshot->Nodes.front()
+            : FCustomSafeZoneNode{};
+    }
+
+    static inline bool PublishLegacyCustomSafeZone(
+        const FCustomSafeZoneNode& LegacyNode)
+    {
+        FCustomSafeZoneSequence Sequence;
+        Sequence.Nodes.assign(1, LegacyNode);
+        return PublishCustomSafeZoneSequence(
+            std::move(Sequence), false);
+    }
 
     static inline std::atomic_bool bGliderRedeploy{ false };
     // -1 leaves the playlist/asset-authored maximum completely untouched.

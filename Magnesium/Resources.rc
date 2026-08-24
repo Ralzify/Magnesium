@@ -1,0 +1,4 @@
+#include "Resource.h"
+
+IDR_TRICKSHOT_BLOCK_WINNER_15BANDIT RCDATA
+    "Erbium\\Resources\\TrickshotPresets\\BlockWinner_15Bandit.json"

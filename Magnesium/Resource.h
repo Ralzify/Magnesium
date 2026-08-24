@@ -1,0 +1,3 @@
+#pragma once
+
+#define IDR_TRICKSHOT_BLOCK_WINNER_15BANDIT 201
