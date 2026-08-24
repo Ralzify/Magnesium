@@ -12027,7 +12027,10 @@ void GUI::Init()
                 gsStatus >= Joinable &&
                 gsStatus < Ended &&
                 FConfiguration::
-                    IsGliderRedeploySupportedBuild();
+                    IsGliderRedeploySupportedBuild() &&
+                FConfiguration::
+                    GliderRedeployRuntimeSupport.load(
+                        std::memory_order_acquire) != 0;
             const bool bPlaylistHidesRespawnSection =
                 !bShowsDefaultMatchSettings ||
                 SelectedPlaylist ==
