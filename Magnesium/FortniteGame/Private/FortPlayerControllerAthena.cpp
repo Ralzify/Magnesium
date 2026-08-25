@@ -20371,10 +20371,9 @@ static int32 GiveItemForCommand(
 		return 0;
 	}
 
-	// Pickup spawning and ServerHandlePickup use different native layouts on
-	// several legacy builds (6.00 included). A cheat grant does not need that
-	// world-actor round trip, so add one valid stack through the inventory path
-	// shared by normal starting items on every supported generation.
+	// Prefer the ordinary authoritative pickup lifecycle. It gives command
+	// grants the same fly-to-player animation and replication setup as world
+	// loot; the direct inventory path below is only a capability fallback.
 	int32 MaxStackSize = ItemDefinition->GetMaxStackSize();
 	if (MaxStackSize <= 0 || MaxStackSize > 999999)
 		MaxStackSize = 999;
@@ -20384,13 +20383,6 @@ static int32 GiveItemForCommand(
 		ItemDefinition, GrantedCount, 0);
 	if (!GrantEntry)
 		return 0;
-	auto GrantedItem = PlayerController->WorldInventory->GiveItem(
-		*GrantEntry, GrantedCount, true, true);
-	free(GrantEntry);
-	if (!GrantedItem)
-		return 0;
-	if (IsCreativePhoneDefinition(ItemDefinition))
-		NotifyCreativePhoneAvailable(PlayerController);
 
 	auto Pawn = PlayerController->HasMyFortPawn()
 		? PlayerController->MyFortPawn
@@ -20405,15 +20397,41 @@ static int32 GiveItemForCommand(
 		AFortPlayerPawnAthena::
 			PlayCommandGrantPickupAnimation(
 				Pawn,
-				GrantedItem->ItemEntry.ItemDefinition,
+				ItemDefinition,
 				GrantedCount,
-				GrantedItem->ItemEntry.LoadedAmmo,
-				GrantedItem->ItemEntry.Level);
+				GrantEntry->LoadedAmmo,
+				GrantEntry->Level);
+	if (bPickupAnimationStaged)
+	{
+		FFortWeaponMods::FreeEntrySlots(*GrantEntry);
+		free(GrantEntry);
+		if (IsCreativePhoneDefinition(ItemDefinition))
+			NotifyCreativePhoneAvailable(PlayerController);
+
+		SDK::DbgLog(
+			"[ServerCheat] authoritative pickup grant controller=%p "
+			"definition=%s count=%d requested=%d FN=%.2f\n",
+			(void*)PlayerController,
+			ItemDefinition->Name.ToString().c_str(),
+			GrantedCount,
+			RequestedCount,
+			VersionInfo.FortniteVersion);
+		return GrantedCount;
+	}
+
+	auto GrantedItem = PlayerController->WorldInventory->GiveItem(
+		*GrantEntry, GrantedCount, true, true);
+	FFortWeaponMods::FreeEntrySlots(*GrantEntry);
+	free(GrantEntry);
+	if (!GrantedItem)
+		return 0;
+	if (IsCreativePhoneDefinition(ItemDefinition))
+		NotifyCreativePhoneAvailable(PlayerController);
 
 	SDK::DbgLog(
-		"[ServerCheat] direct inventory grant controller=%p "
+		"[ServerCheat] direct inventory fallback controller=%p "
 		"definition=%s count=%d requested=%d loadedAmmo=%d "
-		"phantomReserve=%d animated=%d FN=%.2f\n",
+		"phantomReserve=%d FN=%.2f\n",
 		(void*)PlayerController,
 		GrantedItem->ItemEntry.ItemDefinition->Name.ToString().c_str(),
 		GrantedCount, RequestedCount,
@@ -20421,7 +20439,6 @@ static int32 GiveItemForCommand(
 		GrantedItem->ItemEntry.HasPhantomReserveAmmo()
 			? GrantedItem->ItemEntry.PhantomReserveAmmo
 			: 0,
-		(int)bPickupAnimationStaged,
 		VersionInfo.FortniteVersion);
 	return GrantedCount;
 }

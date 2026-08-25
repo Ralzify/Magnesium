@@ -1605,6 +1605,9 @@ namespace SafeZoneMap
         // Chapter 1's cooked Athena capture is a verified compatibility
         // transform shared by the supported legacy builds.
         LegacyAthenaCapture,
+        // A stock-island capture measured from Fortnite's own
+        // BPWorldLocationToMapLocation function on representative builds.
+        KnownCaptureCalibration,
         WorldSettingsExtents,
         PoiCalibration,
         NativeMapSampling,
@@ -1615,6 +1618,8 @@ namespace SafeZoneMap
     {
         return provenance ==
                 EMapTransformProvenance::LegacyAthenaCapture ||
+            provenance ==
+                EMapTransformProvenance::KnownCaptureCalibration ||
             provenance ==
                 EMapTransformProvenance::WorldSettingsExtents ||
             provenance ==
@@ -1662,25 +1667,130 @@ namespace SafeZoneMap
     {
         // The original Chapter 1 terrain uses one stable minimap capture from
         // the early releases through 10.40. Season OG has its own Rufus
-        // projection and is resolved by the runtime map manager instead.
-        return VersionInfo.FortniteVersion < 11.00f;
+        // projection. Custom islands always use their own runtime data.
+        return VersionInfo.FortniteVersion < 11.00f &&
+            !FConfiguration::bIsCustomMap.load(
+                std::memory_order_acquire);
+    }
+
+    enum class EStockCaptureFamily : uint8_t
+    {
+        None,
+        Athena,
+        Apollo,
+        Artemis,
+        AsteriaEarly,
+        Asteria,
+        Rufus,
+        Helios,
+    };
+
+    static bool TryGetStockCaptureCalibration(
+        float version,
+        bool bCustomMap,
+        MapTransform& out,
+        EStockCaptureFamily* familyOut = nullptr)
+    {
+        if (familyOut)
+            *familyOut = EStockCaptureFamily::None;
+        if (bCustomMap || !std::isfinite(version) ||
+            version < 0.f || version >= 31.00f)
+        {
+            return false;
+        }
+
+        EStockCaptureFamily family = EStockCaptureFamily::None;
+        if (version < 11.00f)
+        {
+            family = EStockCaptureFamily::Athena;
+            out = {
+                32000.f, -25744.f,
+                0.f, 129760.4f, -129760.4f, 0.f
+            };
+        }
+        else if (version < 19.00f)
+        {
+            family = EStockCaptureFamily::Apollo;
+            out = { 0.f, 0.f, 0.f, 134849.f, -134849.f, 0.f };
+        }
+        else if (version < 23.00f)
+        {
+            family = EStockCaptureFamily::Artemis;
+            out = { 0.f, 0.f, 0.f, 131213.f, -131213.f, 0.f };
+        }
+        else if (version < 24.00f)
+        {
+            // Asteria's first release used the Artemis-sized capture around
+            // Asteria's non-zero texture center.
+            family = EStockCaptureFamily::AsteriaEarly;
+            out = {
+                9524.f, -9732.f,
+                0.f, 131213.f, -131213.f, 0.f
+            };
+        }
+        else if (version < 27.00f)
+        {
+            family = EStockCaptureFamily::Asteria;
+            out = {
+                9524.f, -9732.f,
+                0.f, 149963.f, -149963.f, 0.f
+            };
+        }
+        else if (version < 28.00f)
+        {
+            family = EStockCaptureFamily::Rufus;
+            out = {
+                28321.8f, -21131.f,
+                0.f, 131213.f, -131213.f, 0.f
+            };
+        }
+        else
+        {
+            family = EStockCaptureFamily::Helios;
+            out = {
+                8500.f, 508.f,
+                0.f, 149963.f, -149963.f, 0.f
+            };
+        }
+
+        if (familyOut)
+            *familyOut = family;
+        return true;
+    }
+
+    static bool TryGetStockCaptureCalibration(
+        MapTransform& out,
+        EStockCaptureFamily* familyOut = nullptr)
+    {
+        return TryGetStockCaptureCalibration(
+            static_cast<float>(VersionInfo.FortniteVersion),
+            FConfiguration::bIsCustomMap.load(
+                std::memory_order_acquire),
+            out, familyOut);
+    }
+
+    static bool UsesKnownCaptureCalibration()
+    {
+        MapTransform ignored;
+        return TryGetStockCaptureCalibration(ignored);
     }
 
     static MapTransform DefaultTransformForVersion()
     {
-        // Used before AFortAthenaMapInfo is ready and as a guarded fallback.
-        // Fortnite's native 10.40 world-to-map converter resolves the shared
-        // Chapter 1 capture to this center and half-span. This includes the
-        // image border outside the ten labeled grid cells.
-        const float v = static_cast<float>(
-            VersionInfo.FortniteVersion);
-        if (UsesLegacyAthenaCapture())
-            return { 32000.f, -25744.f, 0.f, 129760.4f, -129760.4f, 0.f };
+        // Use the same full-capture transform before MapInfo exists that the
+        // authoritative match will use later. These values were reconstructed
+        // from Fortnite's own three-point world-to-map samples across the stock
+        // Athena, Apollo, Artemis, Asteria, Rufus, and Helios families. In
+        // particular, MapWorldScale * MapLayerSize is often only a gameplay
+        // layer (68,800 cm half-span on FN24.20), not the minimap capture.
+        MapTransform calibrated;
+        if (TryGetStockCaptureCalibration(calibrated))
+            return calibrated;
 
-        const float extent = (v >= 27.00f && v < 28.00f) ? 125000.f : 135345.f;
+        constexpr float extent = 135345.f;
         // Athena's world plane uses X for map north/south and Y for east/west:
         // at zero map yaw, image-right is world +Y and image-bottom is world -X.
-        // Runtime data replaces this provisional transform in-match.
+        // Runtime data replaces this provisional custom-map transform in-match.
         return { 0.f, 0.f, 0.f, extent, -extent, 0.f };
     }
 
@@ -1871,6 +1981,30 @@ namespace SafeZoneMap
         const float sv = (map.AxisUX * dy - dx * map.AxisUY) / det;
         lx = side * 0.5f * (1.f + su);
         ly = side * 0.5f * (1.f + sv);
+    }
+
+    static inline void NodeToPixel(
+        const FCustomSafeZoneNode& node,
+        float side,
+        const MapTransform& map,
+        float& lx,
+        float& ly)
+    {
+        if (node.bHasNormalizedCenter &&
+            std::isfinite(node.NormalizedU) &&
+            std::isfinite(node.NormalizedV))
+        {
+            // Image-space coordinates are the authored source of truth. They do
+            // not depend on the game thread publishing the matching world-space
+            // center in a second atomic transaction.
+            lx = Clamp(node.NormalizedU, 0.f, 1.f) * side;
+            ly = Clamp(node.NormalizedV, 0.f, 1.f) * side;
+            return;
+        }
+
+        WorldToPixel(
+            (float)node.Center.X, (float)node.Center.Y,
+            side, map, lx, ly);
     }
 
     static inline ImVec2 RadiusToPixelAxes(float radiusCm, float side, const MapTransform& map)
@@ -4076,11 +4210,13 @@ namespace SafeZoneMap
             return false;
 
         MapTransform result = DefaultTransformForVersion();
-        // Original Athena reports the gameplay origin here (0,0), while the
-        // 2048 minimap capture itself is offset. Keep the capture center
-        // recovered from Fortnite's native converter for that map family.
-        if (!UsesLegacyAthenaCapture() ||
-            fabs(centerX) > 1.0 || fabs(centerY) > 1.0)
+        // A stock map's gameplay origin is not necessarily the center of its
+        // full minimap capture (Asteria, Rufus, and Helios are all offset).
+        // Custom maps are excluded from the stock registry above and continue
+        // to use their reflected center.
+        const bool hasKnownStockCapture =
+            UsesKnownCaptureCalibration();
+        if (!hasKnownStockCapture)
         {
             result.CenterX = (float)centerX;
             result.CenterY = (float)centerY;
@@ -4104,11 +4240,13 @@ namespace SafeZoneMap
             std::isfinite(width) && width >= 50000.f && width <= 1000000.f;
         const bool validHeight =
             std::isfinite(height) && height >= 50000.f && height <= 1000000.f;
-        bool resolvedExtentU = validWidth;
-        bool resolvedExtentV = validHeight;
-        if (validWidth)
+        bool resolvedExtentU = validWidth ||
+            hasKnownStockCapture;
+        bool resolvedExtentV = validHeight ||
+            hasKnownStockCapture;
+        if (validWidth && !hasKnownStockCapture)
             extentU = width * 0.5f;
-        if (validHeight)
+        if (validHeight && !hasKnownStockCapture)
             extentV = height * 0.5f;
 
         float brushWidth = 0.f;
@@ -4130,8 +4268,13 @@ namespace SafeZoneMap
         // the editor's world span 2.285x too large and sent Season 7/8 zones
         // into the ocean.
         const float absoluteScale = fabsf(mapWorldScale);
-        bool usedFullCaptureScale = false;
+        // This scale/layer product is frequently not the full capture. FN14.40
+        // can report a 143,360 cm layer for Apollo's 269,698 cm capture, and
+        // FN24.20 reports 137,600 cm for Asteria's 299,926 cm capture. Never
+        // replace a measured stock-family transform with that gameplay layer.
+        bool usedFullCaptureScale = hasKnownStockCapture;
         if (std::isfinite(absoluteScale) &&
+            !hasKnownStockCapture &&
             absoluteScale >= 0.01f && absoluteScale <= 10000.f)
         {
             const float logicalWidth = mapLayerSize
@@ -4191,7 +4334,7 @@ namespace SafeZoneMap
         // legacy Athena basis is image-right=world +Y, image-bottom=world -X.
         float reportedMapYaw = 0.f;
         const uint32_t rotationOffset = settings->GetOffset("MapRotation");
-        if (rotationOffset != UINT32_MAX)
+        if (!hasKnownStockCapture && rotationOffset != UINT32_MAX)
         {
             const uint8_t* rotationBytes = (const uint8_t*)settings + rotationOffset;
             const double candidateYaw = VersionInfo.FortniteVersion >= 20.00f
@@ -4204,13 +4347,17 @@ namespace SafeZoneMap
         // Rotate the legacy Athena image basis in the world plane. Newer
         // versions that expose BPWorldLocationToMapLocation are sampled
         // natively below, so this is only their safe fallback.
-        const float yawRadians = reportedMapYaw * 0.01745329251994329577f;
-        const float cosYaw = cosf(yawRadians);
-        const float sinYaw = sinf(yawRadians);
-        result.AxisUX = -sinYaw * extentU;
-        result.AxisUY = cosYaw * extentU;
-        result.AxisVX = -cosYaw * extentV;
-        result.AxisVY = -sinYaw * extentV;
+        if (!hasKnownStockCapture)
+        {
+            const float yawRadians =
+                reportedMapYaw * 0.01745329251994329577f;
+            const float cosYaw = cosf(yawRadians);
+            const float sinYaw = sinf(yawRadians);
+            result.AxisUX = -sinYaw * extentU;
+            result.AxisUY = cosYaw * extentU;
+            result.AxisVX = -cosYaw * extentV;
+            result.AxisVY = -sinYaw * extentV;
+        }
 
         static const UObject* loggedSettings = nullptr;
         static int loggedLayerSize = 0;
@@ -4984,10 +5131,10 @@ namespace SafeZoneMap
     static MapTransform TransformFromMapInfoCenter(const FVector& center)
     {
         MapTransform out = DefaultTransformForVersion();
-        // GetMapCenter() is the gameplay origin on old Athena, not the center
-        // of the full minimap capture. Replacing the native capture offset with
-        // that (usually zero) value shifts every Chapter 1 selection.
-        if (!UsesLegacyAthenaCapture())
+        // GetMapCenter() is a gameplay origin, not a full-capture center, on
+        // multiple stock islands. Custom maps are not in the calibration table
+        // and therefore retain their reflected center here.
+        if (!UsesKnownCaptureCalibration())
         {
             out.CenterX = (float)center.X;
             out.CenterY = (float)center.Y;
@@ -5058,7 +5205,11 @@ namespace SafeZoneMap
         EMapTransformProvenance fallbackProvenance =
             UsesLegacyAthenaCapture()
                 ? EMapTransformProvenance::LegacyAthenaCapture
-                : EMapTransformProvenance::ProvisionalMapInfo;
+                : (UsesKnownCaptureCalibration()
+                    ? EMapTransformProvenance::
+                        KnownCaptureCalibration
+                    : EMapTransformProvenance::
+                        ProvisionalMapInfo);
 
         // FortGameStateZone owns the map manager used by this match when one is
         // created. Dedicated/NullRHI servers commonly leave it null, but reading
@@ -5092,17 +5243,22 @@ namespace SafeZoneMap
                 world, manager, worldSettingsTransform, worldSettings,
                 hasAuthoritativeWorldSettingsExtents))
         {
-            // MapInfo belongs to this match and can carry a non-zero island
-            // origin. Original Athena is the exception: its gameplay origin is
-            // not the center of the full minimap capture.
-            if (!UsesLegacyAthenaCapture())
+            // Custom maps use their live island origin. A stock map keeps the
+            // measured full-capture center even when MapInfo exposes a different
+            // gameplay center.
+            if (!UsesKnownCaptureCalibration())
             {
                 worldSettingsTransform.CenterX = (float)center.X;
                 worldSettingsTransform.CenterY = (float)center.Y;
             }
             fallbackTransform = worldSettingsTransform;
             fallbackSource = worldSettings;
-            if (hasAuthoritativeWorldSettingsExtents)
+            if (UsesKnownCaptureCalibration())
+            {
+                fallbackProvenance = EMapTransformProvenance::
+                    KnownCaptureCalibration;
+            }
+            else if (hasAuthoritativeWorldSettingsExtents)
             {
                 fallbackProvenance =
                     EMapTransformProvenance::WorldSettingsExtents;
@@ -5113,7 +5269,8 @@ namespace SafeZoneMap
             // volumes still share gameplay tags, though, so use those native
             // anchor pairs to recover this season's exact texture projection.
             MapTransform poiCalibratedTransform;
-            if (BuildPoiCalibration(
+            if (!UsesKnownCaptureCalibration() &&
+                BuildPoiCalibration(
                     world, worldSettings, manager, poiCalibratedTransform))
             {
                 fallbackTransform = poiCalibratedTransform;
@@ -5343,7 +5500,14 @@ namespace SafeZoneMap
 
         MapTransform current;
         const UObject* manager = nullptr;
-        if (!ReadRuntimeTransform(current, manager)) return;
+        EMapTransformProvenance provenance =
+            EMapTransformProvenance::None;
+        if (!ReadRuntimeTransform(
+                current, manager, &provenance) ||
+            !IsAuthoritativeProjection(provenance))
+        {
+            return;
+        }
         const bool changed = !haveLast || manager != lastManager ||
             fabsf(current.CenterX - last.CenterX) > 1.f ||
             fabsf(current.CenterY - last.CenterY) > 1.f ||
@@ -6005,6 +6169,83 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
         return fabsf(left - right) <= 0.01f;
     };
 
+    // Every supported stock island has a deterministic full-capture transform.
+    // The boundaries are intentionally tested because Asteria changed scale at
+    // FN24 while keeping the same non-zero center.
+    SafeZoneMap::MapTransform calibrated;
+    SafeZoneMap::EStockCaptureFamily family =
+        SafeZoneMap::EStockCaptureFamily::None;
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(
+        10.40f, false, calibrated, &family));
+    assert(family == SafeZoneMap::EStockCaptureFamily::Athena);
+    assert(nearlyEqual(calibrated.CenterX, 32000.f));
+    assert(nearlyEqual(
+        SafeZoneMap::AxisULength(calibrated), 129760.4f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(
+        18.40f, false, calibrated, &family));
+    assert(family == SafeZoneMap::EStockCaptureFamily::Apollo);
+    assert(nearlyEqual(
+        SafeZoneMap::AxisULength(calibrated), 134849.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(
+        22.40f, false, calibrated, &family));
+    assert(family == SafeZoneMap::EStockCaptureFamily::Artemis);
+    assert(nearlyEqual(
+        SafeZoneMap::AxisULength(calibrated), 131213.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(
+        23.10f, false, calibrated, &family));
+    assert(family == SafeZoneMap::EStockCaptureFamily::AsteriaEarly);
+    assert(nearlyEqual(calibrated.CenterX, 9524.f));
+    assert(nearlyEqual(calibrated.CenterY, -9732.f));
+    assert(nearlyEqual(
+        SafeZoneMap::AxisULength(calibrated), 131213.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(
+        24.20f, false, calibrated, &family));
+    assert(family == SafeZoneMap::EStockCaptureFamily::Asteria);
+    assert(nearlyEqual(calibrated.CenterX, 9524.f));
+    assert(nearlyEqual(calibrated.CenterY, -9732.f));
+    assert(nearlyEqual(
+        SafeZoneMap::AxisULength(calibrated), 149963.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(
+        27.11f, false, calibrated, &family));
+    assert(family == SafeZoneMap::EStockCaptureFamily::Rufus);
+    assert(nearlyEqual(calibrated.CenterX, 28321.8f));
+    assert(nearlyEqual(calibrated.CenterY, -21131.f));
+    assert(nearlyEqual(
+        SafeZoneMap::AxisULength(calibrated), 131213.f));
+    SafeZoneMap::MapTransform helios;
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(
+        30.00f, false, helios, &family));
+    assert(family == SafeZoneMap::EStockCaptureFamily::Helios);
+    assert(nearlyEqual(helios.CenterX, 8500.f));
+    assert(nearlyEqual(helios.CenterY, 508.f));
+    assert(nearlyEqual(
+        SafeZoneMap::AxisULength(helios), 149963.f));
+    assert(nearlyEqual(
+        SafeZoneMap::AxisVLength(helios), 149963.f));
+    assert(!SafeZoneMap::TryGetStockCaptureCalibration(
+        24.20f, true, calibrated, &family));
+    assert(!SafeZoneMap::TryGetStockCaptureCalibration(
+        31.00f, false, calibrated, &family));
+    assert(SafeZoneMap::IsAuthoritativeProjection(
+        SafeZoneMap::EMapTransformProvenance::
+            KnownCaptureCalibration));
+
+    // A normalized edit must render at its authored image point even while its
+    // compatibility world center still belongs to the preceding transform.
+    FCustomSafeZoneNode normalizedDisplay;
+    normalizedDisplay.Center.X = -999999.f;
+    normalizedDisplay.Center.Y = 999999.f;
+    normalizedDisplay.bHasNormalizedCenter = true;
+    normalizedDisplay.NormalizedU = 0.25f;
+    normalizedDisplay.NormalizedV = 0.75f;
+    float normalizedPixelX = 0.f;
+    float normalizedPixelY = 0.f;
+    SafeZoneMap::NodeToPixel(
+        normalizedDisplay, 400.f, helios,
+        normalizedPixelX, normalizedPixelY);
+    assert(nearlyEqual(normalizedPixelX, 100.f));
+    assert(nearlyEqual(normalizedPixelY, 300.f));
+
     // A rotated, non-square capture must round-trip points and project a world
     // circle to independent pixel radii. Doubling the canvas models zoom and
     // must double both radii without changing their aspect ratio.
@@ -6338,9 +6579,11 @@ void SmallSeparator(float Width, float Thickness = 1.0f)
     ImGui::Dummy(ImVec2(Width, Thickness + 4));
 }
 
-static float ContentSectionWidth(float FallbackWidth)
+static float ContentSectionWidth(
+    float FallbackWidth, float RightInset = 0.f)
 {
-    float Width = ImGui::GetContentRegionAvail().x;
+    float Width =
+        ImGui::GetContentRegionAvail().x - RightInset;
     if (Width < FallbackWidth)
         Width = FallbackWidth;
 
@@ -11426,11 +11669,17 @@ void GUI::Init()
             float yy = TabsTop;
             float activeY = -1.f;
             const bool inMatch = !FConfiguration::bReadyToStart;
+            const bool bShowLategameTab =
+                inMatch ||
+                (FConfiguration::bLateGame.load(
+                         std::memory_order_acquire) &&
+                 FConfiguration::bCustomSafeZone.load(
+                         std::memory_order_acquire));
 
             struct TabDef { const char* label; int ui; bool show; };
             TabDef tabs[] = {
                 { "Match",      0, true },
-                { "Lategame",   3, true },
+                { "Lategame",   3, bShowLategameTab },
                 { "Playlist",   1, inMatch },
                 { "Creative",   5, inMatch && SelectedPlaylist == static_cast<int>(Playlist::Creative) },
                 { "Custom Map", 6, inMatch && FConfiguration::bIsCustomMap },
@@ -11590,13 +11839,31 @@ void GUI::Init()
 
         // ---- Content panel (inset; transparent so the #32703b background shows) ----
         const float ContentPadX = 22.f;
+        const ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
+        const float VisibleWindowW = (std::max)(
+            1.f,
+            (std::min)(W, DisplaySize.x - wp.x));
+        const float VisibleWindowH = (std::max)(
+            1.f,
+            (std::min)(H, DisplaySize.y - wp.y));
+        const float ContentChildW = (std::max)(
+            1.f,
+            (VisibleWindowW - SidebarW) - ContentPadX);
+        const float ContentChildH = (std::max)(
+            1.f,
+            (VisibleWindowH - TopBarH) - 26.f);
         ImGui::SetCursorPos(ImVec2(SidebarW + ContentPadX, TopBarH + 14.f));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.f, 0.f, 0.f, 0.f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
-        ImGui::BeginChild("##content", ImVec2((W - SidebarW) - ContentPadX * 2.f, (H - TopBarH) - 26.f), false);
+        ImGui::BeginChild(
+            "##content",
+            ImVec2(ContentChildW, ContentChildH),
+            false,
+            ImGuiWindowFlags_AlwaysVerticalScrollbar);
         float Width = 260.0f;
         float Height = 0.0f;
-        const float SectionWidth = ContentSectionWidth(Width);
+        const float SectionWidth =
+            ContentSectionWidth(Width, ContentPadX);
 
         static char commandBuffer[1024] = { 0 };
         static char playlistBuffer[1024] = { 0 };
@@ -11714,11 +11981,13 @@ void GUI::Init()
 
                 static std::string LastElimStatusMessage;
                 static std::chrono::high_resolution_clock::time_point AddMessageTime;
+                static bool bHasLogged = false;
 
                 if (!FConfiguration::ElimStatusMessage.empty() && FConfiguration::ElimStatusMessage != LastElimStatusMessage)
                 {
                     LastElimStatusMessage = FConfiguration::ElimStatusMessage;
                     AddMessageTime = std::chrono::high_resolution_clock::now();
+                    bHasLogged = false;
                 }
 
                 if (!LastElimStatusMessage.empty() && duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - AddMessageTime).count() < 120)
@@ -11752,8 +12021,6 @@ void GUI::Init()
                     ImGui::SameLine(0.0f, 0.0f);
 
                     ImGui::TextUnformatted(")");
-
-                    static bool bHasLogged = false;
 
                     if (!bHasLogged)
                     {
@@ -14488,10 +14755,8 @@ void GUI::Init()
                                     const auto& node = sequence.Nodes[i];
                                     float lx = 0.f;
                                     float ly = 0.f;
-                                    SafeZoneMap::WorldToPixel(
-                                        (float)node.Center.X,
-                                        (float)node.Center.Y,
-                                        S, map, lx, ly);
+                                    SafeZoneMap::NodeToPixel(
+                                        node, S, map, lx, ly);
                                     ImVec2 radius =
                                         SafeZoneMap::RadiusToPixelAxes(
                                             node.RadiusCm, S, map);
@@ -14612,10 +14877,29 @@ void GUI::Init()
                                     SafeZoneMap::PixelToWorld(
                                         u, v, 1.f, map,
                                         mouseX, mouseY);
-                                    const float dx = mouseX -
-                                        (float)node.Center.X;
-                                    const float dy = mouseY -
-                                        (float)node.Center.Y;
+                                    float centerX = (float)node.Center.X;
+                                    float centerY = (float)node.Center.Y;
+                                    if (node.bHasNormalizedCenter &&
+                                        std::isfinite(node.NormalizedU) &&
+                                        std::isfinite(node.NormalizedV))
+                                    {
+                                        // The game thread can publish a more
+                                        // precise projection between mouse-down
+                                        // and a later drag frame. Reconstruct
+                                        // both endpoints with this frame's one
+                                        // coherent map snapshot; never subtract
+                                        // an old-transform world mirror from a
+                                        // new-transform mouse position.
+                                        SafeZoneMap::PixelToWorld(
+                                            SafeZoneMap::Clamp(
+                                                node.NormalizedU, 0.f, 1.f),
+                                            SafeZoneMap::Clamp(
+                                                node.NormalizedV, 0.f, 1.f),
+                                            1.f, map,
+                                            centerX, centerY);
+                                    }
+                                    const float dx = mouseX - centerX;
+                                    const float dy = mouseY - centerY;
                                     const float maximumRadius = nodeIndex > 0
                                         ? sequence.Nodes[nodeIndex - 1].RadiusCm
                                         : FCustomSafeZoneSequence::

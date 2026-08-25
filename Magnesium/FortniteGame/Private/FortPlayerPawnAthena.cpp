@@ -5,6 +5,7 @@
 #include "../Public/FortAthenaMutator.h"
 #include "../Public/FortPlayerControllerAthena.h"
 #include "../Public/FortWeapon.h"
+#include "../Public/FortWeaponMods.h"
 #include "../Public/FortPhysicsPawn.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../Erbium/Public/Configuration.h"
@@ -12,7 +13,6 @@
 #include "../../Erbium/Public/PlayerLoadout.h"
 #include "../../Erbium/Support/Public/FaultGuard.h"
 
-#include <objbase.h>
 #include <array>
 
 struct _Pad_0xC
@@ -4816,56 +4816,6 @@ static bool TrySetPickupTargetByReference(
 	return bSucceeded;
 }
 
-constexpr size_t MaxCommandGrantVisualPickups = 64;
-static std::array<
-	TWeakObjectPtr<AFortPickupAthena>,
-	MaxCommandGrantVisualPickups>
-	GCommandGrantVisualPickups{};
-static size_t GCommandGrantVisualPickupCursor = 0;
-
-static void RegisterCommandGrantVisualPickup(
-	AFortPickupAthena* Pickup)
-{
-	if (!Pickup)
-		return;
-
-	for (auto& TrackedPickup : GCommandGrantVisualPickups)
-	{
-		auto ExistingPickup = TrackedPickup.Get();
-		if (ExistingPickup == Pickup)
-			return;
-		if (!ExistingPickup)
-		{
-			TrackedPickup =
-				TWeakObjectPtr<AFortPickupAthena>(Pickup);
-			return;
-		}
-	}
-
-	GCommandGrantVisualPickups[
-		GCommandGrantVisualPickupCursor++ %
-		MaxCommandGrantVisualPickups] =
-			TWeakObjectPtr<AFortPickupAthena>(Pickup);
-}
-
-static bool ConsumeCommandGrantVisualPickup(
-	AFortPickupAthena* Pickup)
-{
-	if (!Pickup)
-		return false;
-
-	for (auto& TrackedPickup : GCommandGrantVisualPickups)
-	{
-		if (TrackedPickup.Get() != Pickup)
-			continue;
-
-		TrackedPickup = TWeakObjectPtr<AFortPickupAthena>();
-		return true;
-	}
-
-	return false;
-}
-
 static bool StagePickupTargetManually(
 	AFortPlayerPawnAthena* Pawn,
 	AFortPickupAthena* Pickup,
@@ -4923,7 +4873,6 @@ static bool StagePickupTargetManually(
 
 	Pickup->bPickedUp = true;
 	Pickup->OnRep_bPickedUp();
-	Pickup->ForceNetUpdate();
 
 	SDK::DbgLog(
 		"[Pickup] manual animated target staging "
@@ -4931,93 +4880,6 @@ static bool StagePickupTargetManually(
 		(void*)Pickup,
 		(void*)Pawn,
 		FlyTime,
-		VersionInfo.FortniteVersion);
-	return true;
-}
-
-bool AFortPlayerPawnAthena::PlayCommandGrantPickupAnimation(
-	AFortPlayerPawnAthena* Pawn,
-	const UFortItemDefinition* ItemDefinition,
-	int32 Count,
-	int32 LoadedAmmo,
-	int32 Level)
-{
-	if (!Pawn || !ItemDefinition || Count <= 0 ||
-		!AFortPickupAthena::StaticClass())
-	{
-		return false;
-	}
-
-	FVector SpawnLocation = Pawn->K2_GetActorLocation();
-	FVector ForwardVector = Pawn->GetActorForwardVector();
-	ForwardVector.Z = 0.f;
-	ForwardVector.Normalize();
-	SpawnLocation = SpawnLocation + ForwardVector * 450.f;
-	SpawnLocation.Z += 50.f;
-
-	const float RandomAngleVariation =
-		((float)rand() * 0.00109866634f) - 18.f;
-	const float FinalAngle =
-		RandomAngleVariation * 0.017453292519943295f;
-	SpawnLocation.X += cos(FinalAngle) * 100.f;
-	SpawnLocation.Y += sin(FinalAngle) * 100.f;
-
-	auto Pickup = UWorld::SpawnActor<AFortPickupAthena>(
-		AFortPickupAthena::StaticClass(), SpawnLocation, {});
-	if (!Pickup ||
-		!Pickup->HasPrimaryPickupItemEntry() ||
-		!Pickup->GetFunction("OnRep_PrimaryPickupItemEntry"))
-	{
-		if (Pickup)
-			Pickup->K2_DestroyActor();
-		return false;
-	}
-
-	auto& Entry = Pickup->PrimaryPickupItemEntry;
-	Entry.MostRecentArrayReplicationKey = -1;
-	Entry.ReplicationID = -1;
-	Entry.ReplicationKey = -1;
-	Entry.ItemDefinition = ItemDefinition;
-	Entry.Count = Count;
-	Entry.LoadedAmmo = LoadedAmmo;
-	Entry.Level = Level;
-	Entry.Durability = 1.f;
-	CoCreateGuid((GUID*)&Entry.ItemGuid);
-	if (Entry.HasPickupVariantIndex())
-		Entry.PickupVariantIndex = -1;
-	if (Entry.HasItemVariantDataMappingIndex())
-		Entry.ItemVariantDataMappingIndex = -1;
-	if (Entry.HasOrderIndex())
-		Entry.OrderIndex = -1;
-
-	if (Pickup->HasPawnWhoDroppedPickup())
-		Pickup->PawnWhoDroppedPickup = Pawn;
-	if (Pickup->HasbActorEnableCollision())
-		Pickup->bActorEnableCollision = false;
-	Pickup->OnRep_PrimaryPickupItemEntry();
-	RegisterCommandGrantVisualPickup(Pickup);
-
-	if (!StagePickupTargetManually(
-			Pawn,
-			Pickup,
-			0.4f,
-			FVector(),
-			true,
-			false))
-	{
-		ConsumeCommandGrantVisualPickup(Pickup);
-		Pickup->K2_DestroyActor();
-		return false;
-	}
-
-	Pickup->SetLifeSpan(2.f);
-	SDK::DbgLog(
-		"[ServerCheat] visual pickup staged pawn=%p pickup=%p "
-		"definition=%s count=%d FN=%.2f\n",
-		(void*)Pawn,
-		(void*)Pickup,
-		ItemDefinition->Name.ToString().c_str(),
-		Count,
 		VersionInfo.FortniteVersion);
 	return true;
 }
@@ -5115,6 +4977,135 @@ static bool CompletePickupWithoutSpline(
 		(void*)Pickup->PrimaryPickupItemEntry.ItemDefinition,
 		Pickup->PrimaryPickupItemEntry.Count,
 		(int)bPreserveAnimatedActor,
+		VersionInfo.FortniteVersion);
+	return true;
+}
+
+bool AFortPlayerPawnAthena::PlayCommandGrantPickupAnimation(
+	AFortPlayerPawnAthena* Pawn,
+	const UFortItemDefinition* ItemDefinition,
+	int32 Count,
+	int32 LoadedAmmo,
+	int32 Level)
+{
+	if (!Pawn || !ItemDefinition || Count <= 0 ||
+		!AFortPickupAthena::StaticClass())
+	{
+		return false;
+	}
+
+	FVector SpawnLocation = Pawn->K2_GetActorLocation();
+	FVector ForwardVector = Pawn->GetActorForwardVector();
+	ForwardVector.Z = 0.f;
+	ForwardVector.Normalize();
+	SpawnLocation = SpawnLocation + ForwardVector * 450.f;
+	SpawnLocation.Z += 50.f;
+
+	const float RandomAngleVariation =
+		((float)rand() * 0.00109866634f) - 18.f;
+	const float FinalAngle =
+		RandomAngleVariation * 0.017453292519943295f;
+	SpawnLocation.X += cos(FinalAngle) * 100.f;
+	SpawnLocation.Y += sin(FinalAngle) * 100.f;
+
+	// Command grants must use the same actor initialization as world loot.
+	// TossPickup registers the actor with the active replication model before
+	// the native fly-to-player transition changes its dormancy/spatial state.
+	auto PickupEntry = AFortInventory::MakeItemEntry(
+		ItemDefinition, Count, Level);
+	if (!PickupEntry)
+		return false;
+	if (LoadedAmmo >= 0)
+		PickupEntry->LoadedAmmo = LoadedAmmo;
+
+	auto Pickup = AFortInventory::SpawnPickup(
+		SpawnLocation,
+		*PickupEntry,
+		EFortPickupSourceTypeFlag::GetOther(),
+		EFortPickupSpawnSource::GetUnset(),
+		Pawn);
+	FFortWeaponMods::FreeEntrySlots(*PickupEntry);
+	free(PickupEntry);
+	if (!Pickup)
+		return false;
+
+	float RequestedFlyTime = 0.4f;
+	if (Pickup->HasPickupLocationData() &&
+		FFortPickupLocationData::HasFlyTime() &&
+		FPlatformMath::IsFinite(
+			Pickup->PickupLocationData.FlyTime) &&
+		Pickup->PickupLocationData.FlyTime > 0.f)
+	{
+		RequestedFlyTime = Pickup->PickupLocationData.FlyTime;
+	}
+
+	float PickupSpeed = Pawn->HasPickupSpeedMultiplier()
+		? Pawn->PickupSpeedMultiplier
+		: 1.f;
+	if (!FPlatformMath::IsFinite(PickupSpeed) ||
+		PickupSpeed <= 0.f)
+	{
+		PickupSpeed = 1.f;
+	}
+
+	FVector StartDirection{};
+	auto PawnDefault = AFortPlayerPawnAthena::GetDefaultObj();
+	const bool bUsesPickupInfoSchema =
+		PawnDefault &&
+		PawnDefault->GetFunction("ServerHandlePickupInfo");
+	bool bAnimationStaged = false;
+	if (SetPickupTarget_)
+	{
+		bAnimationStaged = bUsesPickupInfoSchema
+			? TrySetPickupTargetByReference(
+				Pickup,
+				Pawn,
+				RequestedFlyTime / PickupSpeed,
+				StartDirection,
+				true)
+			: TrySetPickupTargetByValue(
+				Pickup,
+				Pawn,
+				RequestedFlyTime / PickupSpeed,
+				StartDirection,
+				true);
+	}
+
+	if (!bAnimationStaged)
+	{
+		bAnimationStaged = StagePickupTargetManually(
+			Pawn,
+			Pickup,
+			RequestedFlyTime,
+			StartDirection,
+			true);
+	}
+
+	if (!bAnimationStaged)
+	{
+		Pickup->K2_DestroyActor();
+		return false;
+	}
+
+	// Builds without a discoverable spline-completion hook still receive the
+	// item immediately, while the correctly initialized pickup remains alive
+	// long enough for the client animation. Other builds grant exactly once in
+	// FinishedTargetSpline through the ordinary InternalPickup path.
+	if (!FinishedTargetSplineOG &&
+		!CompletePickupWithoutSpline(Pawn, Pickup, true))
+	{
+		Pickup->K2_DestroyActor();
+		return false;
+	}
+
+	SDK::DbgLog(
+		"[ServerCheat] authoritative pickup staged pawn=%p pickup=%p "
+		"definition=%s count=%d nativeTarget=%d FN=%.2f\n",
+		(void*)Pawn,
+		(void*)Pickup,
+		ItemDefinition->Name.ToString().c_str(),
+		Count,
+		(int)(SetPickupTarget_ != 0),
 		VersionInfo.FortniteVersion);
 	return true;
 }
@@ -5724,17 +5715,6 @@ void AFortPlayerPawnAthena::ServerHandlePickupWithRequestedSwap(UObject* Context
 bool AFortPlayerPawnAthena::FinishedTargetSpline(void* _Pickup)
 {
 	auto Pickup = (AFortPickupAthena*)_Pickup;
-	if (ConsumeCommandGrantVisualPickup(Pickup))
-	{
-		SDK::DbgLog(
-			"[ServerCheat] visual pickup completed without grant "
-			"pickup=%p FN=%.2f\n",
-			(void*)Pickup,
-			VersionInfo.FortniteVersion);
-		if (Pickup)
-			Pickup->SetLifeSpan(0.01f);
-		return true;
-	}
 	auto Pawn = Pickup
 		? (AFortPlayerPawnAthena*)
 			Pickup->PickupLocationData.PickupTarget

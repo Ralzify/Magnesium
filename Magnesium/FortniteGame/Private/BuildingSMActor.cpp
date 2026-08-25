@@ -6,6 +6,7 @@
 #include "../Public/FortWeapon.h"
 #include "../Public/FortKismetLibrary.h"
 #include "../Public/FortPlayerControllerAthena.h"
+#include "../../Engine/Public/AbilitySystemComponent.h"
 #include "../../Erbium/Public/Configuration.h"
 
 
@@ -218,6 +219,699 @@ static bool IsValidTrapDefinition(UFortDecoItemDefinition* Definition)
 		Definition->IsA<UFortDecoItemDefinition>();
 }
 
+static bool IsAllTeamPlayerJumpPadDefinition(
+	UFortDecoItemDefinition* Definition)
+{
+	if (!IsValidTrapDefinition(Definition))
+		return false;
+
+	static const FName UpwardPad(
+		L"TID_Floor_Player_Jump_Pad_Athena");
+	static const FName FreeDirectionalPad(
+		L"TID_Floor_Player_Jump_Pad_Free_Direction_Athena");
+	return Definition->Name == UpwardPad ||
+		Definition->Name == FreeDirectionalPad;
+}
+
+static bool IsLiveJumpPadObject(const UObject* Object)
+{
+	if (!Object || !SDK::MemReadable(Object, 0x40))
+		return false;
+	const int32 ObjectIndex = static_cast<int32>(Object->Index);
+	return ObjectIndex >= 0 && ObjectIndex < TUObjectArray::Num() &&
+		TUObjectArray::GetObjectByIndex(ObjectIndex) == Object &&
+		Object->Class && SDK::MemReadable(Object->Class, 0x40);
+}
+
+struct FJumpPadTargetingSchema
+{
+	const UStruct* EffectContainer = nullptr;
+	const UStruct* TargetSelectionList = nullptr;
+	const UStruct* TargetSelection = nullptr;
+	const UStruct* TargetFilter = nullptr;
+	int32 EffectContainerSize = 0;
+	int32 TargetSelectionListSize = 0;
+	int32 TargetSelectionSize = 0;
+	int32 TargetFilterSize = 0;
+	uint32 ContainerTargetSelectionOffset = 0;
+	uint32 SelectionListArrayOffset = 0;
+	uint32 SelectionTargetFilterOffset = 0;
+	uint32 EnemyFilterOffset = 0;
+	uint8 EnemyFilterMask = 0;
+
+	bool IsValid() const
+	{
+		constexpr int32 kMaximumReflectedStructSize = 0x1000;
+		return EffectContainer && TargetSelectionList &&
+			TargetSelection && TargetFilter &&
+			EffectContainerSize > 0 &&
+			EffectContainerSize <= kMaximumReflectedStructSize &&
+			TargetSelectionListSize >= sizeof(void*) + sizeof(int32) * 2 &&
+			TargetSelectionListSize <= kMaximumReflectedStructSize &&
+			TargetSelectionSize > 0 && TargetFilterSize > 0 &&
+			TargetSelectionSize <= kMaximumReflectedStructSize &&
+			TargetFilterSize <= kMaximumReflectedStructSize &&
+			EffectContainerSize >= TargetSelectionListSize &&
+			TargetSelectionSize >= TargetFilterSize &&
+			ContainerTargetSelectionOffset <=
+				static_cast<uint32>(EffectContainerSize -
+					TargetSelectionListSize) &&
+			SelectionListArrayOffset <=
+				static_cast<uint32>(TargetSelectionListSize -
+					(sizeof(void*) + sizeof(int32) * 2)) &&
+			SelectionTargetFilterOffset <=
+				static_cast<uint32>(TargetSelectionSize -
+					TargetFilterSize) &&
+			EnemyFilterOffset < static_cast<uint32>(TargetFilterSize) &&
+			EnemyFilterMask != 0;
+	}
+};
+
+static bool ReadStructPropertyLayout(
+	const UStruct* Owner,
+	const char* Name,
+	uint64 PropertyFlags,
+	uint32& OutOffset,
+	uint32& OutElementSize,
+	int32& OutArrayDimension,
+	const UField*& OutProperty)
+{
+	OutOffset = static_cast<uint32>(-1);
+	OutElementSize = 0;
+	OutArrayDimension = 0;
+	OutProperty = nullptr;
+	if (!Owner || !Name || Offsets::ElementSize < sizeof(int32))
+		return false;
+	OutProperty = Owner->GetProperty(Name, PropertyFlags);
+	if (!OutProperty || !SDK::MemReadable(
+			OutProperty,
+			static_cast<size_t>((std::max)(
+				Offsets::Offset_Internal,
+				Offsets::ElementSize)) + sizeof(uint32)))
+	{
+		return false;
+	}
+	OutOffset = SDK::ReadPropertyOffset(GetFromOffset<uint32>(
+		OutProperty, Offsets::Offset_Internal));
+	OutElementSize = GetFromOffset<uint32>(
+		OutProperty, Offsets::ElementSize);
+	OutArrayDimension = GetFromOffset<int32>(
+		OutProperty, Offsets::ElementSize - sizeof(int32));
+	return OutOffset != static_cast<uint32>(-1);
+}
+
+static FJumpPadTargetingSchema ResolveJumpPadTargetingSchema()
+{
+	FJumpPadTargetingSchema Result{};
+	Result.EffectContainer = SDK::FindStruct(
+		"FortGameplayEffectContainer");
+	Result.TargetSelectionList = SDK::FindStruct(
+		"FortAbilityTargetSelectionList");
+	Result.TargetSelection = SDK::FindStruct(
+		"FortAbilityTargetSelection");
+	Result.TargetFilter = SDK::FindStruct("FortTargetFilter");
+	if (!Result.EffectContainer || !Result.TargetSelectionList ||
+		!Result.TargetSelection || !Result.TargetFilter)
+	{
+		return {};
+	}
+
+	Result.EffectContainerSize =
+		Result.EffectContainer->GetPropertiesSize();
+	Result.TargetSelectionListSize =
+		Result.TargetSelectionList->GetPropertiesSize();
+	Result.TargetSelectionSize =
+		Result.TargetSelection->GetPropertiesSize();
+	Result.TargetFilterSize =
+		Result.TargetFilter->GetPropertiesSize();
+	uint32 ElementSize = 0;
+	int32 ArrayDimension = 0;
+	const UField* Property = nullptr;
+	if (!ReadStructPropertyLayout(
+			Result.EffectContainer, "TargetSelection", 0,
+			Result.ContainerTargetSelectionOffset,
+			ElementSize, ArrayDimension, Property) ||
+		ElementSize !=
+			static_cast<uint32>(Result.TargetSelectionListSize) ||
+		ArrayDimension != 1 ||
+		!ReadStructPropertyLayout(
+			Result.TargetSelectionList, "List", 0,
+			Result.SelectionListArrayOffset,
+			ElementSize, ArrayDimension, Property) ||
+		ElementSize != sizeof(void*) + sizeof(int32) * 2 ||
+		ArrayDimension != 1 ||
+		!ReadStructPropertyLayout(
+			Result.TargetSelection, "TargetFilter", 0,
+			Result.SelectionTargetFilterOffset,
+			ElementSize, ArrayDimension, Property) ||
+		ElementSize != static_cast<uint32>(Result.TargetFilterSize) ||
+		ArrayDimension != 1 ||
+		!ReadStructPropertyLayout(
+			Result.TargetFilter, "bExcludePawnEnemies", 0x20000,
+			Result.EnemyFilterOffset,
+			ElementSize, ArrayDimension, Property) ||
+		ElementSize != sizeof(uint8) || ArrayDimension != 1)
+	{
+		return {};
+	}
+	Result.EnemyFilterMask = Property->GetFieldMask();
+	return Result.IsValid() ? Result : FJumpPadTargetingSchema{};
+}
+
+static const FJumpPadTargetingSchema& GetJumpPadTargetingSchema()
+{
+	// Script structs are immutable for the lifetime of a Fortnite process.
+	// Resolve their moving offsets once instead of scanning the global object
+	// registry again every time a pad is placed or an ability instance is seen.
+	static const FJumpPadTargetingSchema Schema =
+		ResolveJumpPadTargetingSchema();
+	return Schema;
+}
+
+static void PrewarmPlayerJumpPadReflection()
+{
+	// Each of these SDK helpers performs a process-wide object search on its
+	// first call. Do that with the other startup reflection work, never in a
+	// placement RPC where it would stall the authoritative game thread.
+	(void)GetJumpPadTargetingSchema();
+	(void)UClass::StaticClass();
+	(void)UFortGameplayAbility::StaticClass();
+	(void)UAbilitySystemComponent::StaticClass();
+	(void)FGameplayAbilitySpec::Size();
+}
+
+struct FRawScriptArray
+{
+	void* Data = nullptr;
+	int32 Num = 0;
+	int32 Max = 0;
+};
+
+static bool IsReadableScriptArray(
+	const FRawScriptArray& Array,
+	int32 ElementSize,
+	int32 MaximumElements)
+{
+	if (ElementSize <= 0 || MaximumElements <= 0 ||
+		Array.Num < 0 || Array.Num > MaximumElements ||
+		Array.Max < Array.Num || Array.Max > MaximumElements * 4)
+	{
+		return false;
+	}
+	if (Array.Num == 0)
+		return true;
+	return Array.Data && SDK::MemReadable(
+		Array.Data,
+		static_cast<size_t>(Array.Num) *
+			static_cast<size_t>(ElementSize));
+}
+
+static int32 ClearEnemyExclusionFromTargetSelectionList(
+	uint8* SelectionListMemory,
+	const FJumpPadTargetingSchema& Schema)
+{
+	if (!SelectionListMemory || !Schema.IsValid() ||
+		!SDK::MemReadable(
+			SelectionListMemory,
+			Schema.TargetSelectionListSize))
+	{
+		return 0;
+	}
+
+	FRawScriptArray Selections{};
+	memcpy(
+		&Selections,
+		SelectionListMemory + Schema.SelectionListArrayOffset,
+		sizeof(Selections));
+	if (!IsReadableScriptArray(
+			Selections, Schema.TargetSelectionSize, 64))
+	{
+		return 0;
+	}
+
+	int32 Changed = 0;
+	for (int32 Index = 0; Index < Selections.Num; Index++)
+	{
+		auto EnemyFilterByte =
+			reinterpret_cast<uint8*>(Selections.Data) +
+			static_cast<size_t>(Index) * Schema.TargetSelectionSize +
+			Schema.SelectionTargetFilterOffset +
+			Schema.EnemyFilterOffset;
+		if ((*EnemyFilterByte & Schema.EnemyFilterMask) == 0)
+			continue;
+		*EnemyFilterByte &= static_cast<uint8>(
+			~Schema.EnemyFilterMask);
+		++Changed;
+	}
+	return Changed;
+}
+
+static int32 ClearEnemyExclusionFromEffectContainer(
+	uint8* ContainerMemory,
+	const FJumpPadTargetingSchema& Schema)
+{
+	if (!ContainerMemory || !Schema.IsValid() ||
+		!SDK::MemReadable(
+			ContainerMemory, Schema.EffectContainerSize))
+	{
+		return 0;
+	}
+	return ClearEnemyExclusionFromTargetSelectionList(
+		ContainerMemory + Schema.ContainerTargetSelectionOffset,
+		Schema);
+}
+
+static bool ReadPropertyLayout(
+	UObject* Owner,
+	const char* Name,
+	uint32& OutOffset,
+	uint32& OutElementSize,
+	int32& OutArrayDimension)
+{
+	OutOffset = static_cast<uint32>(-1);
+	OutElementSize = 0;
+	OutArrayDimension = 0;
+	if (!IsLiveJumpPadObject(Owner) || !Name ||
+		Offsets::ElementSize < sizeof(int32))
+	{
+		return false;
+	}
+
+	auto Property = Owner->GetProperty(Name);
+	if (!Property || !SDK::MemReadable(
+			Property,
+			static_cast<size_t>((std::max)(
+				Offsets::Offset_Internal,
+				Offsets::ElementSize)) + sizeof(uint32)))
+	{
+		return false;
+	}
+
+	OutOffset = SDK::ReadPropertyOffset(GetFromOffset<uint32>(
+		Property, Offsets::Offset_Internal));
+	OutElementSize = GetFromOffset<uint32>(
+		Property, Offsets::ElementSize);
+	OutArrayDimension = GetFromOffset<int32>(
+		Property, Offsets::ElementSize - sizeof(int32));
+	const int32 OwnerSize = Owner->Class->GetPropertiesSize();
+	return OutOffset != static_cast<uint32>(-1) &&
+		OwnerSize > 0 && OutOffset < static_cast<uint32>(OwnerSize);
+}
+
+static int32 ClearEnemyExclusionFromAbility(
+	UFortGameplayAbility* Ability)
+{
+	if (!IsLiveJumpPadObject(Ability))
+		return 0;
+	const auto& Schema = GetJumpPadTargetingSchema();
+	if (!Schema.IsValid())
+		return 0;
+
+	int32 Changed = 0;
+	uint32 Offset = 0;
+	uint32 ElementSize = 0;
+	int32 ArrayDimension = 0;
+	if (ReadPropertyLayout(
+			Ability, "EffectContainers", Offset,
+			ElementSize, ArrayDimension) &&
+		ElementSize == static_cast<uint32>(Schema.EffectContainerSize) &&
+		ArrayDimension > 0 && ArrayDimension <= 64 &&
+		static_cast<uint64>(Offset) +
+			static_cast<uint64>(ElementSize) * ArrayDimension <=
+			static_cast<uint64>(Ability->Class->GetPropertiesSize()))
+	{
+		for (int32 Index = 0; Index < ArrayDimension; Index++)
+		{
+			Changed += ClearEnemyExclusionFromEffectContainer(
+				reinterpret_cast<uint8*>(Ability) + Offset +
+					static_cast<size_t>(Index) * ElementSize,
+				Schema);
+		}
+	}
+
+	// Later Fortnite builds also materialize effect containers in a dynamic
+	// array. Patch it when reflected, while retaining the fixed-array path used
+	// by the older builds these two pads originated on.
+	if (ReadPropertyLayout(
+			Ability, "GameplayEffectContainers", Offset,
+			ElementSize, ArrayDimension) &&
+		ElementSize == sizeof(FRawScriptArray) &&
+		ArrayDimension == 1 &&
+		Offset + sizeof(FRawScriptArray) <=
+			static_cast<uint32>(Ability->Class->GetPropertiesSize()))
+	{
+		FRawScriptArray Containers{};
+		memcpy(
+			&Containers,
+			reinterpret_cast<uint8*>(Ability) + Offset,
+			sizeof(Containers));
+		if (IsReadableScriptArray(
+				Containers, Schema.EffectContainerSize, 64))
+		{
+			for (int32 Index = 0; Index < Containers.Num; Index++)
+			{
+				Changed += ClearEnemyExclusionFromEffectContainer(
+					reinterpret_cast<uint8*>(Containers.Data) +
+						static_cast<size_t>(Index) *
+							Schema.EffectContainerSize,
+					Schema);
+			}
+		}
+	}
+	return Changed;
+}
+
+static bool ReadObjectProperty(
+	UObject* Owner,
+	const char* Name,
+	UObject*& OutObject)
+{
+	OutObject = nullptr;
+	uint32 Offset = 0;
+	uint32 ElementSize = 0;
+	int32 ArrayDimension = 0;
+	if (!ReadPropertyLayout(
+			Owner, Name, Offset, ElementSize, ArrayDimension) ||
+		ElementSize != sizeof(UObject*) || ArrayDimension != 1 ||
+		Offset + sizeof(UObject*) >
+			static_cast<uint32>(Owner->Class->GetPropertiesSize()))
+	{
+		return false;
+	}
+	memcpy(
+		&OutObject,
+		reinterpret_cast<uint8*>(Owner) + Offset,
+		sizeof(OutObject));
+	return IsLiveJumpPadObject(OutObject);
+}
+
+static void AddUniqueJumpPadAbilityClass(
+	std::vector<UClass*>& Classes,
+	UClass* AbilityClass)
+{
+	if (!IsLiveJumpPadObject(AbilityClass) ||
+		!AbilityClass->IsA(UClass::StaticClass()) ||
+		std::find(Classes.begin(), Classes.end(), AbilityClass) !=
+			Classes.end())
+	{
+		return;
+	}
+	Classes.push_back(AbilityClass);
+}
+
+static int32 PatchJumpPadAbilitySet(
+	UObject* TrapTemplate,
+	std::vector<UClass*>& AbilityClasses,
+	const FName& ExpectedAbilityName)
+{
+	UObject* AbilitySet = nullptr;
+	if (!ReadObjectProperty(
+			TrapTemplate, "AbilitySet", AbilitySet))
+	{
+		return 0;
+	}
+
+	uint32 Offset = 0;
+	uint32 ElementSize = 0;
+	int32 ArrayDimension = 0;
+	if (!ReadPropertyLayout(
+			AbilitySet, "GameplayAbilities", Offset,
+			ElementSize, ArrayDimension) ||
+		ElementSize != sizeof(FRawScriptArray) ||
+		ArrayDimension != 1 ||
+		Offset + sizeof(FRawScriptArray) >
+			static_cast<uint32>(AbilitySet->Class->GetPropertiesSize()))
+	{
+		return 0;
+	}
+
+	FRawScriptArray Classes{};
+	memcpy(
+		&Classes,
+		reinterpret_cast<uint8*>(AbilitySet) + Offset,
+		sizeof(Classes));
+	if (!IsReadableScriptArray(Classes, sizeof(UClass*), 64))
+		return 0;
+
+	int32 Changed = 0;
+	for (int32 Index = 0; Index < Classes.Num; Index++)
+	{
+		UClass* AbilityClass = nullptr;
+		memcpy(
+			&AbilityClass,
+			reinterpret_cast<uint8*>(Classes.Data) +
+				static_cast<size_t>(Index) * sizeof(UClass*),
+				sizeof(AbilityClass));
+		if (!IsLiveJumpPadObject(AbilityClass) ||
+			AbilityClass->Name != ExpectedAbilityName)
+		{
+			continue;
+		}
+		const auto PreviousCount = AbilityClasses.size();
+		AddUniqueJumpPadAbilityClass(
+			AbilityClasses, AbilityClass);
+		if (AbilityClasses.size() == PreviousCount)
+			continue;
+		auto AbilityDefault = AbilityClass->GetDefaultObj();
+		if (IsLiveJumpPadObject(AbilityDefault) &&
+			AbilityDefault->IsA<UFortGameplayAbility>())
+		{
+			Changed += ClearEnemyExclusionFromAbility(
+				static_cast<UFortGameplayAbility*>(AbilityDefault));
+		}
+	}
+	return Changed;
+}
+
+static FName GetExpectedJumpPadAbilityName(
+	UFortDecoItemDefinition* Definition)
+{
+	static const FName UpwardPad(
+		L"TID_Floor_Player_Jump_Pad_Athena");
+	static const FName UpwardAbility(L"GA_Trap_FloorJumpPad_C");
+	static const FName DirectionalAbility(
+		L"GA_Trap_FloorJumpPadDirectional_C");
+	return Definition && Definition->Name == UpwardPad
+		? UpwardAbility : DirectionalAbility;
+}
+
+static bool IsMatchingJumpPadAbility(
+	UFortGameplayAbility* Ability,
+	const std::vector<UClass*>& AbilityClasses,
+	const FName& ExpectedName)
+{
+	if (!IsLiveJumpPadObject(Ability) || !Ability->Class)
+		return false;
+	return std::find(
+		AbilityClasses.begin(), AbilityClasses.end(),
+		Ability->Class) != AbilityClasses.end() ||
+		Ability->Class->Name == ExpectedName;
+}
+
+static int32 PatchJumpPadAbilitySystem(
+	ABuildingSMActor* TrapActor,
+	const std::vector<UClass*>& AbilityClasses,
+	const FName& ExpectedName)
+{
+	if (!IsLiveJumpPadObject(TrapActor))
+		return 0;
+	std::vector<UAbilitySystemComponent*> Components;
+	for (const char* PropertyName : {
+		"AbilitySystemComponent",
+		"ReplicatedAbilitySystemComponent" })
+	{
+		UObject* ComponentObject = nullptr;
+		if (!ReadObjectProperty(
+				TrapActor, PropertyName, ComponentObject) ||
+			!ComponentObject->IsA<UAbilitySystemComponent>())
+		{
+			continue;
+		}
+		auto Component = static_cast<UAbilitySystemComponent*>(
+			ComponentObject);
+		if (std::find(
+				Components.begin(), Components.end(), Component) ==
+			Components.end())
+		{
+			Components.push_back(Component);
+		}
+	}
+
+	int32 Changed = 0;
+	for (auto Component : Components)
+	{
+		if (!Component->HasActivatableAbilities())
+			continue;
+		auto& Specs = Component->ActivatableAbilities.Items;
+		const int32 SpecSize = FGameplayAbilitySpec::Size();
+		if (SpecSize <= 0 || SpecSize > 0x400 ||
+			Specs.Num() < 0 || Specs.Num() > 512 ||
+			(Specs.Num() > 0 &&
+				(!Specs.Data || !SDK::MemReadable(
+					Specs.Data,
+					static_cast<size_t>(Specs.Num()) * SpecSize))))
+		{
+			continue;
+		}
+
+		for (int32 Index = 0; Index < Specs.Num(); Index++)
+		{
+			auto& Spec = Specs.Get(Index, SpecSize);
+			auto PatchAbility = [&](UFortGameplayAbility* Ability)
+			{
+				if (IsMatchingJumpPadAbility(
+						Ability, AbilityClasses, ExpectedName))
+				{
+					Changed += ClearEnemyExclusionFromAbility(
+						Ability);
+				}
+			};
+
+			if (Spec.HasAbility())
+				PatchAbility(Spec.Ability);
+			if (Spec.HasReplicatedInstances())
+			{
+				auto& Instances = Spec.ReplicatedInstances;
+				if (Instances.Num() >= 0 && Instances.Num() <= 64 &&
+					(Instances.Num() == 0 ||
+						(Instances.Data && SDK::MemReadable(
+							Instances.Data,
+							static_cast<size_t>(Instances.Num()) *
+								sizeof(UFortGameplayAbility*)))))
+				{
+					for (auto Instance : Instances)
+						PatchAbility(Instance);
+				}
+			}
+			if (Spec.HasNonReplicatedInstances())
+			{
+				auto& Instances = Spec.NonReplicatedInstances;
+				if (Instances.Num() >= 0 && Instances.Num() <= 64 &&
+					(Instances.Num() == 0 ||
+						(Instances.Data && SDK::MemReadable(
+							Instances.Data,
+							static_cast<size_t>(Instances.Num()) *
+								sizeof(UFortGameplayAbility*)))))
+				{
+					for (auto Instance : Instances)
+						PatchAbility(Instance);
+				}
+			}
+		}
+	}
+	return Changed;
+}
+
+// These two Battle Royale player pads have two independent native enemy
+// filters: the trap activation filter and the launch ability's target list.
+// Keep the real team/owner intact and relax only those filters. Every layout,
+// including the bool mask, is reflected so this follows the native structures
+// used by each supported Fortnite build instead of one SDK's offsets.
+static void AllowAllTeamsOnPlayerJumpPad(
+	ABuildingSMActor* TrapActor,
+	UFortDecoItemDefinition* Definition)
+{
+	if (!IsAllTeamPlayerJumpPadDefinition(Definition) &&
+		TrapActor && IsLiveJumpPadObject(TrapActor))
+	{
+		const uint8 AttachmentType =
+			TrapActor->HasBuildingAttachmentType()
+				? TrapActor->BuildingAttachmentType : 0;
+		Definition =
+			ABuildingSMActor::ResolveTrapDefinitionForAttachment(
+				Definition, AttachmentType, TrapActor->Class);
+	}
+	if (!IsAllTeamPlayerJumpPadDefinition(Definition))
+		return;
+
+	std::vector<UClass*> AbilityClasses;
+	const FName ExpectedAbilityName =
+		GetExpectedJumpPadAbilityName(Definition);
+	auto TrapClass = TrapActor && IsLiveJumpPadObject(TrapActor)
+		? TrapActor->Class
+		: static_cast<UClass*>(
+			const_cast<UObject*>(
+				Definition->BlueprintClass.WeakPtr.Get()));
+	if (!IsLiveJumpPadObject(TrapClass) ||
+		!TrapClass->IsA(UClass::StaticClass()))
+	{
+		TrapClass = nullptr;
+	}
+	auto TrapDefaultObject = IsLiveJumpPadObject(TrapClass)
+		? TrapClass->GetDefaultObj() : nullptr;
+	auto TrapDefault = IsLiveJumpPadObject(TrapDefaultObject) &&
+		TrapDefaultObject->IsA<ABuildingSMActor>()
+		? static_cast<ABuildingSMActor*>(TrapDefaultObject) : nullptr;
+	if (IsLiveJumpPadObject(TrapDefault))
+	{
+		PatchJumpPadAbilitySet(
+			TrapDefault, AbilityClasses, ExpectedAbilityName);
+	}
+	if (AbilityClasses.empty() &&
+		TrapActor && TrapActor != TrapDefault)
+	{
+		PatchJumpPadAbilitySet(
+			TrapActor, AbilityClasses, ExpectedAbilityName);
+	}
+
+	const auto& Schema = GetJumpPadTargetingSchema();
+	auto ClearTrapFilter = [&](ABuildingSMActor* Target)
+	{
+		if (!IsLiveJumpPadObject(Target) || !Schema.IsValid())
+		{
+			return;
+		}
+
+		uint32 TriggerFilterOffset = 0;
+		uint32 TriggerFilterElementSize = 0;
+		int32 TriggerFilterArrayDimension = 0;
+		if (!ReadPropertyLayout(
+				Target, "TriggerFilter", TriggerFilterOffset,
+				TriggerFilterElementSize,
+				TriggerFilterArrayDimension) ||
+			TriggerFilterElementSize !=
+				static_cast<uint32>(Schema.TargetFilterSize) ||
+			TriggerFilterArrayDimension != 1)
+		{
+			return;
+		}
+
+		const int32 ActorSize = Target->Class->GetPropertiesSize();
+		if (ActorSize <= 0 || Schema.TargetFilterSize <= 0 ||
+			TriggerFilterOffset >= static_cast<uint32>(ActorSize) ||
+			Schema.EnemyFilterOffset >=
+				static_cast<uint32>(Schema.TargetFilterSize) ||
+			static_cast<uint64>(TriggerFilterOffset) +
+				static_cast<uint64>(Schema.TargetFilterSize) >
+				static_cast<uint64>(ActorSize))
+		{
+			return;
+		}
+
+		auto EnemyFilterByte = reinterpret_cast<uint8*>(Target) +
+			TriggerFilterOffset + Schema.EnemyFilterOffset;
+		if (!SDK::MemReadable(
+				EnemyFilterByte, sizeof(*EnemyFilterByte)) ||
+			(*EnemyFilterByte & Schema.EnemyFilterMask) == 0)
+		{
+			return;
+		}
+
+		*EnemyFilterByte &= static_cast<uint8>(
+			~Schema.EnemyFilterMask);
+	};
+	ClearTrapFilter(TrapDefault);
+	if (TrapActor != TrapDefault)
+		ClearTrapFilter(TrapActor);
+
+	if (TrapActor)
+	{
+		PatchJumpPadAbilitySystem(
+			TrapActor, AbilityClasses,
+			ExpectedAbilityName);
+	}
+}
+
 static UFortDecoItemDefinition* RecoverContextTrapDefinition(
 	UFortDecoItemDefinition* ConcreteDefinition,
 	uint8 AttachmentType,
@@ -230,6 +924,8 @@ void ABuildingSMActor::RegisterTrapDefinition(
 {
 	if (TrapClass && ItemDefinition)
 	{
+		AllowAllTeamsOnPlayerJumpPad(TrapActor, ItemDefinition);
+
 		FTrySavedTrapDefinitionsLock Lock;
 		if (!Lock)
 			return;
@@ -1374,6 +2070,10 @@ ABuildingSMActor* ABuildingSMActor::SpawnSavedTrap(UClass* TrapClass, const FVec
 			ItemDefinition, AttachmentType, TrapClass);
 	if (!ConcreteItemDefinition)
 		return nullptr;
+	// Patch the dedicated ability CDO before native SpawnDeco grants it. The
+	// post-spawn registration below also patches any per-actor ability instance.
+	AllowAllTeamsOnPlayerJumpPad(
+		nullptr, ConcreteItemDefinition);
 	// Older preset revisions persisted only the concrete child selected by a
 	// context trap. Recover the original Battle Royale container so native
 	// placement receives the same WeaponData/TrapData as ordinary gameplay.
@@ -1721,6 +2421,10 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 	AFortPlayerStateAthena* PlayerState = nullptr;
 	if (!ResolveDecoToolPlayer(DecoTool, Pawn, PlayerController, PlayerState))
 		return;
+	AllowAllTeamsOnPlayerJumpPad(
+		nullptr,
+		ResolvePlacedDecoDefinition(
+			DecoTool, InBuildingAttachmentType));
 
 	if (VersionInfo.FortniteVersion >= 18) // idk when they stripped it, guessing s18
 	{
@@ -1781,7 +2485,9 @@ void AFortDecoTool::ServerSpawnDeco_(UObject* Context, FFrame& Stack)
 		ABuildingSMActor::RegisterTrapDefinition(
 			NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(),
 			ItemDefinition, NewTrap);
-		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
+		ApplyTrapTeamToNewAttachments(
+			AttachedActor, PlayerState, PreviousAttachedActorCount,
+			ItemDefinition);
 
 		if (FConfiguration::bInfiniteAmmo ||
 			(PlayerController->HasbInfiniteAmmo() &&
@@ -1839,6 +2545,10 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 	AFortPlayerStateAthena* PlayerState = nullptr;
 	if (!ResolveDecoToolPlayer(DecoTool, Pawn, PlayerController, PlayerState))
 		return;
+	AllowAllTeamsOnPlayerJumpPad(
+		nullptr,
+		ResolvePlacedDecoDefinition(
+			DecoTool, InBuildingAttachmentType));
 
 	if (VersionInfo.FortniteVersion >= 18) // idk when they stripped it, guessing s18
 	{
@@ -1899,7 +2609,9 @@ void AFortDecoTool_ContextTrap::ServerSpawnDeco_Implementation(UObject* Context,
 		ABuildingSMActor::RegisterTrapDefinition(
 			NewTrap ? NewTrap->Class : ItemDefinition->BlueprintClass.Get(),
 			ItemDefinition, NewTrap);
-		ApplyTrapTeamToNewAttachments(AttachedActor, PlayerState, PreviousAttachedActorCount);
+		ApplyTrapTeamToNewAttachments(
+			AttachedActor, PlayerState, PreviousAttachedActorCount,
+			ItemDefinition);
 
 		if (FConfiguration::bInfiniteAmmo ||
 			(PlayerController->HasbInfiniteAmmo() &&
@@ -2234,6 +2946,7 @@ _out:
 void ABuildingSMActor::PostLoadHook()
 {
 	SDK::DbgLog("  [BSM] 0 start (CDO=%p)\n", (void*)GetDefaultObj());
+	PrewarmPlayerJumpPadReflection();
 	bool _hasOverride = GetDefaultObj() && GetDefaultObj()->HasBuildingResourceAmountOverride();
 	SDK::DbgLog("  [BSM] 0a HasBuildingResourceAmountOverride=%d\n", (int)_hasOverride);
 	if (!_hasOverride)
