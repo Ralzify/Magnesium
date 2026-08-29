@@ -93,9 +93,13 @@ struct FConfiguration
 
     static inline bool IsGliderRedeploySupportedBuild()
     {
-        return VersionInfo.FortniteVersion > 5.41 &&
-            VersionInfo.FortniteVersion <= 16.00;
+        return VersionInfo.FortniteVersion > 5.41;
     }
+
+    static inline constexpr float
+        GliderRedeployFallbackHeightLimit = 1000.f;
+    static inline constexpr float
+        GliderRedeployFallbackLateralVelocityMult = 1.f;
 
     static inline constexpr int FoodFightObjectiveHealthAuthored = -1;
     static inline constexpr int FoodFightObjectiveHealthMinimum = 1000;
@@ -515,6 +519,7 @@ public:
     }
 
     static inline std::atomic_bool bGliderRedeploy{ false };
+    static inline std::atomic_int GliderRedeployRuntimeSupport{ -1 };
     // -1 leaves the playlist/asset-authored maximum completely untouched.
     static inline std::atomic_int FoodFightObjectiveHealth{
         FoodFightObjectiveHealthAuthored

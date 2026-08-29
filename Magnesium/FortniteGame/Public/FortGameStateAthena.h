@@ -240,6 +240,8 @@ public:
     DEFINE_PROP(AdditionalPlaylistLevelsStreamed, TArray<FAdditionalLevelStreamed>);
     DEFINE_PROP(DefaultParachuteDeployTraceForGroundDistance, float);
     DEFINE_PROP(DefaultGliderRedeployCanRedeploy, float);
+    DEFINE_PROP(DefaultRedeployGliderLateralVelocityMult, float);
+    DEFINE_PROP(DefaultRedeployGliderHeightLimit, float);
     DEFINE_PROP(AthenaGameDataTable, UCurveTable*);
     DEFINE_PROP(CurrentPlaylistData, const UFortPlaylistAthena*);
     DEFINE_PROP(GameMemberInfoArray, FGameMemberInfoArray);

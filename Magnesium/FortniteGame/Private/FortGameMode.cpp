@@ -4660,6 +4660,17 @@ namespace
         bool bOriginalInfiniteAmmo = false;
     };
 
+    struct FGliderRedeployPawnSnapshot
+    {
+        TWeakObjectPtr<AFortPlayerPawnAthena> Pawn;
+        bool bHasAllowedRow = false;
+        FScalableFloat OriginalAllowedRow{};
+        bool bHasHeightLimitRow = false;
+        FScalableFloat OriginalHeightLimitRow{};
+        bool bHasLateralVelocityMultRow = false;
+        FScalableFloat OriginalLateralVelocityMultRow{};
+    };
+
     struct FGameplayConfigurationPolicyState
     {
         TWeakObjectPtr<UWorld> World;
@@ -4670,6 +4681,15 @@ namespace
             PlayerResourceSnapshots;
         bool bGliderRedeployCaptured = false;
         float OriginalGliderRedeploy = 0.f;
+        bool bGliderHeightLimitCaptured = false;
+        float OriginalGliderHeightLimit = 0.f;
+        bool bGliderLateralVelocityMultCaptured = false;
+        float OriginalGliderLateralVelocityMult = 0.f;
+        bool bGliderRowValuesResolved = false;
+        float DesiredGliderHeightLimit = 0.f;
+        float DesiredGliderLateralVelocityMult = 0.f;
+        std::vector<FGliderRedeployPawnSnapshot>
+            GliderRedeployPawnSnapshots;
         bool bTODMApplied = false;
         bool bOriginalTODMSpeedCaptured = false;
         float OriginalTODMSpeed = 0.f;
@@ -4776,6 +4796,41 @@ namespace
         Snapshots.clear();
     }
 
+    void RestoreGliderRedeployPawnPolicy()
+    {
+        auto& Snapshots =
+            GGameplayConfigurationPolicyState
+                .GliderRedeployPawnSnapshots;
+        for (auto& Snapshot : Snapshots)
+        {
+            auto Pawn = Snapshot.Pawn.Get();
+            if (!IsSaneObject(Pawn))
+                continue;
+
+            if (Snapshot.bHasAllowedRow &&
+                Pawn->HasGliderRedeployAllowedRow())
+            {
+                Pawn->GliderRedeployAllowedRow =
+                    Snapshot.OriginalAllowedRow;
+            }
+            if (Snapshot.bHasHeightLimitRow &&
+                Pawn->HasGliderRedeployHeighLimitRow())
+            {
+                Pawn->GliderRedeployHeighLimitRow =
+                    Snapshot.OriginalHeightLimitRow;
+            }
+            if (Snapshot.bHasLateralVelocityMultRow &&
+                Pawn
+                    ->HasGliderRedeployLateralVelocityMultiplierRow())
+            {
+                Pawn
+                    ->GliderRedeployLateralVelocityMultiplierRow =
+                    Snapshot.OriginalLateralVelocityMultRow;
+            }
+        }
+        Snapshots.clear();
+    }
+
     void ResetGameplayConfigurationPolicy(
         bool bRestoreCurrentWorld)
     {
@@ -4784,6 +4839,7 @@ namespace
         {
             RestoreJumpFatiguePolicy();
             RestorePlayerResourcePolicy();
+            RestoreGliderRedeployPawnPolicy();
 
             auto GameState = State.GameState.Get();
             if (State.bGliderRedeployCaptured &&
@@ -4794,6 +4850,24 @@ namespace
                 GameState
                     ->DefaultGliderRedeployCanRedeploy =
                     State.OriginalGliderRedeploy;
+                if (State.bGliderHeightLimitCaptured &&
+                    GameState
+                        ->HasDefaultRedeployGliderHeightLimit())
+                {
+                    GameState
+                        ->DefaultRedeployGliderHeightLimit =
+                        State.OriginalGliderHeightLimit;
+                }
+                if (State
+                        .bGliderLateralVelocityMultCaptured &&
+                    GameState
+                        ->HasDefaultRedeployGliderLateralVelocityMult())
+                {
+                    GameState
+                        ->DefaultRedeployGliderLateralVelocityMult =
+                        State
+                            .OriginalGliderLateralVelocityMult;
+                }
                 GameState->ForceNetUpdate();
             }
 
@@ -4816,6 +4890,8 @@ namespace
         }
 
         State = FGameplayConfigurationPolicyState{};
+        FConfiguration::GliderRedeployRuntimeSupport.store(
+            -1, std::memory_order_release);
     }
 
     void ApplyJumpFatiguePolicy(
@@ -5127,6 +5203,312 @@ namespace
         }
     }
 
+    float EvaluateGliderRedeployRow(FScalableFloat& Row)
+    {
+        const float BaseValue = Row.Value;
+        auto CurveTable = (UObject*)Row.Curve.CurveTable;
+        if (!CurveTable || !IsSaneObject(CurveTable) ||
+            !Row.Curve.RowName.IsValid())
+        {
+            return std::isfinite(BaseValue)
+                ? BaseValue
+                : 0.f;
+        }
+
+        auto Library =
+            UDataTableFunctionLibrary::StaticClass();
+        auto Defaults =
+            Library ? Library->GetDefaultObj() : nullptr;
+        if (!IsSaneObject(Defaults) ||
+            !Defaults->GetFunction(
+                "EvaluateCurveTableRow"))
+        {
+            return std::isfinite(BaseValue)
+                ? BaseValue
+                : 0.f;
+        }
+
+        const float Value = Row.Evaluate();
+        return std::isfinite(Value) ? Value : 0.f;
+    }
+
+    AFortPlayerPawnAthena* ResolveGliderRedeployPawnDefaults(
+        AFortGameMode* GameMode)
+    {
+        auto PawnBaseClass =
+            AFortPlayerPawnAthena::StaticClass();
+        if (!PawnBaseClass)
+            return nullptr;
+
+        auto PawnClass =
+            IsSaneObject(GameMode) &&
+                GameMode->HasDefaultPawnClass()
+                ? GameMode->DefaultPawnClass
+                : nullptr;
+        if (IsSaneObject((UObject*)PawnClass))
+        {
+            auto Defaults = PawnClass->GetDefaultObj();
+            if (IsSaneObject(Defaults) &&
+                Defaults->IsA(PawnBaseClass))
+            {
+                return (AFortPlayerPawnAthena*)Defaults;
+            }
+        }
+
+        auto AthenaDefaults =
+            (AFortPlayerPawnAthena*)
+                AFortPlayerPawnAthena::GetDefaultObj();
+        return IsSaneObject((UObject*)AthenaDefaults)
+            ? AthenaDefaults
+            : nullptr;
+    }
+
+    void ResolveGliderRedeployPolicyValues(
+        AFortGameMode* GameMode,
+        float& OutHeightLimit,
+        float& OutLateralVelocityMult)
+    {
+        OutHeightLimit = 0.f;
+        OutLateralVelocityMult = 0.f;
+
+        auto Defaults =
+            ResolveGliderRedeployPawnDefaults(GameMode);
+        if (!Defaults)
+            return;
+
+        if (Defaults->HasGliderRedeployHeighLimitRow())
+        {
+            OutHeightLimit = EvaluateGliderRedeployRow(
+                Defaults->GliderRedeployHeighLimitRow);
+        }
+        if (Defaults
+                ->HasGliderRedeployLateralVelocityMultiplierRow())
+        {
+            OutLateralVelocityMult =
+                EvaluateGliderRedeployRow(
+                    Defaults
+                        ->GliderRedeployLateralVelocityMultiplierRow);
+        }
+    }
+
+    float SelectGliderRedeployValue(
+        float AuthoredValue,
+        float OriginalValue,
+        float FallbackValue)
+    {
+        if (std::isfinite(AuthoredValue) &&
+            AuthoredValue > 0.f)
+        {
+            return AuthoredValue;
+        }
+        if (std::isfinite(OriginalValue) &&
+            OriginalValue > 0.f)
+        {
+            return OriginalValue;
+        }
+        return FallbackValue;
+    }
+
+    void WriteGliderRedeployRow(
+        FScalableFloat& Row,
+        float Value)
+    {
+        if (Row.Value == Value && !Row.Curve.CurveTable)
+            return;
+
+        Row.Value = Value;
+        Row.Curve.CurveTable = nullptr;
+        Row.Curve.RowName.ComparisonIndex = 0;
+        Row.Curve.RowName.Number = 0;
+    }
+
+    void ApplyGliderRedeployPawnPolicy(
+        AFortGameMode* GameMode,
+        UWorld* World,
+        bool bEnabled,
+        float HeightLimit,
+        float LateralVelocityMult)
+    {
+        auto& Snapshots =
+            GGameplayConfigurationPolicyState
+                .GliderRedeployPawnSnapshots;
+        for (auto It = Snapshots.begin();
+            It != Snapshots.end();)
+        {
+            if (!IsSaneObject(It->Pawn.Get()))
+            {
+                It = Snapshots.erase(It);
+                continue;
+            }
+            ++It;
+        }
+
+        if (!bEnabled)
+        {
+            if (!Snapshots.empty())
+                RestoreGliderRedeployPawnPolicy();
+            return;
+        }
+
+        auto ApplyPawn =
+            [&](AFortPlayerPawnAthena* Pawn)
+            {
+            if (!IsSaneObject(Pawn))
+                return;
+
+            const bool bHasAllowedRow =
+                Pawn->HasGliderRedeployAllowedRow();
+            const bool bHasHeightLimitRow =
+                Pawn->HasGliderRedeployHeighLimitRow();
+            const bool bHasLateralVelocityMultRow =
+                Pawn
+                    ->HasGliderRedeployLateralVelocityMultiplierRow();
+            if (!bHasAllowedRow && !bHasHeightLimitRow &&
+                !bHasLateralVelocityMultRow)
+            {
+                return;
+            }
+
+            auto Existing = std::find_if(
+                Snapshots.begin(), Snapshots.end(),
+                [&](const FGliderRedeployPawnSnapshot&
+                        Snapshot)
+                {
+                    return Snapshot.Pawn.Get() == Pawn;
+                });
+            if (Existing == Snapshots.end())
+            {
+                FGliderRedeployPawnSnapshot Snapshot;
+                Snapshot.Pawn =
+                    TWeakObjectPtr<AFortPlayerPawnAthena>(
+                        Pawn);
+                Snapshot.bHasAllowedRow = bHasAllowedRow;
+                if (bHasAllowedRow)
+                {
+                    Snapshot.OriginalAllowedRow =
+                        Pawn->GliderRedeployAllowedRow;
+                }
+                Snapshot.bHasHeightLimitRow =
+                    bHasHeightLimitRow;
+                if (bHasHeightLimitRow)
+                {
+                    Snapshot.OriginalHeightLimitRow =
+                        Pawn->GliderRedeployHeighLimitRow;
+                }
+                Snapshot.bHasLateralVelocityMultRow =
+                    bHasLateralVelocityMultRow;
+                if (bHasLateralVelocityMultRow)
+                {
+                    Snapshot
+                        .OriginalLateralVelocityMultRow =
+                        Pawn
+                            ->GliderRedeployLateralVelocityMultiplierRow;
+                }
+                Snapshots.push_back(Snapshot);
+            }
+
+            if (bHasAllowedRow)
+            {
+                WriteGliderRedeployRow(
+                    Pawn->GliderRedeployAllowedRow, 1.f);
+            }
+            if (bHasHeightLimitRow && HeightLimit > 0.f)
+            {
+                WriteGliderRedeployRow(
+                    Pawn->GliderRedeployHeighLimitRow,
+                    HeightLimit);
+            }
+            if (bHasLateralVelocityMultRow &&
+                LateralVelocityMult > 0.f)
+            {
+                WriteGliderRedeployRow(
+                    Pawn
+                        ->GliderRedeployLateralVelocityMultiplierRow,
+                    LateralVelocityMult);
+            }
+            };
+
+        auto ApplyController =
+            [&](AFortPlayerControllerAthena*
+                    PlayerController)
+            {
+                if (!IsSaneObject(PlayerController))
+                    return;
+
+                ApplyPawn(
+                    IsSaneObject(
+                        PlayerController->MyFortPawn)
+                        ? PlayerController->MyFortPawn
+                        : nullptr);
+            };
+
+        ApplyPawn(
+            ResolveGliderRedeployPawnDefaults(GameMode));
+
+        if (IsSaneObject(GameMode) &&
+            GameMode->HasAlivePlayers())
+        {
+            for (auto UncastedController :
+                GameMode->AlivePlayers)
+            {
+                ApplyController(
+                    IsSaneObject(UncastedController)
+                        ? UncastedController->Cast<
+                            AFortPlayerControllerAthena>()
+                        : nullptr);
+            }
+        }
+
+        auto Driver =
+            World
+                ? (UNetDriver*)World->NetDriver
+                : nullptr;
+        if (!IsSaneObject(Driver))
+            return;
+
+        auto ApplyConnection =
+            [&](UNetConnection* Connection)
+            {
+                if (!IsSaneObject(Connection))
+                    return;
+
+                ApplyController(
+                    IsSaneObject(
+                        Connection->PlayerController)
+                        ? Connection->PlayerController
+                            ->Cast<
+                                AFortPlayerControllerAthena>()
+                        : nullptr);
+
+                if (!Connection->HasChildren())
+                    return;
+                for (int32 ChildIndex = 0;
+                    ChildIndex <
+                        Connection->Children.Num();
+                    ++ChildIndex)
+                {
+                    auto Child =
+                        Connection->Children[ChildIndex];
+                    ApplyController(
+                        IsSaneObject(Child) &&
+                            IsSaneObject(
+                                Child->PlayerController)
+                            ? Child->PlayerController
+                                ->Cast<
+                                    AFortPlayerControllerAthena>()
+                            : nullptr);
+                }
+            };
+
+        for (int32 Index = 0;
+            Index < Driver->ClientConnections.Num();
+            ++Index)
+        {
+            ApplyConnection(
+                Driver->ClientConnections[Index]);
+        }
+    }
+
     UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
         ResolveGameplayPolicyPhaseLogic(UWorld* World)
     {
@@ -5276,22 +5658,125 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
         FConfiguration::bGliderRedeploy.store(
             false, std::memory_order_release);
     }
+    if (bGliderBuildSupported)
+    {
+        auto PawnDefaults =
+            ResolveGliderRedeployPawnDefaults(GameMode);
+        const bool bRuntimeSupported =
+            GameState
+                ->HasDefaultGliderRedeployCanRedeploy() ||
+            (PawnDefaults &&
+                PawnDefaults
+                    ->HasGliderRedeployAllowedRow());
+        FConfiguration::GliderRedeployRuntimeSupport.store(
+            bRuntimeSupported ? 1 : 0,
+            std::memory_order_release);
+    }
+    if (bGliderPolicyAvailable &&
+        !State.bGliderRedeployCaptured &&
+        GameState
+            ->HasDefaultGliderRedeployCanRedeploy())
+    {
+        State.OriginalGliderRedeploy =
+            GameState->DefaultGliderRedeployCanRedeploy;
+        State.bGliderRedeployCaptured = true;
+
+        State.bGliderHeightLimitCaptured =
+            GameState
+                ->HasDefaultRedeployGliderHeightLimit();
+        if (State.bGliderHeightLimitCaptured)
+        {
+            State.OriginalGliderHeightLimit =
+                GameState
+                    ->DefaultRedeployGliderHeightLimit;
+        }
+        State.bGliderLateralVelocityMultCaptured =
+            GameState
+                ->HasDefaultRedeployGliderLateralVelocityMult();
+        if (State.bGliderLateralVelocityMultCaptured)
+        {
+            State.OriginalGliderLateralVelocityMult =
+                GameState
+                    ->DefaultRedeployGliderLateralVelocityMult;
+        }
+
+        if (State.OriginalGliderRedeploy > 0.f)
+        {
+            FConfiguration::bGliderRedeploy.store(
+                true, std::memory_order_release);
+        }
+    }
+    if (bGliderPolicyAvailable &&
+        !State.bGliderRowValuesResolved)
+    {
+        State.bGliderRowValuesResolved = true;
+
+        const bool bHasStateHeightLimit =
+            GameState
+                ->HasDefaultRedeployGliderHeightLimit();
+        const float StateHeightLimit = bHasStateHeightLimit
+            ? GameState->DefaultRedeployGliderHeightLimit
+            : 0.f;
+        const bool bHasStateLateralVelocityMult =
+            GameState
+                ->HasDefaultRedeployGliderLateralVelocityMult();
+        const float StateLateralVelocityMult =
+            bHasStateLateralVelocityMult
+                ? GameState
+                    ->DefaultRedeployGliderLateralVelocityMult
+                : 0.f;
+
+        float AuthoredHeightLimit = 0.f;
+        float AuthoredLateralVelocityMult = 0.f;
+        ResolveGliderRedeployPolicyValues(
+            GameMode,
+            AuthoredHeightLimit,
+            AuthoredLateralVelocityMult);
+        const float GroundTraceDistance =
+            GameState
+                ->HasDefaultParachuteDeployTraceForGroundDistance()
+                ? GameState
+                    ->DefaultParachuteDeployTraceForGroundDistance
+                : 0.f;
+        State.DesiredGliderHeightLimit =
+            SelectGliderRedeployValue(
+                AuthoredHeightLimit,
+                StateHeightLimit,
+                SelectGliderRedeployValue(
+                    GroundTraceDistance,
+                    0.f,
+                    FConfiguration::
+                        GliderRedeployFallbackHeightLimit));
+        State.DesiredGliderLateralVelocityMult =
+            SelectGliderRedeployValue(
+                AuthoredLateralVelocityMult,
+                StateLateralVelocityMult,
+                FConfiguration::
+                    GliderRedeployFallbackLateralVelocityMult);
+        SDK::DbgLog(
+            "  [GliderRedeploy] FN=%.2f authored height=%.2f lateral=%.2f "
+            "state height=%.2f lateral=%.2f trace=%.2f -> "
+            "height=%.2f lateral=%.2f\n",
+            VersionInfo.FortniteVersion,
+            AuthoredHeightLimit,
+            AuthoredLateralVelocityMult,
+            StateHeightLimit,
+            StateLateralVelocityMult,
+            GroundTraceDistance,
+            State.DesiredGliderHeightLimit,
+            State.DesiredGliderLateralVelocityMult);
+    }
+    const bool bGliderRedeployEnabled =
+        bGliderPolicyAvailable &&
+        FConfiguration::bGliderRedeploy.load(
+            std::memory_order_acquire);
     if (bGliderPolicyAvailable &&
         GameState
             ->HasDefaultGliderRedeployCanRedeploy())
     {
-        if (!State.bGliderRedeployCaptured)
-        {
-            State.OriginalGliderRedeploy =
-                GameState
-                    ->DefaultGliderRedeployCanRedeploy;
-            State.bGliderRedeployCaptured = true;
-        }
-
         float DesiredRedeploy =
-            FConfiguration::bGliderRedeploy.load()
-                ? 1.f
-                : 0.f;
+            bGliderRedeployEnabled ? 1.f : 0.f;
+        bool bGliderStateChanged = false;
         if (GameState
                 ->DefaultGliderRedeployCanRedeploy !=
             DesiredRedeploy)
@@ -5299,8 +5784,44 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
             GameState
                 ->DefaultGliderRedeployCanRedeploy =
                 DesiredRedeploy;
-            GameState->ForceNetUpdate();
+            bGliderStateChanged = true;
         }
+        if (State.bGliderHeightLimitCaptured)
+        {
+            float DesiredHeightLimit =
+                bGliderRedeployEnabled
+                    ? State.DesiredGliderHeightLimit
+                    : State.OriginalGliderHeightLimit;
+            if (GameState
+                    ->DefaultRedeployGliderHeightLimit !=
+                DesiredHeightLimit)
+            {
+                GameState
+                    ->DefaultRedeployGliderHeightLimit =
+                    DesiredHeightLimit;
+                bGliderStateChanged = true;
+            }
+        }
+        if (State.bGliderLateralVelocityMultCaptured)
+        {
+            float DesiredLateralVelocityMult =
+                bGliderRedeployEnabled
+                    ? State
+                        .DesiredGliderLateralVelocityMult
+                    : State
+                        .OriginalGliderLateralVelocityMult;
+            if (GameState
+                    ->DefaultRedeployGliderLateralVelocityMult !=
+                DesiredLateralVelocityMult)
+            {
+                GameState
+                    ->DefaultRedeployGliderLateralVelocityMult =
+                    DesiredLateralVelocityMult;
+                bGliderStateChanged = true;
+            }
+        }
+        if (bGliderStateChanged)
+            GameState->ForceNetUpdate();
     }
     else if (State.bGliderRedeployCaptured)
     {
@@ -5310,10 +5831,35 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
             GameState
                 ->DefaultGliderRedeployCanRedeploy =
                 State.OriginalGliderRedeploy;
+            if (State.bGliderHeightLimitCaptured &&
+                GameState
+                    ->HasDefaultRedeployGliderHeightLimit())
+            {
+                GameState
+                    ->DefaultRedeployGliderHeightLimit =
+                    State.OriginalGliderHeightLimit;
+            }
+            if (State.bGliderLateralVelocityMultCaptured &&
+                GameState
+                    ->HasDefaultRedeployGliderLateralVelocityMult())
+            {
+                GameState
+                    ->DefaultRedeployGliderLateralVelocityMult =
+                    State.OriginalGliderLateralVelocityMult;
+            }
             GameState->ForceNetUpdate();
         }
         State.bGliderRedeployCaptured = false;
+        State.bGliderHeightLimitCaptured = false;
+        State.bGliderLateralVelocityMultCaptured = false;
     }
+
+    ApplyGliderRedeployPawnPolicy(
+        GameMode,
+        World,
+        bGliderRedeployEnabled,
+        State.DesiredGliderHeightLimit,
+        State.DesiredGliderLateralVelocityMult);
 
     ApplyJumpFatiguePolicy(GameMode);
     // Infinite materials and ammo are enforced at their consumption sites so

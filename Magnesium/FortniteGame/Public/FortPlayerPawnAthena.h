@@ -1,6 +1,7 @@
 #pragma once
 #include "../../pch.h"
 #include "GameplayTagContainer.h"
+#include "../../Engine/Public/CurveTable.h"
 
 class AFortPlayerControllerAthena;
 class UFortItemDefinition;
@@ -173,6 +174,10 @@ public:
     DEFINE_BITFIELD_PROP(bIsHiddenForDeath);
     DEFINE_BITFIELD_PROP(bIsSkydiving);
     DEFINE_BITFIELD_PROP(bIsSkydivingFromBus);
+    DEFINE_PROP(GliderRedeployAllowedRow, FScalableFloat);
+    DEFINE_PROP(
+        GliderRedeployLateralVelocityMultiplierRow, FScalableFloat);
+    DEFINE_PROP(GliderRedeployHeighLimitRow, FScalableFloat);
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
     DEFINE_PROP(VehicleInputComponent, UObject*);
 
