@@ -4,17 +4,17 @@
 class UStreamableRenderAsset : public UObject
 {
 public:
-	UCLASS_COMMON_MEMBERS(UStreamableRenderAsset);
+    UCLASS_COMMON_MEMBERS(UStreamableRenderAsset);
 };
 
 class UTexture : public UStreamableRenderAsset
 {
 public:
-	UCLASS_COMMON_MEMBERS(UTexture);
+    UCLASS_COMMON_MEMBERS(UTexture);
 };
 
 class UTexture2D : public UTexture
 {
 public:
-	UCLASS_COMMON_MEMBERS(UTexture2D);
+    UCLASS_COMMON_MEMBERS(UTexture2D);
 };

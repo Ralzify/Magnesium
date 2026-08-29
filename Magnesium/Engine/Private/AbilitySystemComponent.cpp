@@ -9,18 +9,17 @@ uint64 GiveAbility_;
 static uint64 ClearAbilityAddress;
 
 FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(
-    const UObject* Ability, UObject* SourceObject,
-    int32 Level, int32 InputID)
+    const UObject* Ability, UObject* SourceObject, int32 Level, int32 InputID)
 {
     if (!this || !Ability || !GiveAbility_)
         return {};
-    // printf("GiveAbility[%s]\n", Ability->Name.ToString().c_str());
 
     auto Spec = (FGameplayAbilitySpec*)malloc(FGameplayAbilitySpec::Size());
     memset(PBYTE(Spec), 0, FGameplayAbilitySpec::Size());
 
     if (ConstructAbilitySpec)
-        ((void (*)(FGameplayAbilitySpec*, const UObject*, int, int, UObject*))ConstructAbilitySpec)(Spec, Ability, Level, InputID, SourceObject);
+        ((void (*)(FGameplayAbilitySpec*, const UObject*, int, int, UObject*))ConstructAbilitySpec)(
+            Spec, Ability, Level, InputID, SourceObject);
     else
     {
         Spec->MostRecentArrayReplicationKey = -1;
@@ -34,7 +33,8 @@ FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(
     }
 
     FGameplayAbilitySpecHandle OutHandle{};
-    ((FGameplayAbilitySpecHandle * (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle*, __int64)) GiveAbility_)(this, &OutHandle, __int64(Spec));
+    ((FGameplayAbilitySpecHandle * (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle*, __int64)) GiveAbility_)(
+        this, &OutHandle, __int64(Spec));
     free(Spec);
     return OutHandle;
 }
@@ -44,8 +44,7 @@ bool UAbilitySystemComponent::ClearAbility(FGameplayAbilitySpecHandle Handle)
     if (!this || !ClearAbilityAddress)
         return false;
 
-    auto ClearAbilityInternal =
-        (void(*)(UAbilitySystemComponent*,
+    auto ClearAbilityInternal = (void(*)(UAbilitySystemComponent*,
             FGameplayAbilitySpecHandle&))ClearAbilityAddress;
     ClearAbilityInternal(this, Handle);
     return true;
@@ -57,11 +56,11 @@ void UAbilitySystemComponent::GiveAbilitySet(const UFortAbilitySet* Set)
     ScriptInterface.ObjectPointer = this->GetOwner();
     ScriptInterface.InterfacePointer = ScriptInterface.ObjectPointer->GetInterface(IFortAbilitySystemInterface::StaticClass());
 
-    if (VersionInfo.EngineVersion >= 4.19 && ScriptInterface.ObjectPointer && ScriptInterface.InterfacePointer)
+    if (VersionInfo.EngineVersion >= 4.19 && ScriptInterface.ObjectPointer &&
+        ScriptInterface.InterfacePointer)
         UFortKismetLibrary::EquipFortAbilitySet(ScriptInterface, Set, nullptr);
     else if (Set)
     {
-        // printf("GiveAbilitySet[%s]\n", Set->Name.ToString().c_str());
         for (auto& GameplayAbility : Set->GameplayAbilities)
             GiveAbility(GameplayAbility->GetDefaultObj());
         if (Set->HasGrantedGameplayEffects())
@@ -69,7 +68,8 @@ void UAbilitySystemComponent::GiveAbilitySet(const UFortAbilitySet* Set)
             {
                 auto& GameplayEffect = Set->GrantedGameplayEffects.Get(i, FGameplayEffectApplicationInfoHard::Size());
 
-                BP_ApplyGameplayEffectToSelf(GameplayEffect.GameplayEffect.Get(), GameplayEffect.Level, MakeEffectContext());
+                BP_ApplyGameplayEffectToSelf(GameplayEffect.GameplayEffect.Get(),
+                    GameplayEffect.Level, MakeEffectContext());
             }
     }
 }
@@ -89,91 +89,61 @@ uint64_t InternalTryActivateAbility_ = 0;
 void UAbilitySystemComponent::InternalServerTryActivateAbility(
     UAbilitySystemComponent* AbilitySystemComponent, FGameplayAbilitySpecHandle Handle, bool InputPressed, FPredictionKey* PredictionKey, void* TriggerEventData)
 {
-    if (!AbilitySystemComponent || !PredictionKey ||
-        !InternalTryActivateAbility_)
+    if (!AbilitySystemComponent || !PredictionKey || !InternalTryActivateAbility_)
         return;
 
     auto Spec = AbilitySystemComponent->ActivatableAbilities.Items.Search(
         [&](FGameplayAbilitySpec& item)
         {
             return item.Handle.Handle == Handle.Handle;
-        },
-        FGameplayAbilitySpec::Size());
+        }, FGameplayAbilitySpec::Size());
 
     if (!Spec)
         return AbilitySystemComponent->ClientActivateAbilityFailed(Handle, PredictionKey->Current);
 
-    // Instant abilities may remove their granting gameplay effect and mutate
-    // ActivatableAbilities while InternalTryActivateAbility is unwinding.
-    // Keep only stable values across that call and resolve the spec again
-    // afterward before marking it dirty.
     UFortGameplayAbility* AbilityToActivate = Spec->Ability;
     Spec->InputPressed = true;
-    UObject* AbilitySourceObject =
-        Spec->HasSourceObject()
-            ? Spec->SourceObject
-            : nullptr;
-    AFortWeaponRanged::
-        NotifyServerAbilityActivationStarted(
-            AbilitySourceObject);
+    UObject* AbilitySourceObject = Spec->HasSourceObject() ? Spec->SourceObject : nullptr;
+    AFortWeaponRanged::NotifyServerAbilityActivationStarted(AbilitySourceObject);
 
     UFortGameplayAbility* InstancedAbility = nullptr;
-    auto InternalTryActivateAbility = (bool (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle, _Pad_0x10, UFortGameplayAbility**, void*, void*))InternalTryActivateAbility_;
+    auto InternalTryActivateAbility = (bool (*)(UAbilitySystemComponent*,
+        FGameplayAbilitySpecHandle, _Pad_0x10, UFortGameplayAbility**, void*,
+        void*))InternalTryActivateAbility_;
     auto InternalTryActivateAbilityNew
-        = (bool (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle, _Pad_0x18, UFortGameplayAbility**, void*, void*))InternalTryActivateAbility_;
+        = (bool (*)(UAbilitySystemComponent*, FGameplayAbilitySpecHandle, _Pad_0x18,
+            UFortGameplayAbility**, void*, void*))InternalTryActivateAbility_;
 
-    const bool Activated =
-        FPredictionKey::Size() == 0x18
-            ? InternalTryActivateAbilityNew(
-                AbilitySystemComponent,
-                Handle,
-                *(_Pad_0x18*)PredictionKey,
-                &InstancedAbility,
-                nullptr,
-                TriggerEventData)
-            : InternalTryActivateAbility(
-                AbilitySystemComponent,
-                Handle,
-                *(_Pad_0x10*)PredictionKey,
-                &InstancedAbility,
-                nullptr,
-                TriggerEventData);
+    const bool Activated = FPredictionKey::Size() == 0x18 ? InternalTryActivateAbilityNew(
+                AbilitySystemComponent, Handle, *(_Pad_0x18*)PredictionKey, &InstancedAbility,
+                nullptr, TriggerEventData) : InternalTryActivateAbility(AbilitySystemComponent,
+                Handle, *(_Pad_0x10*)PredictionKey, &InstancedAbility, nullptr, TriggerEventData);
     if (!Activated)
     {
-        AFortWeaponRanged::
-            NotifyServerAbilityActivationFailed(
-                AbilitySourceObject);
+        AFortWeaponRanged::NotifyServerAbilityActivationFailed(AbilitySourceObject);
         AbilitySystemComponent->ClientActivateAbilityFailed(Handle, PredictionKey->Current);
     }
     else
     {
-        AFortWeaponRanged::NotifyServerAbilityActivated(
-            AbilitySourceObject);
-        AFortInventory::NotifyGhostModeExitAbilityActivated(
-            AbilitySystemComponent,
+        AFortWeaponRanged::NotifyServerAbilityActivated(AbilitySourceObject);
+        AFortInventory::NotifyGhostModeExitAbilityActivated(AbilitySystemComponent,
             AbilityToActivate);
     }
 
-    auto PostActivationSpec =
-        AbilitySystemComponent->ActivatableAbilities.Items.Search(
+    auto PostActivationSpec = AbilitySystemComponent->ActivatableAbilities.Items.Search(
             [&](FGameplayAbilitySpec& Item)
             {
                 return Item.Handle.Handle == Handle.Handle;
-            },
-            FGameplayAbilitySpec::Size());
+            }, FGameplayAbilitySpec::Size());
     if (PostActivationSpec)
     {
         if (!Activated)
             PostActivationSpec->InputPressed = false;
 
-        // UE 4.21's native RPC path expects this explicit dirty mark after
-        // both successful and failed activation. Without it, instant exit
-        // abilities can remain client-only and their state never reaches the
-        // authoritative Ghost Mode lifecycle.
+        // <=4.21 needs the explicit dirty mark, or instant-exit abilities stay client-only.
         if (VersionInfo.EngineVersion <= 4.21 || !Activated)
         {
-            AbilitySystemComponent->ActivatableAbilities
-                .MarkItemDirty(*PostActivationSpec);
+            AbilitySystemComponent->ActivatableAbilities.MarkItemDirty(*PostActivationSpec);
         }
     }
 }
@@ -188,16 +158,17 @@ void UFortGameplayAbility::K2_AddGameplayCueWithParams_(UObject* Context, FFrame
     Stack.IncrementCode();
 
     auto Ability = (UFortGameplayAbility*)Context;
-    callOG(Ability, Stack.GetCurrentNativeFunction(), K2_AddGameplayCueWithParams, GameplayCueTag, GameplayCueParameter, bRemoveOnAbilityEnd);
+    callOG(Ability, Stack.GetCurrentNativeFunction(), K2_AddGameplayCueWithParams, GameplayCueTag,
+        GameplayCueParameter, bRemoveOnAbilityEnd);
 
     auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
     memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
 
     auto AbilitySystemComponent = (UAbilitySystemComponent*)Ability->GetAbilitySystemComponentFromActorInfo();
 
-    // AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(GameplayCueTag, *PredictionKey, EffectContext);
     if (AbilitySystemComponent)
-        AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded_WithParams(GameplayCueTag, *PredictionKey, GameplayCueParameter);
+        AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded_WithParams(GameplayCueTag,
+            *PredictionKey, GameplayCueParameter);
 
     free(PredictionKey);
 }
@@ -212,7 +183,8 @@ void UFortGameplayAbility::K2_AddGameplayCue_(UObject* Context, FFrame& Stack)
     Stack.IncrementCode();
 
     auto Ability = (UFortGameplayAbility*)Context;
-    callOG(Ability, Stack.GetCurrentNativeFunction(), K2_AddGameplayCue, GameplayCueTag, EffectContext, bRemoveOnAbilityEnd);
+    callOG(Ability, Stack.GetCurrentNativeFunction(), K2_AddGameplayCue, GameplayCueTag,
+        EffectContext, bRemoveOnAbilityEnd);
 
     auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
     memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
@@ -220,7 +192,8 @@ void UFortGameplayAbility::K2_AddGameplayCue_(UObject* Context, FFrame& Stack)
     auto AbilitySystemComponent = (UAbilitySystemComponent*)Ability->GetAbilitySystemComponentFromActorInfo();
 
     if (AbilitySystemComponent)
-        AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(GameplayCueTag, *PredictionKey, EffectContext);
+        AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(GameplayCueTag, *PredictionKey,
+            EffectContext);
 
     free(PredictionKey);
 }
@@ -239,9 +212,9 @@ void UFortGameplayAbility::K2_ExecuteGameplayCue_(UObject* Context, FFrame& Stac
 
     auto AbilitySystemComponent = (UAbilitySystemComponent*)Ability->GetAbilitySystemComponentFromActorInfo();
 
-    // AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(GameplayCueTag, *PredictionKey, EffectContext);
     if (AbilitySystemComponent)
-        AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(GameplayCueTag, *PredictionKey, EffectContext);
+        AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(GameplayCueTag,
+            *PredictionKey, EffectContext);
 
     free(PredictionKey);
 }
@@ -253,16 +226,17 @@ void UFortGameplayAbility::K2_ExecuteGameplayCueWithParams_(UObject* Context, FF
     Stack.IncrementCode();
 
     auto Ability = (UFortGameplayAbility*)Context;
-    callOG(Ability, Stack.GetCurrentNativeFunction(), K2_ExecuteGameplayCueWithParams, GameplayCueTag, GameplayCueParameter);
+    callOG(Ability, Stack.GetCurrentNativeFunction(), K2_ExecuteGameplayCueWithParams,
+        GameplayCueTag, GameplayCueParameter);
 
     auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
     memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
 
     auto AbilitySystemComponent = (UAbilitySystemComponent*)Ability->GetAbilitySystemComponentFromActorInfo();
 
-    // AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(GameplayCueTag, *PredictionKey, EffectContext);
     if (AbilitySystemComponent)
-        AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted_WithParams(GameplayCueTag, *PredictionKey, GameplayCueParameter);
+        AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted_WithParams(GameplayCueTag,
+            *PredictionKey, GameplayCueParameter);
 
     free(PredictionKey);
 }
@@ -305,24 +279,15 @@ void UAbilitySystemComponent::Hook()
     }
 
     SDK::DbgLog("  [ASC] 7 pre-HookEvery(istaIdx=0x%X)\n", istaIdx);
-    // A failed GetVTableIndex yields a garbage index; patching a
-    // wild vtable slot would corrupt the process. Only install when the index looks sane.
+    // A failed GetVTableIndex returns garbage, so bound it before patching a slot.
     if (istaIdx != 0 && istaIdx < 0x1000)
         Utils::HookEvery<UAbilitySystemComponent>(istaIdx, InternalServerTryActivateAbility);
     else
         SDK::DbgLog("  [ASC] 7! SKIP HookEvery — istaIdx invalid (0x%X)\n", istaIdx);
     SDK::DbgLog("  [ASC] 8 post-HookEvery\n");
 
-    // 10.40 and 15.30's native K2 gameplay-cue implementations perform the
-    // authoritative cue dispatch. Hooking them here calls the native function
-    // and then sends a second multicast from the wrappers above. That creates
-    // duplicate one-shot cue components, while duplicated added cues do not
-    // receive a corresponding second removal. Both are unsafe around pawn
-    // replacement. In 10.40 this is especially harmful to Thanos' infinite
-    // jump/skydive cues and can starve the later purple beam cue. Leave both
-    // builds entirely on their native, balanced cue lifecycle.
-    if (VersionInfo.FortniteVersion >= 8 &&
-        VersionInfo.FortniteVersion != 10.40 &&
+    // 10.40 and 15.30 dispatch cues natively; hooking them would send every cue twice.
+    if (VersionInfo.FortniteVersion >= 8 && VersionInfo.FortniteVersion != 10.40 &&
         VersionInfo.FortniteVersion != 15.30)
     {
         Utils::ExecHook(UFortGameplayAbility::GetDefaultObj()->GetFunction("K2_ExecuteGameplayCue"), UFortGameplayAbility::K2_ExecuteGameplayCue_,
@@ -334,11 +299,9 @@ void UAbilitySystemComponent::Hook()
         Utils::ExecHook(UFortGameplayAbility::GetDefaultObj()->GetFunction("K2_AddGameplayCueWithParams"), UFortGameplayAbility::K2_AddGameplayCueWithParams_,
             UFortGameplayAbility::K2_AddGameplayCueWithParams_OG);
     }
-    else if (VersionInfo.FortniteVersion == 10.40 ||
-             VersionInfo.FortniteVersion == 15.30)
+    else if (VersionInfo.FortniteVersion == 10.40 || VersionInfo.FortniteVersion == 15.30)
     {
-        SDK::DbgLog(
-            "  [ASC] %.2f using native balanced gameplay-cue dispatch\n",
+        SDK::DbgLog("  [ASC] %.2f using native balanced gameplay-cue dispatch\n",
             VersionInfo.FortniteVersion);
     }
     SDK::DbgLog("  [ASC] 9 Hook() complete\n");

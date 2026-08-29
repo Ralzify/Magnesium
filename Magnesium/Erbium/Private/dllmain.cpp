@@ -1,4 +1,3 @@
-// dllmain.cpp : Defines the entry point for the DLL application.
 #include "pch.h"
 #include "../Public/Utils.h"
 #include <thread>
@@ -22,8 +21,7 @@
 
 namespace
 {
-    constexpr wchar_t TransportMappingName[] =
-        L"Local\\Magnesium.Transport.v1";
+    constexpr wchar_t TransportMappingName[] = L"Local\\Magnesium.Transport.v1";
     constexpr DWORD TransportMagic = 0x4D475450u;
     constexpr DWORD TransportSchema = 1u;
     constexpr DWORD TransportCommitted = 1u;
@@ -53,116 +51,75 @@ namespace
 
     DWORD GetFortniteVersionHundredths()
     {
-        return static_cast<DWORD>(
-            VersionInfo.FortniteVersion * 100.0 + 0.5);
+        return static_cast<DWORD>(VersionInfo.FortniteVersion * 100.0 + 0.5);
     }
 
     bool IsDurianLegacyTransport(DWORD FortniteVersionHundredths)
     {
         static constexpr wchar_t DurianPlaylist[] =
             L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian";
-        return FortniteVersionHundredths == 2711u &&
-            FConfiguration::Playlist &&
+        return FortniteVersionHundredths == 2711u && FConfiguration::Playlist &&
             wcscmp(FConfiguration::Playlist, DurianPlaylist) == 0;
     }
 
-    bool PublishTransportManifest(
-        DWORD FortniteVersionHundredths,
-        bool bUseIris)
+    bool PublishTransportManifest(DWORD FortniteVersionHundredths, bool bUseIris)
     {
         if (!TransportMapping)
         {
-            TransportMapping = CreateFileMappingW(
-                INVALID_HANDLE_VALUE,
-                nullptr,
-                PAGE_READWRITE,
-                0,
-                static_cast<DWORD>(sizeof(FTransportManifest)),
-                TransportMappingName);
+            TransportMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                static_cast<DWORD>(sizeof(FTransportManifest)), TransportMappingName);
             if (!TransportMapping)
             {
-                SDK::DbgLog(
-                    "[Transport] CreateFileMapping failed error=%lu\n",
-                    GetLastError());
+                SDK::DbgLog("[Transport] CreateFileMapping failed error=%lu\n", GetLastError());
                 return false;
             }
         }
 
         if (!TransportManifest)
         {
-            TransportManifest = static_cast<FTransportManifest*>(
-                MapViewOfFile(
-                    TransportMapping,
-                    FILE_MAP_ALL_ACCESS,
-                    0,
-                    0,
-                    sizeof(FTransportManifest)));
+            TransportManifest = static_cast<FTransportManifest*>(MapViewOfFile(TransportMapping,
+                    FILE_MAP_ALL_ACCESS, 0, 0, sizeof(FTransportManifest)));
             if (!TransportManifest)
             {
-                SDK::DbgLog(
-                    "[Transport] MapViewOfFile failed error=%lu\n",
-                    GetLastError());
+                SDK::DbgLog("[Transport] MapViewOfFile failed error=%lu\n", GetLastError());
                 return false;
             }
         }
 
-        const LONG CurrentSequence = InterlockedCompareExchange(
-            &TransportManifest->Sequence, 0, 0);
-        const LONG OddSequence = (CurrentSequence & 1)
-            ? CurrentSequence + 2
-            : CurrentSequence + 1;
-        InterlockedExchange(
-            &TransportManifest->Sequence, OddSequence);
+        const LONG CurrentSequence = InterlockedCompareExchange(&TransportManifest->Sequence, 0, 0);
+        const LONG OddSequence = (CurrentSequence & 1) ? CurrentSequence + 2 : CurrentSequence + 1;
+        InterlockedExchange(&TransportManifest->Sequence, OddSequence);
 
         TransportManifest->Magic = TransportMagic;
         TransportManifest->Schema = TransportSchema;
         TransportManifest->StructSize = sizeof(FTransportManifest);
         TransportManifest->PublisherPid = GetCurrentProcessId();
-        TransportManifest->FortniteVersionHundredths =
-            FortniteVersionHundredths;
-        const int ConfiguredPort = FConfiguration::Port.load(
-            std::memory_order_acquire);
-        TransportManifest->ServerPort =
-            ConfiguredPort > 0 && ConfiguredPort <= 65535
-                ? static_cast<DWORD>(ConfiguredPort)
-                : 7777u;
+        TransportManifest->FortniteVersionHundredths = FortniteVersionHundredths;
+        const int ConfiguredPort = FConfiguration::Port.load(std::memory_order_acquire);
+        TransportManifest->ServerPort = ConfiguredPort > 0 && ConfiguredPort <= 65535
+                ? static_cast<DWORD>(ConfiguredPort) : 7777u;
         TransportManifest->Committed = TransportCommitted;
-        TransportManifest->Mode = bUseIris
-            ? TransportModeIris
-            : TransportModeGenericLegacy;
+        TransportManifest->Mode = bUseIris ? TransportModeIris : TransportModeGenericLegacy;
 
         MemoryBarrier();
-        InterlockedExchange(
-            &TransportManifest->Sequence, OddSequence + 1);
+        InterlockedExchange(&TransportManifest->Sequence, OddSequence + 1);
 
-        SDK::DbgLog(
-            "[Transport] published name=%ls pid=%lu version=%lu "
-            "port=%lu mode=%s\n",
-            TransportMappingName,
-            TransportManifest->PublisherPid,
-            TransportManifest->FortniteVersionHundredths,
-            TransportManifest->ServerPort,
+        SDK::DbgLog("[Transport] published name=%ls pid=%lu version=%lu "
+            "port=%lu mode=%s\n", TransportMappingName, TransportManifest->PublisherPid,
+            TransportManifest->FortniteVersionHundredths, TransportManifest->ServerPort,
             bUseIris ? "Iris" : "GenericLegacy");
         return true;
     }
 
     void FinalizeTransportPolicy()
     {
-        const DWORD FortniteVersionHundredths =
-            GetFortniteVersionHundredths();
-        const bool bDurianLegacy =
-            IsDurianLegacyTransport(FortniteVersionHundredths);
-        const bool bIrisRequested = FConfiguration::bEnableIris.load(
-            std::memory_order_acquire);
-        const bool bUseIris =
-            VersionInfo.EngineVersion >= 5.3 &&
-            bIrisRequested &&
-            !bDurianLegacy;
+        const DWORD FortniteVersionHundredths = GetFortniteVersionHundredths();
+        const bool bDurianLegacy = IsDurianLegacyTransport(FortniteVersionHundredths);
+        const bool bIrisRequested = FConfiguration::bEnableIris.load(std::memory_order_acquire);
+        const bool bUseIris = VersionInfo.EngineVersion >= 5.3 && bIrisRequested && !bDurianLegacy;
 
-        FConfiguration::bEnableIris.store(
-            bUseIris, std::memory_order_release);
-        PublishTransportManifest(
-            FortniteVersionHundredths, bUseIris);
+        FConfiguration::bEnableIris.store(bUseIris, std::memory_order_release);
+        PublishTransportManifest(FortniteVersionHundredths, bUseIris);
     }
 
     using UE421FrontendRenderTask = void (*)(void*, void*);
@@ -172,9 +129,7 @@ namespace
 
     void UE421FrontendRenderTaskHook(void* Task, void* Context)
     {
-        // On a UE 4.21 NullRHI host this frontend task can be queued without the
-        // renderer/resource object stored at +0x28. The original immediately
-        // passes that null pointer to a helper which reads [rcx+0x68].
+        // On a UE 4.21 NullRHI host this task can be queued without the render object at +0x28.
         if (!Task || !*reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(Task) + 0x28))
         {
             if (InterlockedIncrement(&UE421SkippedNullRenderTasks) == 1)
@@ -190,8 +145,7 @@ namespace
     {
         const auto Target = Memcury::Scanner::FindPattern(
             "48 89 5C 24 ? 48 89 74 24 ? 57 48 81 EC 90 00 00 00 "
-            "48 8B D9 48 8D 51 08 48 8B 49 28 E8 ? ? ? ?",
-            false).Get();
+            "48 8B D9 48 8D 51 08 48 8B 49 28 E8 ? ? ? ?", false).Get();
 
         if (!Target)
         {
@@ -205,21 +159,17 @@ namespace
         {
             SDK::DbgLog(
                 "[Startup] UE4.21/FN %.2f: frontend render guard MH_Initialize failed: %s\n",
-                VersionInfo.FortniteVersion,
-                MH_StatusToString(InitializeStatus));
+                VersionInfo.FortniteVersion, MH_StatusToString(InitializeStatus));
             return false;
         }
 
-        const auto CreateStatus = MH_CreateHook(
-            reinterpret_cast<LPVOID>(Target),
-            UE421FrontendRenderTaskHook,
-            reinterpret_cast<LPVOID*>(&UE421FrontendRenderTaskOG));
+        const auto CreateStatus = MH_CreateHook(reinterpret_cast<LPVOID>(Target),
+            UE421FrontendRenderTaskHook, reinterpret_cast<LPVOID*>(&UE421FrontendRenderTaskOG));
         if (CreateStatus != MH_OK)
         {
             SDK::DbgLog(
                 "[Startup] UE4.21/FN %.2f: frontend render guard MH_CreateHook failed: %s\n",
-                VersionInfo.FortniteVersion,
-                MH_StatusToString(CreateStatus));
+                VersionInfo.FortniteVersion, MH_StatusToString(CreateStatus));
             return false;
         }
 
@@ -228,23 +178,18 @@ namespace
         {
             SDK::DbgLog(
                 "[Startup] UE4.21/FN %.2f: frontend render guard MH_EnableHook failed: %s\n",
-                VersionInfo.FortniteVersion,
-                MH_StatusToString(EnableStatus));
+                VersionInfo.FortniteVersion, MH_StatusToString(EnableStatus));
             return false;
         }
 
-        SDK::DbgLog(
-            "[Startup] UE4.21/FN %.2f: frontend render guard enabled at RVA 0x%llX\n",
-            VersionInfo.FortniteVersion,
-            Target - ImageBase);
+        SDK::DbgLog("[Startup] UE4.21/FN %.2f: frontend render guard enabled at RVA 0x%llX\n",
+            VersionInfo.FortniteVersion, Target - ImageBase);
         return true;
     }
 
     bool ShouldPrepareCompatibilityBeforeStart()
     {
-        // Every Season 5/6 build on UE 4.21 shares this NullRHI frontend path.
-        // Preparing only FN 6.21 left 5.41 ticking the same invalid render task
-        // while Magnesium waited at the Start button.
+        // Every Season 5/6 build on UE 4.21 shares this NullRHI frontend path, not just 6.21.
         return VersionInfo.EngineVersion == 4.21;
     }
 
@@ -286,18 +231,10 @@ namespace
 
         if (UseStockErbiumFastPath)
         {
-            // Match stock Erbium's short startup window exactly. The previous
-            // implementation patched only the first three NullFuncs and then
-            // spent several seconds scanning all 79 diagnostic finders. On
-            // UE 4.21 the rendering thread could still enter an unpatched
-            // RetTrue/Null compatibility target during that scan.
             const auto Counts = ApplyResolvedCompatibilityPatches();
             SDK::DbgLog(
                 "[Startup] UE4.21/FN %.2f: Erbium fast path applied %zu/%zu Null and %zu/%zu RetTrue patches\n",
-                VersionInfo.FortniteVersion,
-                Counts.Nulls,
-                NullFuncs.size(),
-                Counts.RetTrues,
+                VersionInfo.FortniteVersion, Counts.Nulls, NullFuncs.size(), Counts.RetTrues,
                 RetTrueFuncs.size());
             SDK::DbgLog("Main: cp7 (Null/RetTrue patches applied)\n");
             return;
@@ -327,19 +264,14 @@ void Main()
     printf("Initializing SDK...\n");
     if (!SDK::Init())
     {
-        MessageBoxW(
-            nullptr,
-            L"This Magnesium build supports Fortnite releases through 30.x only.",
-            L"Unsupported Fortnite version",
-            MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"This Magnesium build supports Fortnite releases through 30.x only.",
+            L"Unsupported Fortnite version", MB_OK | MB_ICONERROR);
         return;
     }
 
     if constexpr (FConfiguration::bCustomCrashReporter)
         FCrashReporter::Register();
 
-    // Restore the complete launch profile before either the GUI or the server
-    // start gate can observe configuration values.
     AutoHosting::Initialize();
 
     if constexpr (FConfiguration::bGUI)
@@ -368,9 +300,7 @@ void Main()
 
     if constexpr (FConfiguration::bGUI)
     {
-        // Custom Safe Zone requests are made by the GUI before the Start
-        // button is pressed, but UE texture loading must run on the game
-        // thread. Install this after UE 4.21's frontend guard is ready.
+        // Texture loading must run on the game thread, so install this after 4.21's frontend guard.
         if (!Misc::InstallPreStartSafeZoneTick())
             SDK::DbgLog("[SafeZoneMap] pre-Start pump unavailable; disk/numeric fallback remains active\n");
     }
@@ -384,9 +314,6 @@ void Main()
     }
 
     SDK::DbgLog("Main: start pressed\n");
-    // Playlist selection is final once the Start gate releases. Choose the
-    // transport once, publish it for ATLAS before the server becomes
-    // joinable, and retain the mapping/view for the lifetime of this process.
     FinalizeTransportPolicy();
 
     if (VersionInfo.FortniteVersion <= 2.50)
@@ -407,12 +334,14 @@ void Main()
     }
     if (VersionInfo.FortniteVersion == 20.40)
     {
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogSpecialRelevancyHealthComponent None"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+            FString(L"log LogSpecialRelevancyHealthComponent None"), nullptr);
     }
     SDK::DbgLog("Main: cp1 (pre EV5.1 / console cmds ok)\n");
     if (VersionInfo.EngineVersion >= 5.1)
     {
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"net.AllowEncryption 0"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+            FString(L"net.AllowEncryption 0"), nullptr);
 
         SDK::DbgLog("Main: cp2 (net.AllowEncryption ok, pre CurieGlobals)\n");
         auto CurieClass = FindClass("CurieGlobals");
@@ -421,30 +350,27 @@ void Main()
         if (DefaultCurieGlobals)
         {
             uint32 Offset = DefaultCurieGlobals->GetOffset("bEnableCurie");
-
-            //if (Offset != -1)
-            //    *(bool*)(uintptr_t(DefaultCurieGlobals) + Offset) = false;
         }
     }
     SDK::DbgLog("Main: cp3 (pre Iris block)\n");
     if (VersionInfo.EngineVersion >= 5.3)
     {
-        const bool bUseIris = FConfiguration::bEnableIris.load(
-            std::memory_order_acquire);
+        const bool bUseIris = FConfiguration::bEnableIris.load(std::memory_order_acquire);
         auto IrisBool = FindCVar<uint32_t>(L"net.Iris.UseIrisReplication");
         if (IrisBool)
             *IrisBool = bUseIris ? 1u : 0u;
 
-        SDK::DbgLog(
-            "[Transport] net.Iris.UseIrisReplication=%u cvar=%p\n",
-            bUseIris ? 1u : 0u,
+        SDK::DbgLog("[Transport] net.Iris.UseIrisReplication=%u cvar=%p\n", bUseIris ? 1u : 0u,
             static_cast<void*>(IrisBool));
 
         if (bUseIris)
         {
-            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIris None"), nullptr);
-            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIrisRpc None"), nullptr);
-            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"log LogIrisBridge None"), nullptr);
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+                FString(L"log LogIris None"), nullptr);
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+                FString(L"log LogIrisRpc None"), nullptr);
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+                FString(L"log LogIrisBridge None"), nullptr);
         }
 
         SDK::DbgLog("Main: cp4 (Iris cvars done, pre FilterConfigs)\n");
@@ -474,9 +400,6 @@ void Main()
         auto SlideCVar = FindCVar<uint32_t>(L"Fort.MME.Sliding");
         auto MantleCVar = FindCVar<uint32_t>(L"Fort.MME.Clambering");
 
-        //if (SprintCVar)
-        //    *SprintCVar = false;
-
         if (FConfiguration::IsKnownS27CustomMapPlaylist() && HurdleCVar)
             *HurdleCVar = false;
 
@@ -485,23 +408,25 @@ void Main()
 
         if (MantleCVar)
             *MantleCVar = false;
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.TacticalSprint 0"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+            FString(L"Fort.MME.TacticalSprint 0"), nullptr);
         if (FConfiguration::IsKnownS27CustomMapPlaylist())
-            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Hurdle 0"), nullptr);
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Sliding 0"), nullptr);
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Fort.MME.Clambering 0"), nullptr);
+            UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+                FString(L"Fort.MME.Hurdle 0"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+            FString(L"Fort.MME.Sliding 0"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+            FString(L"Fort.MME.Clambering 0"), nullptr);
     }
 
     if constexpr (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)
         curl_global_init(CURL_GLOBAL_ALL);
 
     SDK::DbgLog("Main: cp6 (pre Hooking / FindNullsAndRetTrues)\n");
-    sprintf_s(GUI::windowTitle, VersionInfo.EngineVersion >= 5.0 ? "Magnesium (FN %.2f, UE %.1f)" : (VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "Magnesium (FN %.2f, UE %.2f)" : "Magnesium (FN %.1f, UE %.2f)"), VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
+    sprintf_s(GUI::windowTitle,
+        VersionInfo.EngineVersion >= 5.0 ? "Magnesium (FN %.2f, UE %.1f)" : (VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "Magnesium (FN %.2f, UE %.2f)" : "Magnesium (FN %.1f, UE %.2f)"),
+        VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
     SetConsoleTitleA(GUI::windowTitle);
-
-
-    //if constexpr (!FConfiguration::bGUI)
-    //    Sleep(2000);
 
     printf("Hooking & finding offsets... (this may take a while)\n");
 
@@ -563,7 +488,8 @@ void Main()
 
     if (wcsstr(FConfiguration::Playlist, L"/MoleGame/Playlists/Playlist_MoleGame"))
     {
-        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"Mole.WorstCasePlayerCount 1"), nullptr);
+        UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+            FString(L"Mole.WorstCasePlayerCount 1"), nullptr);
         terrainOpen = L"open Mole_UnderBase_Parent";
     }
     else if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn"))
@@ -594,7 +520,9 @@ void Main()
     {
         terrainOpen = L"open /Game/Retrac/Maps/WaterMap";
     }
-    else if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo") && VersionInfo.FortniteVersion == 30.00 && GUI::GetSelectedPlaylist() == static_cast<int>(Playlist::Boxfight))
+    else if (wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo") &&
+        VersionInfo.FortniteVersion == 30.00 &&
+        GUI::GetSelectedPlaylist() == static_cast<int>(Playlist::Boxfight))
     {
         terrainOpen = L"open /Game/Sawyer/Maps/BoxfightFFA.BoxfightFFA";
     }
@@ -602,10 +530,11 @@ void Main()
     {
         terrainOpen = L"open /Game/Crow/Backrooms/Backrooms";
     }
-    else if (FConfiguration::bIsCustomMap && FConfiguration::CustomMap && FConfiguration::CustomMap[0] != L'\0')
+    else if (FConfiguration::bIsCustomMap && FConfiguration::CustomMap &&
+        FConfiguration::CustomMap[0] != L'\0')
     {
         terrainOpen = FConfiguration::CustomMap;
-	}
+    }
     else if (VersionInfo.FortniteVersion >= 12.00 && wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2"))
         terrainOpen = L"open Creative_NoApollo_Terrain";
     else
@@ -623,12 +552,7 @@ void Main()
             terrainOpen = L"open Apollo_Terrain";
     }
 
-    // UE 4.16's front end is not safe to keep ticking after GIsClient is cleared
-    // and its only LocalPlayer is removed. Stock Erbium begins travel here; if
-    // we defer it while the post-load scanners run, 1.7.2 can dereference a
-    // null front-end object on an engine task thread. Newer builds retain the
-    // deferred order because their post-load hooks must be complete before the
-    // destination world starts initializing.
+    // UE 4.16 cannot keep ticking its front end once GIsClient is cleared, so 1.7.2 travels immediately.
     const bool bDeferTerrainOpen = VersionInfo.EngineVersion > 4.16;
     if (bDeferTerrainOpen)
     {
@@ -679,10 +603,7 @@ void Main()
     }
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule,
-    DWORD  ul_reason_for_call,
-    LPVOID lpReserved
-)
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved)
 {
     switch (ul_reason_for_call)
     {

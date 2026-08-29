@@ -21,11 +21,7 @@ public:
 
 enum class EGameplayAbilityActivationMode : uint8
 {
-    Authority = 0,
-    NonAuthority = 1,
-    Predicting = 2,
-    Confirmed = 3,
-	Rejected = 4,
+    Authority = 0, NonAuthority = 1, Predicting = 2, Confirmed = 3, Rejected = 4,
 };
 
 struct FGameplayAbilityActivationInfo
@@ -34,8 +30,8 @@ struct FGameplayAbilityActivationInfo
     USCRIPTSTRUCT_COMMON_MEMBERS(FGameplayAbilityActivationInfo);
 
     DEFINE_STRUCT_PROP(ActivationMode, EGameplayAbilityActivationMode);
-	DEFINE_STRUCT_BITFIELD_PROP(bCanBeEndedByOtherInstance);
-	DEFINE_STRUCT_PROP(PredictionKeyWhenActivated, FPredictionKey);
+    DEFINE_STRUCT_BITFIELD_PROP(bCanBeEndedByOtherInstance);
+    DEFINE_STRUCT_PROP(PredictionKeyWhenActivated, FPredictionKey);
 };
 
 class UFortGameplayAbility : public UObject
@@ -43,9 +39,6 @@ class UFortGameplayAbility : public UObject
 public:
     UCLASS_COMMON_MEMBERS(UFortGameplayAbility);
 
-    // Instanced death/DBNO abilities can survive pawn replacement on builds
-    // whose ASC is owned by PlayerState. ActiveCount alone is insufficient:
-    // inspect and end the live instance that still owns input-blocking tags.
     DEFINE_PROP(CurrentActivationInfo, FGameplayAbilityActivationInfo);
     DEFINE_BITFIELD_PROP(bIsActive);
     DEFINE_BITFIELD_PROP(bIsBlockingOtherAbilities);
@@ -77,12 +70,8 @@ public:
     DEFINE_STRUCT_PROP(DynamicAbilityTags, FGameplayTagContainer);
     DEFINE_STRUCT_NEWOBJ_PROP(SourceObject, UObject);
     DEFINE_STRUCT_PROP(ActiveCount, uint8);
-    DEFINE_STRUCT_PROP(
-        ReplicatedInstances,
-        TArray<UFortGameplayAbility*>);
-    DEFINE_STRUCT_PROP(
-        NonReplicatedInstances,
-        TArray<UFortGameplayAbility*>);
+    DEFINE_STRUCT_PROP(ReplicatedInstances, TArray<UFortGameplayAbility*>);
+    DEFINE_STRUCT_PROP(NonReplicatedInstances, TArray<UFortGameplayAbility*>);
     DEFINE_STRUCT_BITFIELD_PROP(InputPressed);
 };
 
@@ -100,7 +89,6 @@ public:
     UCLASS_COMMON_MEMBERS(UGameplayEffect);
 };
 
-
 struct FGameplayEffectApplicationInfoHard
 {
 public:
@@ -114,7 +102,7 @@ class UFortAbilitySet : public UObject
 {
 public:
     UCLASS_COMMON_MEMBERS(UFortAbilitySet);
-    
+
     DEFINE_PROP(GameplayAbilities, TArray<TSubclassOf<UFortGameplayAbility>>);
     DEFINE_PROP(GrantedGameplayEffects, TArray<FGameplayEffectApplicationInfoHard>);
 };
@@ -147,7 +135,6 @@ public:
     DEFINE_STRUCT_PROP(EffectContext, FGameplayEffectContextHandle);
 };
 
-
 struct FActiveGameplayEffectHandle
 {
 public:
@@ -165,7 +152,6 @@ public:
     DEFINE_STRUCT_PROP(Level, float);
 };
 
-
 struct FActiveGameplayEffect
 {
 public:
@@ -173,7 +159,6 @@ public:
 
     DEFINE_STRUCT_PROP(Spec, FGameplayEffectSpec);
 };
-
 
 struct FActiveGameplayEffectsContainer
 {
@@ -191,9 +176,7 @@ public:
 
 enum class ETenacityType : uint8
 {
-    Default = 0,
-    MaxHealth = 1,
-    Custom = 2,
+    Default = 0, MaxHealth = 1, Custom = 2,
 };
 
 class UGAB_AthenaDBNO_C : public UFortGameplayAbility
@@ -231,14 +214,12 @@ public:
     DEFINE_FUNC(UpdateActiveGameplayEffectSetByCallerMagnitude, void);
     DEFINE_FUNC(SetActiveGameplayEffectLevel, void);
 
-    FGameplayAbilitySpecHandle GiveAbility(
-        const UObject* Ability,
-        UObject* SourceObject = nullptr,
-        int32 Level = 1,
-        int32 InputID = -1);
+    FGameplayAbilitySpecHandle GiveAbility(const UObject* Ability, UObject* SourceObject = nullptr,
+        int32 Level = 1, int32 InputID = -1);
     bool ClearAbility(FGameplayAbilitySpecHandle Handle);
     void GiveAbilitySet(const UFortAbilitySet* Set);
-    static void InternalServerTryActivateAbility(UAbilitySystemComponent*, FGameplayAbilitySpecHandle, bool, FPredictionKey*, void*);
+    static void InternalServerTryActivateAbility(UAbilitySystemComponent*,
+        FGameplayAbilitySpecHandle, bool, FPredictionKey*, void*);
 
     InitHooks;
 };

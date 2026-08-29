@@ -116,28 +116,18 @@ public:
 
 enum class ECollisionEnabled : uint8
 {
-    NoCollision = 0,
-    QueryOnly = 1,
-    PhysicsOnly = 2,
-    QueryAndPhysics = 3,
-	ECollisionEnabled_MAX = 4
+    NoCollision = 0, QueryOnly = 1, PhysicsOnly = 2, QueryAndPhysics = 3, ECollisionEnabled_MAX = 4
 };
 
 enum class ECollisionResponse : uint8
 {
-    ECR_Ignore = 0,
-    ECR_Overlap = 1,
-    ECR_Block = 2,
-	ECollisionResponse_MAX = 3
+    ECR_Ignore = 0, ECR_Overlap = 1, ECR_Block = 2, ECollisionResponse_MAX = 3
 };
 
 enum class EWalkableSlopeBehavior : uint8
 {
-    WalkableSlope_Default = 0,
-    WalkableSlope_Increase = 1,
-    WalkableSlope_Decrease = 2,
-    WalkableSlope_Unwalkable = 3,
-	WalkableSlope_Max = 4
+    WalkableSlope_Default = 0, WalkableSlope_Increase = 1, WalkableSlope_Decrease = 2,
+    WalkableSlope_Unwalkable = 3, WalkableSlope_Max = 4
 };
 
 struct FWalkableSlopeOverride
@@ -156,28 +146,13 @@ public:
 
     DEFINE_PROP(HealthSet, UFortHealthSet*);
 
-    // Native pawn-launch tuning. Fortnite builds the "car bumps you" launch out
-    // of exactly these: the impact speed is split into a horizontal push and a
-    // vertical pop by the two scales, tilted up by the angle adjustment, capped
-    // at the max speed, and only applied when the pawn is at least
-    // MinDirection along the vehicle's travel direction.
-    //
-    // They are per-vehicle-class, so a Whiplash and an ATK throw you differently.
-    // Confirmed present on 13.40; which other builds ship them is unverified, so
-    // every one is capability-probed independently and FortVehicleBump
-    // substitutes its own default for whichever the running build lacks. A build
-    // with none of them still bumps, just with Magnesium's tuning rather than
-    // Epic's.
+    // Native per-vehicle launch tuning: impact speed split by the two scales, tilted by the angle, capped at max speed.
     DEFINE_PROP(PawnLaunchForwardVelocityScale, float);
     DEFINE_PROP(PawnLaunchVerticalVelocityScale, float);
     DEFINE_PROP(PawnLaunchMaxSpeed, float);
     DEFINE_PROP(PawnLaunchMinDirection, float);
     DEFINE_PROP(PawnLaunchAngleAdjustment, float);
 
-    // The matching run-over damage curve: damage ramps linearly from
-    // VehicleMinHorSpeedDamage to VehicleMaxHorSpeedDamage as horizontal speed
-    // goes from VehicleMinHorSpeedToDamage to VehicleMaxHorSpeedToDamage. Same
-    // provenance and same probe-or-default handling as the launch tuning above.
     DEFINE_PROP(VehicleMinHorSpeedToDamage, float);
     DEFINE_PROP(VehicleMaxHorSpeedToDamage, float);
     DEFINE_PROP(VehicleMinHorSpeedDamage, float);
@@ -197,7 +172,7 @@ public:
 
     UCLASS_COMMON_MEMBERS(AFortAthenaSKPushCannon);
 
-	DEFINE_FUNC(MultiCastPushCannonLaunchedPlayer, void);
+    DEFINE_FUNC(MultiCastPushCannonLaunchedPlayer, void);
     DEFINE_FUNC(OnLaunchPawn, void);
     DEFINE_FUNC(OnPreLaunchPawn, void);
     DEFINE_FUNC(GetPawnAtSeat, AFortPlayerPawnAthena*);
@@ -296,11 +271,6 @@ public:
     }
 };
 
-// The weapon the cannon operator holds, not the cannon. It owns
-// ServerFireActorInCannon, so that RPC's Context is a weapon actor and the
-// cannon it belongs to has to be resolved through the pawn holding it - see
-// FortPhysicsPawn.cpp. Declared on AActor rather than AFortWeapon only because
-// FortWeapon.h includes this header, and nothing here needs the weapon fields.
 class AFortWeaponRangedMountedCannon : public AActor
 {
 public:
@@ -309,22 +279,9 @@ public:
     static void ServerFireActorInCannon(UObject* Context, FFrame& Stack);
 };
 
-// Server-side vehicle -> player knockback. Implementation and rationale live in
-// FortPhysicsPawn.cpp. It has two entry points because a vehicle moves for two
-// different reasons, and the server learns about them in two different places.
 namespace FortVehicleBump
 {
-    // A client is driving. Location/LinearVelocity are the values it just sent in
-    // the vehicle's own move RPC - not re-read off the actor, so this stays
-    // correct even before the transform write lands.
-    void OnVehicleMoved(
-        AActor* Vehicle,
-        const FVector& Location,
-        const FVector& LinearVelocity);
+    void OnVehicleMoved(AActor* Vehicle, const FVector& Location, const FVector& LinearVelocity);
 
-    // Nobody is driving, but the vehicle is still moving - rolling downhill,
-    // coasting on the momentum its last driver left, or shoved by an explosion.
-    // No RPC arrives for any of that, so motion is measured from the server's own
-    // view of the vehicle. Call once per server tick.
     void Tick();
 }

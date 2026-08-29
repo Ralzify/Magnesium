@@ -21,23 +21,17 @@ namespace
             return 0;
 
         const int32 ReflectedSize = Struct->GetPropertiesSize();
-        if (ReflectedSize > 0 &&
-            ReflectedSize <= static_cast<int32>(sizeof(FUniqueNetIdRepl)))
+        if (ReflectedSize > 0 && ReflectedSize <= static_cast<int32>(sizeof(FUniqueNetIdRepl)))
         {
             return ReflectedSize;
         }
 
-        // ReplicationBytes is the final member on the supported layouts, so
-        // retain the bounded inference fallback for older incomplete SDKs.
         const uint32 BytesOffset = Struct->GetOffset("ReplicationBytes");
         if (BytesOffset == static_cast<uint32>(-1))
             return 0;
 
-        const uint32 InferredSize =
-            (BytesOffset + sizeof(TArray<uint8>) + 7u) & ~7u;
-        return InferredSize <= sizeof(FUniqueNetIdRepl)
-            ? static_cast<int32>(InferredSize)
-            : 0;
+        const uint32 InferredSize = (BytesOffset + sizeof(TArray<uint8>) + 7u) & ~7u;
+        return InferredSize <= sizeof(FUniqueNetIdRepl) ? static_cast<int32>(InferredSize) : 0;
     }
 
     FUniqueNetIdRepl* GetPlayerUniqueId(AFortPlayerStateAthena* PlayerState)
@@ -52,8 +46,7 @@ namespace
         return nullptr;
     }
 
-    bool UniqueIdsEqual(const FUniqueNetIdRepl& Left,
-        const FUniqueNetIdRepl& Right);
+    bool UniqueIdsEqual(const FUniqueNetIdRepl& Left, const FUniqueNetIdRepl& Right);
     bool HasUniqueIdValue(const FUniqueNetIdRepl& Id);
 
     bool IsZeroUniqueId(const FUniqueNetIdRepl& Id)
@@ -71,45 +64,30 @@ namespace
         return true;
     }
 
-    bool CallUniqueIdPredicate(const char* FunctionName,
-        const char* LeftParameterName,
-        const FUniqueNetIdRepl& Left,
-        const char* RightParameterName,
-        const FUniqueNetIdRepl* Right,
+    bool CallUniqueIdPredicate(const char* FunctionName, const char* LeftParameterName,
+        const FUniqueNetIdRepl& Left, const char* RightParameterName, const FUniqueNetIdRepl* Right,
         bool& Result)
     {
-        auto Library = const_cast<UObject*>(
-            DefaultObjImpl("FortKismetLibrary"));
-        auto Function = Library
-            ? Library->GetFunction(FunctionName) : nullptr;
+        auto Library = const_cast<UObject*>(DefaultObjImpl("FortKismetLibrary"));
+        auto Function = Library ? Library->GetFunction(FunctionName) : nullptr;
         const int32 IdSize = GetUniqueIdSize();
         if (!Function || IdSize <= 0)
             return false;
 
-        const uint32 LeftOffset =
-            Function->GetOffset(LeftParameterName);
-        const uint32 ReturnOffset =
-            Function->GetOffset("ReturnValue");
-        const uint32 RightOffset = Right
-            ? Function->GetOffset(RightParameterName) : 0;
-        if (LeftOffset == static_cast<uint32>(-1) ||
-            ReturnOffset == static_cast<uint32>(-1) ||
-            (Right && RightOffset == static_cast<uint32>(-1)) ||
-            LeftOffset + IdSize > 0x1000 ||
-            ReturnOffset >= 0x1000 ||
-            (Right && RightOffset + IdSize > 0x1000))
+        const uint32 LeftOffset = Function->GetOffset(LeftParameterName);
+        const uint32 ReturnOffset = Function->GetOffset("ReturnValue");
+        const uint32 RightOffset = Right ? Function->GetOffset(RightParameterName) : 0;
+        if (LeftOffset == static_cast<uint32>(-1) || ReturnOffset == static_cast<uint32>(-1) ||
+            (Right && RightOffset == static_cast<uint32>(-1)) || LeftOffset + IdSize > 0x1000 ||
+            ReturnOffset >= 0x1000 || (Right && RightOffset + IdSize > 0x1000))
         {
             return false;
         }
 
         const int32 ReflectedSize = Function->GetPropertiesSize();
-        const size_t BufferSize =
-            ReflectedSize > 0 &&
-                ReflectedSize <= 0x1000
-            ? static_cast<size_t>(ReflectedSize)
-            : 0x1000;
-        if (LeftOffset + IdSize > BufferSize ||
-            ReturnOffset >= BufferSize ||
+        const size_t BufferSize = ReflectedSize > 0 && ReflectedSize <= 0x1000
+            ? static_cast<size_t>(ReflectedSize) : 0x1000;
+        if (LeftOffset + IdSize > BufferSize || ReturnOffset >= BufferSize ||
             (Right && RightOffset + IdSize > BufferSize))
         {
             return false;
@@ -124,8 +102,7 @@ namespace
         return true;
     }
 
-    bool CopyUniqueId(FUniqueNetIdRepl& Destination,
-        const FUniqueNetIdRepl& Source,
+    bool CopyUniqueId(FUniqueNetIdRepl& Destination, const FUniqueNetIdRepl& Source,
         AFortPlayerControllerAthena* PlayerController)
     {
         if (!HasUniqueIdValue(Source))
@@ -133,44 +110,27 @@ namespace
         if (HasUniqueIdValue(Destination))
             return UniqueIdsEqual(Destination, Source);
 
-        // Ask the engine for an owned by-value copy. Its generated thunk
-        // runs FUniqueNetIdRepl's real copy operation, including the opaque
-        // account handle which cannot safely be reconstructed from reflected
-        // bytes. Moving the returned storage into the empty destination keeps
-        // every replicated owner field independently owned.
+        // FUniqueNetIdRepl's account handle is opaque and cannot be rebuilt from reflected bytes.
         auto CloneFunction = IsLiveObject(PlayerController)
-            ? PlayerController->GetFunction("GetGameAccountId")
-            : nullptr;
+            ? PlayerController->GetFunction("GetGameAccountId") : nullptr;
         const int32 IdSize = GetUniqueIdSize();
         if (CloneFunction && IdSize > 0)
         {
-            const uint32 ReturnOffset =
-                CloneFunction->GetOffset("ReturnValue");
-            if (ReturnOffset != static_cast<uint32>(-1) &&
-                ReturnOffset + IdSize <= 0x1000)
+            const uint32 ReturnOffset = CloneFunction->GetOffset("ReturnValue");
+            if (ReturnOffset != static_cast<uint32>(-1) && ReturnOffset + IdSize <= 0x1000)
             {
-                const int32 ReflectedSize =
-                    CloneFunction->GetPropertiesSize();
-                const size_t BufferSize =
-                    ReflectedSize > 0 &&
-                        ReflectedSize <= 0x1000
-                    ? static_cast<size_t>(ReflectedSize)
-                    : 0x1000;
+                const int32 ReflectedSize = CloneFunction->GetPropertiesSize();
+                const size_t BufferSize = ReflectedSize > 0 && ReflectedSize <= 0x1000
+                    ? static_cast<size_t>(ReflectedSize) : 0x1000;
                 if (ReturnOffset + IdSize <= BufferSize)
                 {
                     std::vector<uint8> Params(BufferSize, 0);
-                    // Generated thunks assign into an already-constructed
-                    // result. Seed the polymorphic wrapper's vtable while
-                    // leaving its owned handles null before that assignment.
-                    memcpy(Params.data() + ReturnOffset,
-                        &Source, sizeof(void*));
-                    PlayerController->ProcessEvent(
-                        CloneFunction, Params.data());
-                    auto OwnedClone = reinterpret_cast<
-                        FUniqueNetIdRepl*>(
+                    // Generated thunks assign into an already-constructed result, so seed the wrapper's vtable first.
+                    memcpy(Params.data() + ReturnOffset, &Source, sizeof(void*));
+                    PlayerController->ProcessEvent(CloneFunction, Params.data());
+                    auto OwnedClone = reinterpret_cast<FUniqueNetIdRepl*>(
                             Params.data() + ReturnOffset);
-                    if (HasUniqueIdValue(*OwnedClone) &&
-                        UniqueIdsEqual(*OwnedClone, Source))
+                    if (HasUniqueIdValue(*OwnedClone) && UniqueIdsEqual(*OwnedClone, Source))
                     {
                         memcpy(&Destination, OwnedClone, IdSize);
                         memset(OwnedClone, 0, IdSize);
@@ -180,25 +140,19 @@ namespace
             }
         }
 
-        // ReplicationBytes is only a lazy serialization cache; copying it
-        // without the opaque account handle creates an ID that replication
-        // can display but permission checks correctly reject.
         return false;
     }
 
-    bool UniqueIdsEqual(const FUniqueNetIdRepl& Left,
-        const FUniqueNetIdRepl& Right)
+    bool UniqueIdsEqual(const FUniqueNetIdRepl& Left, const FUniqueNetIdRepl& Right)
     {
         bool NativeResult = false;
-        if (CallUniqueIdPredicate(
-                "EqualEqual_UniqueNetIdReplUniqueNetIdRepl",
+        if (CallUniqueIdPredicate("EqualEqual_UniqueNetIdReplUniqueNetIdRepl",
                 "A", Left, "B", &Right, NativeResult))
         {
             return NativeResult;
         }
 
-        if (FUniqueNetIdRepl::StaticStruct() &&
-            FUniqueNetIdRepl::HasReplicationBytes())
+        if (FUniqueNetIdRepl::StaticStruct() && FUniqueNetIdRepl::HasReplicationBytes())
         {
             const auto& LeftBytes = Left.ReplicationBytes;
             const auto& RightBytes = Right.ReplicationBytes;
@@ -215,8 +169,7 @@ namespace
         }
 
         const int32 Size = GetUniqueIdSize();
-        return Size > 0 && SDK::MemReadable(&Left, Size) &&
-            SDK::MemReadable(&Right, Size) &&
+        return Size > 0 && SDK::MemReadable(&Left, Size) && SDK::MemReadable(&Right, Size) &&
             memcmp(&Left, &Right, Size) == 0;
     }
 
@@ -226,20 +179,16 @@ namespace
             return false;
 
         bool NativeResult = false;
-        if (CallUniqueIdPredicate(
-                "IsValid_UniqueNetIdRepl",
-                "InUniqueNetIdRepl", Id, nullptr, nullptr,
-                NativeResult))
+        if (CallUniqueIdPredicate("IsValid_UniqueNetIdRepl",
+                "InUniqueNetIdRepl", Id, nullptr, nullptr, NativeResult))
         {
             return NativeResult;
         }
 
-        if (FUniqueNetIdRepl::StaticStruct() &&
-            FUniqueNetIdRepl::HasReplicationBytes())
+        if (FUniqueNetIdRepl::StaticStruct() && FUniqueNetIdRepl::HasReplicationBytes())
         {
             const auto& Bytes = Id.ReplicationBytes;
-            return Bytes.Num() > 0 && Bytes.Num() <= 0x100 &&
-                SDK::MemReadable(Bytes.Data,
+            return Bytes.Num() > 0 && Bytes.Num() <= 0x100 && SDK::MemReadable(Bytes.Data,
                     static_cast<size_t>(Bytes.Num()));
         }
 
@@ -267,12 +216,10 @@ namespace
 
     void MarkDirty(const UObject* Object, const wchar_t* PropertyName)
     {
-        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-            Object, PropertyName);
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(Object, PropertyName);
     }
 
-    bool AddReadyPlayer(AFortAthenaCreativePortal* Portal,
-        const FUniqueNetIdRepl& PlayerId,
+    bool AddReadyPlayer(AFortAthenaCreativePortal* Portal, const FUniqueNetIdRepl& PlayerId,
         AFortPlayerControllerAthena* PlayerController)
     {
         if (!Portal || !Portal->HasPlayersReady())
@@ -283,8 +230,7 @@ namespace
             return false;
 
         auto& ReadyPlayers = Portal->PlayersReady;
-        if (ReadyPlayers.Num() < 0 || ReadyPlayers.Num() > 0x100 ||
-            (ReadyPlayers.Num() > 0 &&
+        if (ReadyPlayers.Num() < 0 || ReadyPlayers.Num() > 0x100 || (ReadyPlayers.Num() > 0 &&
              !SDK::MemReadable(ReadyPlayers.Data,
                  static_cast<size_t>(ReadyPlayers.Num()) * ElementSize)))
         {
@@ -298,8 +244,7 @@ namespace
         }
 
         FUniqueNetIdRepl OwnedPlayerId{};
-        if (!CopyUniqueId(
-                OwnedPlayerId, PlayerId, PlayerController))
+        if (!CopyUniqueId(OwnedPlayerId, PlayerId, PlayerController))
             return false;
         ReadyPlayers.Add(OwnedPlayerId, ElementSize);
         MarkDirty(Portal, L"PlayersReady");
@@ -324,15 +269,13 @@ namespace
         return Plot;
     }
 
-    void SetPermissionData(UObject* PermissionOwner,
-        FUniqueNetIdRepl* AccountId,
+    void SetPermissionData(UObject* PermissionOwner, FUniqueNetIdRepl* AccountId,
         FFortCreativePlotPermissionData* PlotPermissions)
     {
         if (!IsLiveObject(PermissionOwner) || !AccountId)
             return;
 
-        if (PlotPermissions &&
-            FFortCreativePlotPermissionData::StaticStruct() &&
+        if (PlotPermissions && FFortCreativePlotPermissionData::StaticStruct() &&
             FFortCreativePlotPermissionData::HasPermission())
         {
             PlotPermissions->GetPermission() = CreativeEditPermission;
@@ -344,14 +287,12 @@ namespace
         NotifyNoArgs(PermissionOwner, "OnRep_PlotPermissionsChanged");
     }
 
-    bool DoesLevelSaveAllowEditing(
-        UFortLevelSaveComponent* LevelSave,
+    bool DoesLevelSaveAllowEditing(UFortLevelSaveComponent* LevelSave,
         const FUniqueNetIdRepl& PlayerId)
     {
         if (!IsLiveObject(LevelSave))
             return false;
-        auto Check = LevelSave->GetFunction(
-            "DoesPlayerHavePermissionToEdit");
+        auto Check = LevelSave->GetFunction("DoesPlayerHavePermissionToEdit");
         return !Check || LevelSave->Call<bool>(Check, PlayerId);
     }
 
@@ -361,13 +302,11 @@ namespace
         if (!IsLiveObject(Volume))
             return nullptr;
 
-        auto PermissionClass =
-            UPlayspaceComponent_CreativeToolsPermission::StaticClass();
+        auto PermissionClass = UPlayspaceComponent_CreativeToolsPermission::StaticClass();
         if (!PermissionClass)
             return nullptr;
 
-        if (auto Component =
-                Volume->GetComponentByClass(PermissionClass))
+        if (auto Component = Volume->GetComponentByClass(PermissionClass))
         {
             return (UPlayspaceComponent_CreativeToolsPermission*)Component;
         }
@@ -381,8 +320,7 @@ namespace
         return nullptr;
     }
 
-    bool ApplyCreativeVolumePermission(AFortVolume* Volume,
-        AFortPlayerStateAthena* PlayerState,
+    bool ApplyCreativeVolumePermission(AFortVolume* Volume, AFortPlayerStateAthena* PlayerState,
         AFortPlayerControllerAthena* PlayerController,
         const UFortCreativeRealEstatePlotItemDefinition* Plot)
     {
@@ -396,16 +334,13 @@ namespace
         bool bAppliedPermission = false;
 
         auto LevelSaveClass = UFortLevelSaveComponent::StaticClass();
-        auto LevelSave = LevelSaveClass
-            ? (UFortLevelSaveComponent*)
-                Volume->GetComponentByClass(LevelSaveClass)
-            : nullptr;
+        auto LevelSave = LevelSaveClass ? (UFortLevelSaveComponent*)
+                Volume->GetComponentByClass(LevelSaveClass) : nullptr;
         if (IsLiveObject(LevelSave))
         {
             if (LevelSave->HasAccountIdOfOwner())
             {
-                bAppliedPermission |= CopyUniqueId(
-                    LevelSave->AccountIdOfOwner, *PlayerId,
+                bAppliedPermission |= CopyUniqueId(LevelSave->AccountIdOfOwner, *PlayerId,
                     PlayerController);
             }
             if (LevelSave->HasbIsLoaded())
@@ -433,22 +368,16 @@ namespace
 
             MarkDirty(LevelSave, L"bIsLoaded");
             MarkDirty(LevelSave, L"bLoadPlaysetFromPlot");
-            MarkDirty(LevelSave,
-                L"bAutoLoadFromRestrictedPlotDefinition");
+            MarkDirty(LevelSave, L"bAutoLoadFromRestrictedPlotDefinition");
             MarkDirty(LevelSave, L"RestrictedPlotDefinition");
         }
 
-        // Some later Creative builds moved the same authority into a
-        // playspace component. Update both when both exist; these are not
-        // mutually exclusive during the migration builds.
-        auto PlayspacePermission =
-            FindPlayspacePermissionComponent(Volume);
+        auto PlayspacePermission = FindPlayspacePermissionComponent(Volume);
         if (IsLiveObject(PlayspacePermission))
         {
             if (PlayspacePermission->HasAccountIdOfOwner())
             {
-                bAppliedPermission |= CopyUniqueId(
-                    PlayspacePermission->AccountIdOfOwner, *PlayerId,
+                bAppliedPermission |= CopyUniqueId(PlayspacePermission->AccountIdOfOwner, *PlayerId,
                     PlayerController);
             }
 
@@ -458,8 +387,7 @@ namespace
                 PermissionData = &PlayspacePermission->PlotPermissions;
                 bAppliedPermission = true;
             }
-            SetPermissionData(
-                PlayspacePermission, PlayerId, PermissionData);
+            SetPermissionData(PlayspacePermission, PlayerId, PermissionData);
         }
 
         if (Volume->HasbNeverAllowSaving())
@@ -483,29 +411,23 @@ namespace
         if (!IsLiveObject(PlayerState))
             return;
 
-        auto CanEditFunction =
-            PlayerState->GetFunction("CanEditCreativeIsland");
+        auto CanEditFunction = PlayerState->GetFunction("CanEditCreativeIsland");
         if (CanEditFunction && PlayerState->Call<bool>(CanEditFunction))
             return;
 
-        auto Setter =
-            PlayerState->GetFunction("Server_SetCanEditCreativeIsland");
+        auto Setter = PlayerState->GetFunction("Server_SetCanEditCreativeIsland");
         if (!Setter)
             return;
 
         const uint32 CanEditOffset = Setter->GetOffset("bCanEdit");
-        if (CanEditOffset == static_cast<uint32>(-1) ||
-            CanEditOffset >= 0x1000)
+        if (CanEditOffset == static_cast<uint32>(-1) || CanEditOffset >= 0x1000)
         {
             return;
         }
 
         const int32 ReflectedSize = Setter->GetPropertiesSize();
-        const size_t BufferSize =
-            ReflectedSize > 0 &&
-                ReflectedSize <= 0x1000
-            ? static_cast<size_t>(ReflectedSize)
-            : 0x1000;
+        const size_t BufferSize = ReflectedSize > 0 && ReflectedSize <= 0x1000
+            ? static_cast<size_t>(ReflectedSize) : 0x1000;
         if (CanEditOffset >= BufferSize)
             return;
 
@@ -516,8 +438,7 @@ namespace
     }
 
     void LinkPortalAndVolume(AFortAthenaCreativePortal* Portal,
-        AFortPlayerControllerAthena* PlayerController,
-        AFortPlayerStateAthena* PlayerState)
+        AFortPlayerControllerAthena* PlayerController, AFortPlayerStateAthena* PlayerState)
     {
         if (!IsLiveObject(Portal) || !IsLiveObject(PlayerController) ||
             !IsLiveObject(PlayerState) || !Portal->HasLinkedVolume() ||
@@ -529,8 +450,7 @@ namespace
         auto PlayerId = GetPlayerUniqueId(PlayerState);
         if (PlayerId && Portal->HasOwningPlayer())
         {
-            CopyUniqueId(
-                Portal->OwningPlayer, *PlayerId, PlayerController);
+            CopyUniqueId(Portal->OwningPlayer, *PlayerId, PlayerController);
             MarkDirty(Portal, L"OwningPlayer");
             NotifyNoArgs(Portal, "OnRep_OwningPlayer");
             AddReadyPlayer(Portal, *PlayerId, PlayerController);
@@ -554,8 +474,7 @@ namespace
             Portal->bInErrorState = false;
 
         auto Volume = Portal->LinkedVolume;
-        if (Volume->HasLinkedPortals() &&
-            !Volume->LinkedPortals.Contains((AActor*)Portal))
+        if (Volume->HasLinkedPortals() && !Volume->LinkedPortals.Contains((AActor*)Portal))
         {
             Volume->LinkedPortals.Add((AActor*)Portal);
         }
@@ -566,8 +485,7 @@ namespace
         {
             PlayerController->CreativePlotLinkedVolume = Volume;
             MarkDirty(PlayerController, L"CreativePlotLinkedVolume");
-            NotifyNoArgs(PlayerController,
-                "OnRep_CreativePlotLinkedVolume");
+            NotifyNoArgs(PlayerController, "OnRep_CreativePlotLinkedVolume");
         }
 
         MarkDirty(Portal, L"bUserInitiatedLoad");
@@ -576,26 +494,20 @@ namespace
         Volume->ForceNetUpdate();
     }
 
-    AFortAthenaCreativePortal* FindPortalForPlayer(
-        AFortCreativePortalManager* Manager,
-        AFortPlayerControllerAthena* PlayerController,
-        AFortPlayerStateAthena* PlayerState)
+    AFortAthenaCreativePortal* FindPortalForPlayer(AFortCreativePortalManager* Manager,
+        AFortPlayerControllerAthena* PlayerController, AFortPlayerStateAthena* PlayerState)
     {
-        if (!IsLiveObject(Manager) || !IsLiveObject(PlayerController) ||
-            !IsLiveObject(PlayerState))
+        if (!IsLiveObject(Manager) || !IsLiveObject(PlayerController) || !IsLiveObject(PlayerState))
         {
             return nullptr;
         }
 
-        if (PlayerController->HasOwnedPortal() &&
-            IsLiveObject(PlayerController->OwnedPortal) &&
-            PlayerController->OwnedPortal->IsA(
-                AFortAthenaCreativePortal::StaticClass()))
+        if (PlayerController->HasOwnedPortal() && IsLiveObject(PlayerController->OwnedPortal) &&
+            PlayerController->OwnedPortal->IsA(AFortAthenaCreativePortal::StaticClass()))
         {
             auto Existing = (AFortAthenaCreativePortal*)
                 PlayerController->OwnedPortal;
-            if (Existing->HasLinkedVolume() &&
-                IsLiveObject(Existing->LinkedVolume))
+            if (Existing->HasLinkedVolume() && IsLiveObject(Existing->LinkedVolume))
             {
                 return Existing;
             }
@@ -609,15 +521,13 @@ namespace
         {
             for (auto Actor : Manager->AllPortals)
             {
-                if (!IsLiveObject(Actor) ||
-                    !Actor->IsA(AFortAthenaCreativePortal::StaticClass()))
+                if (!IsLiveObject(Actor) || !Actor->IsA(AFortAthenaCreativePortal::StaticClass()))
                 {
                     continue;
                 }
 
                 auto Portal = (AFortAthenaCreativePortal*)Actor;
-                if (Portal->HasOwningPlayer() &&
-                    UniqueIdsEqual(Portal->OwningPlayer, *PlayerId))
+                if (Portal->HasOwningPlayer() && UniqueIdsEqual(Portal->OwningPlayer, *PlayerId))
                 {
                     return Portal;
                 }
@@ -625,24 +535,18 @@ namespace
         }
 
         AFortAthenaCreativePortal* Portal = nullptr;
-        if (Manager->HasAvailablePortals() &&
-            Manager->AvailablePortals.Num() > 0)
+        if (Manager->HasAvailablePortals() && Manager->AvailablePortals.Num() > 0)
         {
             for (auto Actor : Manager->AvailablePortals)
             {
-                if (!IsLiveObject(Actor) ||
-                    !Actor->IsA(
-                        AFortAthenaCreativePortal::StaticClass()))
+                if (!IsLiveObject(Actor) || !Actor->IsA(AFortAthenaCreativePortal::StaticClass()))
                 {
                     continue;
                 }
 
-                auto Candidate =
-                    (AFortAthenaCreativePortal*)Actor;
-                if (Candidate->HasOwningPlayer() &&
-                    HasUniqueIdValue(Candidate->OwningPlayer) &&
-                    !UniqueIdsEqual(
-                        Candidate->OwningPlayer, *PlayerId))
+                auto Candidate = (AFortAthenaCreativePortal*)Actor;
+                if (Candidate->HasOwningPlayer() && HasUniqueIdValue(Candidate->OwningPlayer) &&
+                    !UniqueIdsEqual(Candidate->OwningPlayer, *PlayerId))
                 {
                     continue;
                 }
@@ -656,15 +560,13 @@ namespace
         {
             for (auto Actor : Manager->AllPortals)
             {
-                if (!IsLiveObject(Actor) ||
-                    !Actor->IsA(AFortAthenaCreativePortal::StaticClass()))
+                if (!IsLiveObject(Actor) || !Actor->IsA(AFortAthenaCreativePortal::StaticClass()))
                 {
                     continue;
                 }
 
                 auto Candidate = (AFortAthenaCreativePortal*)Actor;
-                if (Candidate->HasOwningPlayer() &&
-                    HasUniqueIdValue(Candidate->OwningPlayer))
+                if (Candidate->HasOwningPlayer() && HasUniqueIdValue(Candidate->OwningPlayer))
                 {
                     continue;
                 }
@@ -695,8 +597,7 @@ namespace
                 }
             }
         }
-        if (Manager->HasUsedPortals() &&
-            !Manager->UsedPortals.Contains((AActor*)Portal))
+        if (Manager->HasUsedPortals() && !Manager->UsedPortals.Contains((AActor*)Portal))
         {
             Manager->UsedPortals.Add((AActor*)Portal);
         }
@@ -708,8 +609,7 @@ namespace
         const UFortCreativeRealEstatePlotItemDefinition* Plot)
     {
         if (!IsLiveObject(Portal) || !Portal->HasLinkedVolume() ||
-            !IsLiveObject(Portal->LinkedVolume) || !Plot ||
-            !Plot->HasBasePlayset())
+            !IsLiveObject(Portal->LinkedVolume) || !Plot || !Plot->HasBasePlayset())
         {
             return;
         }
@@ -719,10 +619,8 @@ namespace
             return;
 
         auto StreamClass = UPlaysetLevelStreamComponent::StaticClass();
-        auto Stream = StreamClass
-            ? (UPlaysetLevelStreamComponent*)
-                Portal->LinkedVolume->GetComponentByClass(StreamClass)
-            : nullptr;
+        auto Stream = StreamClass ? (UPlaysetLevelStreamComponent*)
+                Portal->LinkedVolume->GetComponentByClass(StreamClass) : nullptr;
         if (!IsLiveObject(Stream))
             return;
 
@@ -739,8 +637,7 @@ namespace
         if (Stream->HasbAutoActivate())
             Stream->bAutoActivate = true;
 
-        auto LoadPlayset =
-            (void (*)(UPlaysetLevelStreamComponent*))FindLoadPlayset();
+        auto LoadPlayset = (void (*)(UPlaysetLevelStreamComponent*))FindLoadPlayset();
         if (LoadPlayset)
             LoadPlayset(Stream);
     }
@@ -762,8 +659,7 @@ namespace
         }
 
         AMinigameSettingsMachine_C* SettingsMachine = nullptr;
-        if (IsLiveObject(MinigameVolume) &&
-            MinigameVolume->HasCurrentMinigameSettingsMachine() &&
+        if (IsLiveObject(MinigameVolume) && MinigameVolume->HasCurrentMinigameSettingsMachine() &&
             IsLiveObject((UObject*)
                 MinigameVolume->CurrentMinigameSettingsMachine))
         {
@@ -777,10 +673,8 @@ namespace
                 L"/Game/Athena/Items/Gameplay/MinigameSettingsControl/MinigameSettingsMachine.MinigameSettingsMachine_C");
             if (SettingsMachineClass)
             {
-                SettingsMachine =
-                    UWorld::SpawnActor<AMinigameSettingsMachine_C>(
-                        SettingsMachineClass,
-                        Volume->K2_GetActorLocation(), {}, Volume);
+                SettingsMachine = UWorld::SpawnActor<AMinigameSettingsMachine_C>(
+                        SettingsMachineClass, Volume->K2_GetActorLocation(), {}, Volume);
             }
         }
 
@@ -795,29 +689,23 @@ namespace
         if (SettingsMachine->HasCreativeLinkComponent())
         {
             auto LinkClass = UFortCreativeVolumeLinkComponent::StaticClass();
-            SettingsMachine->CreativeLinkComponent = LinkClass
-                ? (UFortCreativeVolumeLinkComponent*)
-                    Volume->GetComponentByClass(LinkClass)
-                : nullptr;
+            SettingsMachine->CreativeLinkComponent = LinkClass ? (UFortCreativeVolumeLinkComponent*)
+                    Volume->GetComponentByClass(LinkClass) : nullptr;
         }
-        if (IsLiveObject(MinigameVolume) &&
-            MinigameVolume->HasCurrentMinigameSettingsMachine())
+        if (IsLiveObject(MinigameVolume) && MinigameVolume->HasCurrentMinigameSettingsMachine())
         {
-            MinigameVolume->CurrentMinigameSettingsMachine =
-                SettingsMachine;
+            MinigameVolume->CurrentMinigameSettingsMachine = SettingsMachine;
         }
     }
 
-    void EnableCreativeControllerState(
-        AFortPlayerControllerAthena* PlayerController)
+    void EnableCreativeControllerState(AFortPlayerControllerAthena* PlayerController)
     {
         if (!IsLiveObject(PlayerController))
             return;
 
         if (PlayerController->HasbIsCreativeQuickbarEnabled())
         {
-            const bool OldValue =
-                PlayerController->bIsCreativeQuickbarEnabled;
+            const bool OldValue = PlayerController->bIsCreativeQuickbarEnabled;
             PlayerController->bIsCreativeQuickbarEnabled = true;
             PlayerController->OnRep_IsCreativeQuickbarEnabled(OldValue);
             MarkDirty(PlayerController, L"bIsCreativeQuickbarEnabled");
@@ -826,8 +714,7 @@ namespace
         {
             PlayerController->bIsCreativeQuickmenuEnabled = true;
             MarkDirty(PlayerController, L"bIsCreativeQuickmenuEnabled");
-            NotifyNoArgs(PlayerController,
-                "OnRep_IsCreativeQuickmenuEnabled");
+            NotifyNoArgs(PlayerController, "OnRep_IsCreativeQuickmenuEnabled");
         }
         if (PlayerController->HasbIsCreativeModeEnabled())
         {
@@ -839,8 +726,7 @@ namespace
 
     void GiveCreativePhone(AFortPlayerControllerAthena* PlayerController)
     {
-        if (!IsLiveObject(PlayerController) ||
-            !IsLiveObject(PlayerController->WorldInventory))
+        if (!IsLiveObject(PlayerController) || !IsLiveObject(PlayerController->WorldInventory))
         {
             return;
         }
@@ -848,18 +734,15 @@ namespace
         auto CreativePhone = FindObject<UFortWeaponItemDefinition>(
             L"/Game/Athena/Items/Weapons/Prototype/WID_CreativeTool.WID_CreativeTool");
         if (!CreativePhone)
-            CreativePhone = FindObject<UFortWeaponItemDefinition>(
-                L"WID_CreativeTool");
+            CreativePhone = FindObject<UFortWeaponItemDefinition>(L"WID_CreativeTool");
         if (!CreativePhone)
             return;
 
-        auto ItemEntry =
-            PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search(
+        auto ItemEntry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Entry)
                 {
                     return Entry.ItemDefinition == CreativePhone;
-                },
-                FFortItemEntry::Size());
+                }, FFortItemEntry::Size());
         if (ItemEntry)
             return;
 
@@ -867,18 +750,15 @@ namespace
         if (auto Stats = AFortInventory::GetStats(CreativePhone))
             LoadedAmmo = Stats->ClipSize;
 
-        PlayerController->WorldInventory->GiveItem(
-            CreativePhone, 1, LoadedAmmo);
-        if (auto PhoneCreated =
-                PlayerController->GetFunction("ClientCreativePhoneCreated"))
+        PlayerController->WorldInventory->GiveItem(CreativePhone, 1, LoadedAmmo);
+        if (auto PhoneCreated = PlayerController->GetFunction("ClientCreativePhoneCreated"))
         {
             PlayerController->Call<void>(PhoneCreated);
         }
     }
 }
 
-void AFortMinigameSettingsBuilding::BeginPlay(
-    AFortMinigameSettingsBuilding* Settings)
+void AFortMinigameSettingsBuilding::BeginPlay(AFortMinigameSettingsBuilding* Settings)
 {
     return BeginPlayOG(Settings);
 }
@@ -886,17 +766,14 @@ void AFortMinigameSettingsBuilding::BeginPlay(
 bool AFortAthenaCreativePortal::PrepareLinkedVolumeForEditing(
     AFortPlayerControllerAthena* PlayerController)
 {
-    if (!IsLiveObject(PlayerController) ||
-        !IsLiveObject(PlayerController->PlayerState))
+    if (!IsLiveObject(PlayerController) || !IsLiveObject(PlayerController->PlayerState))
     {
         return false;
     }
 
-    auto PlayerState =
-        (AFortPlayerStateAthena*)PlayerController->PlayerState;
+    auto PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
     AFortAthenaCreativePortal* Portal = nullptr;
-    if (PlayerController->HasOwnedPortal() &&
-        IsLiveObject(PlayerController->OwnedPortal) &&
+    if (PlayerController->HasOwnedPortal() && IsLiveObject(PlayerController->OwnedPortal) &&
         PlayerController->OwnedPortal->IsA(StaticClass()))
     {
         Portal = (AFortAthenaCreativePortal*)
@@ -904,8 +781,7 @@ bool AFortAthenaCreativePortal::PrepareLinkedVolumeForEditing(
     }
 
     AFortVolume* Volume = nullptr;
-    if (Portal && Portal->HasLinkedVolume() &&
-        IsLiveObject(Portal->LinkedVolume))
+    if (Portal && Portal->HasLinkedVolume() && IsLiveObject(Portal->LinkedVolume))
     {
         Volume = Portal->LinkedVolume;
         LinkPortalAndVolume(Portal, PlayerController, PlayerState);
@@ -929,40 +805,32 @@ AFortAthenaCreativePortal* AFortAthenaCreativePortal::Create(
     AFortPlayerControllerAthena* PlayerController)
 {
     auto World = UWorld::GetWorld();
-    if (!World || !IsLiveObject(PlayerController) ||
-        !IsLiveObject(PlayerController->PlayerState) ||
+    if (!World || !IsLiveObject(PlayerController) || !IsLiveObject(PlayerController->PlayerState) ||
         !IsLiveObject(World->GameState))
     {
         return nullptr;
     }
 
     auto GameState = (AFortGameStateAthena*)World->GameState;
-    auto PlayerState =
-        (AFortPlayerStateAthena*)PlayerController->PlayerState;
-    if (!GameState->HasCreativePortalManager() ||
-        !IsLiveObject(GameState->CreativePortalManager))
+    auto PlayerState = (AFortPlayerStateAthena*)PlayerController->PlayerState;
+    if (!GameState->HasCreativePortalManager() || !IsLiveObject(GameState->CreativePortalManager))
     {
         return nullptr;
     }
 
-    auto Portal = FindPortalForPlayer(
-        GameState->CreativePortalManager,
-        PlayerController,
+    auto Portal = FindPortalForPlayer(GameState->CreativePortalManager, PlayerController,
         PlayerState);
-    if (!Portal || !Portal->HasLinkedVolume() ||
-        !IsLiveObject(Portal->LinkedVolume))
+    if (!Portal || !Portal->HasLinkedVolume() || !IsLiveObject(Portal->LinkedVolume))
     {
         return nullptr;
     }
 
-    printf("[Creative] Assigned portal %s to %s\n",
-        Portal->Name.ToString().c_str(),
+    printf("[Creative] Assigned portal %s to %s\n", Portal->Name.ToString().c_str(),
         PlayerController->Name.ToString().c_str());
 
     LinkPortalAndVolume(Portal, PlayerController, PlayerState);
     auto Plot = ResolveCreativePlot();
-    ApplyCreativeVolumePermission(
-        Portal->LinkedVolume, PlayerState, PlayerController, Plot);
+    ApplyCreativeVolumePermission(Portal->LinkedVolume, PlayerState, PlayerController, Plot);
     EnablePlayerCreativeEditing(PlayerState);
     ConfigurePlayset(Portal, Plot);
     EnsureSettingsMachine(Portal);
@@ -971,8 +839,7 @@ AFortAthenaCreativePortal* AFortAthenaCreativePortal::Create(
     return Portal;
 }
 
-void AFortAthenaCreativePortal::TeleportPlayerToLinkedVolume(
-    UObject* Context, FFrame& Stack)
+void AFortAthenaCreativePortal::TeleportPlayerToLinkedVolume(UObject* Context, FFrame& Stack)
 {
     AFortPlayerPawnAthena* PlayerPawn = nullptr;
     bool bUseSpawnTags = false;
@@ -981,18 +848,15 @@ void AFortAthenaCreativePortal::TeleportPlayerToLinkedVolume(
     Stack.IncrementCode();
 
     auto Portal = (AFortAthenaCreativePortal*)Context;
-    if (!IsLiveObject(Portal) || !IsLiveObject(PlayerPawn) ||
-        !Portal->HasLinkedVolume() ||
-        !IsLiveObject(Portal->LinkedVolume) ||
-        !IsLiveObject(PlayerPawn->Controller))
+    if (!IsLiveObject(Portal) || !IsLiveObject(PlayerPawn) || !Portal->HasLinkedVolume() ||
+        !IsLiveObject(Portal->LinkedVolume) || !IsLiveObject(PlayerPawn->Controller))
     {
         return;
     }
 
     auto PlayerController = (AFortPlayerControllerAthena*)
         PlayerPawn->Controller;
-    LinkPortalAndVolume(
-        Portal, PlayerController,
+    LinkPortalAndVolume(Portal, PlayerController,
         (AFortPlayerStateAthena*)PlayerController->PlayerState);
     PrepareLinkedVolumeForEditing(PlayerController);
     GiveCreativePhone(PlayerController);
@@ -1001,29 +865,20 @@ void AFortAthenaCreativePortal::TeleportPlayerToLinkedVolume(
     const FVector BeforeLocation = PlayerPawn->K2_GetActorLocation();
     bool bNativeMovedPawn = false;
     auto NativeFunction = Stack.GetCurrentNativeFunction();
-    if (NativeFunction && TeleportPlayerToLinkedVolumeOG &&
-        TeleportPlayerToLinkedVolumeOG !=
+    if (NativeFunction && TeleportPlayerToLinkedVolumeOG && TeleportPlayerToLinkedVolumeOG !=
             TeleportPlayerToLinkedVolume)
     {
-        NativeFunction->ExecFunction =
-            (void*)TeleportPlayerToLinkedVolumeOG;
-        Portal->Call<void>(
-            NativeFunction, PlayerPawn, bUseSpawnTags);
-        NativeFunction->ExecFunction =
-            (void*)TeleportPlayerToLinkedVolume;
+        NativeFunction->ExecFunction = (void*)TeleportPlayerToLinkedVolumeOG;
+        Portal->Call<void>(NativeFunction, PlayerPawn, bUseSpawnTags);
+        NativeFunction->ExecFunction = (void*)TeleportPlayerToLinkedVolume;
 
         if (IsLiveObject(PlayerPawn))
         {
-            const FVector AfterLocation =
-                PlayerPawn->K2_GetActorLocation();
-            bNativeMovedPawn =
-                (AfterLocation - BeforeLocation).SizeSquared() > 10000.0;
+            const FVector AfterLocation = PlayerPawn->K2_GetActorLocation();
+            bNativeMovedPawn = (AfterLocation - BeforeLocation).SizeSquared() > 10000.0;
         }
     }
 
-    // Stripped dedicated-server builds leave the native portal RPC as a
-    // no-op. Preserve the native spawn-tag path when it worked and use the
-    // historical center-of-volume fallback only when it did not.
     if (!bNativeMovedPawn && IsLiveObject(PlayerPawn))
     {
         auto Location = Portal->LinkedVolume->K2_GetActorLocation();
@@ -1038,19 +893,15 @@ void AFortAthenaCreativePortal::TeleportPlayerToLinkedVolume(
 void AFortAthenaCreativePortal::Hook()
 {
     auto PortalClass = StaticClass();
-    auto DefaultPortal = PortalClass
-        ? (AFortAthenaCreativePortal*)PortalClass->GetDefaultObj()
+    auto DefaultPortal = PortalClass ? (AFortAthenaCreativePortal*)PortalClass->GetDefaultObj()
         : nullptr;
     if (!DefaultPortal)
         return;
 
-    auto TeleportFunction =
-        DefaultPortal->GetFunction("TeleportPlayerToLinkedVolume");
+    auto TeleportFunction = DefaultPortal->GetFunction("TeleportPlayerToLinkedVolume");
     if (TeleportFunction)
     {
-        Utils::ExecHook(
-            TeleportFunction,
-            TeleportPlayerToLinkedVolume,
+        Utils::ExecHook(TeleportFunction, TeleportPlayerToLinkedVolume,
             TeleportPlayerToLinkedVolumeOG);
     }
 }
@@ -1059,7 +910,4 @@ void AFortMinigameSettingsBuilding::Hook()
 {
     if (!GetDefaultObj())
         return;
-
-    // The native BeginPlay path is retained. Creative setup assigns the
-    // settings volume explicitly after the machine is spawned.
 }

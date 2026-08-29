@@ -24,11 +24,7 @@ uint64 FindPickTeam();
 uint64 FindCantBuild();
 uint64 FindReplaceBuildingActor();
 uint64 FindKickPlayer();
-// Address of UE's "last failed RPC validation" global, or 0 when it cannot be
-// identified with confidence. See the definition for why it matters.
 uint64 FindRpcValidationFailureSlot();
-// Drops a validation failure recorded by server-side synthetic RPC calls so
-// the engine cannot charge it to the client whose bunch is being processed.
 void ClearPendingRpcValidationFailure(const char* Context);
 uint64 FindEncryptionPatch();
 uint64 FindRemoveInventoryItem();
@@ -75,7 +71,8 @@ uint64 FindSetGamePhase();
 uint64 FindPayBuildableClassPlacementCost();
 uint64 FindCanAffordToPlaceBuildableClass();
 uint64 FindCanPlaceBuildableClassInStructuralGrid();
-uint64 FindLoadPlayset(const std::vector<uint8_t>& Bytes = std::vector<uint8_t>({ 0x48, 0x89, 0x5C }), int recursive = 0);
+uint64 FindLoadPlayset(const std::vector<uint8_t>& Bytes = std::vector<uint8_t>(
+    { 0x48, 0x89, 0x5C }), int recursive = 0);
 uint32 FindSpawnDecoVft();
 uint32 FindShouldAllowServerSpawnDecoVft();
 uint64 FindSetState();
@@ -92,8 +89,7 @@ uint64 FindHasStreamingLevelsCompletedLoadingUnLoading();
 uint64 FindSelectAndSetupMyBuildingLevel();
 uint64 FindStreamInMyBuilding();
 
-template <typename CVarT>
-CVarT* FindCVar(const wchar_t* CVarStr)
+template <typename CVarT> CVarT* FindCVar(const wchar_t* CVarStr)
 {
     auto sRef = Memcury::Scanner::FindStringRef(CVarStr);
 
@@ -118,7 +114,6 @@ CVarT* FindCVar(const wchar_t* CVarStr)
         }
     }
 
-
     for (int i = 0; i < 2000; i++)
     {
         auto Ptr = (uint8_t*)(BeforeVars + i);
@@ -135,9 +130,5 @@ inline std::vector<uint64_t> RetTrueFuncs = {};
 
 void FindNullsAndRetTrues();
 
-// Runs every finder once and writes a full offset report (address + RVA per
-// finder) to magnesium_offsets.log in the game's working directory;
-// misses/crashes also go to the console. Run this when bringing up a new
-// version so a dead sig shows up by name instead of as a silent 0 or a crash
-// somewhere down the boot.
+// Runs every finder once and writes magnesium_offsets.log, so a dead signature shows up by name.
 void ValidateFinders();

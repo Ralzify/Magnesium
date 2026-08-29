@@ -31,9 +31,7 @@ namespace
         bool bRestore[GhostCharacterPartSlotCount]{};
     };
 
-    std::unordered_map<
-        AFortPlayerControllerAthena*,
-        FGhostCharacterPartRestore>
+    std::unordered_map<AFortPlayerControllerAthena*, FGhostCharacterPartRestore>
         GhostCharacterPartRestores;
 
     struct FPendingGhostModeCleanup
@@ -51,8 +49,7 @@ namespace
         bool bHarvestingToolRefocusAttempted = false;
     };
 
-    std::vector<FPendingGhostModeCleanup>
-        PendingGhostModeCleanups;
+    std::vector<FPendingGhostModeCleanup> PendingGhostModeCleanups;
 
     struct FTrackedGhostModeSession
     {
@@ -69,17 +66,13 @@ namespace
         bool bExitRequested = false;
     };
 
-    std::vector<FTrackedGhostModeSession>
-        TrackedGhostModeSessions;
+    std::vector<FTrackedGhostModeSession> TrackedGhostModeSessions;
 
-    bool ResolveFixedCharacterPartArray(
-        UObject* Owner,
-        const char* PropertyName,
+    bool ResolveFixedCharacterPartArray(UObject* Owner, const char* PropertyName,
         UObject**& OutParts)
     {
         OutParts = nullptr;
-        if (!Owner || !Owner->Class || !PropertyName ||
-            Offsets::ElementSize < sizeof(int32))
+        if (!Owner || !Owner->Class || !PropertyName || Offsets::ElementSize < sizeof(int32))
         {
             return false;
         }
@@ -88,47 +81,29 @@ namespace
         if (!Property)
             return false;
 
-        const size_t RequiredPropertyBytes =
-            static_cast<size_t>(max(
-                Offsets::Offset_Internal,
+        const size_t RequiredPropertyBytes = static_cast<size_t>(max(Offsets::Offset_Internal,
                 Offsets::ElementSize)) + sizeof(uint32);
-        if (!SDK::MemReadable(
-                Property, RequiredPropertyBytes))
+        if (!SDK::MemReadable(Property, RequiredPropertyBytes))
         {
             return false;
         }
 
-        const int32 PropertyOffset =
-            static_cast<int32>(SDK::ReadPropertyOffset(
-                GetFromOffset<uint32>(
-                    Property, Offsets::Offset_Internal)));
-        const uint32 ElementSize = GetFromOffset<uint32>(
-            Property, Offsets::ElementSize);
-        const int32 ArrayDimension = GetFromOffset<int32>(
-            Property,
+        const int32 PropertyOffset = static_cast<int32>(SDK::ReadPropertyOffset(
+                GetFromOffset<uint32>(Property, Offsets::Offset_Internal)));
+        const uint32 ElementSize = GetFromOffset<uint32>(Property, Offsets::ElementSize);
+        const int32 ArrayDimension = GetFromOffset<int32>(Property,
             Offsets::ElementSize - sizeof(int32));
-        const int32 OwnerSize =
-            Owner->Class->GetPropertiesSize();
-        if (PropertyOffset < 0 ||
-            ElementSize != sizeof(UObject*) ||
-            ArrayDimension < GhostCharacterPartSlotCount ||
-            ArrayDimension > 16 ||
-            OwnerSize <= PropertyOffset ||
-            static_cast<size_t>(ElementSize) *
-                    ArrayDimension >
-                static_cast<size_t>(
-                    OwnerSize - PropertyOffset))
+        const int32 OwnerSize = Owner->Class->GetPropertiesSize();
+        if (PropertyOffset < 0 || ElementSize != sizeof(UObject*) ||
+            ArrayDimension < GhostCharacterPartSlotCount || ArrayDimension > 16 ||
+            OwnerSize <= PropertyOffset || static_cast<size_t>(ElementSize) * ArrayDimension >
+                static_cast<size_t>(OwnerSize - PropertyOffset))
         {
             return false;
         }
 
-        auto Parts = reinterpret_cast<UObject**>(
-            reinterpret_cast<uint8*>(Owner) +
-            PropertyOffset);
-        if (!SDK::MemReadable(
-                Parts,
-                static_cast<size_t>(ElementSize) *
-                    ArrayDimension))
+        auto Parts = reinterpret_cast<UObject**>(reinterpret_cast<uint8*>(Owner) + PropertyOffset);
+        if (!SDK::MemReadable(Parts, static_cast<size_t>(ElementSize) * ArrayDimension))
         {
             return false;
         }
@@ -137,91 +112,62 @@ namespace
         return true;
     }
 
-    bool ResolvePlayerStateCharacterPartArray(
-        AFortPlayerStateAthena* PlayerState,
-        UObject**& OutParts,
-        const wchar_t*& OutDirtyProperty)
+    bool ResolvePlayerStateCharacterPartArray(AFortPlayerStateAthena* PlayerState,
+        UObject**& OutParts, const wchar_t*& OutDirtyProperty)
     {
         OutParts = nullptr;
         OutDirtyProperty = nullptr;
         if (!PlayerState || !PlayerState->Class)
             return false;
 
-        // 6.21 uses the flat fixed array. Keep the adjacent struct layout
-        // supported as well so the Shadow Stone compatibility range does not
-        // rely on a hard-coded season boundary.
-        if (ResolveFixedCharacterPartArray(
-                PlayerState, "CharacterParts", OutParts))
+        // 6.21 uses the flat fixed array; the adjacent struct layout stays supported too.
+        if (ResolveFixedCharacterPartArray(PlayerState, "CharacterParts", OutParts))
         {
             OutDirtyProperty = L"CharacterParts";
             return true;
         }
-        if (ResolveFixedCharacterPartArray(
-                PlayerState, "LocalCharacterParts", OutParts))
+        if (ResolveFixedCharacterPartArray(PlayerState, "LocalCharacterParts", OutParts))
         {
             OutDirtyProperty = L"LocalCharacterParts";
             return true;
         }
 
-        auto CharacterPartsProperty =
-            PlayerState->GetProperty(
-                "CharacterParts", 0x100000);
+        auto CharacterPartsProperty = PlayerState->GetProperty("CharacterParts", 0x100000);
         auto CharacterPartsStruct = FindObject<UStruct>(
             L"/Script/FortniteGame.CustomCharacterParts");
-        if (!CharacterPartsProperty ||
-            !CharacterPartsStruct ||
+        if (!CharacterPartsProperty || !CharacterPartsStruct ||
             Offsets::ElementSize < sizeof(int32))
         {
             return false;
         }
 
-        auto PartsProperty =
-            CharacterPartsStruct->GetProperty("Parts");
+        auto PartsProperty = CharacterPartsStruct->GetProperty("Parts");
         if (!PartsProperty)
             return false;
 
-        const int32 OuterOffset =
-            static_cast<int32>(SDK::ReadPropertyOffset(
-                GetFromOffset<uint32>(
-                    CharacterPartsProperty,
-                    Offsets::Offset_Internal)));
-        const uint32 OuterSize = GetFromOffset<uint32>(
-            CharacterPartsProperty,
+        const int32 OuterOffset = static_cast<int32>(SDK::ReadPropertyOffset(GetFromOffset<uint32>(
+                    CharacterPartsProperty, Offsets::Offset_Internal)));
+        const uint32 OuterSize = GetFromOffset<uint32>(CharacterPartsProperty,
             Offsets::ElementSize);
-        const int32 PartsOffset =
-            static_cast<int32>(SDK::ReadPropertyOffset(
-                GetFromOffset<uint32>(
-                    PartsProperty,
-                    Offsets::Offset_Internal)));
-        const uint32 PartElementSize = GetFromOffset<uint32>(
-            PartsProperty, Offsets::ElementSize);
-        const int32 PartArrayDimension = GetFromOffset<int32>(
-            PartsProperty,
+        const int32 PartsOffset = static_cast<int32>(SDK::ReadPropertyOffset(GetFromOffset<uint32>(
+                    PartsProperty, Offsets::Offset_Internal)));
+        const uint32 PartElementSize = GetFromOffset<uint32>(PartsProperty, Offsets::ElementSize);
+        const int32 PartArrayDimension = GetFromOffset<int32>(PartsProperty,
             Offsets::ElementSize - sizeof(int32));
-        const int32 PlayerStateSize =
-            PlayerState->Class->GetPropertiesSize();
-        if (OuterOffset < 0 || PartsOffset < 0 ||
-            PartElementSize != sizeof(UObject*) ||
-            PartArrayDimension < GhostCharacterPartSlotCount ||
-            PartArrayDimension > 16 ||
-            OuterSize < static_cast<uint32>(PartsOffset) ||
-            static_cast<size_t>(PartElementSize) *
-                    PartArrayDimension >
-                static_cast<size_t>(OuterSize - PartsOffset) ||
-            PlayerStateSize <= OuterOffset ||
-            OuterSize > static_cast<uint32>(
+        const int32 PlayerStateSize = PlayerState->Class->GetPropertiesSize();
+        if (OuterOffset < 0 || PartsOffset < 0 || PartElementSize != sizeof(UObject*) ||
+            PartArrayDimension < GhostCharacterPartSlotCount || PartArrayDimension > 16 ||
+            OuterSize < static_cast<uint32>(PartsOffset) || static_cast<size_t>(PartElementSize) *
+                    PartArrayDimension > static_cast<size_t>(OuterSize - PartsOffset) ||
+            PlayerStateSize <= OuterOffset || OuterSize > static_cast<uint32>(
                 PlayerStateSize - OuterOffset))
         {
             return false;
         }
 
-        auto Parts = reinterpret_cast<UObject**>(
-            reinterpret_cast<uint8*>(PlayerState) +
+        auto Parts = reinterpret_cast<UObject**>(reinterpret_cast<uint8*>(PlayerState) +
             OuterOffset + PartsOffset);
-        if (!SDK::MemReadable(
-                Parts,
-                static_cast<size_t>(PartElementSize) *
-                    PartArrayDimension))
+        if (!SDK::MemReadable(Parts, static_cast<size_t>(PartElementSize) * PartArrayDimension))
         {
             return false;
         }
@@ -231,51 +177,38 @@ namespace
         return true;
     }
 
-    bool CaptureCurrentGhostCharacterParts(
-        AFortPlayerControllerAthena* PlayerController,
+    bool CaptureCurrentGhostCharacterParts(AFortPlayerControllerAthena* PlayerController,
         FGhostCharacterPartRestore& OutRestore)
     {
         OutRestore = {};
         if (!PlayerController)
             return false;
 
-        auto Pawn = PlayerController->MyFortPawn
-            ? PlayerController->MyFortPawn
-            : PlayerController->Pawn
-                ? PlayerController->Pawn
-                    ->Cast<AFortPlayerPawnAthena>()
+        auto Pawn = PlayerController->MyFortPawn ? PlayerController->MyFortPawn
+            : PlayerController->Pawn ? PlayerController->Pawn->Cast<AFortPlayerPawnAthena>()
                 : nullptr;
-        auto PlayerState = PlayerController->PlayerState
-            ? PlayerController->PlayerState
-                ->Cast<AFortPlayerStateAthena>()
-            : nullptr;
+        auto PlayerState = PlayerController->PlayerState ? PlayerController->PlayerState
+                ->Cast<AFortPlayerStateAthena>() : nullptr;
         if (!Pawn || !PlayerState)
             return false;
 
         UObject** PawnParts = nullptr;
         UObject** PlayerStateParts = nullptr;
         const wchar_t* IgnoredDirtyProperty = nullptr;
-        ResolveFixedCharacterPartArray(
-            Pawn, "CharacterParts", PawnParts);
-        ResolvePlayerStateCharacterPartArray(
-            PlayerState,
-            PlayerStateParts,
-            IgnoredDirtyProperty);
+        ResolveFixedCharacterPartArray(Pawn, "CharacterParts", PawnParts);
+        ResolvePlayerStateCharacterPartArray(PlayerState, PlayerStateParts, IgnoredDirtyProperty);
 
         int32 CapturedCount = 0;
         for (int32 PartType = 0;
             PartType < GhostCharacterPartSlotCount;
             PartType++)
         {
-            UObject* Part = PawnParts
-                ? PawnParts[PartType]
-                : nullptr;
+            UObject* Part = PawnParts ? PawnParts[PartType] : nullptr;
             if (!Part && PlayerStateParts)
                 Part = PlayerStateParts[PartType];
             if (!Part && PartType == 3)
             {
-                Part = const_cast<UObject*>(
-                    FindObject<UObject>(
+                Part = const_cast<UObject*>(FindObject<UObject>(
                         L"/Game/Characters/CharacterParts/Backpacks/"
                         L"NoBackpack.NoBackpack"));
             }
@@ -294,44 +227,27 @@ namespace
         return true;
     }
 
-    bool CaptureGhostCharacterPartRestore(
-        AFortPlayerControllerAthena* PlayerController,
-        const UFortItemDefinition* ItemDefinition,
-        FGhostCharacterPartRestore& OutRestore)
+    bool CaptureGhostCharacterPartRestore(AFortPlayerControllerAthena* PlayerController,
+        const UFortItemDefinition* ItemDefinition, FGhostCharacterPartRestore& OutRestore)
     {
         OutRestore = {};
-        if (!PlayerController ||
-            !UFortKismetLibrary::IsGhostModeItemDefinition(
-                ItemDefinition))
+        if (!PlayerController || !UFortKismetLibrary::IsGhostModeItemDefinition(ItemDefinition))
         {
             return false;
         }
 
-        auto Gadget = ItemDefinition
-            ->Cast<UFortGadgetItemDefinition>();
-        auto Pawn = PlayerController->MyFortPawn
-            ? PlayerController->MyFortPawn
-            : PlayerController->Pawn
-                ? PlayerController->Pawn
-                    ->Cast<AFortPlayerPawnAthena>()
+        auto Gadget = ItemDefinition->Cast<UFortGadgetItemDefinition>();
+        auto Pawn = PlayerController->MyFortPawn ? PlayerController->MyFortPawn
+            : PlayerController->Pawn ? PlayerController->Pawn->Cast<AFortPlayerPawnAthena>()
                 : nullptr;
-        auto PlayerState = PlayerController->PlayerState
-            ? PlayerController->PlayerState
-                ->Cast<AFortPlayerStateAthena>()
-            : nullptr;
+        auto PlayerState = PlayerController->PlayerState ? PlayerController->PlayerState
+                ->Cast<AFortPlayerStateAthena>() : nullptr;
 
-        auto PreGrantRestore =
-            GhostCharacterPartRestores.find(
-                PlayerController);
-        if (PreGrantRestore !=
-            GhostCharacterPartRestores.end())
+        auto PreGrantRestore = GhostCharacterPartRestores.find(PlayerController);
+        if (PreGrantRestore != GhostCharacterPartRestores.end())
         {
             OutRestore = PreGrantRestore->second;
-            GhostCharacterPartRestores.erase(
-                PreGrantRestore);
-            // Death cleanup can replace the pawn between grant and terminal
-            // removal. The cosmetic snapshot still belongs to this controller,
-            // but it must be applied to the currently possessed pawn/state.
+            GhostCharacterPartRestores.erase(PreGrantRestore);
             OutRestore.Pawn = Pawn;
             OutRestore.PlayerState = PlayerState;
             if (OutRestore.Pawn && OutRestore.PlayerState)
@@ -339,71 +255,44 @@ namespace
             OutRestore = {};
         }
 
-        if (!Gadget || !Gadget->HasCharacterParts() ||
-            !Pawn || !Pawn->Class || !PlayerState ||
-            Gadget->CharacterParts.Num() <= 0 ||
-            Gadget->CharacterParts.Num() >
-                GhostCharacterPartSlotCount ||
-            Gadget->CharacterParts.Max() <
-                Gadget->CharacterParts.Num() ||
-            !SDK::MemReadable(
-                Gadget->CharacterParts.Data,
-                static_cast<size_t>(
-                    Gadget->CharacterParts.Num()) *
-                    sizeof(UObject*)) ||
+        if (!Gadget || !Gadget->HasCharacterParts() || !Pawn || !Pawn->Class || !PlayerState ||
+            Gadget->CharacterParts.Num() <= 0 || Gadget->CharacterParts.Num() >
+                GhostCharacterPartSlotCount || Gadget->CharacterParts.Max() <
+                Gadget->CharacterParts.Num() || !SDK::MemReadable(Gadget->CharacterParts.Data,
+                static_cast<size_t>(Gadget->CharacterParts.Num()) * sizeof(UObject*)) ||
             Offsets::ElementSize < sizeof(int32))
         {
             return false;
         }
 
-        auto PreviousPartsProperty =
-            Pawn->GetProperty("PreviousCharacterParts");
-        const size_t RequiredPropertyBytes =
-            static_cast<size_t>(max(
-                Offsets::Offset_Internal,
+        auto PreviousPartsProperty = Pawn->GetProperty("PreviousCharacterParts");
+        const size_t RequiredPropertyBytes = static_cast<size_t>(max(Offsets::Offset_Internal,
                 Offsets::ElementSize)) + sizeof(uint32);
-        if (!PreviousPartsProperty ||
-            !SDK::MemReadable(
-                PreviousPartsProperty,
+        if (!PreviousPartsProperty || !SDK::MemReadable(PreviousPartsProperty,
                 RequiredPropertyBytes))
         {
             return false;
         }
 
-        const int32 PreviousPartsOffset =
-            static_cast<int32>(SDK::ReadPropertyOffset(
-                GetFromOffset<uint32>(
-                    PreviousPartsProperty,
-                    Offsets::Offset_Internal)));
-        const uint32 PartElementSize =
-            GetFromOffset<uint32>(
-                PreviousPartsProperty,
+        const int32 PreviousPartsOffset = static_cast<int32>(SDK::ReadPropertyOffset(
+                GetFromOffset<uint32>(PreviousPartsProperty, Offsets::Offset_Internal)));
+        const uint32 PartElementSize = GetFromOffset<uint32>(PreviousPartsProperty,
                 Offsets::ElementSize);
-        const int32 PartArrayDimension =
-            GetFromOffset<int32>(
-                PreviousPartsProperty,
+        const int32 PartArrayDimension = GetFromOffset<int32>(PreviousPartsProperty,
                 Offsets::ElementSize - sizeof(int32));
-        const int32 PawnPropertiesSize =
-            Pawn->Class->GetPropertiesSize();
-        if (PreviousPartsOffset < 0 ||
-            PartElementSize != sizeof(UObject*) ||
-            PartArrayDimension < GhostCharacterPartSlotCount ||
-            PartArrayDimension > 16 ||
-            PawnPropertiesSize <= PreviousPartsOffset ||
-            static_cast<size_t>(PartElementSize) *
-                    PartArrayDimension >
-                static_cast<size_t>(PawnPropertiesSize -
+        const int32 PawnPropertiesSize = Pawn->Class->GetPropertiesSize();
+        if (PreviousPartsOffset < 0 || PartElementSize != sizeof(UObject*) ||
+            PartArrayDimension < GhostCharacterPartSlotCount || PartArrayDimension > 16 ||
+            PawnPropertiesSize <= PreviousPartsOffset || static_cast<size_t>(PartElementSize) *
+                    PartArrayDimension > static_cast<size_t>(PawnPropertiesSize -
                     PreviousPartsOffset))
         {
             return false;
         }
 
-        auto PreviousParts = reinterpret_cast<UObject**>(
-            reinterpret_cast<uint8*>(Pawn) +
+        auto PreviousParts = reinterpret_cast<UObject**>(reinterpret_cast<uint8*>(Pawn) +
             PreviousPartsOffset);
-        if (!SDK::MemReadable(
-                PreviousParts,
-                static_cast<size_t>(PartElementSize) *
+        if (!SDK::MemReadable(PreviousParts, static_cast<size_t>(PartElementSize) *
                     PartArrayDimension))
         {
             return false;
@@ -417,23 +306,16 @@ namespace
             if (!GadgetPart || !GadgetPart->Class)
                 continue;
 
-            const int32 PartTypeOffset =
-                GadgetPart->GetOffset("CharacterPartType");
-            if (PartTypeOffset < 0 ||
-                PartTypeOffset >=
-                    GadgetPart->Class->GetPropertiesSize() ||
-                !SDK::MemReadable(
-                    reinterpret_cast<uint8*>(GadgetPart) +
-                        PartTypeOffset,
+            const int32 PartTypeOffset = GadgetPart->GetOffset("CharacterPartType");
+            if (PartTypeOffset < 0 || PartTypeOffset >= GadgetPart->Class->GetPropertiesSize() ||
+                !SDK::MemReadable(reinterpret_cast<uint8*>(GadgetPart) + PartTypeOffset,
                     sizeof(uint8)))
             {
                 continue;
             }
 
-            const uint8 PartType = GetFromOffset<uint8>(
-                GadgetPart, PartTypeOffset);
-            if (PartType >= GhostCharacterPartSlotCount ||
-                OutRestore.bRestore[PartType])
+            const uint8 PartType = GetFromOffset<uint8>(GadgetPart, PartTypeOffset);
+            if (PartType >= GhostCharacterPartSlotCount || OutRestore.bRestore[PartType])
             {
                 continue;
             }
@@ -441,8 +323,7 @@ namespace
             UObject* PreviousPart = PreviousParts[PartType];
             if (!PreviousPart && PartType == 3)
             {
-                PreviousPart = const_cast<UObject*>(
-                    FindObject<UObject>(
+                PreviousPart = const_cast<UObject*>(FindObject<UObject>(
                         L"/Game/Characters/CharacterParts/Backpacks/"
                         L"NoBackpack.NoBackpack"));
             }
@@ -461,8 +342,7 @@ namespace
         return true;
     }
 
-    void ApplyGhostCharacterPartRestore(
-        const FGhostCharacterPartRestore& Restore)
+    void ApplyGhostCharacterPartRestore(const FGhostCharacterPartRestore& Restore)
     {
         if (!Restore.Pawn || !Restore.PlayerState)
             return;
@@ -471,38 +351,28 @@ namespace
         for (uint8 PartType = 0;
             PartType < GhostCharacterPartSlotCount; PartType++)
         {
-            if (!Restore.bRestore[PartType] ||
-                !Restore.Parts[PartType])
+            if (!Restore.bRestore[PartType] || !Restore.Parts[PartType])
             {
                 continue;
             }
-            Restore.Pawn->ServerChoosePart(
-                PartType, Restore.Parts[PartType]);
+            Restore.Pawn->ServerChoosePart(PartType, Restore.Parts[PartType]);
             ++RestoredCount;
         }
 
-        // ServerChoosePart is an RPC entry point and is not a reliable local
-        // state writer on the 6.21 dedicated server. Write the two fixed arrays
-        // that its native implementation normally synchronizes so the
-        // subsequent visualization pass cannot read the stale ghost parts back.
+        // ServerChoosePart is an RPC entry point, not a reliable local state writer on the 6.21 dedicated server.
         int32 PawnArrayWrites = 0;
         UObject** PawnParts = nullptr;
-        if (ResolveFixedCharacterPartArray(
-                Restore.Pawn,
-                "CharacterParts",
-                PawnParts))
+        if (ResolveFixedCharacterPartArray(Restore.Pawn, "CharacterParts", PawnParts))
         {
             for (int32 PartType = 0;
                 PartType < GhostCharacterPartSlotCount;
                 PartType++)
             {
-                if (!Restore.bRestore[PartType] ||
-                    !Restore.Parts[PartType])
+                if (!Restore.bRestore[PartType] || !Restore.Parts[PartType])
                 {
                     continue;
                 }
-                PawnParts[PartType] =
-                    Restore.Parts[PartType];
+                PawnParts[PartType] = Restore.Parts[PartType];
                 ++PawnArrayWrites;
             }
         }
@@ -510,106 +380,75 @@ namespace
         int32 PlayerStateArrayWrites = 0;
         UObject** PlayerStateParts = nullptr;
         const wchar_t* DirtyProperty = nullptr;
-        if (ResolvePlayerStateCharacterPartArray(
-                Restore.PlayerState,
-                PlayerStateParts,
+        if (ResolvePlayerStateCharacterPartArray(Restore.PlayerState, PlayerStateParts,
                 DirtyProperty))
         {
             for (int32 PartType = 0;
                 PartType < GhostCharacterPartSlotCount;
                 PartType++)
             {
-                if (!Restore.bRestore[PartType] ||
-                    !Restore.Parts[PartType])
+                if (!Restore.bRestore[PartType] || !Restore.Parts[PartType])
                 {
                     continue;
                 }
-                PlayerStateParts[PartType] =
-                    Restore.Parts[PartType];
+                PlayerStateParts[PartType] = Restore.Parts[PartType];
                 ++PlayerStateArrayWrites;
             }
             if (DirtyProperty)
             {
-                VersionFeatureAdapter::
-                    MarkReplicatedPropertyDirty(
-                        Restore.PlayerState,
+                VersionFeatureAdapter::MarkReplicatedPropertyDirty(Restore.PlayerState,
                         DirtyProperty);
             }
         }
 
-        if (auto OnRepCharacterParts =
-                Restore.PlayerState->GetFunction(
-                    "OnRep_CharacterParts"))
+        if (auto OnRepCharacterParts = Restore.PlayerState->GetFunction("OnRep_CharacterParts"))
         {
-            Restore.PlayerState->ProcessEvent(
-                OnRepCharacterParts, nullptr);
+            Restore.PlayerState->ProcessEvent(OnRepCharacterParts, nullptr);
         }
-        if (auto PartsReinitialized =
-                Restore.Pawn->GetFunction(
-                    "OnCharacterPartsReinitialized"))
+        if (auto PartsReinitialized = Restore.Pawn->GetFunction("OnCharacterPartsReinitialized"))
         {
-            Restore.Pawn->ProcessEvent(
-                PartsReinitialized, nullptr);
+            Restore.Pawn->ProcessEvent(PartsReinitialized, nullptr);
         }
-        if (auto KismetDefault =
-                UFortKismetLibrary::GetDefaultObj())
+        if (auto KismetDefault = UFortKismetLibrary::GetDefaultObj())
         {
-            if (KismetDefault->GetFunction(
-                    "UpdatePlayerCustomCharacterPartsVisualization"))
+            if (KismetDefault->GetFunction("UpdatePlayerCustomCharacterPartsVisualization"))
             {
-                UFortKismetLibrary::
-                    UpdatePlayerCustomCharacterPartsVisualization(
+                UFortKismetLibrary::UpdatePlayerCustomCharacterPartsVisualization(
                         Restore.PlayerState);
             }
         }
         Restore.PlayerState->ForceNetUpdate();
         Restore.Pawn->ForceNetUpdate();
-        SDK::DbgLog(
-            "[GhostMode] restored pre-gadget character parts "
+        SDK::DbgLog("[GhostMode] restored pre-gadget character parts "
             "pawn=%p playerState=%p selected=%d "
-            "pawnWrites=%d playerStateWrites=%d\n",
-            static_cast<void*>(Restore.Pawn),
-            static_cast<void*>(Restore.PlayerState),
-            RestoredCount,
-            PawnArrayWrites,
+            "pawnWrites=%d playerStateWrites=%d\n", static_cast<void*>(Restore.Pawn),
+            static_cast<void*>(Restore.PlayerState), RestoredCount, PawnArrayWrites,
             PlayerStateArrayWrites);
     }
 
-    void RemoveGhostGadgetAbilitySetFallback(
-        AFortPlayerControllerAthena* PlayerController,
+    void RemoveGhostGadgetAbilitySetFallback(AFortPlayerControllerAthena* PlayerController,
         const UFortItemDefinition* ItemDefinition)
     {
-        if (!PlayerController ||
-            !UFortKismetLibrary::IsGhostModeItemDefinition(
-                ItemDefinition) ||
+        if (!PlayerController || !UFortKismetLibrary::IsGhostModeItemDefinition(ItemDefinition) ||
             !PlayerController->PlayerState)
         {
             return;
         }
 
-        auto Gadget = ItemDefinition
-            ->Cast<UFortGadgetItemDefinition>();
-        auto PlayerState = PlayerController->PlayerState
-            ->Cast<AFortPlayerStateAthena>();
-        auto AbilitySystemComponent =
-            PlayerState
-                ? PlayerState->AbilitySystemComponent
-                : nullptr;
-        const UFortAbilitySet* AbilitySet =
-            Gadget && Gadget->HasAbilitySet()
-                ? Gadget->AbilitySet.Get()
-                : nullptr;
+        auto Gadget = ItemDefinition->Cast<UFortGadgetItemDefinition>();
+        auto PlayerState = PlayerController->PlayerState->Cast<AFortPlayerStateAthena>();
+        auto AbilitySystemComponent = PlayerState ? PlayerState->AbilitySystemComponent : nullptr;
+        const UFortAbilitySet* AbilitySet = Gadget && Gadget->HasAbilitySet()
+                ? Gadget->AbilitySet.Get() : nullptr;
         if (!AbilitySystemComponent || !AbilitySet)
             return;
 
         std::vector<FGameplayAbilitySpecHandle> AbilitiesToRemove;
-        auto& AbilitySpecs =
-            AbilitySystemComponent->ActivatableAbilities.Items;
+        auto& AbilitySpecs = AbilitySystemComponent->ActivatableAbilities.Items;
         for (int32 SpecIndex = 0;
             SpecIndex < AbilitySpecs.Num(); SpecIndex++)
         {
-            auto& Spec = AbilitySpecs.Get(
-                SpecIndex, FGameplayAbilitySpec::Size());
+            auto& Spec = AbilitySpecs.Get(SpecIndex, FGameplayAbilitySpec::Size());
             if (!Spec.Ability)
                 continue;
 
@@ -618,11 +457,8 @@ namespace
                 AbilityIndex < AbilitySet->GameplayAbilities.Num();
                 AbilityIndex++)
             {
-                auto AbilityClass =
-                    AbilitySet->GameplayAbilities[AbilityIndex]
-                        .Get();
-                if (AbilityClass &&
-                    Spec.Ability->Class == AbilityClass)
+                auto AbilityClass = AbilitySet->GameplayAbilities[AbilityIndex].Get();
+                if (AbilityClass && Spec.Ability->Class == AbilityClass)
                 {
                     bFromGhostSet = true;
                     break;
@@ -634,26 +470,16 @@ namespace
             }
         }
 
-        std::vector<FActiveGameplayEffectHandle>
-            EffectHandlesToRemove;
+        std::vector<FActiveGameplayEffectHandle> EffectHandlesToRemove;
         std::vector<UClass*> EffectClassesToRemove;
         int32 IndirectSpookyEffects = 0;
-        // GA_SpookyMist_PassiveSetup applies its presentation effects at
-        // runtime and keeps the looping one in its own LoopingGC handle. Those
-        // effects are not necessarily present in the gadget AbilitySet's
-        // GrantedGameplayEffects array, so matching only that array leaves
-        // GCN_Loop_SpookyMist alive on the owning client. Its OnRemoval event
-        // is what restores the pawn materials and stops the purple loop FX.
-        // Include the exact Spooky Mist effect family so removing the active
-        // effect follows GAS's normal replicated gameplay-cue teardown.
         {
             auto& ActiveEffects = AbilitySystemComponent
                 ->ActiveGameplayEffects.GameplayEffects_Internal;
             for (int32 EffectIndex = 0;
                 EffectIndex < ActiveEffects.Num(); EffectIndex++)
             {
-                auto& ActiveEffect = ActiveEffects.Get(
-                    EffectIndex, FActiveGameplayEffect::Size());
+                auto& ActiveEffect = ActiveEffects.Get(EffectIndex, FActiveGameplayEffect::Size());
                 if (!ActiveEffect.Spec.Def)
                     continue;
 
@@ -661,20 +487,13 @@ namespace
                 if (AbilitySet->HasGrantedGameplayEffects())
                 {
                     for (int32 GrantedIndex = 0;
-                        GrantedIndex <
-                            AbilitySet->GrantedGameplayEffects.Num();
+                        GrantedIndex <AbilitySet->GrantedGameplayEffects.Num();
                         GrantedIndex++)
                     {
-                        auto& GrantedEffect =
-                            AbilitySet->GrantedGameplayEffects.Get(
-                                GrantedIndex,
-                                FGameplayEffectApplicationInfoHard::
-                                    Size());
-                        auto EffectClass =
-                            GrantedEffect.GameplayEffect.Get();
-                        if (EffectClass &&
-                            ActiveEffect.Spec.Def->Class ==
-                                EffectClass)
+                        auto& GrantedEffect = AbilitySet->GrantedGameplayEffects.Get(GrantedIndex,
+                                FGameplayEffectApplicationInfoHard::Size());
+                        auto EffectClass = GrantedEffect.GameplayEffect.Get();
+                        if (EffectClass && ActiveEffect.Spec.Def->Class == EffectClass)
                         {
                             bFromGhostSet = true;
                             break;
@@ -685,21 +504,16 @@ namespace
                 bool bIndirectSpookyEffect = false;
                 if (ActiveEffect.Spec.Def->Class)
                 {
-                    const auto EffectClassName =
-                        ActiveEffect.Spec.Def->Class->Name.ToWString();
+                    const auto EffectClassName = ActiveEffect.Spec.Def->Class->Name.ToWString();
                     static const wchar_t* const
                         GhostEffectClassNames[] =
                     {
-                        L"GE_CBGA_SpookyMist_C",
-                        L"GE_SpookyMist_Equipped_C",
-                        L"GE_SpookyMist_FallDamageImmune_C",
-                        L"GE_SpookyMist_Speed_C",
-                        L"GE_SpookyMist_GC_LoopingOnPlayer_C",
-                        L"GE_SpookyMist_GC_Trail_C",
+                        L"GE_CBGA_SpookyMist_C", L"GE_SpookyMist_Equipped_C",
+                        L"GE_SpookyMist_FallDamageImmune_C", L"GE_SpookyMist_Speed_C",
+                        L"GE_SpookyMist_GC_LoopingOnPlayer_C", L"GE_SpookyMist_GC_Trail_C",
                         L"GE_SpookyMist_GC_Wobble_C"
                     };
-                    for (const auto KnownClassName :
-                        GhostEffectClassNames)
+                    for (const auto KnownClassName : GhostEffectClassNames)
                     {
                         if (EffectClassName == KnownClassName)
                         {
@@ -712,27 +526,21 @@ namespace
                 if (!bFromGhostSet && !bIndirectSpookyEffect)
                     continue;
 
-                auto Handle =
-                    *reinterpret_cast<FActiveGameplayEffectHandle*>(
-                        reinterpret_cast<uint8*>(&ActiveEffect) +
-                        0xC);
+                auto Handle = *reinterpret_cast<FActiveGameplayEffectHandle*>(
+                        reinterpret_cast<uint8*>(&ActiveEffect) + 0xC);
                 if (Handle.Handle <= 0)
                     continue;
 
                 EffectHandlesToRemove.push_back(Handle);
-                EffectClassesToRemove.push_back(
-                    ActiveEffect.Spec.Def->Class);
-                if (bIndirectSpookyEffect && !bFromGhostSet)
-                    ++IndirectSpookyEffects;
+                EffectClassesToRemove.push_back(ActiveEffect.Spec.Def->Class);
+                if (bIndirectSpookyEffect && !bFromGhostSet) ++IndirectSpookyEffects;
             }
         }
 
         int32 RemovedEffects = 0;
         int32 SourceEffectFallbacks = 0;
-        auto RemoveActiveEffect = AbilitySystemComponent
-            ->GetFunction("RemoveActiveGameplayEffect");
-        auto RemoveBySourceEffect = AbilitySystemComponent
-            ->GetFunction(
+        auto RemoveActiveEffect = AbilitySystemComponent->GetFunction("RemoveActiveGameplayEffect");
+        auto RemoveBySourceEffect = AbilitySystemComponent->GetFunction(
                 "RemoveActiveGameplayEffectBySourceEffect");
         std::unordered_set<UClass*> SourceFallbackClasses;
         for (size_t EffectIndex = 0;
@@ -742,10 +550,8 @@ namespace
             bool bRemoved = false;
             if (RemoveActiveEffect)
             {
-                bRemoved = AbilitySystemComponent->Call<bool>(
-                    RemoveActiveEffect,
-                    EffectHandlesToRemove[EffectIndex],
-                    -1);
+                bRemoved = AbilitySystemComponent->Call<bool>(RemoveActiveEffect,
+                    EffectHandlesToRemove[EffectIndex], -1);
             }
             if (bRemoved)
             {
@@ -753,41 +559,29 @@ namespace
                 continue;
             }
 
-            if (EffectIndex < EffectClassesToRemove.size() &&
-                EffectClassesToRemove[EffectIndex])
+            if (EffectIndex < EffectClassesToRemove.size() && EffectClassesToRemove[EffectIndex])
             {
-                SourceFallbackClasses.insert(
-                    EffectClassesToRemove[EffectIndex]);
+                SourceFallbackClasses.insert(EffectClassesToRemove[EffectIndex]);
             }
         }
         if (RemoveBySourceEffect)
         {
             for (auto EffectClass : SourceFallbackClasses)
             {
-                AbilitySystemComponent->Call<void>(
-                    RemoveBySourceEffect,
-                    EffectClass,
-                    static_cast<UAbilitySystemComponent*>(
-                        nullptr),
-                    -1);
+                AbilitySystemComponent->Call<void>(RemoveBySourceEffect, EffectClass,
+                    static_cast<UAbilitySystemComponent*>(nullptr), -1);
                 ++SourceEffectFallbacks;
             }
         }
 
-        // Preserve the dynamically applied effect handles before clearing the
-        // abilities. Raw ClearAbility can discard the passive ability instance
-        // (and its LoopingGC member) without giving this compatibility path a
-        // second opportunity to identify the effect that owns the client cue.
         int32 RemovedAbilities = 0;
         if (ClearAbility_)
         {
-            auto ClearAbility =
-                (void(*)(UAbilitySystemComponent*,
+            auto ClearAbility = (void(*)(UAbilitySystemComponent*,
                     FGameplayAbilitySpecHandle&))ClearAbility_;
             for (auto& AbilityHandle : AbilitiesToRemove)
             {
-                ClearAbility(
-                    AbilitySystemComponent, AbilityHandle);
+                ClearAbility(AbilitySystemComponent, AbilityHandle);
                 ++RemovedAbilities;
             }
         }
@@ -798,41 +592,31 @@ namespace
             PlayerController->ForceNetUpdate();
         }
 
-        if (!AbilitiesToRemove.empty() ||
-            !EffectHandlesToRemove.empty())
+        if (!AbilitiesToRemove.empty() || !EffectHandlesToRemove.empty())
         {
-            SDK::DbgLog(
-                "[GhostMode] removed residual gadget ability set "
+            SDK::DbgLog("[GhostMode] removed residual gadget ability set "
                 "controller=%p abilities=%d/%zu effects=%d/%zu "
-                "sourceFallbacks=%d indirectSpooky=%d\n",
-                static_cast<void*>(PlayerController),
+                "sourceFallbacks=%d indirectSpooky=%d\n", static_cast<void*>(PlayerController),
                 RemovedAbilities, AbilitiesToRemove.size(),
-                RemovedEffects, EffectHandlesToRemove.size(),
-                SourceEffectFallbacks,
+                RemovedEffects, EffectHandlesToRemove.size(), SourceEffectFallbacks,
                 IndirectSpookyEffects);
         }
     }
 
-    bool ClearPawnGhostModeFlag(
-        AFortPlayerPawnAthena* Pawn)
+    bool ClearPawnGhostModeFlag(AFortPlayerPawnAthena* Pawn)
     {
         if (!Pawn || !Pawn->Class)
             return false;
 
-        auto Property = Pawn->GetProperty(
-            "GhostMode", 0x20000);
+        auto Property = Pawn->GetProperty("GhostMode", 0x20000);
         if (!Property)
             return false;
 
-        const int32 Offset = static_cast<int32>(
-            SDK::ReadPropertyOffset(GetFromOffset<uint32>(
+        const int32 Offset = static_cast<int32>(SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal)));
         const uint8 FieldMask = Property->GetFieldMask();
-        if (Offset < 0 || FieldMask == 0 ||
-            Offset >= Pawn->Class->GetPropertiesSize() ||
-            !SDK::MemReadable(
-                reinterpret_cast<uint8*>(Pawn) + Offset,
-                sizeof(uint8)))
+        if (Offset < 0 || FieldMask == 0 || Offset >= Pawn->Class->GetPropertiesSize() ||
+            !SDK::MemReadable(reinterpret_cast<uint8*>(Pawn) + Offset, sizeof(uint8)))
         {
             return false;
         }
@@ -843,22 +627,16 @@ namespace
         return bWasSet;
     }
 
-    bool ForceClearControllerGhostModeState(
-        AFortPlayerControllerAthena* PlayerController)
+    bool ForceClearControllerGhostModeState(AFortPlayerControllerAthena* PlayerController)
     {
         if (!PlayerController || !PlayerController->Class)
             return false;
 
-        auto RepDataStruct = FindObject<UStruct>(
-            L"/Script/FortniteGame.GhostModeRepData");
-        auto RepDataProperty = PlayerController->GetProperty(
-            "GhostModeRepData");
-        auto InGhostModeProperty = RepDataStruct
-            ? RepDataStruct->GetProperty(
-                "bInGhostMode", 0x20000)
-            : nullptr;
-        if (!RepDataStruct || !RepDataProperty ||
-            !InGhostModeProperty)
+        auto RepDataStruct = FindObject<UStruct>(L"/Script/FortniteGame.GhostModeRepData");
+        auto RepDataProperty = PlayerController->GetProperty("GhostModeRepData");
+        auto InGhostModeProperty = RepDataStruct ? RepDataStruct->GetProperty(
+                "bInGhostMode", 0x20000) : nullptr;
+        if (!RepDataStruct || !RepDataProperty || !InGhostModeProperty)
         {
             return false;
         }
@@ -867,139 +645,96 @@ namespace
             SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 RepDataProperty, Offsets::Offset_Internal)));
         const int32 InGhostModeOffset = static_cast<int32>(
-            SDK::ReadPropertyOffset(GetFromOffset<uint32>(
-                InGhostModeProperty,
+            SDK::ReadPropertyOffset(GetFromOffset<uint32>(InGhostModeProperty,
                 Offsets::Offset_Internal)));
-        const int32 RepDataSize =
-            RepDataStruct->GetPropertiesSize();
-        const uint8 FieldMask =
-            InGhostModeProperty->GetFieldMask();
+        const int32 RepDataSize = RepDataStruct->GetPropertiesSize();
+        const uint8 FieldMask = InGhostModeProperty->GetFieldMask();
         if (RepDataOffset < 0 || InGhostModeOffset < 0 ||
             RepDataSize < static_cast<int32>(sizeof(uint8)) ||
-            RepDataSize > 0x40 || FieldMask == 0 ||
-            InGhostModeOffset >= RepDataSize ||
-            RepDataOffset >
-                PlayerController->Class->GetPropertiesSize() -
-                    RepDataSize)
+            RepDataSize > 0x40 || FieldMask == 0 || InGhostModeOffset >= RepDataSize ||
+            RepDataOffset > PlayerController->Class->GetPropertiesSize() - RepDataSize)
         {
             return false;
         }
 
-        auto RepData = reinterpret_cast<uint8*>(
-            PlayerController) + RepDataOffset;
-        if (!SDK::MemReadable(
-                RepData, static_cast<size_t>(RepDataSize)))
+        auto RepData = reinterpret_cast<uint8*>(PlayerController) + RepDataOffset;
+        if (!SDK::MemReadable(RepData, static_cast<size_t>(RepDataSize)))
         {
             return false;
         }
 
-        auto& InGhostMode =
-            *reinterpret_cast<uint8*>(
-                RepData + InGhostModeOffset);
-        const bool bWasSet =
-            (InGhostMode & FieldMask) != 0;
+        auto& InGhostMode = *reinterpret_cast<uint8*>(RepData + InGhostModeOffset);
+        const bool bWasSet = (InGhostMode & FieldMask) != 0;
         InGhostMode &= static_cast<uint8>(~FieldMask);
 
-        auto ItemDefinitionProperty =
-            RepDataStruct->GetProperty("GhostModeItemDef");
+        auto ItemDefinitionProperty = RepDataStruct->GetProperty("GhostModeItemDef");
         if (ItemDefinitionProperty)
         {
-            const int32 ItemDefinitionOffset =
-                static_cast<int32>(SDK::ReadPropertyOffset(
-                    GetFromOffset<uint32>(
-                        ItemDefinitionProperty,
-                        Offsets::Offset_Internal)));
-            const uint32 ItemDefinitionSize =
-                GetFromOffset<uint32>(
-                    ItemDefinitionProperty,
+            const int32 ItemDefinitionOffset = static_cast<int32>(SDK::ReadPropertyOffset(
+                    GetFromOffset<uint32>(ItemDefinitionProperty, Offsets::Offset_Internal)));
+            const uint32 ItemDefinitionSize = GetFromOffset<uint32>(ItemDefinitionProperty,
                     Offsets::ElementSize);
-            if (ItemDefinitionOffset >= 0 &&
-                ItemDefinitionSize == sizeof(UObject*) &&
-                ItemDefinitionOffset <=
-                    RepDataSize -
-                        static_cast<int32>(sizeof(UObject*)))
+            if (ItemDefinitionOffset >= 0 && ItemDefinitionSize == sizeof(UObject*) &&
+                ItemDefinitionOffset <= RepDataSize - static_cast<int32>(sizeof(UObject*)))
             {
-                *reinterpret_cast<UObject**>(
-                    RepData + ItemDefinitionOffset) = nullptr;
+                *reinterpret_cast<UObject**>(RepData + ItemDefinitionOffset) = nullptr;
             }
         }
 
-        if (auto OnRepGhostMode =
-                PlayerController->GetFunction(
-                    "OnRep_GhostModeRepData"))
+        if (auto OnRepGhostMode = PlayerController->GetFunction("OnRep_GhostModeRepData"))
         {
-            PlayerController->ProcessEvent(
-                OnRepGhostMode, nullptr);
+            PlayerController->ProcessEvent(OnRepGhostMode, nullptr);
         }
         PlayerController->ForceNetUpdate();
         return bWasSet;
     }
 
-    bool RefocusHarvestingToolAfterGhostMode(
-        AFortPlayerControllerAthena* PlayerController)
+    bool RefocusHarvestingToolAfterGhostMode(AFortPlayerControllerAthena* PlayerController)
     {
-        if (!PlayerController ||
-            !PlayerController->WorldInventory)
+        if (!PlayerController || !PlayerController->WorldInventory)
         {
             return false;
         }
 
-        auto Entry = PlayerController->WorldInventory
-            ->Inventory.ReplicatedEntries.Search(
+        auto Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search(
                 [](FFortItemEntry& Candidate)
                 {
-                    return Candidate.ItemDefinition &&
-                        Candidate.ItemDefinition->ItemType ==
+                    return Candidate.ItemDefinition && Candidate.ItemDefinition->ItemType ==
                             EFortItemType::GetWeaponHarvest();
-                },
-                FFortItemEntry::Size());
+                }, FFortItemEntry::Size());
         if (!Entry)
             return false;
 
         FGuid Guid = Entry->ItemGuid;
-        auto Pawn = PlayerController->MyFortPawn
-            ? PlayerController->MyFortPawn
-            : PlayerController->Pawn
-                ? PlayerController->Pawn
-                    ->Cast<AFortPlayerPawnAthena>()
+        auto Pawn = PlayerController->MyFortPawn ? PlayerController->MyFortPawn
+            : PlayerController->Pawn ? PlayerController->Pawn->Cast<AFortPlayerPawnAthena>()
                 : nullptr;
-        auto CurrentWeapon =
-            Pawn && Pawn->HasCurrentWeapon() && Pawn->CurrentWeapon
-                ? Pawn->CurrentWeapon->Cast<AFortWeapon>()
-                : nullptr;
+        auto CurrentWeapon = Pawn && Pawn->HasCurrentWeapon() && Pawn->CurrentWeapon
+                ? Pawn->CurrentWeapon->Cast<AFortWeapon>() : nullptr;
         if (CurrentWeapon && CurrentWeapon->HasItemEntryGuid())
         {
             if (CurrentWeapon->ItemEntryGuid == Guid)
                 return true;
 
             auto CurrentEntry = PlayerController->WorldInventory
-                ->Inventory.ReplicatedEntries.Search(
-                    [&](FFortItemEntry& Candidate)
+                ->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Candidate)
                     {
-                        return Candidate.ItemGuid ==
-                            CurrentWeapon->ItemEntryGuid;
-                    },
-                    FFortItemEntry::Size());
+                        return Candidate.ItemGuid == CurrentWeapon->ItemEntryGuid;
+                    }, FFortItemEntry::Size());
             if (CurrentEntry && CurrentEntry->ItemDefinition &&
-                !UFortKismetLibrary::IsGhostModeItemDefinition(
-                    CurrentEntry->ItemDefinition))
+                !UFortKismetLibrary::IsGhostModeItemDefinition(CurrentEntry->ItemDefinition))
             {
-                SDK::DbgLog(
-                    "[GhostMode] preserved selected weapon after exit "
-                    "controller=%p definition=%s\n",
-                    static_cast<void*>(PlayerController),
-                    CurrentEntry->ItemDefinition->Name
-                        .ToString().c_str());
+                SDK::DbgLog("[GhostMode] preserved selected weapon after exit "
+                    "controller=%p definition=%s\n", static_cast<void*>(PlayerController),
+                    CurrentEntry->ItemDefinition->Name.ToString().c_str());
                 return false;
             }
         }
 
         PlayerController->ClientEquipItem(Guid, true);
         PlayerController->ServerExecuteInventoryItem(Guid);
-        SDK::DbgLog(
-            "[GhostMode] retried harvesting-tool focus "
-            "controller=%p definition=%s\n",
-            static_cast<void*>(PlayerController),
+        SDK::DbgLog("[GhostMode] retried harvesting-tool focus "
+            "controller=%p definition=%s\n", static_cast<void*>(PlayerController),
             Entry->ItemDefinition->Name.ToString().c_str());
         return true;
     }
@@ -1010,96 +745,68 @@ namespace
         if (!AbilitySystemComponent)
             return nullptr;
 
-        AActor* OwnerActor =
-            AbilitySystemComponent->HasOwnerActor()
-                ? AbilitySystemComponent->OwnerActor
-                : nullptr;
+        AActor* OwnerActor = AbilitySystemComponent->HasOwnerActor()
+                ? AbilitySystemComponent->OwnerActor : nullptr;
         if (OwnerActor)
         {
-            if (auto Controller = OwnerActor
-                    ->Cast<AFortPlayerControllerAthena>())
+            if (auto Controller = OwnerActor->Cast<AFortPlayerControllerAthena>())
             {
                 return Controller;
             }
             if (OwnerActor->Owner)
             {
-                if (auto Controller = OwnerActor->Owner
-                        ->Cast<AFortPlayerControllerAthena>())
+                if (auto Controller = OwnerActor->Owner->Cast<AFortPlayerControllerAthena>())
                 {
                     return Controller;
                 }
             }
         }
 
-        auto Avatar =
-            AbilitySystemComponent->HasAvatarActor()
-                ? AbilitySystemComponent->AvatarActor
+        auto Avatar = AbilitySystemComponent->HasAvatarActor() ? AbilitySystemComponent->AvatarActor
                 : nullptr;
-        auto Pawn = Avatar
-            ? Avatar->Cast<AFortPlayerPawnAthena>()
-            : nullptr;
-        return Pawn && Pawn->Controller
-            ? Pawn->Controller
-                ->Cast<AFortPlayerControllerAthena>()
+        auto Pawn = Avatar ? Avatar->Cast<AFortPlayerPawnAthena>() : nullptr;
+        return Pawn && Pawn->Controller ? Pawn->Controller->Cast<AFortPlayerControllerAthena>()
             : nullptr;
     }
 
-    double ResolveGhostModeLifetimeSeconds(
-        const UFortItemDefinition* ItemDefinition)
+    double ResolveGhostModeLifetimeSeconds(const UFortItemDefinition* ItemDefinition)
     {
         constexpr double FallbackLifetimeSeconds = 45.0;
-        auto Gadget = ItemDefinition
-            ? ItemDefinition->Cast<UFortGadgetItemDefinition>()
-            : nullptr;
-        auto AbilitySet =
-            Gadget && Gadget->HasAbilitySet()
-                ? Gadget->AbilitySet.Get()
-                : nullptr;
+        auto Gadget = ItemDefinition ? ItemDefinition->Cast<UFortGadgetItemDefinition>() : nullptr;
+        auto AbilitySet = Gadget && Gadget->HasAbilitySet() ? Gadget->AbilitySet.Get() : nullptr;
         if (!AbilitySet || !AbilitySet->HasGameplayAbilities())
             return FallbackLifetimeSeconds;
 
         for (int32 Index = 0;
             Index < AbilitySet->GameplayAbilities.Num(); ++Index)
         {
-            auto AbilityClass =
-                AbilitySet->GameplayAbilities[Index].Get();
-            if (!AbilityClass ||
-                AbilityClass->Name.ToWString() !=
-                    L"GA_SpookyMist_PassiveSetup_C")
+            auto AbilityClass = AbilitySet->GameplayAbilities[Index].Get();
+            if (!AbilityClass || AbilityClass->Name.ToWString() != L"GA_SpookyMist_PassiveSetup_C")
             {
                 continue;
             }
 
             auto AbilityDefault = AbilityClass->GetDefaultObj();
-            auto DurationProperty = AbilityDefault
-                ? AbilityDefault->GetProperty("AbilityDuration")
+            auto DurationProperty = AbilityDefault ? AbilityDefault->GetProperty("AbilityDuration")
                 : nullptr;
-            if (!AbilityDefault || !AbilityDefault->Class ||
-                !DurationProperty)
+            if (!AbilityDefault || !AbilityDefault->Class || !DurationProperty)
                 break;
 
-            const int32 Offset = static_cast<int32>(
-                SDK::ReadPropertyOffset(GetFromOffset<uint32>(
-                    DurationProperty,
-                    Offsets::Offset_Internal)));
+            const int32 Offset = static_cast<int32>(SDK::ReadPropertyOffset(GetFromOffset<uint32>(
+                    DurationProperty, Offsets::Offset_Internal)));
             const uint32 ElementSize = GetFromOffset<uint32>(
                 DurationProperty, Offsets::ElementSize);
-            if (Offset < 0 ||
-                ElementSize < sizeof(FScalableFloat) ||
+            if (Offset < 0 || ElementSize < sizeof(FScalableFloat) ||
                 Offset > AbilityDefault->Class->GetPropertiesSize() -
-                    static_cast<int32>(sizeof(FScalableFloat)) ||
-                !SDK::MemReadable(
-                    reinterpret_cast<uint8*>(AbilityDefault) + Offset,
-                    sizeof(FScalableFloat)))
+                    static_cast<int32>(sizeof(FScalableFloat)) || !SDK::MemReadable(
+                    reinterpret_cast<uint8*>(AbilityDefault) + Offset, sizeof(FScalableFloat)))
             {
                 break;
             }
 
-            auto Duration = GetFromOffset<FScalableFloat>(
-                AbilityDefault, Offset);
+            auto Duration = GetFromOffset<FScalableFloat>(AbilityDefault, Offset);
             const float Evaluated = Duration.Evaluate(1.0f);
-            if (std::isfinite(Evaluated) &&
-                Evaluated >= 5.0f && Evaluated <= 120.0f)
+            if (std::isfinite(Evaluated) && Evaluated >= 5.0f && Evaluated <= 120.0f)
             {
                 return Evaluated;
             }
@@ -1108,87 +815,64 @@ namespace
         return FallbackLifetimeSeconds;
     }
 
-    auto FindTrackedGhostModeSession(
-        AFortPlayerControllerAthena* PlayerController)
+    auto FindTrackedGhostModeSession(AFortPlayerControllerAthena* PlayerController)
     {
-        return std::find_if(
-            TrackedGhostModeSessions.begin(),
-            TrackedGhostModeSessions.end(),
+        return std::find_if(TrackedGhostModeSessions.begin(), TrackedGhostModeSessions.end(),
             [&](const FTrackedGhostModeSession& Session)
             {
                 return Session.Owner.Get() == PlayerController;
             });
     }
 
-    bool RequestTrackedGhostModeExit(
-        AFortPlayerControllerAthena* PlayerController,
-        const char* Source,
-        double DelaySeconds = 0.05)
+    bool RequestTrackedGhostModeExit(AFortPlayerControllerAthena* PlayerController,
+        const char* Source, double DelaySeconds = 0.05)
     {
         if (!PlayerController)
             return false;
 
-        auto Session = FindTrackedGhostModeSession(
-            PlayerController);
+        auto Session = FindTrackedGhostModeSession(PlayerController);
         if (Session == TrackedGhostModeSessions.end())
             return false;
 
         auto World = UWorld::GetWorld();
-        const double Now = World
-            ? UGameplayStatics::GetTimeSeconds(World)
-            : 0.0;
-        const double RequestedTime =
-            Now + max(DelaySeconds, 0.0);
-        if (!Session->bExitRequested ||
-            RequestedTime < Session->EarliestExitCleanupTime)
+        const double Now = World ? UGameplayStatics::GetTimeSeconds(World) : 0.0;
+        const double RequestedTime = Now + max(DelaySeconds, 0.0);
+        if (!Session->bExitRequested || RequestedTime < Session->EarliestExitCleanupTime)
         {
             Session->bExitRequested = true;
             Session->EarliestExitCleanupTime = RequestedTime;
-            SDK::DbgLog(
-                "[GhostMode] observed authoritative exit signal "
-                "controller=%p source=%s cleanupAt=%.2f\n",
-                static_cast<void*>(PlayerController),
-                Source ? Source : "unknown",
-                RequestedTime);
+            SDK::DbgLog("[GhostMode] observed authoritative exit signal "
+                "controller=%p source=%s cleanupAt=%.2f\n", static_cast<void*>(PlayerController),
+                Source ? Source : "unknown", RequestedTime);
         }
         return true;
     }
 
-    void MarkTrackedGhostModeBackingRemoved(
-        AFortPlayerControllerAthena* PlayerController,
+    void MarkTrackedGhostModeBackingRemoved(AFortPlayerControllerAthena* PlayerController,
         const FGuid& ItemGuid)
     {
         if (!PlayerController)
             return;
 
-        auto Session = FindTrackedGhostModeSession(
-            PlayerController);
-        if (Session != TrackedGhostModeSessions.end() &&
-            Session->ItemGuid.A == ItemGuid.A &&
-            Session->ItemGuid.B == ItemGuid.B &&
-            Session->ItemGuid.C == ItemGuid.C &&
+        auto Session = FindTrackedGhostModeSession(PlayerController);
+        if (Session != TrackedGhostModeSessions.end() && Session->ItemGuid.A == ItemGuid.A &&
+            Session->ItemGuid.B == ItemGuid.B && Session->ItemGuid.C == ItemGuid.C &&
             Session->ItemGuid.D == ItemGuid.D)
         {
             Session->bBackingRemovalObserved = true;
         }
     }
 
-    bool ReadGhostExitFloat(
-        AFortPlayerPawnAthena* Pawn,
-        const char* PropertyName,
-        float& OutValue)
+    bool ReadGhostExitFloat(AFortPlayerPawnAthena* Pawn, const char* PropertyName, float& OutValue)
     {
         OutValue = 0.0f;
         if (!Pawn || !Pawn->Class || !PropertyName)
             return false;
 
         const int32 Offset = Pawn->GetOffset(PropertyName);
-        if (Offset < 0 ||
-            Offset > Pawn->Class->GetPropertiesSize() -
-                static_cast<int32>(sizeof(float)) ||
-            !SDK::MemReadable(
-                reinterpret_cast<uint8*>(Pawn) + Offset,
-                sizeof(float)))
+        if (Offset < 0 || Offset > Pawn->Class->GetPropertiesSize() -
+                static_cast<int32>(sizeof(float)) || !SDK::MemReadable(
+                reinterpret_cast<uint8*>(Pawn) + Offset, sizeof(float)))
         {
             return false;
         }
@@ -1200,128 +884,82 @@ namespace
         return true;
     }
 
-    bool IsControllerStillInGhostMode(
-        AFortPlayerControllerAthena* PlayerController)
+    bool IsControllerStillInGhostMode(AFortPlayerControllerAthena* PlayerController)
     {
         if (!PlayerController)
             return false;
-        auto IsInGhostMode = PlayerController->GetFunction(
-            "IsInGhostMode");
-        return IsInGhostMode &&
-            PlayerController->Call<bool>(IsInGhostMode);
+        auto IsInGhostMode = PlayerController->GetFunction("IsInGhostMode");
+        return IsInGhostMode && PlayerController->Call<bool>(IsInGhostMode);
     }
 
-    void QueueGhostModeTerminalCleanup(
-        AFortPlayerControllerAthena* PlayerController,
-        const UFortItemDefinition* ItemDefinition,
-        const FGhostCharacterPartRestore& CharacterParts,
+    void QueueGhostModeTerminalCleanup(AFortPlayerControllerAthena* PlayerController,
+        const UFortItemDefinition* ItemDefinition, const FGhostCharacterPartRestore& CharacterParts,
         bool bRestoreCharacterParts)
     {
-        if (!PlayerController ||
-            !UFortKismetLibrary::IsGhostModeItemDefinition(
-                ItemDefinition))
+        if (!PlayerController || !UFortKismetLibrary::IsGhostModeItemDefinition(ItemDefinition))
         {
             return;
         }
 
         auto World = UWorld::GetWorld();
-        const double Now = World
-            ? UGameplayStatics::GetTimeSeconds(World)
-            : 0.0;
+        const double Now = World ? UGameplayStatics::GetTimeSeconds(World) : 0.0;
         double EarliestFinalizeTime = Now + 0.75;
-        auto Pawn = PlayerController->MyFortPawn
-            ? PlayerController->MyFortPawn
-            : PlayerController->Pawn
-                ? PlayerController->Pawn
-                    ->Cast<AFortPlayerPawnAthena>()
+        auto Pawn = PlayerController->MyFortPawn ? PlayerController->MyFortPawn
+            : PlayerController->Pawn ? PlayerController->Pawn->Cast<AFortPlayerPawnAthena>()
                 : nullptr;
         float ExitStartTime = 0.0f;
         float ExitDuration = 0.0f;
-        if (ReadGhostExitFloat(
-                Pawn, "GhostModeExitDuration", ExitDuration) &&
+        if (ReadGhostExitFloat(Pawn, "GhostModeExitDuration", ExitDuration) &&
             ExitDuration > 0.0f && ExitDuration <= 5.0f)
         {
-            if (ReadGhostExitFloat(
-                    Pawn,
-                    "GhostModeExitStartTime",
-                    ExitStartTime) &&
-                ExitStartTime > 0.01f &&
-                std::abs(
-                    static_cast<double>(ExitStartTime) - Now) <=
-                    10.0)
+            if (ReadGhostExitFloat(Pawn, "GhostModeExitStartTime", ExitStartTime) &&
+                ExitStartTime > 0.01f && std::abs(static_cast<double>(ExitStartTime) - Now) <= 10.0)
             {
-                EarliestFinalizeTime = max(
-                    Now + 0.05,
-                    static_cast<double>(ExitStartTime) +
+                EarliestFinalizeTime = max(Now + 0.05, static_cast<double>(ExitStartTime) +
                         ExitDuration + 0.10);
             }
             else
             {
-                EarliestFinalizeTime =
-                    Now + ExitDuration + 0.10;
+                EarliestFinalizeTime = Now + ExitDuration + 0.10;
             }
         }
 
-        auto Existing = std::find_if(
-            PendingGhostModeCleanups.begin(),
-            PendingGhostModeCleanups.end(),
-            [&](const FPendingGhostModeCleanup& Pending)
+        auto Existing = std::find_if(PendingGhostModeCleanups.begin(),
+            PendingGhostModeCleanups.end(), [&](const FPendingGhostModeCleanup& Pending)
             {
                 return Pending.Owner.Get() == PlayerController;
             });
         FPendingGhostModeCleanup Pending{};
-        Pending.Owner =
-            TWeakObjectPtr<AFortPlayerControllerAthena>(
-                PlayerController);
-        Pending.ItemDefinition =
-            TWeakObjectPtr<UFortItemDefinition>(
-                const_cast<UFortItemDefinition*>(
-                    ItemDefinition));
+        Pending.Owner = TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
+        Pending.ItemDefinition = TWeakObjectPtr<UFortItemDefinition>(
+                const_cast<UFortItemDefinition*>(ItemDefinition));
         Pending.CharacterParts = CharacterParts;
-        Pending.bRestoreCharacterParts =
-            bRestoreCharacterParts;
-        Pending.EarliestFinalizeTime =
-            EarliestFinalizeTime;
-        Pending.RetryDeadline =
-            EarliestFinalizeTime + 0.50;
-        Pending.ForceFinalizeDeadline =
-            EarliestFinalizeTime + 2.0;
+        Pending.bRestoreCharacterParts = bRestoreCharacterParts;
+        Pending.EarliestFinalizeTime = EarliestFinalizeTime;
+        Pending.RetryDeadline = EarliestFinalizeTime + 0.50;
+        Pending.ForceFinalizeDeadline = EarliestFinalizeTime + 2.0;
         if (Existing != PendingGhostModeCleanups.end())
         {
-            // A tracker can observe the same terminal removal after the
-            // inventory callback has already queued it. Never replace a valid
-            // pre-grant snapshot with a later empty/stale capture.
-            Existing->EarliestFinalizeTime = max(
-                Existing->EarliestFinalizeTime,
+            Existing->EarliestFinalizeTime = max(Existing->EarliestFinalizeTime,
                 Pending.EarliestFinalizeTime);
-            Existing->RetryDeadline = max(
-                Existing->RetryDeadline,
-                Pending.RetryDeadline);
-            Existing->ForceFinalizeDeadline = max(
-                Existing->ForceFinalizeDeadline,
+            Existing->RetryDeadline = max(Existing->RetryDeadline, Pending.RetryDeadline);
+            Existing->ForceFinalizeDeadline = max(Existing->ForceFinalizeDeadline,
                 Pending.ForceFinalizeDeadline);
             if (!Existing->ItemDefinition.Get())
-                Existing->ItemDefinition =
-                    Pending.ItemDefinition;
-            if (!Existing->bRestoreCharacterParts &&
-                Pending.bRestoreCharacterParts)
+                Existing->ItemDefinition = Pending.ItemDefinition;
+            if (!Existing->bRestoreCharacterParts && Pending.bRestoreCharacterParts)
             {
-                Existing->CharacterParts =
-                    Pending.CharacterParts;
+                Existing->CharacterParts = Pending.CharacterParts;
                 Existing->bRestoreCharacterParts = true;
             }
         }
         else
             PendingGhostModeCleanups.push_back(Pending);
 
-        SDK::DbgLog(
-            "[GhostMode] queued post-transition cleanup "
+        SDK::DbgLog("[GhostMode] queued post-transition cleanup "
             "controller=%p earliest=%.2f duration=%.2f "
-            "restoreParts=%d\n",
-            static_cast<void*>(PlayerController),
-            EarliestFinalizeTime,
-            ExitDuration,
-            bRestoreCharacterParts ? 1 : 0);
+            "restoreParts=%d\n", static_cast<void*>(PlayerController), EarliestFinalizeTime,
+            ExitDuration, bRestoreCharacterParts ? 1 : 0);
     }
 
     void TickPendingGhostModeCleanups(double Now)
@@ -1333,8 +971,7 @@ namespace
             auto PlayerController = Pending.Owner.Get();
             if (!PlayerController)
             {
-                PendingGhostModeCleanups.erase(
-                    PendingGhostModeCleanups.begin() + Index);
+                PendingGhostModeCleanups.erase(PendingGhostModeCleanups.begin() + Index);
                 continue;
             }
 
@@ -1353,84 +990,54 @@ namespace
                     continue;
                 }
 
-                if (auto EndGhostMode =
-                        PlayerController->GetFunction(
-                            "EndGhostMode"))
+                if (auto EndGhostMode = PlayerController->GetFunction("EndGhostMode"))
                 {
                     PlayerController->Call<void>(EndGhostMode);
                     PlayerController->ForceNetUpdate();
                 }
                 ++Pending.NativeEndAttempts;
 
-                if (IsControllerStillInGhostMode(
-                        PlayerController) &&
-                    Now < Pending.ForceFinalizeDeadline &&
-                    Pending.NativeEndAttempts < 3)
+                if (IsControllerStillInGhostMode(PlayerController) &&
+                    Now < Pending.ForceFinalizeDeadline && Pending.NativeEndAttempts < 3)
                 {
                     Pending.RetryDeadline = Now + 0.50;
                     ++Index;
                     continue;
                 }
 
-                if (IsControllerStillInGhostMode(
-                        PlayerController))
+                if (IsControllerStillInGhostMode(PlayerController))
                 {
-                    const bool bCleared =
-                        ForceClearControllerGhostModeState(
-                            PlayerController);
+                    const bool bCleared = ForceClearControllerGhostModeState(PlayerController);
                     bControllerStateForceAttempted = true;
-                    SDK::DbgLog(
-                        "[GhostMode] forced stale controller exit "
+                    SDK::DbgLog("[GhostMode] forced stale controller exit "
                         "controller=%p attempts=%d cleared=%d\n",
-                        static_cast<void*>(PlayerController),
-                        Pending.NativeEndAttempts,
+                        static_cast<void*>(PlayerController), Pending.NativeEndAttempts,
                         bCleared ? 1 : 0);
                 }
             }
 
-            if (Pending.FinalizationPass == 0 &&
-                !bControllerStateForceAttempted)
+            if (Pending.FinalizationPass == 0 && !bControllerStateForceAttempted)
             {
-                const bool bCleared =
-                    ForceClearControllerGhostModeState(
-                        PlayerController);
-                SDK::DbgLog(
-                    "[GhostMode] normalized controller exit state "
-                    "controller=%p cleared=%d\n",
-                    static_cast<void*>(PlayerController),
+                const bool bCleared = ForceClearControllerGhostModeState(PlayerController);
+                SDK::DbgLog("[GhostMode] normalized controller exit state "
+                    "controller=%p cleared=%d\n", static_cast<void*>(PlayerController),
                     bCleared ? 1 : 0);
             }
 
-            auto ExitPawn = PlayerController->MyFortPawn
-                ? PlayerController->MyFortPawn
-                : PlayerController->Pawn
-                    ? PlayerController->Pawn
-                        ->Cast<AFortPlayerPawnAthena>()
+            auto ExitPawn = PlayerController->MyFortPawn ? PlayerController->MyFortPawn
+                : PlayerController->Pawn ? PlayerController->Pawn->Cast<AFortPlayerPawnAthena>()
                     : nullptr;
-            auto ExitPlayerState =
-                PlayerController->PlayerState
-                    ? PlayerController->PlayerState
-                        ->Cast<AFortPlayerStateAthena>()
-                    : nullptr;
-            const bool bPawnIsDying =
-                ExitPawn && ExitPawn->HasbIsDying() &&
-                ExitPawn->bIsDying;
-            if (Pending.bRestoreCharacterParts &&
-                (!ExitPawn || !ExitPlayerState || bPawnIsDying))
+            auto ExitPlayerState = PlayerController->PlayerState ? PlayerController->PlayerState
+                        ->Cast<AFortPlayerStateAthena>() : nullptr;
+            const bool bPawnIsDying = ExitPawn && ExitPawn->HasbIsDying() && ExitPawn->bIsDying;
+            if (Pending.bRestoreCharacterParts && (!ExitPawn || !ExitPlayerState || bPawnIsDying))
             {
-                // Death removes the backing item before RestartPlayer has
-                // supplied its replacement pawn. Keep the pre-ghost snapshot
-                // alive across that gap; finalizing here would silently throw
-                // it away and the new pawn would inherit the spooky body.
                 if (!Pending.bLoggedWaitingForPawn)
                 {
-                    SDK::DbgLog(
-                        "[GhostMode] waiting for replacement pawn before "
+                    SDK::DbgLog("[GhostMode] waiting for replacement pawn before "
                         "visual restore controller=%p pawn=%p state=%p "
-                        "dying=%d\n",
-                        static_cast<void*>(PlayerController),
-                        static_cast<void*>(ExitPawn),
-                        static_cast<void*>(ExitPlayerState),
+                        "dying=%d\n", static_cast<void*>(PlayerController),
+                        static_cast<void*>(ExitPawn), static_cast<void*>(ExitPlayerState),
                         bPawnIsDying ? 1 : 0);
                     Pending.bLoggedWaitingForPawn = true;
                 }
@@ -1438,47 +1045,30 @@ namespace
                 continue;
             }
 
-            // EndGhostMode starts a timed pawn-side exit on 6.21. The stock
-            // completion timer is client-authored and is not dependable on a
-            // stripped dedicated server, so close that transition after its
-            // reflected duration before publishing the original parts. This
-            // also clears the pawn BP GhostMode flag/cues that can otherwise
-            // reapply CP_Body_SpookyMist after the part replication below.
             if (ExitPawn)
             {
                 if (Pending.FinalizationPass == 0)
                 {
-                    if (auto EndGhostModeExit =
-                            ExitPawn->GetFunction(
-                                "EndGhostModeExit"))
+                    if (auto EndGhostModeExit = ExitPawn->GetFunction("EndGhostModeExit"))
                     {
-                        ExitPawn->ProcessEvent(
-                            EndGhostModeExit, nullptr);
+                        ExitPawn->ProcessEvent(EndGhostModeExit, nullptr);
                     }
                 }
 
-                // PlayerPawn_Athena_Generic keeps a separate Blueprint bit
-                // that drives the CP_Body_SpookyMist presentation. The
-                // stripped dedicated-server path does not reliably clear it,
-                // even after EndGhostModeExit. Clear only its reflected bit;
-                // it can share a byte with unrelated pawn flags.
+                // PlayerPawn_Athena_Generic keeps a separate Blueprint bit for CP_Body_SpookyMist, and it can share a byte with other flags.
                 if (ClearPawnGhostModeFlag(ExitPawn))
                 {
-                    SDK::DbgLog(
-                        "[GhostMode] cleared pawn presentation flag "
-                        "controller=%p pawn=%p\n",
-                        static_cast<void*>(PlayerController),
+                    SDK::DbgLog("[GhostMode] cleared pawn presentation flag "
+                        "controller=%p pawn=%p\n", static_cast<void*>(PlayerController),
                         static_cast<void*>(ExitPawn));
                 }
                 ExitPawn->ForceNetUpdate();
             }
 
-            auto ItemDefinition =
-                Pending.ItemDefinition.Get();
+            auto ItemDefinition = Pending.ItemDefinition.Get();
             if (ItemDefinition)
             {
-                RemoveGhostGadgetAbilitySetFallback(
-                    PlayerController, ItemDefinition);
+                RemoveGhostGadgetAbilitySetFallback(PlayerController, ItemDefinition);
             }
 
             if (Pending.bRestoreCharacterParts)
@@ -1492,40 +1082,29 @@ namespace
             if (!Pending.bHarvestingToolRefocusAttempted)
             {
                 Pending.bHarvestingToolRefocusAttempted = true;
-                RefocusHarvestingToolAfterGhostMode(
-                    PlayerController);
+                RefocusHarvestingToolAfterGhostMode(PlayerController);
             }
 
-            SDK::DbgLog(
-                "[GhostMode] finalized post-transition cleanup "
-                "controller=%p pass=%d\n",
-                static_cast<void*>(PlayerController),
+            SDK::DbgLog("[GhostMode] finalized post-transition cleanup "
+                "controller=%p pass=%d\n", static_cast<void*>(PlayerController),
                 Pending.FinalizationPass);
 
             static constexpr double ReassertionDelays[] =
             {
-                0.25,
-                0.75,
-                1.50
+                0.25, 0.75, 1.50
             };
-            if (Pending.FinalizationPass <
-                static_cast<int32>(
-                    std::size(ReassertionDelays)))
+            if (Pending.FinalizationPass <static_cast<int32>(std::size(ReassertionDelays)))
             {
-                const double Delay = ReassertionDelays[
-                    Pending.FinalizationPass];
+                const double Delay = ReassertionDelays[Pending.FinalizationPass];
                 ++Pending.FinalizationPass;
                 Pending.EarliestFinalizeTime = Now + Delay;
-                Pending.RetryDeadline =
-                    Pending.EarliestFinalizeTime;
-                Pending.ForceFinalizeDeadline = max(
-                    Pending.ForceFinalizeDeadline,
+                Pending.RetryDeadline = Pending.EarliestFinalizeTime;
+                Pending.ForceFinalizeDeadline = max(Pending.ForceFinalizeDeadline,
                     Pending.EarliestFinalizeTime + 1.0);
                 ++Index;
                 continue;
             }
-            PendingGhostModeCleanups.erase(
-                PendingGhostModeCleanups.begin() + Index);
+            PendingGhostModeCleanups.erase(PendingGhostModeCleanups.begin() + Index);
         }
     }
 
@@ -1556,51 +1135,33 @@ namespace
 
     std::vector<FRegeneratingInventoryItem> RegeneratingInventoryItems;
     std::vector<FRechargingWeaponAmmo> RechargingWeaponAmmo;
-    std::unordered_map<
-        AFortPlayerControllerAthena*,
-        std::vector<FGuid>>
+    std::unordered_map<AFortPlayerControllerAthena*, std::vector<FGuid>>
         NativeDeathInventoryRetention;
-    std::unordered_map<
-        AFortPlayerControllerAthena*,
-        FGuid>
-        PendingCarmineFocus;
+    std::unordered_map<AFortPlayerControllerAthena*, FGuid> PendingCarmineFocus;
 
-    // Five rechargeable quickbar entries for every player in a full BR lobby
-    // still fit without silently dropping the last players' items.
     constexpr size_t MaxTrackedRechargingWeapons = 512;
     constexpr double NativeRechargeGraceSeconds = 0.10;
 
-    bool IsExact1040CarmineGadget(
-        const UFortItemDefinition* Definition)
+    bool IsExact1040CarmineGadget(const UFortItemDefinition* Definition)
     {
-        return VersionInfo.FortniteVersion == 10.40 &&
-            Definition &&
-            (Definition->Name.ToWString() ==
-                 L"AGID_CarminePack" ||
-             Definition->Name.ToWString() ==
+        return VersionInfo.FortniteVersion == 10.40 && Definition &&
+            (Definition->Name.ToWString() == L"AGID_CarminePack" || Definition->Name.ToWString() ==
                  L"AGID_AshtonPack");
     }
 
-    bool IsExact1040BaseAshtonGadget(
-        const UFortItemDefinition* Definition)
+    bool IsExact1040BaseAshtonGadget(const UFortItemDefinition* Definition)
     {
-        return VersionInfo.FortniteVersion == 10.40 &&
-            Definition &&
-            Definition->Name.ToWString() ==
+        return VersionInfo.FortniteVersion == 10.40 && Definition && Definition->Name.ToWString() ==
                 L"AGID_AshtonPack";
     }
 
-    bool IsExact1040AshtonMiloGadget(
-        const UFortItemDefinition* Definition)
+    bool IsExact1040AshtonMiloGadget(const UFortItemDefinition* Definition)
     {
-        return VersionInfo.FortniteVersion == 10.40 &&
-            Definition &&
-            Definition->Name.ToWString() ==
+        return VersionInfo.FortniteVersion == 10.40 && Definition && Definition->Name.ToWString() ==
                 L"AGID_AshtonPack_Milo";
     }
 
-    bool FocusOrQueueExact1040Carmine(
-        AFortPlayerControllerAthena* PlayerController,
+    bool FocusOrQueueExact1040Carmine(AFortPlayerControllerAthena* PlayerController,
         const FGuid& ItemGuid)
     {
         if (!PlayerController)
@@ -1608,42 +1169,31 @@ namespace
 
         if (!PlayerController->MyFortPawn)
         {
-            PendingCarmineFocus[PlayerController] =
-                ItemGuid;
-            SDK::DbgLog(
-                "[Ashton1040] queued Carmine focus until "
-                "pawn possession controller=%p\n",
-                static_cast<void*>(PlayerController));
+            PendingCarmineFocus[PlayerController] = ItemGuid;
+            SDK::DbgLog("[Ashton1040] queued Carmine focus until "
+                "pawn possession controller=%p\n", static_cast<void*>(PlayerController));
             return true;
         }
 
-        PlayerController->ServerExecuteInventoryItem(
-            ItemGuid);
-        PlayerController->ClientEquipItem(
-            ItemGuid, true);
+        PlayerController->ServerExecuteInventoryItem(ItemGuid);
+        PlayerController->ClientEquipItem(ItemGuid, true);
         return true;
     }
 
-    UFortWeaponItemDefinition*
-        ResolveExact1040CarmineBacking()
+    UFortWeaponItemDefinition* ResolveExact1040CarmineBacking()
     {
         if (VersionInfo.FortniteVersion != 10.40)
             return nullptr;
 
-        auto CarmineGadget =
-            const_cast<UFortGadgetItemDefinition*>(
-                FindObject<UFortGadgetItemDefinition>(
-                    L"/Game/Athena/Items/Gameplay/BackPacks/"
+        auto CarmineGadget = const_cast<UFortGadgetItemDefinition*>(
+                FindObject<UFortGadgetItemDefinition>(L"/Game/Athena/Items/Gameplay/BackPacks/"
                     L"CarminePack/AGID_CarminePack."
                     L"AGID_CarminePack"));
-        auto CarmineBacking =
-            const_cast<UFortWeaponItemDefinition*>(
-                FindObject<UFortWeaponItemDefinition>(
-                    L"/Game/Athena/Items/Gameplay/BackPacks/"
+        auto CarmineBacking = const_cast<UFortWeaponItemDefinition*>(
+                FindObject<UFortWeaponItemDefinition>(L"/Game/Athena/Items/Gameplay/BackPacks/"
                     L"CarminePack/D_CarminePack."
                     L"D_CarminePack"));
-        if (!CarmineGadget ||
-            !CarmineBacking)
+        if (!CarmineGadget || !CarmineBacking)
             return nullptr;
 
         CarmineGadget->AddToRoot();
@@ -1651,17 +1201,14 @@ namespace
         return CarmineBacking;
     }
 
-    const UFortItemDefinition*
-        ResolveExact1040AshtonGadgetAlias(
+    const UFortItemDefinition* ResolveExact1040AshtonGadgetAlias(
             const UFortItemDefinition* Definition)
     {
         if (!IsExact1040BaseAshtonGadget(Definition))
             return Definition;
 
-        auto CarmineGadget =
-            const_cast<UFortGadgetItemDefinition*>(
-                FindObject<UFortGadgetItemDefinition>(
-                    L"/Game/Athena/Items/Gameplay/BackPacks/"
+        auto CarmineGadget = const_cast<UFortGadgetItemDefinition*>(
+                FindObject<UFortGadgetItemDefinition>(L"/Game/Athena/Items/Gameplay/BackPacks/"
                     L"CarminePack/AGID_CarminePack."
                     L"AGID_CarminePack"));
         if (!CarmineGadget)
@@ -1672,8 +1219,7 @@ namespace
         if (!bLoggedAlias)
         {
             bLoggedAlias = true;
-            SDK::DbgLog(
-                "[Ashton1040] aliased incomplete "
+            SDK::DbgLog("[Ashton1040] aliased incomplete "
                 "AGID_AshtonPack to authored AGID_CarminePack "
                 "before inventory replication\n");
         }
@@ -1689,95 +1235,70 @@ namespace
             L"CarminePack/AS_CarminePack.AS_CarminePack");
         if (CarmineAbilitySet)
         {
-            const_cast<UFortAbilitySet*>(CarmineAbilitySet)
-                ->AddToRoot();
+            const_cast<UFortAbilitySet*>(CarmineAbilitySet)->AddToRoot();
         }
         auto AshtonAbilitySet = FindObject<UFortAbilitySet>(
             L"/Game/Athena/Items/Gameplay/BackPacks/"
             L"Ashton/AS_AshtonPack.AS_AshtonPack");
         if (AshtonAbilitySet)
         {
-            const_cast<UFortAbilitySet*>(AshtonAbilitySet)
-                ->AddToRoot();
+            const_cast<UFortAbilitySet*>(AshtonAbilitySet)->AddToRoot();
         }
 
         static constexpr const wchar_t* ClassPaths[] = {
             L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_CarminePack_PassiveSetup."
-                L"GA_CarminePack_PassiveSetup_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_CarminePack_PassiveSetup_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_CarminePack_DashOrSmash."
-                L"GA_CarminePack_DashOrSmash_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_CarminePack_DashOrSmash_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_CarminePack_Jump_NotMoving."
-                L"GA_CarminePack_Jump_NotMoving_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_CarminePack_Jump_NotMoving_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_CarminePack_Punch."
-                L"GA_CarminePack_Punch_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_CarminePack_Punch_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_CarminePack_LifeSteal."
-                L"GA_CarminePack_LifeSteal_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_CarminePack_LifeSteal_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_AshtonPack_Carmine_GemPickup_Passive."
                 L"GA_AshtonPack_Carmine_GemPickup_Passive_C",
             L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_AshtonPack_GemPickupFX."
-                L"GA_AshtonPack_GemPickupFX_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_AshtonPack_GemPickupFX_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/DA_CarminePack."
-                L"DA_CarminePack_C",
-            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"DA_CarminePack_C", L"/Game/Athena/VaultedGameplayCueNotifies/"
                 L"Carmine/GCN_Carmine_Beam."
-                L"GCN_Carmine_Beam_C",
-            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"GCN_Carmine_Beam_C", L"/Game/Athena/VaultedGameplayCueNotifies/"
                 L"Carmine/GCL_Carmine_Beam_Loop."
-                L"GCL_Carmine_Beam_Loop_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GCL_Carmine_Beam_Loop_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Carmine_GC_Beam_Loop."
-                L"GE_Carmine_GC_Beam_Loop_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Carmine_GC_Beam_Loop_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Carmine_Beam_Damage."
-                L"GE_Carmine_Beam_Damage_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Carmine_Beam_Damage_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Carmine_Beam_Damage_P."
-                L"GE_Carmine_Beam_Damage_P_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Carmine_Beam_Damage_P_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Ashton_Carmine_LockInPlace."
-                L"GE_Ashton_Carmine_LockInPlace_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Ashton_Carmine_LockInPlace_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Carmine_AbilityBlocker."
-                L"GE_Carmine_AbilityBlocker_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Carmine_AbilityBlocker_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Carmine_DamageImmune."
-                L"GE_Carmine_DamageImmune_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Carmine_DamageImmune_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Carmine_GC_Aura."
-                L"GE_Carmine_GC_Aura_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Carmine_GC_Aura_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Carmine_GC_Skydive."
-                L"GE_Carmine_GC_Skydive_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Carmine_GC_Skydive_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Ashton_Carmine_GemPickUpAnim."
-                L"GE_Ashton_Carmine_GemPickUpAnim_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Ashton_Carmine_GemPickUpAnim_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GE_Ashton_Carmine_FinalGemPickUpAnim."
-                L"GE_Ashton_Carmine_FinalGemPickUpAnim_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GE_Ashton_Carmine_FinalGemPickUpAnim_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_AshtonPack_Carmine_StonePickUpAnim."
                 L"GA_AshtonPack_Carmine_StonePickUpAnim_C",
             L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/GA_AshtonPack_Carmine_FinalGem."
-                L"GA_AshtonPack_Carmine_FinalGem_C",
-            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"GA_AshtonPack_Carmine_FinalGem_C", L"/Game/Athena/VaultedGameplayCueNotifies/"
                 L"Carmine/GCN_Carmine_Transform."
-                L"GCN_Carmine_Transform_C",
-            L"/Game/Athena/VaultedGameplayCueNotifies/"
+                L"GCN_Carmine_Transform_C", L"/Game/Athena/VaultedGameplayCueNotifies/"
                 L"Carmine/GCL_Carmine_Skydive."
-                L"GCL_Carmine_Skydive_C",
-            L"/Game/Blueprints/Camera/Athena/"
+                L"GCL_Carmine_Skydive_C", L"/Game/Blueprints/Camera/Athena/"
                 L"Athena_PlayerCameraModeCarmineSpawn."
-                L"Athena_PlayerCameraModeCarmineSpawn_C",
-            L"/Game/Blueprints/Camera/Athena/"
+                L"Athena_PlayerCameraModeCarmineSpawn_C", L"/Game/Blueprints/Camera/Athena/"
                 L"Athena_PlayerCameraModeCarmine_Beam."
                 L"Athena_PlayerCameraModeCarmine_Beam_C",
             L"/Game/Characters/Player/Male/Male_Avg_Base/"
@@ -1794,32 +1315,24 @@ namespace
         static constexpr const wchar_t* VisualPaths[] = {
             L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/FX/P_Jim_LaserBlast."
-                L"P_Jim_LaserBlast",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"P_Jim_LaserBlast", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/FX/P_Jim_LaserBlast_Muzzle."
-                L"P_Jim_LaserBlast_Muzzle",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"P_Jim_LaserBlast_Muzzle", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/FX/P_Jim_LaserBlast_Dust."
-                L"P_Jim_LaserBlast_Dust",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"P_Jim_LaserBlast_Dust", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/FX/P_Jim_LaserBlast_Impact."
-                L"P_Jim_LaserBlast_Impact",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"P_Jim_LaserBlast_Impact", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"CarminePack/FX/P_Jim_LaserBlast_Impact_Player."
                 L"P_Jim_LaserBlast_Impact_Player",
             L"/Game/Animation/Game/MainPlayer/Skydive/Freefall/"
                 L"Custom/Jim/Transitions/Spawn_Montage."
-                L"Spawn_Montage",
-            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"Spawn_Montage", L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
                 L"ExtraLarge/Jim/Jim_FistBeam_Montage."
-                L"Jim_FistBeam_Montage",
-            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"Jim_FistBeam_Montage", L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
                 L"ExtraLarge/Jim/Jim_FistBeam_Outro_M."
-                L"Jim_FistBeam_Outro_M",
-            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"Jim_FistBeam_Outro_M", L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
                 L"ExtraLarge/Jim/Jim_PowerUp_Montage."
-                L"Jim_PowerUp_Montage",
-            L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
+                L"Jim_PowerUp_Montage", L"/Game/Animation/Game/MainPlayer/Combat/Gadgets/"
                 L"ExtraLarge/Jim/Jim_Victory_Montage."
                 L"Jim_Victory_Montage"
         };
@@ -1833,55 +1346,43 @@ namespace
 
     void PreloadExact1040AshtonMiloDependencies()
     {
-        auto AbilitySet = FindObject<UFortAbilitySet>(
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+        auto AbilitySet = FindObject<UFortAbilitySet>(L"/Game/Athena/Items/Gameplay/BackPacks/"
             L"Ashton/Milo/AS_AshtonPack_Milo."
             L"AS_AshtonPack_Milo");
         if (AbilitySet)
         {
-            const_cast<UFortAbilitySet*>(AbilitySet)
-                ->AddToRoot();
+            const_cast<UFortAbilitySet*>(AbilitySet)->AddToRoot();
         }
 
-        auto BoostAbilitySet = FindObject<UFortAbilitySet>(
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+        auto BoostAbilitySet = FindObject<UFortAbilitySet>(L"/Game/Athena/Items/Gameplay/BackPacks/"
             L"BoostJumpPack/AS_BoostJumpPack."
             L"AS_BoostJumpPack");
         if (BoostAbilitySet)
         {
-            const_cast<UFortAbilitySet*>(BoostAbilitySet)
-                ->AddToRoot();
+            const_cast<UFortAbilitySet*>(BoostAbilitySet)->AddToRoot();
         }
 
         static constexpr const wchar_t* ClassPaths[] = {
             L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"Ashton/GA_AshtonPack_EMPTYABILITY."
-                L"GA_AshtonPack_EMPTYABILITY_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_AshtonPack_EMPTYABILITY_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"Ashton/Milo/GA_AshtonPack_EquipWeapon_Milo."
-                L"GA_AshtonPack_EquipWeapon_Milo_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_AshtonPack_EquipWeapon_Milo_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"Ashton/Milo/GA_AshtonPack_PassiveSetup_Milo."
-                L"GA_AshtonPack_PassiveSetup_Milo_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_AshtonPack_PassiveSetup_Milo_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"Ashton/Milo/GA_AshtonPack_Milo_BlockAbilities."
-                L"GA_AshtonPack_Milo_BlockAbilities_C",
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+                L"GA_AshtonPack_Milo_BlockAbilities_C", L"/Game/Athena/Items/Gameplay/BackPacks/"
                 L"Ashton/Milo/GAT_AshtonPack_Milo_GemPickupHeal."
                 L"GAT_AshtonPack_Milo_GemPickupHeal_C",
             L"/Game/Weapons/FORT_Rifles/Blueprints/Assault/"
                 L"B_Assault_AshtonPack_Milo."
-                L"B_Assault_AshtonPack_Milo_C",
-            L"/Game/Weapons/FORT_Rifles/Blueprints/"
+                L"B_Assault_AshtonPack_Milo_C", L"/Game/Weapons/FORT_Rifles/Blueprints/"
                 L"B_Rifle_AshtonPack_Milo_Launcher."
-                L"B_Rifle_AshtonPack_Milo_Launcher_C",
-            L"/Game/Athena/Items/Weapons/Abilities/"
+                L"B_Rifle_AshtonPack_Milo_Launcher_C", L"/Game/Athena/Items/Weapons/Abilities/"
                 L"GA_Ranged_Ashton_Milo_Explosive_Athena."
-                L"GA_Ranged_Ashton_Milo_Explosive_Athena_C",
-            L"/Game/Abilities/Weapons/Ranged/"
+                L"GA_Ranged_Ashton_Milo_Explosive_Athena_C", L"/Game/Abilities/Weapons/Ranged/"
                 L"GA_Ranged_GenericDamage."
-                L"GA_Ranged_GenericDamage_C",
-            L"/Game/Weapons/FORT_RocketLaunchers/Blueprints/"
+                L"GA_Ranged_GenericDamage_C", L"/Game/Weapons/FORT_RocketLaunchers/Blueprints/"
                 L"B_Prj_AshtonPack_Milo_Launcher."
                 L"B_Prj_AshtonPack_Milo_Launcher_C"
         };
@@ -1895,27 +1396,20 @@ namespace
 
     bool AreGuidsEqual(const FGuid& Left, const FGuid& Right)
     {
-        return Left.A == Right.A &&
-            Left.B == Right.B &&
-            Left.C == Right.C &&
-            Left.D == Right.D;
+        return Left.A == Right.A && Left.B == Right.B && Left.C == Right.C && Left.D == Right.D;
     }
 
-    bool IsSameRegenItem(
-        const FRegeneratingInventoryItem& State,
-        const AFortPlayerControllerAthena* Owner,
-        const FGuid& ItemGuid)
+    bool IsSameRegenItem(const FRegeneratingInventoryItem& State,
+        const AFortPlayerControllerAthena* Owner, const FGuid& ItemGuid)
     {
-        return State.Owner.Get() == Owner &&
-            AreGuidsEqual(State.ItemGuid, ItemGuid);
+        return State.Owner.Get() == Owner && AreGuidsEqual(State.ItemGuid, ItemGuid);
     }
 
     void RemoveRegenItemAt(size_t Index)
     {
         if (Index + 1 != RegeneratingInventoryItems.size())
         {
-            RegeneratingInventoryItems[Index] =
-                RegeneratingInventoryItems.back();
+            RegeneratingInventoryItems[Index] = RegeneratingInventoryItems.back();
         }
         RegeneratingInventoryItems.pop_back();
     }
@@ -1924,66 +1418,46 @@ namespace
     {
         if (Index + 1 != RechargingWeaponAmmo.size())
         {
-            RechargingWeaponAmmo[Index] =
-                RechargingWeaponAmmo.back();
+            RechargingWeaponAmmo[Index] = RechargingWeaponAmmo.back();
         }
         RechargingWeaponAmmo.pop_back();
     }
 
-    bool IsNitroFistsDefinition(
-        const UFortWeaponItemDefinition* WeaponDefinition)
+    bool IsNitroFistsDefinition(const UFortWeaponItemDefinition* WeaponDefinition)
     {
-        if (!WeaponDefinition ||
-            VersionInfo.FortniteVersion < 30.0 ||
+        if (!WeaponDefinition || VersionInfo.FortniteVersion < 30.0 ||
             VersionInfo.FortniteVersion >= 31.0)
         {
             return false;
         }
 
-        const auto DefinitionName =
-            WeaponDefinition->Name.ToString();
-        return DefinitionName.rfind(
-            "WID_Moonflax_NitroGauntlet", 0) == 0;
+        const auto DefinitionName = WeaponDefinition->Name.ToString();
+        return DefinitionName.rfind("WID_Moonflax_NitroGauntlet", 0) == 0;
     }
 
-    bool NotifyWeaponRechargeStarted(
-        AFortPlayerControllerAthena* Owner,
-        const FGuid& ItemGuid,
+    bool NotifyWeaponRechargeStarted(AFortPlayerControllerAthena* Owner, const FGuid& ItemGuid,
         double ServerStartTime)
     {
         if (!Owner || !std::isfinite(ServerStartTime))
             return false;
 
-        auto RechargeComponentClass =
-            FindClass("FortControllerComponent_RechargeWeapons");
-        auto RechargeComponent =
-            RechargeComponentClass
-                ? Owner->GetComponentByClass(
-                    RechargeComponentClass)
-                : nullptr;
+        auto RechargeComponentClass = FindClass("FortControllerComponent_RechargeWeapons");
+        auto RechargeComponent = RechargeComponentClass ? Owner->GetComponentByClass(
+                    RechargeComponentClass) : nullptr;
         UObject* NotificationTarget = RechargeComponent;
-        auto ClientStartedFunction =
-            NotificationTarget
-                ? NotificationTarget->GetFunction(
-                    "ClientItemStartedRecharging")
-                : nullptr;
+        auto ClientStartedFunction = NotificationTarget ? NotificationTarget->GetFunction(
+                    "ClientItemStartedRecharging") : nullptr;
         if (!ClientStartedFunction)
         {
-            // Some transition builds already instantiate the component while
-            // retaining this RPC on the controller. Probe the reflected owner
-            // as a second capability, not merely when the component is absent.
             NotificationTarget = static_cast<UObject*>(Owner);
-            ClientStartedFunction = Owner->GetFunction(
-                "ClientItemStartedRecharging");
+            ClientStartedFunction = Owner->GetFunction("ClientItemStartedRecharging");
         }
         if (!ClientStartedFunction)
             return false;
 
         const auto Params = ClientStartedFunction->GetParamsNamed();
-        const size_t AllocationSize =
-            static_cast<size_t>(Params.Size);
-        if (AllocationSize < sizeof(FGuid) + sizeof(float) ||
-            AllocationSize > 0x4000)
+        const size_t AllocationSize = static_cast<size_t>(Params.Size);
+        if (AllocationSize < sizeof(FGuid) + sizeof(float) || AllocationSize > 0x4000)
         {
             return false;
         }
@@ -1998,8 +1472,7 @@ namespace
                     return false;
                 GuidOffset = Param.Offset;
             }
-            else if (Param.Name == "InServerStartTime" ||
-                Param.Name == "ServerStartTime")
+            else if (Param.Name == "InServerStartTime" || Param.Name == "ServerStartTime")
             {
                 if (StartTimeOffset != uint32(-1))
                     return false;
@@ -2010,43 +1483,29 @@ namespace
                 return false;
             }
         }
-        if (GuidOffset == uint32(-1) ||
-            StartTimeOffset == uint32(-1) ||
+        if (GuidOffset == uint32(-1) || StartTimeOffset == uint32(-1) ||
             GuidOffset + sizeof(ItemGuid) > AllocationSize ||
             StartTimeOffset + sizeof(float) > AllocationSize)
         {
             return false;
         }
 
-		// The RPC lived on the player controller before the dedicated recharge
-		// component was introduced (for example, the Shockwave Hammer build).
-		// Dispatch on whichever reflected owner exposes it so every generation
-		// receives the authored client cooldown/countdown presentation.
         auto Memory = FMemory::Malloc(AllocationSize);
         if (!Memory)
             return false;
         memset(Memory, 0, AllocationSize);
         const float StartTime = static_cast<float>(ServerStartTime);
-        memcpy(
-            static_cast<uint8*>(Memory) + GuidOffset,
-            &ItemGuid,
-            sizeof(ItemGuid));
-        memcpy(
-            static_cast<uint8*>(Memory) + StartTimeOffset,
-            &StartTime,
-            sizeof(StartTime));
-		NotificationTarget->ProcessEvent(ClientStartedFunction, Memory);
+        memcpy(static_cast<uint8*>(Memory) + GuidOffset, &ItemGuid, sizeof(ItemGuid));
+        memcpy(static_cast<uint8*>(Memory) + StartTimeOffset, &StartTime, sizeof(StartTime));
+        NotificationTarget->ProcessEvent(ClientStartedFunction, Memory);
         FMemory::Free(Memory);
         return true;
     }
 
-    AFortWeapon* ResolveEquippedWeaponForItem(
-        AFortPlayerControllerAthena* Owner,
-        UFortWeaponItemDefinition* WeaponDefinition,
-        const FGuid& ItemGuid)
+    AFortWeapon* ResolveEquippedWeaponForItem(AFortPlayerControllerAthena* Owner,
+        UFortWeaponItemDefinition* WeaponDefinition, const FGuid& ItemGuid)
     {
-        if (!Owner || !WeaponDefinition ||
-            !Owner->HasMyFortPawn() || !Owner->MyFortPawn ||
+        if (!Owner || !WeaponDefinition || !Owner->HasMyFortPawn() || !Owner->MyFortPawn ||
             !Owner->MyFortPawn->HasCurrentWeapon())
         {
             return nullptr;
@@ -2054,17 +1513,14 @@ namespace
 
         auto WeaponActor = Owner->MyFortPawn->CurrentWeapon;
         auto FortWeaponClass = AFortWeapon::StaticClass();
-        if (!WeaponActor || !FortWeaponClass ||
-            !WeaponActor->IsA(FortWeaponClass))
+        if (!WeaponActor || !FortWeaponClass || !WeaponActor->IsA(FortWeaponClass))
         {
             return nullptr;
         }
 
         auto Weapon = static_cast<AFortWeapon*>(WeaponActor);
-        if (!Weapon->HasItemEntryGuid() ||
-            !AreGuidsEqual(Weapon->ItemEntryGuid, ItemGuid) ||
-            (Weapon->HasWeaponData() &&
-                Weapon->WeaponData != WeaponDefinition) ||
+        if (!Weapon->HasItemEntryGuid() || !AreGuidsEqual(Weapon->ItemEntryGuid, ItemGuid) ||
+            (Weapon->HasWeaponData() && Weapon->WeaponData != WeaponDefinition) ||
             !Weapon->HasAmmoCount())
         {
             return nullptr;
@@ -2075,31 +1531,24 @@ namespace
 
     bool IsLiveRechargeObject(const UObject* Object)
     {
-        if (!Object ||
-            !SDK::MemReadable(Object, sizeof(UObject)))
+        if (!Object || !SDK::MemReadable(Object, sizeof(UObject)))
         {
             return false;
         }
 
         const int32 ObjectIndex = Object->Index;
-        if (ObjectIndex < 0 ||
-            ObjectIndex >= TUObjectArray::Num())
+        if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
         {
             return false;
         }
 
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
         constexpr int32 InvalidObjectFlags = 0x20;
-        return Item &&
-            Item->GetObject() == Object &&
-            !(Item->GetFlags() & InvalidObjectFlags) &&
-            Object->Class &&
-            SDK::MemReadable(Object->Class, sizeof(UClass));
+        return Item && Item->GetObject() == Object && !(Item->GetFlags() & InvalidObjectFlags) &&
+            Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
     }
 
-    bool SyncWeaponAmmo(
-        AFortWeapon* Weapon,
-        int32 NewLoadedAmmo)
+    bool SyncWeaponAmmo(AFortWeapon* Weapon, int32 NewLoadedAmmo)
     {
         if (!Weapon || !Weapon->HasAmmoCount())
             return false;
@@ -2107,38 +1556,22 @@ namespace
         const int32 OldAmmoCount = Weapon->AmmoCount;
         if (OldAmmoCount != NewLoadedAmmo)
         {
-            // The equipped actor owns the authoritative/live magazine.
-            // Keep it in step with the inventory representation and drive
-            // the normal local rep-notify path for server-side listeners.
             Weapon->AmmoCount = NewLoadedAmmo;
-            if (auto OnRepAmmoCount =
-                Weapon->GetFunction("OnRep_AmmoCount"))
+            if (auto OnRepAmmoCount = Weapon->GetFunction("OnRep_AmmoCount"))
             {
-                Weapon->Call<void>(
-                    OnRepAmmoCount, OldAmmoCount);
+                Weapon->Call<void>(OnRepAmmoCount, OldAmmoCount);
             }
         }
 
-        // A locally predicted shot can lower the owning client's ammo while
-        // the server value remains unchanged under Infinite Ammo. Poll-model
-        // replication normally sees no delta in that case, and push-model
-        // builds require an explicit dirty mark. The item-change broadcast
-        // plus this mark sends the correction now instead of waiting for the
-        // weapon to be reconstructed on the next equip.
-        VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-            Weapon, L"AmmoCount");
+        VersionFeatureAdapter::MarkReplicatedPropertyDirty(Weapon, L"AmmoCount");
         Weapon->ForceNetUpdate();
         return true;
     }
 
-    int32 SyncKnownWeaponAmmo(
-        AFortPlayerControllerAthena* Owner,
-        UFortWeaponItemDefinition* WeaponDefinition,
-        const FGuid& ItemGuid,
-        int32 NewLoadedAmmo)
+    int32 SyncKnownWeaponAmmo(AFortPlayerControllerAthena* Owner,
+        UFortWeaponItemDefinition* WeaponDefinition, const FGuid& ItemGuid, int32 NewLoadedAmmo)
     {
-        if (!Owner || !WeaponDefinition ||
-            !Owner->HasMyFortPawn() ||
+        if (!Owner || !WeaponDefinition || !Owner->HasMyFortPawn() ||
             !IsLiveRechargeObject(Owner->MyFortPawn))
         {
             return 0;
@@ -2153,18 +1586,14 @@ namespace
                 return;
 
             auto Weapon = Candidate->Cast<AFortWeapon>();
-            if (!Weapon || !Seen.insert(Weapon).second ||
-                !Weapon->HasItemEntryGuid() ||
-                !AreGuidsEqual(Weapon->ItemEntryGuid, ItemGuid) ||
-                (Weapon->HasWeaponData() &&
-                    Weapon->WeaponData != WeaponDefinition) ||
-                !Weapon->HasAmmoCount())
+            if (!Weapon || !Seen.insert(Weapon).second || !Weapon->HasItemEntryGuid() ||
+                !AreGuidsEqual(Weapon->ItemEntryGuid, ItemGuid) || (Weapon->HasWeaponData() &&
+                    Weapon->WeaponData != WeaponDefinition) || !Weapon->HasAmmoCount())
             {
                 return;
             }
 
-            if (SyncWeaponAmmo(Weapon, NewLoadedAmmo))
-                ++SyncedCount;
+            if (SyncWeaponAmmo(Weapon, NewLoadedAmmo)) ++SyncedCount;
         };
 
         if (Pawn->HasCurrentWeapon())
@@ -2176,15 +1605,9 @@ namespace
         {
             const auto& Weapons = Pawn->CurrentWeaponList;
             const int32 WeaponCount = Weapons.Num();
-            if (WeaponCount >= 0 && WeaponCount <= 64 &&
-                Weapons.Max() >= WeaponCount &&
-                Weapons.Max() <= 128 &&
-                (WeaponCount == 0 ||
-                    (Weapons.Data &&
-                        SDK::MemReadable(
-                            Weapons.Data,
-                            static_cast<size_t>(WeaponCount) *
-                                sizeof(AActor*)))))
+            if (WeaponCount >= 0 && WeaponCount <= 64 && Weapons.Max() >= WeaponCount &&
+                Weapons.Max() <= 128 && (WeaponCount == 0 || (Weapons.Data && SDK::MemReadable(
+                            Weapons.Data, static_cast<size_t>(WeaponCount) * sizeof(AActor*)))))
             {
                 for (int32 Index = 0;
                     Index < WeaponCount;
@@ -2198,11 +1621,8 @@ namespace
         return SyncedCount;
     }
 
-    bool TryEvaluateWeaponRechargeGetter(
-        UFortWeaponItemDefinition* WeaponDefinition,
-        const char* FunctionName,
-        int32 ItemLevel,
-        float& OutValue)
+    bool TryEvaluateWeaponRechargeGetter(UFortWeaponItemDefinition* WeaponDefinition,
+        const char* FunctionName, int32 ItemLevel, float& OutValue)
     {
         OutValue = 0.0f;
         if (!WeaponDefinition || !FunctionName)
@@ -2213,10 +1633,8 @@ namespace
             return false;
 
         const auto Params = Function->GetParamsNamed();
-        const size_t AllocationSize =
-            static_cast<size_t>(Params.Size);
-        if (AllocationSize < sizeof(float) ||
-            AllocationSize > 0x4000)
+        const size_t AllocationSize = static_cast<size_t>(Params.Size);
+        if (AllocationSize < sizeof(float) || AllocationSize > 0x4000)
         {
             return false;
         }
@@ -2243,8 +1661,7 @@ namespace
             }
         }
 
-        if (LevelOffset == uint32(-1) ||
-            ReturnOffset == uint32(-1) ||
+        if (LevelOffset == uint32(-1) || ReturnOffset == uint32(-1) ||
             LevelOffset + sizeof(ItemLevel) > AllocationSize ||
             ReturnOffset + sizeof(OutValue) > AllocationSize)
         {
@@ -2255,41 +1672,23 @@ namespace
         if (!Memory)
             return false;
         memset(Memory, 0, AllocationSize);
-        memcpy(
-            static_cast<uint8*>(Memory) + LevelOffset,
-            &ItemLevel,
-            sizeof(ItemLevel));
+        memcpy(static_cast<uint8*>(Memory) + LevelOffset, &ItemLevel, sizeof(ItemLevel));
         WeaponDefinition->ProcessEvent(Function, Memory);
-        memcpy(
-            &OutValue,
-            static_cast<uint8*>(Memory) + ReturnOffset,
-            sizeof(OutValue));
+        memcpy(&OutValue, static_cast<uint8*>(Memory) + ReturnOffset, sizeof(OutValue));
         FMemory::Free(Memory);
         return std::isfinite(OutValue);
     }
 
-    bool ResolveWeaponRechargeSettings(
-        UFortWeaponItemDefinition* WeaponDefinition,
-        int32 ItemLevel,
-        int32& MaxLoadedAmmo,
-        int32& RechargeAmount,
-        double& RechargeIntervalSeconds)
+    bool ResolveWeaponRechargeSettings(UFortWeaponItemDefinition* WeaponDefinition, int32 ItemLevel,
+        int32& MaxLoadedAmmo, int32& RechargeAmount, double& RechargeIntervalSeconds)
     {
         if (!WeaponDefinition)
             return false;
 
-        const bool bNitroFists =
-            IsNitroFistsDefinition(WeaponDefinition);
+        const bool bNitroFists = IsNitroFistsDefinition(WeaponDefinition);
         const auto DefinitionName = WeaponDefinition->Name.ToString();
 
-        // This watchdog owns ReplicatedEntry.LoadedAmmo, so every non-special
-        // weapon must explicitly opt into clip recharge. Older builds expose
-        // inherited recharge getters on ordinary firearms (often returning
-        // 1 round per second) without exposing this opt-in flag; treating the
-        // getters alone as capability data makes normal magazines regenerate.
-        // Those builds retain their native recharge handling instead.
-        if (!bNitroFists &&
-            (!WeaponDefinition->HasbRechargeAmmoToClip() ||
+        if (!bNitroFists && (!WeaponDefinition->HasbRechargeAmmoToClip() ||
                 !WeaponDefinition->bRechargeAmmoToClip))
         {
             return false;
@@ -2299,105 +1698,66 @@ namespace
         MaxLoadedAmmo = Stats ? Stats->ClipSize : 0;
 
         float RechargeQuantityValue = 0.0f;
-        const bool bHasRechargeQuantityProperty =
-            WeaponDefinition->HasWeaponRechargeAmmoQuantity();
+        const bool bHasRechargeQuantityProperty = WeaponDefinition->HasWeaponRechargeAmmoQuantity();
         if (bHasRechargeQuantityProperty)
         {
-            auto Quantity =
-                WeaponDefinition->WeaponRechargeAmmoQuantity;
-            // A zero scalable-float multiplier can never opt a weapon into
-            // recharge, even when it carries an inherited/default curve row.
-            // Avoid a curve-table call for every ordinary firearm grant.
+            auto Quantity = WeaponDefinition->WeaponRechargeAmmoQuantity;
             if (std::isfinite(Quantity.Value) && Quantity.Value > 0.0f)
             {
-                RechargeQuantityValue = Quantity.Evaluate(
-                    static_cast<float>(max(ItemLevel, 1)));
+                RechargeQuantityValue = Quantity.Evaluate(static_cast<float>(max(ItemLevel, 1)));
             }
         }
         else
         {
-            TryEvaluateWeaponRechargeGetter(
-                WeaponDefinition,
-                "GetWeaponRechargeAmmoQuantity",
-                max(ItemLevel, 1),
-                RechargeQuantityValue);
+            TryEvaluateWeaponRechargeGetter(WeaponDefinition, "GetWeaponRechargeAmmoQuantity",
+                max(ItemLevel, 1), RechargeQuantityValue);
         }
-        // Curve tables are cooked data, but validate their result before the
-        // float-to-int conversion.  NaN or an out-of-range value would make
-        // that conversion undefined and must not opt an item into tracking.
-        RechargeAmount =
-            std::isfinite(RechargeQuantityValue) &&
-                RechargeQuantityValue > 0.0f &&
-                RechargeQuantityValue <= 10000.0f
-            ? static_cast<int32>(
-                  std::round(RechargeQuantityValue))
-            : 0;
+        RechargeAmount = std::isfinite(RechargeQuantityValue) && RechargeQuantityValue > 0.0f &&
+                RechargeQuantityValue <= 10000.0f ? static_cast<int32>(
+                  std::round(RechargeQuantityValue)) : 0;
 
         float RechargeRateValue = 0.0f;
-        const bool bHasRechargeRateProperty =
-            WeaponDefinition->HasWeaponRechargeAmmoRate();
+        const bool bHasRechargeRateProperty = WeaponDefinition->HasWeaponRechargeAmmoRate();
         if (bHasRechargeRateProperty)
         {
-            auto Rate =
-                WeaponDefinition->WeaponRechargeAmmoRate;
+            auto Rate = WeaponDefinition->WeaponRechargeAmmoRate;
             if (std::isfinite(Rate.Value) && Rate.Value > 0.0f)
             {
-                RechargeRateValue = Rate.Evaluate(
-                    static_cast<float>(max(ItemLevel, 1)));
+                RechargeRateValue = Rate.Evaluate(static_cast<float>(max(ItemLevel, 1)));
             }
         }
         else
         {
-            TryEvaluateWeaponRechargeGetter(
-                WeaponDefinition,
-                "GetWeaponRechargeAmmoRate",
-                max(ItemLevel, 1),
-                RechargeRateValue);
+            TryEvaluateWeaponRechargeGetter(WeaponDefinition, "GetWeaponRechargeAmmoRate",
+                max(ItemLevel, 1), RechargeRateValue);
         }
-        RechargeIntervalSeconds =
-            static_cast<double>(RechargeRateValue);
+        RechargeIntervalSeconds = static_cast<double>(RechargeRateValue);
 
-        // Nitro Fists use a gauntlet stat row on FN30, so ClipSize is not
-        // reliable there. Keep the known authored fallback narrowly scoped
-        // to those definitions; every other weapon must opt in through its
-        // reflected recharge data and weapon stats.
+        // Nitro Fists use a gauntlet stat row on FN30, so ClipSize is not reliable there.
         if (bNitroFists)
         {
-            MaxLoadedAmmo =
-                DefinitionName.find("_Mythic") != std::string::npos
-                    ? 5
-                    : 4;
-            if (RechargeAmount <= 0 ||
-                RechargeAmount > MaxLoadedAmmo)
+            MaxLoadedAmmo = DefinitionName.find("_Mythic") != std::string::npos ? 5 : 4;
+            if (RechargeAmount <= 0 || RechargeAmount > MaxLoadedAmmo)
             {
                 RechargeAmount = 1;
             }
-            if (!std::isfinite(RechargeIntervalSeconds) ||
-                RechargeIntervalSeconds <= 0.0 ||
+            if (!std::isfinite(RechargeIntervalSeconds) || RechargeIntervalSeconds <= 0.0 ||
                 RechargeIntervalSeconds > 300.0)
             {
                 RechargeIntervalSeconds = 8.0;
             }
         }
 
-        return MaxLoadedAmmo > 0 && MaxLoadedAmmo <= 10000 &&
-            RechargeAmount > 0 &&
-            RechargeAmount <= MaxLoadedAmmo &&
-            std::isfinite(RechargeIntervalSeconds) &&
-            RechargeIntervalSeconds > 0.0 &&
-            RechargeIntervalSeconds <= 3600.0;
+        return MaxLoadedAmmo > 0 && MaxLoadedAmmo <= 10000 && RechargeAmount > 0 &&
+            RechargeAmount <= MaxLoadedAmmo && std::isfinite(RechargeIntervalSeconds) &&
+            RechargeIntervalSeconds > 0.0 && RechargeIntervalSeconds <= 3600.0;
     }
 
-    void ObserveRechargingWeaponAmmo(
-        AFortPlayerControllerAthena* Owner,
-        UFortWeaponItemDefinition* WeaponDefinition,
-        const FGuid& ItemGuid,
-        int32 ItemLevel,
-        int32 PreviousLoadedAmmo,
-        int32 NewLoadedAmmo)
+    void ObserveRechargingWeaponAmmo(AFortPlayerControllerAthena* Owner,
+        UFortWeaponItemDefinition* WeaponDefinition, const FGuid& ItemGuid, int32 ItemLevel,
+        int32 PreviousLoadedAmmo, int32 NewLoadedAmmo)
     {
-        if (!Owner || !Owner->WorldInventory ||
-            !WeaponDefinition)
+        if (!Owner || !Owner->WorldInventory || !WeaponDefinition)
         {
             return;
         }
@@ -2406,173 +1766,110 @@ namespace
         if (!World)
             return;
 
-        const double NowSeconds =
-            UGameplayStatics::GetTimeSeconds(World);
+        const double NowSeconds = UGameplayStatics::GetTimeSeconds(World);
         for (size_t Index = 0;
             Index < RechargingWeaponAmmo.size();
             ++Index)
         {
             auto& State = RechargingWeaponAmmo[Index];
-            if (State.Owner.Get() != Owner ||
-                !AreGuidsEqual(State.ItemGuid, ItemGuid))
+            if (State.Owner.Get() != Owner || !AreGuidsEqual(State.ItemGuid, ItemGuid))
             {
                 continue;
             }
 
-            State.WeaponDefinition =
-                TWeakObjectPtr<UFortWeaponItemDefinition>(
-                    WeaponDefinition);
-            // EquipWeaponDefinition can transiently publish the cached
-            // actor's old magazine through the loaded-ammo setter. The
-            // pre/post equip transaction restores the durable value, so do
-            // not reinterpret that temporary write as charge consumption or
-            // restart the authored deadline.
+            State.WeaponDefinition = TWeakObjectPtr<UFortWeaponItemDefinition>(WeaponDefinition);
             if (State.bEquipInProgress)
                 return;
 
-            State.LastObservedLoadedAmmo =
-                std::clamp(
-                    NewLoadedAmmo, 0, State.MaxLoadedAmmo);
+            State.LastObservedLoadedAmmo = std::clamp(NewLoadedAmmo, 0, State.MaxLoadedAmmo);
             bool bStartedRechargeCycle = false;
 
-            // A native recharge is an increase. Give its controller
-            // component a complete interval before the watchdog can add
-            // another charge. Further consumption does not reset an
-            // already-running interval.
             if (NewLoadedAmmo >= State.MaxLoadedAmmo)
             {
                 State.NextRefillTime = 0.0;
             }
             else if (NewLoadedAmmo > PreviousLoadedAmmo)
             {
-                State.NextRefillTime =
-                    NowSeconds +
-                    State.RechargeIntervalSeconds +
+                State.NextRefillTime = NowSeconds + State.RechargeIntervalSeconds +
                     NativeRechargeGraceSeconds;
                 bStartedRechargeCycle = true;
             }
-            else if (NewLoadedAmmo < PreviousLoadedAmmo &&
-                State.NextRefillTime <= 0.0)
+            else if (NewLoadedAmmo < PreviousLoadedAmmo && State.NextRefillTime <= 0.0)
             {
-                State.NextRefillTime =
-                    NowSeconds +
-                    State.RechargeIntervalSeconds +
+                State.NextRefillTime = NowSeconds + State.RechargeIntervalSeconds +
                     NativeRechargeGraceSeconds;
                 bStartedRechargeCycle = true;
             }
             if (bStartedRechargeCycle)
             {
-                NotifyWeaponRechargeStarted(
-                    Owner, ItemGuid, NowSeconds);
+                NotifyWeaponRechargeStarted(Owner, ItemGuid, NowSeconds);
             }
             return;
         }
 
-        // Only grant-time registration reaches reflected getters and scalable
-        // floats. Loaded-ammo updates reuse the validated settings cached in
-        // the existing state above, keeping charge use out of that hot path.
         int32 MaxLoadedAmmo = 0;
         int32 RechargeAmount = 0;
         double RechargeIntervalSeconds = 0.0;
-        if (!ResolveWeaponRechargeSettings(
-                WeaponDefinition,
-                ItemLevel,
-                MaxLoadedAmmo,
-                RechargeAmount,
-                RechargeIntervalSeconds))
+        if (!ResolveWeaponRechargeSettings(WeaponDefinition, ItemLevel, MaxLoadedAmmo,
+                RechargeAmount, RechargeIntervalSeconds))
         {
             return;
         }
 
-        if (RechargingWeaponAmmo.size() >=
-                MaxTrackedRechargingWeapons)
+        if (RechargingWeaponAmmo.size() >= MaxTrackedRechargingWeapons)
         {
-            // Registration happens off the tick hot path, so reclaim expired
-            // weak entries here before enforcing the defensive global cap.
-            RechargingWeaponAmmo.erase(
-                std::remove_if(
-                    RechargingWeaponAmmo.begin(),
-                    RechargingWeaponAmmo.end(),
-                    [](const FRechargingWeaponAmmo& State)
+            RechargingWeaponAmmo.erase(std::remove_if(RechargingWeaponAmmo.begin(),
+                    RechargingWeaponAmmo.end(), [](const FRechargingWeaponAmmo& State)
                     {
-                        return !State.Owner.Get() ||
-                            !State.WeaponDefinition.Get();
-                    }),
-                RechargingWeaponAmmo.end());
+                        return !State.Owner.Get() || !State.WeaponDefinition.Get();
+                    }), RechargingWeaponAmmo.end());
         }
 
-        if (RechargingWeaponAmmo.size() >=
-                MaxTrackedRechargingWeapons)
+        if (RechargingWeaponAmmo.size() >= MaxTrackedRechargingWeapons)
         {
             return;
         }
 
         FRechargingWeaponAmmo State{};
-        State.Owner =
-            TWeakObjectPtr<AFortPlayerControllerAthena>(Owner);
-        State.WeaponDefinition =
-            TWeakObjectPtr<UFortWeaponItemDefinition>(
-                WeaponDefinition);
+        State.Owner = TWeakObjectPtr<AFortPlayerControllerAthena>(Owner);
+        State.WeaponDefinition = TWeakObjectPtr<UFortWeaponItemDefinition>(WeaponDefinition);
         State.ItemGuid = ItemGuid;
         State.MaxLoadedAmmo = MaxLoadedAmmo;
         State.RechargeAmount = RechargeAmount;
-        State.LastObservedLoadedAmmo =
-            std::clamp(
-                NewLoadedAmmo, 0, MaxLoadedAmmo);
-        State.RechargeIntervalSeconds =
-            RechargeIntervalSeconds;
+        State.LastObservedLoadedAmmo = std::clamp(NewLoadedAmmo, 0, MaxLoadedAmmo);
+        State.RechargeIntervalSeconds = RechargeIntervalSeconds;
         if (NewLoadedAmmo < MaxLoadedAmmo)
         {
-            State.NextRefillTime =
-                NowSeconds +
-                RechargeIntervalSeconds +
+            State.NextRefillTime = NowSeconds + RechargeIntervalSeconds +
                 NativeRechargeGraceSeconds;
         }
         RechargingWeaponAmmo.push_back(State);
 
-        const bool bClientTimerStarted =
-            NewLoadedAmmo < MaxLoadedAmmo &&
-            NotifyWeaponRechargeStarted(
-                Owner, ItemGuid, NowSeconds);
+        const bool bClientTimerStarted = NewLoadedAmmo < MaxLoadedAmmo &&
+            NotifyWeaponRechargeStarted(Owner, ItemGuid, NowSeconds);
 
-        auto RechargeComponentClass =
-            FindClass("FortControllerComponent_RechargeWeapons");
-        auto RechargeComponent =
-            RechargeComponentClass
-                ? Owner->GetComponentByClass(
-                    RechargeComponentClass)
-                : nullptr;
-        SDK::DbgLog(
-            "[WeaponRecharge] registered definition=%s ammo=%d/%d "
+        auto RechargeComponentClass = FindClass("FortControllerComponent_RechargeWeapons");
+        auto RechargeComponent = RechargeComponentClass ? Owner->GetComponentByClass(
+                    RechargeComponentClass) : nullptr;
+        SDK::DbgLog("[WeaponRecharge] registered definition=%s ammo=%d/%d "
             "amount=%d interval=%.2f nativeComponent=%s\n",
-            WeaponDefinition->Name.ToString().c_str(),
-            NewLoadedAmmo,
-            MaxLoadedAmmo,
-            RechargeAmount,
-            RechargeIntervalSeconds,
-            RechargeComponent ? "present" : "missing");
+            WeaponDefinition->Name.ToString().c_str(), NewLoadedAmmo, MaxLoadedAmmo, RechargeAmount,
+            RechargeIntervalSeconds, RechargeComponent ? "present" : "missing");
         if (NewLoadedAmmo < MaxLoadedAmmo)
         {
-            SDK::DbgLog(
-                "[WeaponRecharge] client-timer definition=%s "
-                "started=%d serverStart=%.3f\n",
-                WeaponDefinition->Name.ToString().c_str(),
-                bClientTimerStarted ? 1 : 0,
-                NowSeconds);
+            SDK::DbgLog("[WeaponRecharge] client-timer definition=%s "
+                "started=%d serverStart=%.3f\n", WeaponDefinition->Name.ToString().c_str(),
+                bClientTimerStarted ? 1 : 0, NowSeconds);
         }
     }
 
-    bool IsTrackedRechargingWeaponAmmo(
-        const AFortPlayerControllerAthena* Owner,
+    bool IsTrackedRechargingWeaponAmmo(const AFortPlayerControllerAthena* Owner,
         const FGuid& ItemGuid)
     {
-        return std::any_of(
-            RechargingWeaponAmmo.begin(),
-            RechargingWeaponAmmo.end(),
+        return std::any_of(RechargingWeaponAmmo.begin(), RechargingWeaponAmmo.end(),
             [&](const FRechargingWeaponAmmo& State)
             {
-                return State.Owner.Get() == Owner &&
-                    AreGuidsEqual(State.ItemGuid, ItemGuid);
+                return State.Owner.Get() == Owner && AreGuidsEqual(State.ItemGuid, ItemGuid);
             });
     }
 
@@ -2581,24 +1878,15 @@ namespace
         if (!Item)
             return;
 
-        static auto BroadcastFunction =
-            Item->GetFunction("BroadcastOnItemChanged");
+        static auto BroadcastFunction = Item->GetFunction("BroadcastOnItemChanged");
         if (BroadcastFunction)
         {
-            Item->Call<void>(
-                BroadcastFunction,
-                false,
-                true,
-                false,
-                false);
+            Item->Call<void>(BroadcastFunction, false, true, false, false);
         }
     }
 
-    void ScheduleRegeneratingInventoryItem(
-        AFortPlayerControllerAthena* Owner,
-        UFortAmmoItemDefinition* AmmoDefinition,
-        const FGuid& ItemGuid,
-        int32 MaxCount,
+    void ScheduleRegeneratingInventoryItem(AFortPlayerControllerAthena* Owner,
+        UFortAmmoItemDefinition* AmmoDefinition, const FGuid& ItemGuid, int32 MaxCount,
         double CooldownSeconds)
     {
         if (!Owner || !Owner->WorldInventory || !AmmoDefinition ||
@@ -2608,14 +1896,12 @@ namespace
             return;
         }
 
-        auto ReplicatedEntry =
-            Owner->WorldInventory->Inventory.ReplicatedEntries.Search(
+        auto ReplicatedEntry = Owner->WorldInventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
                     return AreGuidsEqual(Candidate.ItemGuid, ItemGuid) &&
                         Candidate.ItemDefinition == AmmoDefinition;
-                },
-                FFortItemEntry::Size());
+                }, FFortItemEntry::Size());
         if (!ReplicatedEntry || ReplicatedEntry->Count >= MaxCount)
             return;
 
@@ -2624,8 +1910,7 @@ namespace
             if (!IsSameRegenItem(State, Owner, ItemGuid))
                 continue;
 
-            State.AmmoDefinition =
-                TWeakObjectPtr<UFortAmmoItemDefinition>(AmmoDefinition);
+            State.AmmoDefinition = TWeakObjectPtr<UFortAmmoItemDefinition>(AmmoDefinition);
             State.MaxCount = max(State.MaxCount, MaxCount);
             State.CooldownSeconds = CooldownSeconds;
             return;
@@ -2636,27 +1921,20 @@ namespace
             return;
 
         FRegeneratingInventoryItem State{};
-        State.Owner =
-            TWeakObjectPtr<AFortPlayerControllerAthena>(Owner);
-        State.AmmoDefinition =
-            TWeakObjectPtr<UFortAmmoItemDefinition>(AmmoDefinition);
+        State.Owner = TWeakObjectPtr<AFortPlayerControllerAthena>(Owner);
+        State.AmmoDefinition = TWeakObjectPtr<UFortAmmoItemDefinition>(AmmoDefinition);
         State.ItemGuid = ItemGuid;
         State.MaxCount = MaxCount;
         State.CooldownSeconds = CooldownSeconds;
-        State.NextRefillTime =
-            UGameplayStatics::GetTimeSeconds(World) + CooldownSeconds;
+        State.NextRefillTime = UGameplayStatics::GetTimeSeconds(World) + CooldownSeconds;
         RegeneratingInventoryItems.push_back(State);
 
-        SDK::DbgLog(
-            "[ItemRegen] scheduled definition=%s count=%d max=%d cooldown=%.2f\n",
-            AmmoDefinition->Name.ToString().c_str(),
-            ReplicatedEntry->Count,
-            MaxCount,
+        SDK::DbgLog("[ItemRegen] scheduled definition=%s count=%d max=%d cooldown=%.2f\n",
+            AmmoDefinition->Name.ToString().c_str(), ReplicatedEntry->Count, MaxCount,
             CooldownSeconds);
     }
 
-    bool HasTrackedGhostBackingItem(
-        const FTrackedGhostModeSession& Session,
+    bool HasTrackedGhostBackingItem(const FTrackedGhostModeSession& Session,
         const UFortItemDefinition*& OutDefinition)
     {
         OutDefinition = Session.ItemDefinition.Get();
@@ -2664,18 +1942,12 @@ namespace
         if (!PlayerController || !PlayerController->WorldInventory)
             return false;
 
-        auto Entry = PlayerController->WorldInventory
-            ->Inventory.ReplicatedEntries.Search(
+        auto Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
-                    return AreGuidsEqual(
-                        Candidate.ItemGuid,
-                        Session.ItemGuid);
-                },
-                FFortItemEntry::Size());
-        if (!Entry ||
-            !UFortKismetLibrary::IsGhostModeItemDefinition(
-                Entry->ItemDefinition))
+                    return AreGuidsEqual(Candidate.ItemGuid, Session.ItemGuid);
+                }, FFortItemEntry::Size());
+        if (!Entry || !UFortKismetLibrary::IsGhostModeItemDefinition(Entry->ItemDefinition))
         {
             return false;
         }
@@ -2684,57 +1956,35 @@ namespace
         return true;
     }
 
-    void BeginTrackedGhostModeCleanup(
-        FTrackedGhostModeSession& Session,
-        const char* Source)
+    void BeginTrackedGhostModeCleanup(FTrackedGhostModeSession& Session, const char* Source)
     {
         auto PlayerController = Session.Owner.Get();
         if (!PlayerController)
             return;
 
         const UFortItemDefinition* ItemDefinition = nullptr;
-        const bool bHadBackingItem =
-            HasTrackedGhostBackingItem(
-                Session, ItemDefinition);
+        const bool bHadBackingItem = HasTrackedGhostBackingItem(Session, ItemDefinition);
         if (!ItemDefinition)
             ItemDefinition = Session.ItemDefinition.Get();
         if (!ItemDefinition)
             return;
 
-        SDK::DbgLog(
-            "[GhostMode] beginning tracked terminal cleanup "
-            "controller=%p source=%s backing=%d\n",
-            static_cast<void*>(PlayerController),
-            Source ? Source : "unknown",
-            bHadBackingItem ? 1 : 0);
+        SDK::DbgLog("[GhostMode] beginning tracked terminal cleanup "
+            "controller=%p source=%s backing=%d\n", static_cast<void*>(PlayerController),
+            Source ? Source : "unknown", bHadBackingItem ? 1 : 0);
 
         if (bHadBackingItem)
         {
-            // Removing through AFortInventory::Remove preserves the normal
-            // CheckGhostModeItemRemoved callback and captures the pre-gadget
-            // character parts for the timed exit finalizer below.
-            UFortKismetLibrary::CleanupGhostMode(
-                PlayerController, true);
+            UFortKismetLibrary::CleanupGhostMode(PlayerController, true);
             return;
         }
 
-        // A native path can erase the forced-overflow row without traversing
-        // AFortInventory::Remove. Complete the same transition explicitly so
-        // the saved cosmetic snapshot is not stranded.
         FGhostCharacterPartRestore Restore{};
-        const bool bRestoreCharacterParts =
-            CaptureGhostCharacterPartRestore(
-                PlayerController,
-                ItemDefinition,
-                Restore);
-        UFortKismetLibrary::CleanupGhostMode(
-            PlayerController, false);
-        UFortKismetLibrary::NotifyGhostModeItemRemoved(
-            PlayerController, ItemDefinition);
-        QueueGhostModeTerminalCleanup(
-            PlayerController,
-            ItemDefinition,
-            Restore,
+        const bool bRestoreCharacterParts = CaptureGhostCharacterPartRestore(PlayerController,
+                ItemDefinition, Restore);
+        UFortKismetLibrary::CleanupGhostMode(PlayerController, false);
+        UFortKismetLibrary::NotifyGhostModeItemRemoved(PlayerController, ItemDefinition);
+        QueueGhostModeTerminalCleanup(PlayerController, ItemDefinition, Restore,
             bRestoreCharacterParts);
     }
 
@@ -2745,168 +1995,111 @@ namespace
         {
             auto& Session = TrackedGhostModeSessions[Index];
             auto PlayerController = Session.Owner.Get();
-            if (!PlayerController ||
-                !PlayerController->WorldInventory)
+            if (!PlayerController || !PlayerController->WorldInventory)
             {
-                TrackedGhostModeSessions.erase(
-                    TrackedGhostModeSessions.begin() + Index);
+                TrackedGhostModeSessions.erase(TrackedGhostModeSessions.begin() + Index);
                 continue;
             }
 
             const UFortItemDefinition* ItemDefinition = nullptr;
-            const bool bBackingItemPresent =
-                HasTrackedGhostBackingItem(
-                    Session, ItemDefinition);
+            const bool bBackingItemPresent = HasTrackedGhostBackingItem(Session, ItemDefinition);
             if (!bBackingItemPresent)
             {
-                // AFortInventory::Remove already captured/queued this
-                // session's original parts. Do not recapture and overwrite
-                // that valid snapshot on the following tick.
                 if (!Session.bBackingRemovalObserved)
                 {
-                    BeginTrackedGhostModeCleanup(
-                        Session,
-                        "backing-item-falling-edge");
+                    BeginTrackedGhostModeCleanup(Session, "backing-item-falling-edge");
                 }
-                TrackedGhostModeSessions.erase(
-                    TrackedGhostModeSessions.begin() + Index);
+                TrackedGhostModeSessions.erase(TrackedGhostModeSessions.begin() + Index);
                 continue;
             }
 
             if (!Session.bExitRequested)
             {
-                const bool bControllerInGhostMode =
-                    IsControllerStillInGhostMode(
-                        PlayerController);
+                const bool bControllerInGhostMode = IsControllerStillInGhostMode(PlayerController);
                 if (bControllerInGhostMode)
                 {
                     Session.bObservedControllerGhostMode = true;
                 }
                 else if (Session.bObservedControllerGhostMode)
                 {
-                    RequestTrackedGhostModeExit(
-                        PlayerController,
-                        "controller-ghost-falling-edge",
+                    RequestTrackedGhostModeExit(PlayerController, "controller-ghost-falling-edge",
                         0.05);
                 }
 
-                auto Pawn = PlayerController->MyFortPawn
-                    ? PlayerController->MyFortPawn
-                    : PlayerController->Pawn
-                        ? PlayerController->Pawn
-                            ->Cast<AFortPlayerPawnAthena>()
+                auto Pawn = PlayerController->MyFortPawn ? PlayerController->MyFortPawn
+                    : PlayerController->Pawn ? PlayerController->Pawn->Cast<AFortPlayerPawnAthena>()
                         : nullptr;
                 float ExitStartTime = 0.0f;
-                if (ReadGhostExitFloat(
-                        Pawn,
-                        "GhostModeExitStartTime",
-                        ExitStartTime))
+                if (ReadGhostExitFloat(Pawn, "GhostModeExitStartTime", ExitStartTime))
                 {
-                    const bool bChangedFromBaseline =
-                        Session.bHasInitialPawnExitStartTime
-                            ? std::abs(
-                                  ExitStartTime -
-                                  Session.InitialPawnExitStartTime) >
-                                0.01f
+                    const bool bChangedFromBaseline = Session.bHasInitialPawnExitStartTime
+                            ? std::abs(ExitStartTime - Session.InitialPawnExitStartTime) > 0.01f
                             : ExitStartTime > 0.0f;
-                    if (bChangedFromBaseline &&
-                        ExitStartTime >= 0.0f &&
-                        std::abs(
-                            static_cast<double>(ExitStartTime) -
-                            Now) <= 10.0)
+                    if (bChangedFromBaseline && ExitStartTime >= 0.0f && std::abs(
+                            static_cast<double>(ExitStartTime) - Now) <= 10.0)
                     {
-                        RequestTrackedGhostModeExit(
-                            PlayerController,
-                            "pawn-exit-transition",
-                            0.05);
+                        RequestTrackedGhostModeExit(PlayerController, "pawn-exit-transition", 0.05);
                     }
                 }
             }
 
-            if (!Session.bExitRequested &&
-                Now >= Session.ExpireAt)
+            if (!Session.bExitRequested && Now >= Session.ExpireAt)
             {
-                // The authored Shadow Stone duration is evaluated from
-                // GA_SpookyMist_PassiveSetup (45 seconds on 6.21). This is a
-                // fail-safe for stripped servers that never receive the
-                // forced-exit activation; it does not shorten normal gravity.
+                // The authored Shadow Stone duration comes from GA_SpookyMist_PassiveSetup - 45 seconds on 6.21.
                 Session.bExitRequested = true;
                 Session.EarliestExitCleanupTime = Now;
-                SDK::DbgLog(
-                    "[GhostMode] authored lifetime watchdog expired "
-                    "controller=%p elapsed=%.2f\n",
-                    static_cast<void*>(PlayerController),
+                SDK::DbgLog("[GhostMode] authored lifetime watchdog expired "
+                    "controller=%p elapsed=%.2f\n", static_cast<void*>(PlayerController),
                     Now - Session.StartedAt);
             }
 
-            if (!Session.bExitRequested ||
-                Now < Session.EarliestExitCleanupTime)
+            if (!Session.bExitRequested || Now < Session.EarliestExitCleanupTime)
             {
                 ++Index;
                 continue;
             }
 
-            BeginTrackedGhostModeCleanup(
-                Session, "latched-exit");
-            TrackedGhostModeSessions.erase(
-                TrackedGhostModeSessions.begin() + Index);
+            BeginTrackedGhostModeCleanup(Session, "latched-exit");
+            TrackedGhostModeSessions.erase(TrackedGhostModeSessions.begin() + Index);
         }
     }
 }
 
-// StartGhostMode calls the patched inventory grant before ApplyGadgetData
-// replaces the pawn's parts. Keep that pre-gadget state here instead of trying
-// to reconstruct it from PreviousCharacterParts during the later exit RPC.
-void CaptureGhostModeCharacterPartsBeforeGrant(
-    AFortPlayerControllerAthena* PlayerController)
+void CaptureGhostModeCharacterPartsBeforeGrant(AFortPlayerControllerAthena* PlayerController)
 {
-    if (VersionInfo.FortniteVersion < 5.30 ||
-        VersionInfo.FortniteVersion > 8.00 ||
+    if (VersionInfo.FortniteVersion < 5.30 || VersionInfo.FortniteVersion > 8.00 ||
         !PlayerController)
     {
         return;
     }
 
-    if (GhostCharacterPartRestores.contains(
-            PlayerController))
+    if (GhostCharacterPartRestores.contains(PlayerController))
     {
         return;
     }
 
     FGhostCharacterPartRestore Restore{};
-    if (!CaptureCurrentGhostCharacterParts(
-            PlayerController, Restore))
+    if (!CaptureCurrentGhostCharacterParts(PlayerController, Restore))
     {
-        SDK::DbgLog(
-            "[GhostMode] pre-grant character-part snapshot "
-            "unavailable controller=%p\n",
-            static_cast<void*>(PlayerController));
+        SDK::DbgLog("[GhostMode] pre-grant character-part snapshot "
+            "unavailable controller=%p\n", static_cast<void*>(PlayerController));
         return;
     }
 
-    GhostCharacterPartRestores.emplace(
-        PlayerController, Restore);
+    GhostCharacterPartRestores.emplace(PlayerController, Restore);
     int32 CapturedCount = 0;
     for (const bool bCaptured : Restore.bRestore)
         CapturedCount += bCaptured ? 1 : 0;
-    SDK::DbgLog(
-        "[GhostMode] captured pre-grant character parts "
-        "controller=%p pawn=%p count=%d\n",
-        static_cast<void*>(PlayerController),
-        static_cast<void*>(Restore.Pawn),
-        CapturedCount);
+    SDK::DbgLog("[GhostMode] captured pre-grant character parts "
+        "controller=%p pawn=%p count=%d\n", static_cast<void*>(PlayerController),
+        static_cast<void*>(Restore.Pawn), CapturedCount);
 }
 
-void AFortInventory::TrackGhostModeActivation(
-    AFortPlayerControllerAthena* PlayerController,
-    const UFortItemDefinition* ItemDefinition,
-    const FGuid& ItemGuid)
+void AFortInventory::TrackGhostModeActivation(AFortPlayerControllerAthena* PlayerController,
+    const UFortItemDefinition* ItemDefinition, const FGuid& ItemGuid)
 {
-    if (VersionInfo.FortniteVersion < 5.30 ||
-        VersionInfo.FortniteVersion > 8.00 ||
-        !PlayerController ||
-        !UFortKismetLibrary::IsGhostModeItemDefinition(
-            ItemDefinition))
+    if (VersionInfo.FortniteVersion < 5.30 || VersionInfo.FortniteVersion > 8.00 ||
+        !PlayerController || !UFortKismetLibrary::IsGhostModeItemDefinition(ItemDefinition))
     {
         return;
     }
@@ -2916,101 +2109,64 @@ void AFortInventory::TrackGhostModeActivation(
         return;
 
     const double Now = UGameplayStatics::GetTimeSeconds(World);
-    const double LifetimeSeconds =
-        ResolveGhostModeLifetimeSeconds(ItemDefinition);
+    const double LifetimeSeconds = ResolveGhostModeLifetimeSeconds(ItemDefinition);
     FTrackedGhostModeSession Session{};
-    Session.Owner =
-        TWeakObjectPtr<AFortPlayerControllerAthena>(
-            PlayerController);
-    Session.ItemDefinition =
-        TWeakObjectPtr<UFortItemDefinition>(
+    Session.Owner = TWeakObjectPtr<AFortPlayerControllerAthena>(PlayerController);
+    Session.ItemDefinition = TWeakObjectPtr<UFortItemDefinition>(
             const_cast<UFortItemDefinition*>(ItemDefinition));
     Session.ItemGuid = ItemGuid;
     Session.StartedAt = Now;
-    // Give the authored ability one second to publish its normal forced-exit
-    // transition before the watchdog supplies the missing server callback.
     Session.ExpireAt = Now + LifetimeSeconds + 1.0;
 
-    auto Pawn = PlayerController->MyFortPawn
-        ? PlayerController->MyFortPawn
-        : PlayerController->Pawn
-            ? PlayerController->Pawn
-                ->Cast<AFortPlayerPawnAthena>()
-            : nullptr;
-    Session.bHasInitialPawnExitStartTime =
-        ReadGhostExitFloat(
-            Pawn,
-            "GhostModeExitStartTime",
+    auto Pawn = PlayerController->MyFortPawn ? PlayerController->MyFortPawn : PlayerController->Pawn
+            ? PlayerController->Pawn->Cast<AFortPlayerPawnAthena>() : nullptr;
+    Session.bHasInitialPawnExitStartTime = ReadGhostExitFloat(Pawn, "GhostModeExitStartTime",
             Session.InitialPawnExitStartTime);
 
-    auto Existing = FindTrackedGhostModeSession(
-        PlayerController);
+    auto Existing = FindTrackedGhostModeSession(PlayerController);
     if (Existing != TrackedGhostModeSessions.end())
         *Existing = Session;
     else
         TrackedGhostModeSessions.push_back(Session);
 
-    SDK::DbgLog(
-        "[GhostMode] armed lifecycle tracker controller=%p "
-        "item=%08X-%08X-%08X-%08X lifetime=%.2f\n",
-        static_cast<void*>(PlayerController),
-        static_cast<uint32>(ItemGuid.A),
-        static_cast<uint32>(ItemGuid.B),
-        static_cast<uint32>(ItemGuid.C),
-        static_cast<uint32>(ItemGuid.D),
-        LifetimeSeconds);
+    SDK::DbgLog("[GhostMode] armed lifecycle tracker controller=%p "
+        "item=%08X-%08X-%08X-%08X lifetime=%.2f\n", static_cast<void*>(PlayerController),
+        static_cast<uint32>(ItemGuid.A), static_cast<uint32>(ItemGuid.B),
+        static_cast<uint32>(ItemGuid.C), static_cast<uint32>(ItemGuid.D), LifetimeSeconds);
 }
 
 void AFortInventory::NotifyGhostModeExitAbilityActivated(
-    UAbilitySystemComponent* AbilitySystemComponent,
-    const UFortGameplayAbility* Ability)
+    UAbilitySystemComponent* AbilitySystemComponent, const UFortGameplayAbility* Ability)
 {
-    if (VersionInfo.FortniteVersion < 5.30 ||
-        VersionInfo.FortniteVersion > 8.00 ||
+    if (VersionInfo.FortniteVersion < 5.30 || VersionInfo.FortniteVersion > 8.00 ||
         !Ability || !Ability->Class)
     {
         return;
     }
 
-    const auto AbilityClassName =
-        Ability->Class->Name.ToWString();
-    if (AbilityClassName != L"GA_Exit_SpookyMist_C" &&
-        AbilityClassName !=
+    const auto AbilityClassName = Ability->Class->Name.ToWString();
+    if (AbilityClassName != L"GA_Exit_SpookyMist_C" && AbilityClassName !=
             L"GA_SpookyMist_ForcedExit_C")
     {
         return;
     }
 
-    auto PlayerController = ResolveGhostModeController(
-        AbilitySystemComponent);
-    RequestTrackedGhostModeExit(
-        PlayerController,
-        AbilityClassName == L"GA_Exit_SpookyMist_C"
-            ? "GA_Exit_SpookyMist"
-            : "GA_SpookyMist_ForcedExit",
-        0.05);
+    auto PlayerController = ResolveGhostModeController(AbilitySystemComponent);
+    RequestTrackedGhostModeExit(PlayerController, AbilityClassName == L"GA_Exit_SpookyMist_C"
+            ? "GA_Exit_SpookyMist" : "GA_SpookyMist_ForcedExit", 0.05);
 }
 
 void AFortInventory::NotifyGhostModeHarvestingToolRequested(
-    AFortPlayerControllerAthena* PlayerController,
-    const UFortItemDefinition* ItemDefinition)
+    AFortPlayerControllerAthena* PlayerController, const UFortItemDefinition* ItemDefinition)
 {
-    if (VersionInfo.FortniteVersion < 5.30 ||
-        VersionInfo.FortniteVersion > 8.00 ||
-        !PlayerController || !ItemDefinition ||
-        ItemDefinition->ItemType !=
+    if (VersionInfo.FortniteVersion < 5.30 || VersionInfo.FortniteVersion > 8.00 ||
+        !PlayerController || !ItemDefinition || ItemDefinition->ItemType !=
             EFortItemType::GetWeaponHarvest())
     {
         return;
     }
 
-    // Both the manual Exit ability and the authored forced exit return to the
-    // harvesting tool. On stripped 6.21 servers that request can arrive even
-    // when the instant exit ability's own inventory-removal callback did not.
-    RequestTrackedGhostModeExit(
-        PlayerController,
-        "harvesting-tool-request",
-        0.05);
+    RequestTrackedGhostModeExit(PlayerController, "harvesting-tool-request", 0.05);
 }
 
 bool UFortWorldItemDefinition::ServerExecute(UFortItem* Item, AFortPlayerControllerAthena* Instigator) const
@@ -3022,11 +2178,15 @@ bool UFortWorldItemDefinition::ServerExecute(UFortItem* Item, AFortPlayerControl
     if (ServerExecuteVft < 0 || ServerExecuteVft >= 1024 || !Vft[ServerExecuteVft])
         return false;
 
-    return ((bool(*)(const UFortWorldItemDefinition*, UFortItem*, AFortPlayerControllerAthena*))Vft[ServerExecuteVft])(
-        this, Item, Instigator);
+    return ((bool(*)(const UFortWorldItemDefinition*, UFortItem*,
+        AFortPlayerControllerAthena*))Vft[ServerExecuteVft])(this, Item, Instigator);
 }
 
-UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Count, int LoadedAmmo, int Level, bool ShowPickupNoti, bool updateInventory, int PhantomReserveAmmo, TArray<FFortItemEntryStateValue> StateValues, bool bNotifyItemInstanceAdded, TArray<float> GenericAttributeValues, bool* OutForceFocusHandled, bool* OutGadgetInitializationDispatched)
+UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Count, int LoadedAmmo,
+    int Level, bool ShowPickupNoti, bool updateInventory, int PhantomReserveAmmo,
+    TArray<FFortItemEntryStateValue> StateValues, bool bNotifyItemInstanceAdded,
+    TArray<float> GenericAttributeValues, bool* OutForceFocusHandled,
+    bool* OutGadgetInitializationDispatched)
 {
     if (OutForceFocusHandled)
         *OutForceFocusHandled = false;
@@ -3035,27 +2195,19 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
     if (!this || !Def || !Count)
         return nullptr;
 
-    // The cooked 10.40 Ashton gadget is a legacy partial definition: it has
-    // only the head part, the ordinary player AnimBP, an incomplete ability
-    // set and a missing D_AshtonPack package. The playlist-authored Carmine
-    // gadget is the complete Endgame Thanos carrier. Substitute before the
-    // definition ever reaches a replicated inventory entry so clients receive
-    // the full body, Gauntlet AnimBP, stone abilities and beam cue lifecycle.
+    // The cooked 10.40 Ashton gadget is partial (head part only, no D_AshtonPack); the playlist's Carmine gadget is complete.
     Def = ResolveExact1040AshtonGadgetAlias(Def);
 
     auto PlayerController = Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
     auto Gadget = Def->Cast<UFortGadgetItemDefinition>();
-    const bool bCarmineGadget =
-        IsExact1040CarmineGadget(Def);
-    const bool bAshtonMiloGadget =
-        IsExact1040AshtonMiloGadget(Def);
+    const bool bCarmineGadget = IsExact1040CarmineGadget(Def);
+    const bool bAshtonMiloGadget = IsExact1040AshtonMiloGadget(Def);
     if (bCarmineGadget)
         PreloadExact1040CarmineDependencies();
     if (bAshtonMiloGadget)
         PreloadExact1040AshtonMiloDependencies();
 
-    // Exclusive Chapter 1 gadgets expect the backpack to be emptied before
-    // their native ServerExecute runs. The Infinity Gauntlet sets this flag.
+    // Exclusive Chapter 1 gadgets want the backpack emptied before their native ServerExecute. The Infinity Gauntlet sets this flag.
     if (VersionInfo.FortniteVersion >= 4.0 && VersionInfo.FortniteVersion <= 4.5 &&
         PlayerController && PlayerController->MyFortPawn && Gadget &&
         Gadget->HasbDropAllOnEquip() && Gadget->bDropAllOnEquip)
@@ -3069,10 +2221,8 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
                 continue;
 
             const bool CanDrop = ExistingDefinition->HasbCanBeDropped()
-                ? ExistingDefinition->bCanBeDropped
-                : (ExistingDefinition->GetPickupComponent()
-                    ? ExistingDefinition->GetPickupComponent()->bCanBeDroppedFromInventory
-                    : false);
+                ? ExistingDefinition->bCanBeDropped : (ExistingDefinition->GetPickupComponent()
+                    ? ExistingDefinition->GetPickupComponent()->bCanBeDroppedFromInventory : false);
             if (!CanDrop)
                 continue;
 
@@ -3101,10 +2251,8 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
     if (Item->ItemEntry.HasPhantomReserveAmmo())
         Item->ItemEntry.PhantomReserveAmmo = PhantomReserveAmmo;
     if (auto WeaponDef = Def->Cast<UFortWeaponItemDefinition>())
-        FFortWeaponMods::CopyDefinitionSlotsToEntry(
-            WeaponDef, Item->ItemEntry);
-    const bool bHasWeaponModSlots =
-        FFortWeaponMods::HasEntrySlots(Item->ItemEntry);
+        FFortWeaponMods::CopyDefinitionSlotsToEntry(WeaponDef, Item->ItemEntry);
+    const bool bHasWeaponModSlots = FFortWeaponMods::HasEntrySlots(Item->ItemEntry);
     if (Item->ItemEntry.HasStateValues() && StateValues.Num() > 0)
     {
         auto NewData = FMemory::Malloc(FFortItemEntryStateValue::Size() * StateValues.Num());
@@ -3113,49 +2261,35 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
         Item->ItemEntry.StateValues.MaxElements = StateValues.Num();
         Item->ItemEntry.StateValues.Data = (FFortItemEntryStateValue*)NewData;
     }
-    if (Item->ItemEntry.HasGenericAttributeValues() &&
-        GenericAttributeValues.Num() > 0)
+    if (Item->ItemEntry.HasGenericAttributeValues() && GenericAttributeValues.Num() > 0)
     {
-        auto NewData = FMemory::Malloc(
-            sizeof(float) * GenericAttributeValues.Num());
-        memcpy(
-            NewData,
-            GenericAttributeValues.Data,
-            sizeof(float) * GenericAttributeValues.Num());
-        Item->ItemEntry.GenericAttributeValues.NumElements =
-            GenericAttributeValues.Num();
-        Item->ItemEntry.GenericAttributeValues.MaxElements =
-            GenericAttributeValues.Num();
-        Item->ItemEntry.GenericAttributeValues.Data =
-            static_cast<float*>(NewData);
+        auto NewData = FMemory::Malloc(sizeof(float) * GenericAttributeValues.Num());
+        memcpy(NewData, GenericAttributeValues.Data, sizeof(float) * GenericAttributeValues.Num());
+        Item->ItemEntry.GenericAttributeValues.NumElements = GenericAttributeValues.Num();
+        Item->ItemEntry.GenericAttributeValues.MaxElements = GenericAttributeValues.Num();
+        Item->ItemEntry.GenericAttributeValues.Data = static_cast<float*>(NewData);
     }
 
-    if (Item->ItemEntry.ItemGuid.A == 0 && Item->ItemEntry.ItemGuid.B == 0 && Item->ItemEntry.ItemGuid.C == 0 && Item->ItemEntry.ItemGuid.D == 0)
+    if (Item->ItemEntry.ItemGuid.A == 0 && Item->ItemEntry.ItemGuid.B == 0 &&
+        Item->ItemEntry.ItemGuid.C == 0 && Item->ItemEntry.ItemGuid.D == 0)
     {
         CoCreateGuid((GUID*)&Item->ItemEntry.ItemGuid);
 
-        if (FFortItemEntry::HasTrackerGuid() && Item->ItemEntry.TrackerGuid.A == 0 && Item->ItemEntry.TrackerGuid.B == 0 && Item->ItemEntry.TrackerGuid.C == 0 && Item->ItemEntry.TrackerGuid.D == 0)
+        if (FFortItemEntry::HasTrackerGuid() && Item->ItemEntry.TrackerGuid.A == 0 &&
+            Item->ItemEntry.TrackerGuid.B == 0 && Item->ItemEntry.TrackerGuid.C == 0 &&
+            Item->ItemEntry.TrackerGuid.D == 0)
             CoCreateGuid((GUID*)&Item->ItemEntry.TrackerGuid);
     }
 
-
-    auto& AddedReplicatedEntry =
-        this->Inventory.ReplicatedEntries.Add(
+    auto& AddedReplicatedEntry = this->Inventory.ReplicatedEntries.Add(
             Item->ItemEntry, FFortItemEntry::Size());
     auto* ReplicatedEntry = &AddedReplicatedEntry;
     ReplicatedEntry->bIsReplicatedCopy = true;
     if (bHasWeaponModSlots)
     {
-        FFortWeaponMods::CopyEntrySlots(
-            Item->ItemEntry, *ReplicatedEntry);
+        FFortWeaponMods::CopyEntrySlots(Item->ItemEntry, *ReplicatedEntry);
     }
     this->Inventory.ItemInstances.Add(Item);
-
-    /*if (Item->ItemEntry.ItemDefinition->bForceFocusWhenAdded)
-    {
-        ((AFortPlayerControllerAthena*)Owner)->ServerExecuteInventoryItem(Item->ItemEntry.ItemGuid);
-        ((AFortPlayerControllerAthena*)Owner)->ClientEquipItem(Item->ItemEntry.ItemGuid, true);
-    }*/
 
     if (VersionInfo.FortniteVersion <= 3.60)
     {
@@ -3163,30 +2297,29 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
         auto PlayerState = PlayerController ? (AFortPlayerStateAthena*)PlayerController->PlayerState : nullptr;
         bool bIsBotInventory = PlayerState && PlayerState->HasbIsABot() && PlayerState->bIsABot;
 
-        if (!bIsBotInventory && PlayerController && PlayerController->QuickBars && (IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetBuildingPiece() || Def->ItemType == EFortItemType::GetTrap() || Def->ItemType == EFortItemType::GetWeaponHarvest()))
+        if (!bIsBotInventory && PlayerController && PlayerController->QuickBars &&
+            (IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetBuildingPiece() ||
+                Def->ItemType == EFortItemType::GetTrap() ||
+                Def->ItemType == EFortItemType::GetWeaponHarvest()))
         {
-            PlayerController->QuickBars->ServerAddItemInternal(Item->ItemEntry.ItemGuid, !(IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetWeaponHarvest()), -3);
+            PlayerController->QuickBars->ServerAddItemInternal(Item->ItemEntry.ItemGuid,
+                !(IsPrimaryQuickbar(Def) || Def->ItemType == EFortItemType::GetWeaponHarvest()),
+                -3);
         }
     }
 
     if (updateInventory)
     {
-        //Update(&Item->ItemEntry);
-
         bRequiresLocalUpdate = true;
         bRequiresSaving = true;
 
-        HandleInventoryLocalUpdate(); // calls UpdateItemInstances, the func we actually want
+        HandleInventoryLocalUpdate();
 
-        // Native inventory work can move the fast-array allocation. Never
-        // retain the Add() reference across HandleInventoryLocalUpdate.
-        ReplicatedEntry = Inventory.ReplicatedEntries.Search(
-            [&](FFortItemEntry& Candidate)
+        // Native inventory work can move the fast-array allocation, so never hold the Add() reference across an update.
+        ReplicatedEntry = Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Candidate)
             {
-                return Candidate.ItemGuid ==
-                    Item->ItemEntry.ItemGuid;
-            },
-            FFortItemEntry::Size());
+                return Candidate.ItemGuid == Item->ItemEntry.ItemGuid;
+            }, FFortItemEntry::Size());
         if (ReplicatedEntry)
         {
             ReplicatedEntry->bIsDirty = false;
@@ -3196,329 +2329,193 @@ UFortWorldItem* AFortInventory::GiveItem(const UFortItemDefinition* Def, int Cou
         Item->ItemEntry.bIsDirty = true;
     }
 
-    // HandleInventoryLocalUpdate may copy the replicated array header back to
-    // the item instance. Detach it so bench changes cannot mutate both entries.
     if (bHasWeaponModSlots && ReplicatedEntry)
     {
-        FFortWeaponMods::CopyEntrySlots(
-            *ReplicatedEntry, Item->ItemEntry);
+        FFortWeaponMods::CopyEntrySlots(*ReplicatedEntry, Item->ItemEntry);
     }
 
     bool bCarmineInitialized = false;
     if (bCarmineGadget)
     {
-        // Install Carmine's server ability set immediately. The replicated
-        // item still follows the owning client's ordinary item-added path,
-        // where WaitAnimBPOverrideReady starts Spawn_Montage and the authored
-        // lift/skydive timers once the full Gauntlet AnimBP is actually ready.
-        bCarmineInitialized =
-            bNotifyItemInstanceAdded
-                ? InitializeGadgetItemWithFallback(
-                      Item, true)
-                : false;
+        bCarmineInitialized = bNotifyItemInstanceAdded ? InitializeGadgetItemWithFallback(
+                      Item, true) : false;
     }
     bool bAshtonMiloInitialized = false;
     if (bAshtonMiloGadget)
     {
-        // The Chitauri backpack owns the three pieces of visible equipment.
-        // Prefer the validated gadget path after preloading its soft ability
-        // set, then fall through to the ordinary virtual notification if that
-        // private path is unavailable for the executable in use.
-        bAshtonMiloInitialized =
-            bNotifyItemInstanceAdded
-                ? InitializeGadgetItemWithFallback(
-                      Item, true)
-                : false;
+        bAshtonMiloInitialized = bNotifyItemInstanceAdded ? InitializeGadgetItemWithFallback(
+                      Item, true) : false;
     }
     bool bItemAddedFallbackDispatched = false;
     bool bCarmineFallbackDispatched = false;
-    const IInterface* InventoryOwnerInterface =
-        Owner
-            ? Owner->GetInterface(
-                  IFortInventoryOwnerInterface::
-                      StaticClass())
-            : nullptr;
-    if ((!bCarmineGadget || !bCarmineInitialized) &&
-        (!bAshtonMiloGadget ||
-         !bAshtonMiloInitialized) &&
-        bNotifyItemInstanceAdded &&
-        OnItemInstanceAddedVft &&
-        OnItemInstanceAddedVft < 1024 &&
-        Item->Vft &&
-        Item->Vft[OnItemInstanceAddedVft] &&
+    const IInterface* InventoryOwnerInterface = Owner ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::StaticClass()) : nullptr;
+    if ((!bCarmineGadget || !bCarmineInitialized) && (!bAshtonMiloGadget ||
+         !bAshtonMiloInitialized) && bNotifyItemInstanceAdded && OnItemInstanceAddedVft &&
+        OnItemInstanceAddedVft < 1024 && Item->Vft && Item->Vft[OnItemInstanceAddedVft] &&
         InventoryOwnerInterface)
     {
         ((void(*)(const UFortWorldItem*, const IInterface*))
-            Item->Vft[OnItemInstanceAddedVft])(
-                Item, InventoryOwnerInterface);
+            Item->Vft[OnItemInstanceAddedVft])(Item, InventoryOwnerInterface);
         bItemAddedFallbackDispatched = true;
-        bCarmineFallbackDispatched =
-            bCarmineGadget;
+        bCarmineFallbackDispatched = bCarmineGadget;
     }
 
-    // The S4 gauntlet is force-focused when collected. Route that focus through
-    // ServerExecuteInventoryItem so the native gadget execution path above is
-    // used instead of merely equipping its backing weapon definition.
     bool bCarmineFocusHandled = false;
-    if (bCarmineGadget &&
-        (bCarmineInitialized ||
-         bCarmineFallbackDispatched) &&
-        PlayerController &&
-        Def->HasbForceFocusWhenAdded() &&
-        Def->bForceFocusWhenAdded)
+    if (bCarmineGadget && (bCarmineInitialized || bCarmineFallbackDispatched) && PlayerController &&
+        Def->HasbForceFocusWhenAdded() && Def->bForceFocusWhenAdded)
     {
-        bCarmineFocusHandled =
-            IsExact1040BaseAshtonGadget(Def)
-                ? EnsureExact1040AshtonBackingAndFocus()
-                : FocusOrQueueExact1040Carmine(
-                      PlayerController,
-                      Item->ItemEntry.ItemGuid);
+        bCarmineFocusHandled = IsExact1040BaseAshtonGadget(Def)
+                ? EnsureExact1040AshtonBackingAndFocus() : FocusOrQueueExact1040Carmine(
+                      PlayerController, Item->ItemEntry.ItemGuid);
     }
-    if (VersionInfo.FortniteVersion >= 4.0 &&
-        VersionInfo.FortniteVersion <= 4.5 &&
-        PlayerController && Gadget &&
-        Def->HasbForceFocusWhenAdded() &&
-        Def->bForceFocusWhenAdded)
+    if (VersionInfo.FortniteVersion >= 4.0 && VersionInfo.FortniteVersion <= 4.5 &&
+        PlayerController && Gadget && Def->HasbForceFocusWhenAdded() && Def->bForceFocusWhenAdded)
     {
-        PlayerController->ServerExecuteInventoryItem(
-            Item->ItemEntry.ItemGuid);
-        PlayerController->ClientEquipItem(
-            Item->ItemEntry.ItemGuid, true);
+        PlayerController->ServerExecuteInventoryItem(Item->ItemEntry.ItemGuid);
+        PlayerController->ClientEquipItem(Item->ItemEntry.ItemGuid, true);
     }
     if (OutForceFocusHandled && bCarmineGadget)
-        *OutForceFocusHandled =
-            bCarmineFocusHandled;
+        *OutForceFocusHandled = bCarmineFocusHandled;
     if (OutGadgetInitializationDispatched)
     {
-        *OutGadgetInitializationDispatched =
-            bCarmineGadget
-                ? bCarmineInitialized ||
-                      bItemAddedFallbackDispatched
-                : bAshtonMiloGadget
-                    ? bAshtonMiloInitialized ||
-                          bItemAddedFallbackDispatched
-                    : bItemAddedFallbackDispatched;
+        *OutGadgetInitializationDispatched = bCarmineGadget ? bCarmineInitialized ||
+                      bItemAddedFallbackDispatched : bAshtonMiloGadget ? bAshtonMiloInitialized ||
+                          bItemAddedFallbackDispatched : bItemAddedFallbackDispatched;
     }
 
-    auto RechargingWeaponDefinition =
-        Item->ItemEntry.ItemDefinition
-            ? Item->ItemEntry.ItemDefinition->Cast<
-                UFortWeaponItemDefinition>()
-            : nullptr;
+    auto RechargingWeaponDefinition = Item->ItemEntry.ItemDefinition
+            ? Item->ItemEntry.ItemDefinition->Cast<UFortWeaponItemDefinition>() : nullptr;
     if (PlayerController && RechargingWeaponDefinition)
     {
-        // Resolve the weapon's authored recharge capability once at grant
-        // time. Ordinary firearms never enter the tracked list, keeping the
-        // loaded-ammo hot path free of curve evaluation and asset lookups.
-        ObserveRechargingWeaponAmmo(
-            PlayerController,
-            RechargingWeaponDefinition,
-            Item->ItemEntry.ItemGuid,
-            Item->ItemEntry.Level,
-            Item->ItemEntry.LoadedAmmo,
+        ObserveRechargingWeaponAmmo(PlayerController, RechargingWeaponDefinition,
+            Item->ItemEntry.ItemGuid, Item->ItemEntry.Level, Item->ItemEntry.LoadedAmmo,
             Item->ItemEntry.LoadedAmmo);
     }
 
     return Item;
 }
 
-bool AFortInventory::InitializeGadgetItem(
-    UFortWorldItem* Item,
-    bool updateInventory)
+bool AFortInventory::InitializeGadgetItem(UFortWorldItem* Item, bool updateInventory)
 {
     if (!this || !Item || !Item->ItemEntry.ItemDefinition)
         return false;
 
-    auto Gadget =
-        Item->ItemEntry.ItemDefinition
-            ->Cast<UFortGadgetItemDefinition>();
-    const IInterface* InventoryOwnerInterface =
-        Owner
-            ? Owner->GetInterface(
-                  IFortInventoryOwnerInterface::StaticClass())
-            : nullptr;
+    auto Gadget = Item->ItemEntry.ItemDefinition->Cast<UFortGadgetItemDefinition>();
+    const IInterface* InventoryOwnerInterface = Owner ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::StaticClass()) : nullptr;
     if (!Gadget || !InventoryOwnerInterface)
         return false;
 
-    const bool bCarmineGadget =
-        IsExact1040CarmineGadget(Gadget);
-    const bool bAshtonMiloGadget =
-        IsExact1040AshtonMiloGadget(Gadget);
+    const bool bCarmineGadget = IsExact1040CarmineGadget(Gadget);
+    const bool bAshtonMiloGadget = IsExact1040AshtonMiloGadget(Gadget);
     if (bCarmineGadget)
         PreloadExact1040CarmineDependencies();
     if (bAshtonMiloGadget)
         PreloadExact1040AshtonMiloDependencies();
 
-    // ApplyGadgetData uses Get() on these authored soft references. The
-    // stripped 10.40 server never queues their normal preload, leaving both
-    // the ability-set handle and the tracked attribute set uninitialized.
-    // Resolve them once on the game thread before invoking the native path.
     const UFortAbilitySet* LoadedAbilitySet = nullptr;
     if (Gadget->HasAbilitySet())
         LoadedAbilitySet = Gadget->AbilitySet.Get();
 
-    const bool bBigTeamGlider =
-        VersionInfo.FortniteVersion == 10.40 &&
-        Gadget->Name.ToWString() ==
+    const bool bBigTeamGlider = VersionInfo.FortniteVersion == 10.40 && Gadget->Name.ToWString() ==
             L"Athena_Glider_Item_BigTeamMode";
     if (!LoadedAbilitySet && bBigTeamGlider)
     {
-        LoadedAbilitySet = FindObject<UFortAbilitySet>(
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(L"/Game/Athena/Items/Gameplay/BackPacks/"
             L"GliderItem/AS_Athena_Glider_Item."
             L"AS_Athena_Glider_Item");
     }
-    if (!LoadedAbilitySet &&
-        IsExact1040BaseAshtonGadget(Gadget))
+    if (!LoadedAbilitySet && IsExact1040BaseAshtonGadget(Gadget))
     {
-        LoadedAbilitySet = FindObject<UFortAbilitySet>(
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(L"/Game/Athena/Items/Gameplay/BackPacks/"
             L"Ashton/AS_AshtonPack.AS_AshtonPack");
     }
-    if (!LoadedAbilitySet &&
-        bCarmineGadget &&
-        !IsExact1040BaseAshtonGadget(Gadget))
+    if (!LoadedAbilitySet && bCarmineGadget && !IsExact1040BaseAshtonGadget(Gadget))
     {
-        LoadedAbilitySet = FindObject<UFortAbilitySet>(
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(L"/Game/Athena/Items/Gameplay/BackPacks/"
             L"CarminePack/AS_CarminePack.AS_CarminePack");
     }
     if (!LoadedAbilitySet && bAshtonMiloGadget)
     {
-        LoadedAbilitySet = FindObject<UFortAbilitySet>(
-            L"/Game/Athena/Items/Gameplay/BackPacks/"
+        LoadedAbilitySet = FindObject<UFortAbilitySet>(L"/Game/Athena/Items/Gameplay/BackPacks/"
             L"Ashton/Milo/AS_AshtonPack_Milo."
             L"AS_AshtonPack_Milo");
     }
     if (LoadedAbilitySet)
         LoadedAbilitySet->AddToRoot();
 
-    UClass* LoadedAttributeSet =
-        Gadget->HasAttributeSet()
-            ? Gadget->AttributeSet.Get()
+    UClass* LoadedAttributeSet = Gadget->HasAttributeSet() ? Gadget->AttributeSet.Get() : nullptr;
+    UClass* LoadedGameplayAbility = Gadget->HasGameplayAbility() ? Gadget->GameplayAbility.Get()
             : nullptr;
-    UClass* LoadedGameplayAbility =
-        Gadget->HasGameplayAbility()
-            ? Gadget->GameplayAbility.Get()
-            : nullptr;
-    auto LoadedWeaponDefinition =
-        Gadget->GetWeaponItemDefinition();
+    auto LoadedWeaponDefinition = Gadget->GetWeaponItemDefinition();
 
     bool bApplied = false;
     if (ApplyGadgetDataAddress)
     {
-        bApplied =
-            ((bool (*)(
-                UFortGadgetItemDefinition*,
-                const IInterface*,
-                UFortItem*,
-                uint8_t))ApplyGadgetDataAddress)(
-                    Gadget,
-                    InventoryOwnerInterface,
-                    reinterpret_cast<UFortItem*>(Item),
-                    1);
+        bApplied = ((bool (*)(UFortGadgetItemDefinition*, const IInterface*, UFortItem*,
+                uint8_t))ApplyGadgetDataAddress)(Gadget, InventoryOwnerInterface,
+                    reinterpret_cast<UFortItem*>(Item), 1);
     }
 
     if (updateInventory && bApplied)
         Update(&Item->ItemEntry);
 
-    SDK::DbgLog(
-        "[Gadget] native initialization definition=%s item=%p "
+    SDK::DbgLog("[Gadget] native initialization definition=%s item=%p "
         "abilitySet=%p attributeSet=%p gameplayAbility=%p "
-        "weapon=%p applied=%d\n",
-        Gadget->Name.ToString().c_str(),
-        static_cast<void*>(Item),
-        static_cast<const void*>(LoadedAbilitySet),
-        static_cast<void*>(LoadedAttributeSet),
-        static_cast<void*>(LoadedGameplayAbility),
-        static_cast<void*>(LoadedWeaponDefinition),
+        "weapon=%p applied=%d\n", Gadget->Name.ToString().c_str(), static_cast<void*>(Item),
+        static_cast<const void*>(LoadedAbilitySet), static_cast<void*>(LoadedAttributeSet),
+        static_cast<void*>(LoadedGameplayAbility), static_cast<void*>(LoadedWeaponDefinition),
         bApplied ? 1 : 0);
     return bApplied;
 }
 
-bool AFortInventory::InitializeGadgetItemWithFallback(
-    UFortWorldItem* Item,
-    bool updateInventory)
+bool AFortInventory::InitializeGadgetItemWithFallback(UFortWorldItem* Item, bool updateInventory)
 {
-    if (!this || !Item ||
-        !Item->ItemEntry.ItemDefinition ||
-        !Item->ItemEntry.ItemDefinition
+    if (!this || !Item || !Item->ItemEntry.ItemDefinition || !Item->ItemEntry.ItemDefinition
              ->Cast<UFortGadgetItemDefinition>())
     {
         return false;
     }
 
-    const bool bForceStockMiloNotification =
-        IsExact1040AshtonMiloGadget(
+    const bool bForceStockMiloNotification = IsExact1040AshtonMiloGadget(
             Item->ItemEntry.ItemDefinition);
-    const bool bForceStockNotification =
-        bForceStockMiloNotification;
+    const bool bForceStockNotification = bForceStockMiloNotification;
 
-    // Milo's cooked passive creates its rifle, launcher and jetpack from its
-    // server item-added event, so it needs that stock notification. Carmine
-    // instead uses ApplyGadgetData here for immediate server abilities; its
-    // replicated owning-client item-added event independently owns the
-    // AnimBP-ready transformation.
-    if (!bForceStockNotification &&
-        InitializeGadgetItem(Item, updateInventory))
+    if (!bForceStockNotification && InitializeGadgetItem(Item, updateInventory))
         return true;
 
-    const IInterface* InventoryOwnerInterface =
-        Owner
-            ? Owner->GetInterface(
-                  IFortInventoryOwnerInterface::StaticClass())
-            : nullptr;
-    if (!InventoryOwnerInterface ||
-        !OnItemInstanceAddedVft ||
-        OnItemInstanceAddedVft >= 1024 ||
-        !Item->Vft ||
-        !Item->Vft[OnItemInstanceAddedVft])
+    const IInterface* InventoryOwnerInterface = Owner ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::StaticClass()) : nullptr;
+    if (!InventoryOwnerInterface || !OnItemInstanceAddedVft || OnItemInstanceAddedVft >= 1024 ||
+        !Item->Vft || !Item->Vft[OnItemInstanceAddedVft])
     {
         return false;
     }
 
     ((void(*)(const UFortWorldItem*, const IInterface*))
-        Item->Vft[OnItemInstanceAddedVft])(
-            Item, InventoryOwnerInterface);
-    SDK::DbgLog(
-        "[Gadget] dispatched item-added %s "
-        "definition=%s item=%p\n",
-        bForceStockNotification
-            ? "forced-stock path"
-            : "fallback",
-        Item->ItemEntry.ItemDefinition->Name
-            .ToString().c_str(),
-        static_cast<void*>(Item));
+        Item->Vft[OnItemInstanceAddedVft])(Item, InventoryOwnerInterface);
+    SDK::DbgLog("[Gadget] dispatched item-added %s "
+        "definition=%s item=%p\n", bForceStockNotification ? "forced-stock path" : "fallback",
+        Item->ItemEntry.ItemDefinition->Name.ToString().c_str(), static_cast<void*>(Item));
     return true;
 }
 
-bool AFortInventory::
-    EnsureExact1040AshtonBackingAndFocus(
-        FGuid* OutBackingGuid)
+bool AFortInventory::EnsureExact1040AshtonBackingAndFocus(FGuid* OutBackingGuid)
 {
     if (OutBackingGuid)
         *OutBackingGuid = {};
-    auto PlayerController =
-        Owner
-            ? Owner->Cast<
-                  AFortPlayerControllerAthena>()
-            : nullptr;
-    auto BackingDefinition =
-        ResolveExact1040CarmineBacking();
-    if (!PlayerController ||
-        !BackingDefinition)
+    auto PlayerController = Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+    auto BackingDefinition = ResolveExact1040CarmineBacking();
+    if (!PlayerController || !BackingDefinition)
     {
         return false;
     }
 
-    auto Existing =
-        Inventory.ReplicatedEntries.Search(
-            [&](FFortItemEntry& Entry)
+    auto Existing = Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry)
             {
-                return Entry.ItemDefinition ==
-                    BackingDefinition;
-            },
-            FFortItemEntry::Size());
+                return Entry.ItemDefinition == BackingDefinition;
+            }, FFortItemEntry::Size());
     FGuid BackingGuid{};
     if (Existing)
     {
@@ -3526,36 +2523,22 @@ bool AFortInventory::
     }
     else
     {
-        auto BackingItem = GiveItem(
-            BackingDefinition,
-            1,
-            0,
-            0,
-            false,
-            true,
-            0,
-            {},
-            true);
+        auto BackingItem = GiveItem(BackingDefinition, 1, 0, 0, false, true, 0,
+            {}, true);
         if (!BackingItem)
             return false;
-        BackingGuid =
-            BackingItem->ItemEntry.ItemGuid;
-        SDK::DbgLog(
-            "[Ashton1040] granted explicit "
+        BackingGuid = BackingItem->ItemEntry.ItemGuid;
+        SDK::DbgLog("[Ashton1040] granted explicit "
             "D_CarminePack backing for authored gauntlet "
-            "controller=%p\n",
-            static_cast<void*>(PlayerController));
+            "controller=%p\n", static_cast<void*>(PlayerController));
     }
 
     if (OutBackingGuid)
         *OutBackingGuid = BackingGuid;
-    return FocusOrQueueExact1040Carmine(
-        PlayerController, BackingGuid);
+    return FocusOrQueueExact1040Carmine(PlayerController, BackingGuid);
 }
 
-int32 AFortInventory::GiveItemToSingleStack(
-    const UFortItemDefinition* Definition,
-    int32 Count,
+int32 AFortInventory::GiveItemToSingleStack(const UFortItemDefinition* Definition, int32 Count,
     bool ShowPickupNoti)
 {
     if (!this || !Definition || Count <= 0)
@@ -3564,45 +2547,26 @@ int32 AFortInventory::GiveItemToSingleStack(
     int32 MaxStackSize = Definition->GetMaxStackSize();
     if (MaxStackSize <= 0)
     {
-        // Resource definitions expose a finite cap on supported builds. If a
-        // fork omits that reflection, still merge safely instead of reverting
-        // to GiveItem's one-new-GUID-per-grant behavior.
         MaxStackSize = (std::numeric_limits<int32>::max)();
     }
 
-    auto ExistingEntry = Inventory.ReplicatedEntries.Search(
-        [&](FFortItemEntry& Entry)
+    auto ExistingEntry = Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry)
         {
             return Entry.ItemDefinition == Definition;
-        },
-        FFortItemEntry::Size());
+        }, FFortItemEntry::Size());
 
     if (!ExistingEntry)
     {
-        const int32 GrantedCount =
-            (std::min)(Count, MaxStackSize);
-        return GiveItem(
-            Definition,
-            GrantedCount,
-            0,
-            0,
-            ShowPickupNoti)
-            ? GrantedCount
-            : 0;
+        const int32 GrantedCount = (std::min)(Count, MaxStackSize);
+        return GiveItem(Definition, GrantedCount, 0, 0, ShowPickupNoti) ? GrantedCount : 0;
     }
 
-    const int32 ExistingCount =
-        (std::max)(ExistingEntry->Count, 0);
+    const int32 ExistingCount = (std::max)(ExistingEntry->Count, 0);
     if (ExistingCount >= MaxStackSize)
         return 0;
 
-    const int64 DesiredCount =
-        static_cast<int64>(ExistingCount) +
-        static_cast<int64>(Count);
-    int32 NewCount = static_cast<int32>(
-        (std::min)(
-            DesiredCount,
-            static_cast<int64>(MaxStackSize)));
+    const int64 DesiredCount = static_cast<int64>(ExistingCount) + static_cast<int64>(Count);
+    int32 NewCount = static_cast<int32>((std::min)(DesiredCount, static_cast<int64>(MaxStackSize)));
     const int32 GrantedCount = NewCount - ExistingCount;
     if (GrantedCount <= 0)
         return 0;
@@ -3610,13 +2574,9 @@ int32 AFortInventory::GiveItemToSingleStack(
     FGuid ExistingGuid = ExistingEntry->ItemGuid;
     ExistingEntry->Count = NewCount;
 
-    auto ExistingItem = Inventory.ItemInstances.Search(
-        [&](UFortWorldItem* Item)
+    auto ExistingItem = Inventory.ItemInstances.Search([&](UFortWorldItem* Item)
         {
-            return Item &&
-                AreGuidsEqual(
-                    Item->ItemEntry.ItemGuid,
-                    ExistingGuid);
+            return Item && AreGuidsEqual(Item->ItemEntry.ItemGuid, ExistingGuid);
         });
     if (ExistingItem && *ExistingItem)
     {
@@ -3628,64 +2588,36 @@ int32 AFortInventory::GiveItemToSingleStack(
     return GrantedCount;
 }
 
-UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool ShowPickupNoti, bool updateInventory, bool* OutForceFocusHandled)
+UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool ShowPickupNoti,
+    bool updateInventory, bool* OutForceFocusHandled)
 {
     if (OutForceFocusHandled)
         *OutForceFocusHandled = false;
     if (Count == -1)
         Count = entry.Count;
 
-    // Preserve the original inventory/callback/force-focus ordering outside
-    // Chapter 5. Deferred notification is needed only while copying the
-    // attachment slots that native item listeners consume.
     if (!FFortWeaponMods::HasEntrySlots(entry))
     {
-        return GiveItem(
-            entry.ItemDefinition,
-            Count,
-            entry.LoadedAmmo,
-            entry.Level,
-            ShowPickupNoti,
-            updateInventory,
-            entry.HasPhantomReserveAmmo()
-                ? entry.PhantomReserveAmmo
-                : 0,
-            entry.HasStateValues()
-                ? entry.StateValues
-                : TArray<FFortItemEntryStateValue>{},
-            true,
-            entry.HasGenericAttributeValues()
-                ? entry.GenericAttributeValues
-                : TArray<float>{},
+        return GiveItem(entry.ItemDefinition, Count, entry.LoadedAmmo, entry.Level, ShowPickupNoti,
+            updateInventory, entry.HasPhantomReserveAmmo() ? entry.PhantomReserveAmmo : 0,
+            entry.HasStateValues() ? entry.StateValues : TArray<FFortItemEntryStateValue>{}, true,
+            entry.HasGenericAttributeValues() ? entry.GenericAttributeValues : TArray<float>{},
             OutForceFocusHandled);
     }
 
     bool bDefinitionFocusHandled = false;
-    auto Item = GiveItem(
-        entry.ItemDefinition,
-        Count,
-        entry.LoadedAmmo,
-        entry.Level,
-        ShowPickupNoti,
-        false,
-        entry.HasPhantomReserveAmmo() ? entry.PhantomReserveAmmo : 0,
-        entry.HasStateValues()
-            ? entry.StateValues
-            : TArray<FFortItemEntryStateValue>{},
-        false,
-        entry.HasGenericAttributeValues()
-            ? entry.GenericAttributeValues
-            : TArray<float>{},
+    auto Item = GiveItem(entry.ItemDefinition, Count, entry.LoadedAmmo, entry.Level, ShowPickupNoti,
+        false, entry.HasPhantomReserveAmmo() ? entry.PhantomReserveAmmo : 0, entry.HasStateValues()
+            ? entry.StateValues : TArray<FFortItemEntryStateValue>{}, false,
+        entry.HasGenericAttributeValues() ? entry.GenericAttributeValues : TArray<float>{},
         &bDefinitionFocusHandled);
     if (!Item)
         return nullptr;
 
-    auto ReplicatedEntry = Inventory.ReplicatedEntries.Search(
-        [&](FFortItemEntry& Candidate)
+    auto ReplicatedEntry = Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Candidate)
         {
             return Candidate.ItemGuid == Item->ItemEntry.ItemGuid;
-        },
-        FFortItemEntry::Size());
+        }, FFortItemEntry::Size());
 
     FFortWeaponMods::CopyEntrySlots(entry, Item->ItemEntry);
     if (ReplicatedEntry)
@@ -3697,119 +2629,75 @@ UFortWorldItem* AFortInventory::GiveItem(FFortItemEntry& entry, int Count, bool 
         bRequiresSaving = true;
         HandleInventoryLocalUpdate();
 
-        ReplicatedEntry = Inventory.ReplicatedEntries.Search(
-            [&](FFortItemEntry& Candidate)
+        ReplicatedEntry = Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Candidate)
             {
                 return Candidate.ItemGuid == Item->ItemEntry.ItemGuid;
-            },
-            FFortItemEntry::Size());
+            }, FFortItemEntry::Size());
         if (ReplicatedEntry)
         {
             ReplicatedEntry->bIsDirty = false;
             Inventory.MarkItemDirty(*ReplicatedEntry);
-            FFortWeaponMods::CopyEntrySlots(
-                *ReplicatedEntry, Item->ItemEntry);
+            FFortWeaponMods::CopyEntrySlots(*ReplicatedEntry, Item->ItemEntry);
         }
 
         ForceNetUpdate();
         Item->ItemEntry.bIsDirty = true;
     }
 
-    // Pickup/custom entries must expose their source attachment set before
-    // inventory listeners initialize the item's abilities and equipped state.
-    // The definition overload deliberately deferred this one notification.
-    const IInterface* InventoryOwnerInterface =
-        Owner
-            ? Owner->GetInterface(
-                  IFortInventoryOwnerInterface::
-                      StaticClass())
-            : nullptr;
-    if (OnItemInstanceAddedVft &&
-        OnItemInstanceAddedVft < 1024 &&
-        Item->Vft &&
-        Item->Vft[OnItemInstanceAddedVft] &&
-        InventoryOwnerInterface &&
-        !bDefinitionFocusHandled)
+    const IInterface* InventoryOwnerInterface = Owner ? Owner->GetInterface(
+                  IFortInventoryOwnerInterface::StaticClass()) : nullptr;
+    if (OnItemInstanceAddedVft && OnItemInstanceAddedVft < 1024 && Item->Vft &&
+        Item->Vft[OnItemInstanceAddedVft] && InventoryOwnerInterface && !bDefinitionFocusHandled)
     {
         ((void(*)(const UFortWorldItem*, const IInterface*))
-            Item->Vft[OnItemInstanceAddedVft])(
-                Item, InventoryOwnerInterface);
-        if (IsExact1040CarmineGadget(
-                Item->ItemEntry.ItemDefinition))
+            Item->Vft[OnItemInstanceAddedVft])(Item, InventoryOwnerInterface);
+        if (IsExact1040CarmineGadget(Item->ItemEntry.ItemDefinition))
         {
-            auto PlayerController =
-                Owner->Cast<
-                    AFortPlayerControllerAthena>();
-            auto Definition =
-                Item->ItemEntry.ItemDefinition;
-            if (PlayerController &&
-                Definition
-                    ->HasbForceFocusWhenAdded() &&
-                Definition
+            auto PlayerController = Owner->Cast<AFortPlayerControllerAthena>();
+            auto Definition = Item->ItemEntry.ItemDefinition;
+            if (PlayerController && Definition->HasbForceFocusWhenAdded() && Definition
                     ->bForceFocusWhenAdded)
             {
-                bDefinitionFocusHandled =
-                    IsExact1040BaseAshtonGadget(
-                        Definition)
-                        ? EnsureExact1040AshtonBackingAndFocus()
-                        : FocusOrQueueExact1040Carmine(
-                              PlayerController,
-                              Item->ItemEntry.ItemGuid);
+                bDefinitionFocusHandled = IsExact1040BaseAshtonGadget(Definition)
+                        ? EnsureExact1040AshtonBackingAndFocus() : FocusOrQueueExact1040Carmine(
+                              PlayerController, Item->ItemEntry.ItemGuid);
             }
         }
     }
     if (OutForceFocusHandled)
-        *OutForceFocusHandled =
-            bDefinitionFocusHandled;
+        *OutForceFocusHandled = bDefinitionFocusHandled;
 
     return Item;
 }
 
-void AFortInventory::HandlePendingCarmineFocus(
-    AFortPlayerControllerAthena* PlayerController)
+void AFortInventory::HandlePendingCarmineFocus(AFortPlayerControllerAthena* PlayerController)
 {
-    auto Pending =
-        PendingCarmineFocus.find(PlayerController);
-    if (Pending == PendingCarmineFocus.end() ||
-        !PlayerController ||
-        !PlayerController->MyFortPawn ||
-        !PlayerController->WorldInventory)
+    auto Pending = PendingCarmineFocus.find(PlayerController);
+    if (Pending == PendingCarmineFocus.end() || !PlayerController ||
+        !PlayerController->MyFortPawn || !PlayerController->WorldInventory)
     {
         return;
     }
 
     const FGuid ItemGuid = Pending->second;
-    auto Entry =
-        PlayerController->WorldInventory
-            ->Inventory.ReplicatedEntries.Search(
+    auto Entry = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
-                    return AreGuidsEqual(
-                        Candidate.ItemGuid,
-                        ItemGuid);
-                },
-                FFortItemEntry::Size());
+                    return AreGuidsEqual(Candidate.ItemGuid, ItemGuid);
+                }, FFortItemEntry::Size());
     PendingCarmineFocus.erase(Pending);
-    const bool bValidPendingDefinition =
-        Entry &&
-        (IsExact1040CarmineGadget(
-             Entry->ItemDefinition) ||
-         (Entry->ItemDefinition &&
-          Entry->ItemDefinition->Name.ToWString() ==
-              L"D_CarminePack"));
+    const bool bValidPendingDefinition = Entry && (IsExact1040CarmineGadget(
+             Entry->ItemDefinition) || (Entry->ItemDefinition &&
+          Entry->ItemDefinition->Name.ToWString() == L"D_CarminePack"));
     if (!bValidPendingDefinition)
     {
         return;
     }
 
-    PlayerController->ServerExecuteInventoryItem(
-        ItemGuid);
-    PlayerController->ClientEquipItem(
-        ItemGuid, true);
-    SDK::DbgLog(
-        "[Ashton1040] completed queued Carmine focus "
-        "controller=%p\n",
-        static_cast<void*>(PlayerController));
+    PlayerController->ServerExecuteInventoryItem(ItemGuid);
+    PlayerController->ClientEquipItem(ItemGuid, true);
+    SDK::DbgLog("[Ashton1040] completed queued Carmine focus "
+        "controller=%p\n", static_cast<void*>(PlayerController));
 }
 
 void AFortInventory::SetRequiresUpdate()
@@ -3838,19 +2726,14 @@ void AFortInventory::Update(FFortItemEntry* Entry)
             [&](FFortItemEntry& Candidate)
             {
                 return Candidate.ItemGuid == UpdatedGuid;
-            },
-            FFortItemEntry::Size());
-        auto ItemInstance = Inventory.ItemInstances.Search(
-            [&](UFortWorldItem* Candidate)
+            }, FFortItemEntry::Size());
+        auto ItemInstance = Inventory.ItemInstances.Search([&](UFortWorldItem* Candidate)
             {
-                return Candidate &&
-                    Candidate->ItemEntry.ItemGuid == UpdatedGuid;
+                return Candidate && Candidate->ItemEntry.ItemGuid == UpdatedGuid;
             });
         if (UpdatedReplicatedEntry && ItemInstance && *ItemInstance)
         {
-            FFortWeaponMods::CopyEntrySlots(
-                *UpdatedReplicatedEntry,
-                (*ItemInstance)->ItemEntry);
+            FFortWeaponMods::CopyEntrySlots(*UpdatedReplicatedEntry, (*ItemInstance)->ItemEntry);
         }
         goto _out;
     }
@@ -3866,23 +2749,17 @@ void AFortInventory::Update(FFortItemEntry* Entry)
         {
             FGuid UpdatedGuid = Entry->ItemGuid;
             TArray<void*> PreviousWeaponModSlots{};
-            const bool bPreserveWeaponModAllocation =
-                FFortWeaponMods::IsSupported() &&
+            const bool bPreserveWeaponModAllocation = FFortWeaponMods::IsSupported() &&
                 FFortItemEntry::HasWeaponModSlots();
             if (bPreserveWeaponModAllocation)
             {
-                PreviousWeaponModSlots =
-                    repEntry.WeaponModSlots;
+                PreviousWeaponModSlots = repEntry.WeaponModSlots;
             }
 
-            // Preserve the destination's owned nested buffer across the
-            // outer entry assignment. CopyEntrySlots can then replace and
-            // release it safely instead of losing the allocation header.
             repEntry = *Entry;
             if (bPreserveWeaponModAllocation)
             {
-                repEntry.WeaponModSlots =
-                    PreviousWeaponModSlots;
+                repEntry.WeaponModSlots = PreviousWeaponModSlots;
             }
             FFortWeaponMods::CopyEntrySlots(*Entry, repEntry);
             repEntry.bIsDirty = false;
@@ -3893,22 +2770,15 @@ void AFortInventory::Update(FFortItemEntry* Entry)
                 [&](FFortItemEntry& Candidate)
                 {
                     return Candidate.ItemGuid == UpdatedGuid;
-                },
-                FFortItemEntry::Size());
+                }, FFortItemEntry::Size());
             if (UpdatedReplicatedEntry)
             {
-                FFortWeaponMods::CopyEntrySlots(
-                    *UpdatedReplicatedEntry, *Entry);
+                FFortWeaponMods::CopyEntrySlots(*UpdatedReplicatedEntry, *Entry);
             }
             break;
         }
     }
-_out:
-    return;
-    /*bRequiresLocalUpdate = true;
-    HandleInventoryLocalUpdate();
-
-    return Entry ? Inventory.MarkItemDirty(*Entry) : Inventory.MarkArrayDirty();*/
+_out: return;
 }
 
 void AFortInventory::RemoveWeaponAbilities(AActor* Weapon__Uncasted)
@@ -3957,20 +2827,6 @@ void AFortInventory::RemoveWeaponAbilities(AActor* Weapon__Uncasted)
         Weapon->EquippedAbilityHandles.ResetNum();
     }
 
-    /*if (Weapon->WeaponData->EquippedAbilitySet)
-    {
-        bool bRemoved = false;
-        for (auto& [Key, Value] : *(TMap<FGuid, FFortAbilitySetHandle>*)& PlayerController->AppliedInGameModifierAbilitySetHandles)
-            if (Key == Weapon->ItemEntryGuid)
-            {
-                UFortKismetLibrary::UnequipFortAbilitySet(Value);
-                bRemoved = true;
-                break;
-            }
-
-        if (bRemoved)
-            PlayerController->ClientRemoveItemAbilitySet(Weapon->WeaponData->EquippedAbilitySet, Weapon->ItemEntryGuid);
-    }*/
     if (Weapon->EquippedAbilitySetHandles.Num())
     {
         for (int i = 0; i < Weapon->EquippedAbilitySetHandles.Num(); i++)
@@ -3987,15 +2843,9 @@ void AFortInventory::RemoveWeaponAbilities(AActor* Weapon__Uncasted)
 
 void AFortInventory::Remove(FGuid Guid)
 {
-    auto PendingOwner =
-        Owner
-            ? Owner->Cast<
-                  AFortPlayerControllerAthena>()
-            : nullptr;
-    auto Pending =
-        PendingCarmineFocus.find(PendingOwner);
-    if (Pending != PendingCarmineFocus.end() &&
-        AreGuidsEqual(Pending->second, Guid))
+    auto PendingOwner = Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
+    auto Pending = PendingCarmineFocus.find(PendingOwner);
+    if (Pending != PendingCarmineFocus.end() && AreGuidsEqual(Pending->second, Guid))
     {
         PendingCarmineFocus.erase(Pending);
     }
@@ -4005,34 +2855,23 @@ void AFortInventory::Remove(FGuid Guid)
     if (ItemEntryIdx == -1)
         return;
 
-    auto& RemovedEntry = Inventory.ReplicatedEntries.Get(
-        ItemEntryIdx, FFortItemEntry::Size());
+    auto& RemovedEntry = Inventory.ReplicatedEntries.Get(ItemEntryIdx, FFortItemEntry::Size());
     auto EntryDef = RemovedEntry.ItemDefinition;
     FGhostCharacterPartRestore GhostCharacterPartRestore{};
-    const bool bRestoreGhostCharacterParts =
-        CaptureGhostCharacterPartRestore(
-            PendingOwner, EntryDef,
-            GhostCharacterPartRestore);
+    const bool bRestoreGhostCharacterParts = CaptureGhostCharacterPartRestore(
+            PendingOwner, EntryDef, GhostCharacterPartRestore);
 
     auto ItemInstanceIdx = Inventory.ItemInstances.SearchIndex([&](UFortWorldItem* entry)
         { return entry && entry->ItemEntry.ItemGuid == Guid; });
     auto ItemInstanceResult = Inventory.ItemInstances.Search([&](UFortWorldItem* entry)
         { return entry && entry->ItemEntry.ItemGuid == Guid; });
 
-    // Save the object before mutating either replicated array. Search returns
-    // storage owned by the array, which is invalid after Remove.
     auto Instance = ItemInstanceResult ? *ItemInstanceResult : nullptr;
 
-    // TArray::Remove performs a raw element shift and does not destruct nested
-    // arrays. Release the attachment buffers explicitly. If a native inventory
-    // update ever left the two entries sharing a header, clear one owner first
-    // so the allocation is released exactly once.
-    if (FFortWeaponMods::IsSupported() &&
-        FFortItemEntry::HasWeaponModSlots())
+    // TArray::Remove shifts raw elements and does not destruct nested arrays, so free the attachment buffers here.
+    if (FFortWeaponMods::IsSupported() && FFortItemEntry::HasWeaponModSlots())
     {
-        if (Instance &&
-            RemovedEntry.WeaponModSlots.Data &&
-            RemovedEntry.WeaponModSlots.Data ==
+        if (Instance && RemovedEntry.WeaponModSlots.Data && RemovedEntry.WeaponModSlots.Data ==
                 Instance->ItemEntry.WeaponModSlots.Data)
         {
             Instance->ItemEntry.WeaponModSlots.Data = nullptr;
@@ -4051,14 +2890,9 @@ void AFortInventory::Remove(FGuid Guid)
         Inventory.ItemInstances.Remove(ItemInstanceIdx);
 
     auto PlayerController = (AFortPlayerControllerAthena*)Owner;
-    // 7.40 removed FortPlayerController::QuickBars and moved to the client-side
-    // quickbar model. Reading DEFINE_PROP(QuickBars) when it is absent resolves
-    // to offset -1 and produces a bogus pointer (PlayerController - 1). Keep the
-    // legacy actor bookkeeping only on builds that expose it; newer builds are
-    // updated by the replicated inventory path below.
+    // 7.40 removed FortPlayerController::QuickBars, and reading it there resolves to offset -1, i.e. PlayerController - 1.
     AFortQuickBars* QuickBars = nullptr;
-    if (VersionInfo.FortniteVersion < 7.40 && PlayerController &&
-        PlayerController->HasQuickBars())
+    if (VersionInfo.FortniteVersion < 7.40 && PlayerController && PlayerController->HasQuickBars())
     {
         QuickBars = PlayerController->QuickBars;
     }
@@ -4076,8 +2910,7 @@ void AFortInventory::Remove(FGuid Guid)
                     goto _Out;
         }
         goto _Skip;
-    _Out:
-        QuickBars->EmptySlot(!IsPrimaryQuickbar(EntryDef), i);
+    _Out: QuickBars->EmptySlot(!IsPrimaryQuickbar(EntryDef), i);
         QuickBars->ServerRemoveItemInternal(Guid, false, true);
         for (int i = 0; i < PlayerController->WorldInventory->Inventory.ReplicatedEntries.Num(); i++)
         {
@@ -4096,79 +2929,52 @@ _Skip:
     bRequiresLocalUpdate = true;
     bRequiresSaving = true;
 
-    HandleInventoryLocalUpdate(); // calls UpdateItemInstances, the func we actually want
+    HandleInventoryLocalUpdate();
 
     Inventory.MarkArrayDirty();
     ForceNetUpdate();
 
     if (OnItemInstanceAddedVft && Instance && Instance->ItemEntry.ItemDefinition)
     {
-        ((bool(*)(const UFortWorldItem*, const IInterface*, uint32_t)) Instance->Vft[OnItemInstanceAddedVft + 1])(Instance, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()), Instance->ItemEntry.Count);
-        //((bool(*)(const UFortItemDefinition*, const IInterface*, UFortWorldItem*)) Instance->ItemEntry.ItemDefinition->Vft[OnItemInstanceAddedVft + 1])(Instance->ItemEntry.ItemDefinition, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()), Instance);
+        ((bool(*)(const UFortWorldItem*, const IInterface*, uint32_t)) Instance->Vft[OnItemInstanceAddedVft + 1])(
+            Instance, Owner->GetInterface(IFortInventoryOwnerInterface::StaticClass()),
+            Instance->ItemEntry.Count);
     }
-    UFortKismetLibrary::NotifyGhostModeItemRemoved(
-        PendingOwner, EntryDef);
-    // The authored 6.21 exit is timed. Defer residual ability removal and the
-    // visual restore until GhostModeRepData has finished its transition so it
-    // cannot immediately re-apply the spooky body part.
-    QueueGhostModeTerminalCleanup(
-        PendingOwner,
-        EntryDef,
-        GhostCharacterPartRestore,
+    UFortKismetLibrary::NotifyGhostModeItemRemoved(PendingOwner, EntryDef);
+    QueueGhostModeTerminalCleanup(PendingOwner, EntryDef, GhostCharacterPartRestore,
         bRestoreGhostCharacterParts);
-    if (UFortKismetLibrary::IsGhostModeItemDefinition(
-            EntryDef))
+    if (UFortKismetLibrary::IsGhostModeItemDefinition(EntryDef))
     {
-        MarkTrackedGhostModeBackingRemoved(
-            PendingOwner, Guid);
+        MarkTrackedGhostModeBackingRemoved(PendingOwner, Guid);
     }
-    //HandleInventoryLocalUpdate();
-    //Update(nullptr);
 }
 
-int32 AFortInventory::RemoveItem(
-    FGuid Guid,
-    int32 Count,
-    bool bKeepFinalStackEmpty)
+int32 AFortInventory::RemoveItem(FGuid Guid, int32 Count, bool bKeepFinalStackEmpty)
 {
-    auto ItemEntry =
-        Inventory.ReplicatedEntries.Search(
-            [&](FFortItemEntry& Entry)
+    auto ItemEntry = Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry)
             {
                 return Entry.ItemGuid == Guid;
-            },
-            FFortItemEntry::Size());
+            }, FFortItemEntry::Size());
     if (!ItemEntry || Count == 0)
         return 0;
 
     const bool bRemoveAll = Count < 0;
     const int32 ExistingCount = max(ItemEntry->Count, 0);
-    const int32 RemovedCount =
-        bRemoveAll ? ExistingCount : min(ExistingCount, Count);
+    const int32 RemovedCount = bRemoveAll ? ExistingCount : min(ExistingCount, Count);
 
-    // Remove zero/negative terminal stacks too. They are invalid unless the
-    // definition explicitly asked the caller to preserve the final empty
-    // stack.
-    if (bRemoveAll ||
-        (!bKeepFinalStackEmpty &&
-            (ExistingCount <= 0 || Count >= ExistingCount)))
+    if (bRemoveAll || (!bKeepFinalStackEmpty && (ExistingCount <= 0 || Count >= ExistingCount)))
     {
         Remove(Guid);
         return RemovedCount;
     }
 
-    int32 NewCount =
-        bKeepFinalStackEmpty && Count >= ExistingCount
-            ? 0
+    int32 NewCount = bKeepFinalStackEmpty && Count >= ExistingCount ? 0
             : ExistingCount - RemovedCount;
     ItemEntry->Count = NewCount;
 
-    auto ItemInstance =
-        Inventory.ItemInstances.Search(
-            [&](UFortWorldItem* Item)
+    auto ItemInstance = Inventory.ItemInstances.Search([&](UFortWorldItem* Item)
             {
-                return Item &&
-                    Item->ItemEntry.ItemGuid == Guid;
+                return Item && Item->ItemEntry.ItemGuid == Guid;
             });
     if (ItemInstance && *ItemInstance)
     {
@@ -4180,19 +2986,15 @@ int32 AFortInventory::RemoveItem(
     return RemovedCount;
 }
 
-bool AFortInventory::ShouldBypassItemConsumption(
-    AFortPlayerControllerAthena* PlayerController,
-    int32 Count,
-    bool bForceRemoval)
+bool AFortInventory::ShouldBypassItemConsumption(AFortPlayerControllerAthena* PlayerController,
+    int32 Count, bool bForceRemoval)
 {
     if (!PlayerController || Count <= 0 || bForceRemoval)
         return false;
 
     return
-        FConfiguration::bInfiniteAmmo.load(
-            std::memory_order_acquire) ||
-        (PlayerController->HasbInfiniteAmmo() &&
-            PlayerController->bInfiniteAmmo);
+        FConfiguration::bInfiniteAmmo.load(std::memory_order_acquire) ||
+        (PlayerController->HasbInfiniteAmmo() && PlayerController->bInfiniteAmmo);
 }
 
 FFortRangedWeaponStats* AFortInventory::GetStats(const UFortWeaponItemDefinition* Def)
@@ -4220,8 +3022,7 @@ FFortRangedWeaponStats* AFortInventory::CloneStats(const UFortWeaponItemDefiniti
     return NewStats;
 }
 
-int32 AFortInventory::ReloadAllWeaponAmmo(
-    AFortPlayerControllerAthena* PlayerController)
+int32 AFortInventory::ReloadAllWeaponAmmo(AFortPlayerControllerAthena* PlayerController)
 {
     if (!PlayerController || !PlayerController->WorldInventory)
         return 0;
@@ -4236,23 +3037,19 @@ int32 AFortInventory::ReloadAllWeaponAmmo(
     };
 
     std::vector<FReloadTarget> Targets;
-    const int32 EntryCount =
-        Inventory->Inventory.ReplicatedEntries.Num();
+    const int32 EntryCount = Inventory->Inventory.ReplicatedEntries.Num();
     if (EntryCount <= 0)
         return 0;
     Targets.reserve(static_cast<size_t>(EntryCount));
 
     for (int32 Index = 0; Index < EntryCount; ++Index)
     {
-        auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(
-            Index, FFortItemEntry::Size());
+        auto& Entry = Inventory->Inventory.ReplicatedEntries.Get(Index, FFortItemEntry::Size());
         if (!Entry.ItemDefinition)
             continue;
 
-        auto WeaponDefinition =
-            Entry.ItemDefinition->Cast<UFortWeaponItemDefinition>();
-        if (auto Gadget =
-            Entry.ItemDefinition->Cast<UFortGadgetItemDefinition>())
+        auto WeaponDefinition = Entry.ItemDefinition->Cast<UFortWeaponItemDefinition>();
+        if (auto Gadget = Entry.ItemDefinition->Cast<UFortGadgetItemDefinition>())
         {
             WeaponDefinition = Gadget->GetWeaponItemDefinition();
         }
@@ -4262,12 +3059,8 @@ int32 AFortInventory::ReloadAllWeaponAmmo(
         int32 MaxLoadedAmmo = 0;
         int32 RechargeAmount = 0;
         double RechargeIntervalSeconds = 0.0;
-        if (!ResolveWeaponRechargeSettings(
-                WeaponDefinition,
-                Entry.Level,
-                MaxLoadedAmmo,
-                RechargeAmount,
-                RechargeIntervalSeconds))
+        if (!ResolveWeaponRechargeSettings(WeaponDefinition, Entry.Level, MaxLoadedAmmo,
+                RechargeAmount, RechargeIntervalSeconds))
         {
             auto Stats = GetStats(WeaponDefinition);
             MaxLoadedAmmo = Stats ? Stats->ClipSize : 0;
@@ -4276,49 +3069,36 @@ int32 AFortInventory::ReloadAllWeaponAmmo(
             continue;
 
         Targets.push_back({
-            WeaponDefinition,
-            Entry.ItemGuid,
-            Entry.Level,
-            MaxLoadedAmmo
+            WeaponDefinition, Entry.ItemGuid, Entry.Level, MaxLoadedAmmo
         });
     }
 
     int32 ReloadedWeaponCount = 0;
     for (auto& Target : Targets)
     {
-        auto ReplicatedEntry =
-            Inventory->Inventory.ReplicatedEntries.Search(
+        auto ReplicatedEntry = Inventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
-                    return AreGuidsEqual(
-                        Candidate.ItemGuid, Target.ItemGuid);
-                },
-                FFortItemEntry::Size());
+                    return AreGuidsEqual(Candidate.ItemGuid, Target.ItemGuid);
+                }, FFortItemEntry::Size());
         if (!ReplicatedEntry)
             continue;
 
-        auto ItemInstance = Inventory->Inventory.ItemInstances.Search(
-            [&](UFortWorldItem* Candidate)
+        auto ItemInstance = Inventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Candidate)
             {
-                return Candidate &&
-                    AreGuidsEqual(
-                        Candidate->ItemEntry.ItemGuid,
-                        Target.ItemGuid);
+                return Candidate && AreGuidsEqual(Candidate->ItemEntry.ItemGuid, Target.ItemGuid);
             });
-        const int32 PreviousLoadedAmmo =
-            ReplicatedEntry->LoadedAmmo;
+        const int32 PreviousLoadedAmmo = ReplicatedEntry->LoadedAmmo;
         bool bInventoryChanged = false;
         if (ReplicatedEntry->LoadedAmmo != Target.MaxLoadedAmmo)
         {
             ReplicatedEntry->LoadedAmmo = Target.MaxLoadedAmmo;
             bInventoryChanged = true;
         }
-        if (ItemInstance && *ItemInstance &&
-            (*ItemInstance)->ItemEntry.LoadedAmmo !=
+        if (ItemInstance && *ItemInstance && (*ItemInstance)->ItemEntry.LoadedAmmo !=
                 Target.MaxLoadedAmmo)
         {
-            (*ItemInstance)->ItemEntry.LoadedAmmo =
-                Target.MaxLoadedAmmo;
+            (*ItemInstance)->ItemEntry.LoadedAmmo = Target.MaxLoadedAmmo;
             (*ItemInstance)->ItemEntry.bIsDirty = true;
             bInventoryChanged = true;
         }
@@ -4326,32 +3106,19 @@ int32 AFortInventory::ReloadAllWeaponAmmo(
         if (bInventoryChanged)
             Inventory->UpdateEntry(*ReplicatedEntry);
 
-        ItemInstance = Inventory->Inventory.ItemInstances.Search(
-            [&](UFortWorldItem* Candidate)
+        ItemInstance = Inventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Candidate)
             {
-                return Candidate &&
-                    AreGuidsEqual(
-                        Candidate->ItemEntry.ItemGuid,
-                        Target.ItemGuid);
+                return Candidate && AreGuidsEqual(Candidate->ItemEntry.ItemGuid, Target.ItemGuid);
             });
         if (ItemInstance && *ItemInstance)
             BroadcastWorldItemAmmoChanged(*ItemInstance);
 
-        SyncKnownWeaponAmmo(
-            PlayerController,
-            Target.WeaponDefinition,
-            Target.ItemGuid,
+        SyncKnownWeaponAmmo(PlayerController, Target.WeaponDefinition, Target.ItemGuid,
             Target.MaxLoadedAmmo);
-        if (IsTrackedRechargingWeaponAmmo(
-                PlayerController, Target.ItemGuid))
+        if (IsTrackedRechargingWeaponAmmo(PlayerController, Target.ItemGuid))
         {
-            ObserveRechargingWeaponAmmo(
-                PlayerController,
-                Target.WeaponDefinition,
-                Target.ItemGuid,
-                Target.ItemLevel,
-                PreviousLoadedAmmo,
-                Target.MaxLoadedAmmo);
+            ObserveRechargingWeaponAmmo(PlayerController, Target.WeaponDefinition, Target.ItemGuid,
+                Target.ItemLevel, PreviousLoadedAmmo, Target.MaxLoadedAmmo);
         }
 
         ++ReloadedWeaponCount;
@@ -4360,7 +3127,8 @@ int32 AFortInventory::ReloadAllWeaponAmmo(
     return ReloadedWeaponCount;
 }
 
-FFortItemEntry* AFortInventory::MakeItemEntry(const UFortItemDefinition* ItemDefinition, int32 Count, int32 Level)
+FFortItemEntry* AFortInventory::MakeItemEntry(const UFortItemDefinition* ItemDefinition,
+    int32 Count, int32 Level)
 {
     auto ItemEntry = (FFortItemEntry*)malloc(FFortItemEntry::Size());
     memset((PBYTE)ItemEntry, 0, FFortItemEntry::Size());
@@ -4393,13 +3161,9 @@ FFortItemEntry* AFortInventory::MakeItemEntry(const UFortItemDefinition* ItemDef
     }
     if (auto WeaponDef = ItemDef->Cast<UFortWeaponItemDefinition>())
     {
-        if (FFortWeaponMods::IsSupported() &&
-            WeaponDef->HasWeaponModSlots() &&
+        if (FFortWeaponMods::IsSupported() && WeaponDef->HasWeaponModSlots() &&
             FFortItemEntry::HasWeaponModSlots())
         {
-            // MakeItemEntry returns a short-lived, caller-owned entry. Keep a
-            // read-only view here; every durable destination (pickup or
-            // inventory entry) deep-copies it before this temporary is freed.
             ItemEntry->WeaponModSlots = WeaponDef->WeaponModSlots;
         }
     }
@@ -4414,11 +3178,15 @@ FFortItemEntry* AFortInventory::MakeItemEntry(const UFortItemDefinition* ItemDef
 }
 
 uint64_t SetPickupItems;
-AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entry, long long SourceTypeFlag, long long SpawnSource, AFortPlayerPawnAthena* Pawn, int OverrideCount, bool Toss, bool RandomRotation, bool bCombine, const UClass* OverrideClass, FVector FinalLoc)
+AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entry,
+    long long SourceTypeFlag, long long SpawnSource, AFortPlayerPawnAthena* Pawn, int OverrideCount,
+    bool Toss, bool RandomRotation, bool bCombine, const UClass* OverrideClass, FVector FinalLoc)
 {
     if (!&Entry)
         return nullptr;
-    AFortPickupAthena* NewPickup = UWorld::SpawnActor<AFortPickupAthena>(OverrideClass ? OverrideClass : AFortPickupAthena::StaticClass(), Loc, {});
+    AFortPickupAthena* NewPickup = UWorld::SpawnActor<AFortPickupAthena>(
+        OverrideClass ? OverrideClass : AFortPickupAthena::StaticClass(), Loc,
+        {});
     if (!NewPickup)
         return nullptr;
 
@@ -4436,30 +3204,31 @@ AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entr
     bool bAllowRandomMods = false;
     if (FFortWeaponMods::IsSupported())
     {
-        bAllowRandomMods =
-            SourceTypeFlag != EFortPickupSourceTypeFlag::GetPlayer() &&
+        bAllowRandomMods = SourceTypeFlag != EFortPickupSourceTypeFlag::GetPlayer() &&
             SourceTypeFlag != EFortPickupSourceTypeFlag::GetTossed() &&
             SpawnSource != EFortPickupSpawnSource::GetPlayerElimination() &&
             SpawnSource != EFortPickupSpawnSource::GetTossedByPlayer();
     }
-    FFortWeaponMods::InitializePickup(
-        NewPickup, Entry, bAllowRandomMods);
+    FFortWeaponMods::InitializePickup(NewPickup, Entry, bAllowRandomMods);
 
     if (SetPickupItems)
     {
         TArray<FFortItemEntry> a{};
         if (VersionInfo.FortniteVersion >= 16)
-            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, uint8_t, bool, uint8_t)) SetPickupItems)(NewPickup, &NewPickup->PrimaryPickupItemEntry, &a, (uint8_t)EFortPickupSourceTypeFlag::GetContainer(), false, (uint8_t)EFortPickupSpawnSource::GetChest());
+            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, uint8_t, bool, uint8_t)) SetPickupItems)(
+                NewPickup, &NewPickup->PrimaryPickupItemEntry, &a,
+                (uint8_t)EFortPickupSourceTypeFlag::GetContainer(), false,
+                (uint8_t)EFortPickupSpawnSource::GetChest());
         else
-            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, bool)) SetPickupItems)(NewPickup, &NewPickup->PrimaryPickupItemEntry, &a, false);
+            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, bool)) SetPickupItems)(
+                NewPickup, &NewPickup->PrimaryPickupItemEntry, &a, false);
     }
     else
         NewPickup->OnRep_PrimaryPickupItemEntry();
-    //NewPickup->OnRep_PrimaryPickupItemEntry();
     NewPickup->PawnWhoDroppedPickup = Pawn;
 
     auto FinalLocation = Loc;
-    
+
     if (FinalLoc.X || FinalLoc.Y || FinalLoc.Z)
         FinalLocation = FinalLoc;
     NewPickup->TossPickup(FinalLocation, Pawn, -1, Toss, true, (uint8)SourceTypeFlag, (uint8)SpawnSource);
@@ -4471,29 +3240,17 @@ AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entr
 
     if (!SetPickupItems && OverrideClass)
     {
-        const UClass* GameModePickupClass =
-            FindClass("FortGameModePickup");
-        const UObject* PickupDefault =
-            OverrideClass->GetDefaultObj();
-        if (GameModePickupClass &&
-            PickupDefault &&
-            PickupDefault->IsA(GameModePickupClass))
+        const UClass* GameModePickupClass = FindClass("FortGameModePickup");
+        const UObject* PickupDefault = OverrideClass->GetDefaultObj();
+        if (GameModePickupClass && PickupDefault && PickupDefault->IsA(GameModePickupClass))
         {
             UWorld* World = UWorld::GetWorld();
-            auto GameState =
-                World && World->GameState
-                    ? World->GameState
-                          ->Cast<AFortGameStateAthena>()
-                    : nullptr;
-            if (GameState &&
-                GameState
-                    ->HasOnPickupSpawnedAndReady())
+            auto GameState = World && World->GameState ? World->GameState
+                          ->Cast<AFortGameStateAthena>() : nullptr;
+            if (GameState && GameState->HasOnPickupSpawnedAndReady())
             {
-                GameState->OnPickupSpawnedAndReady
-                    .Process(
-                        NewPickup,
-                        const_cast<UFortItemDefinition*>(
-                            Entry.ItemDefinition));
+                GameState->OnPickupSpawnedAndReady.Process(NewPickup,
+                        const_cast<UFortItemDefinition*>(Entry.ItemDefinition));
             }
         }
     }
@@ -4501,20 +3258,24 @@ AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, FFortItemEntry& Entr
     return NewPickup;
 }
 
-AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc, const UFortItemDefinition* ItemDefinition, int Count, int LoadedAmmo, long long SourceTypeFlag, long long SpawnSource, AFortPlayerPawnAthena* Pawn, bool Toss, bool bRandomRotation, const UClass* OverrideClass)
+AFortPickupAthena* AFortInventory::SpawnPickup(FVector Loc,
+    const UFortItemDefinition* ItemDefinition, int Count, int LoadedAmmo, long long SourceTypeFlag,
+    long long SpawnSource, AFortPlayerPawnAthena* Pawn, bool Toss, bool bRandomRotation,
+    const UClass* OverrideClass)
 {
     auto ItemEntry = MakeItemEntry(ItemDefinition, Count, -1);
-    if (LoadedAmmo != -1) // -1 keeps the clip/phantom ammo MakeItemEntry derived from the weapon's stats
+    if (LoadedAmmo != -1)
         ItemEntry->LoadedAmmo = LoadedAmmo;
 
-    auto Pickup = SpawnPickup(Loc, *ItemEntry, SourceTypeFlag, SpawnSource, Pawn, -1, Toss, true, bRandomRotation, OverrideClass);
+    auto Pickup = SpawnPickup(Loc, *ItemEntry, SourceTypeFlag, SpawnSource, Pawn, -1, Toss, true,
+        bRandomRotation, OverrideClass);
     FFortWeaponMods::FreeEntrySlots(*ItemEntry);
     free(ItemEntry);
     return Pickup;
 }
 
-
-AFortPickupAthena* AFortInventory::SpawnPickup(ABuildingContainer* Container, FFortItemEntry& Entry, AFortPlayerPawnAthena* Pawn, int OverrideCount)
+AFortPickupAthena* AFortInventory::SpawnPickup(ABuildingContainer* Container, FFortItemEntry& Entry,
+    AFortPlayerPawnAthena* Pawn, int OverrideCount)
 {
     if (!&Entry)
         return nullptr;
@@ -4545,39 +3306,42 @@ AFortPickupAthena* AFortInventory::SpawnPickup(ABuildingContainer* Container, FF
     if (HasPhantomReserveAmmo)
         NewPickup->PrimaryPickupItemEntry.PhantomReserveAmmo = Entry.PhantomReserveAmmo;
 
-    FFortWeaponMods::InitializePickup(
-        NewPickup, Entry, true);
+    FFortWeaponMods::InitializePickup(NewPickup, Entry, true);
 
     if (SetPickupItems)
     {
         TArray<FFortItemEntry> a{};
         if (VersionInfo.FortniteVersion >= 16)
-            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, uint8_t, bool, uint8_t)) SetPickupItems)(NewPickup, &NewPickup->PrimaryPickupItemEntry, &a, (uint8_t)EFortPickupSourceTypeFlag::GetContainer(), false, (uint8_t)EFortPickupSpawnSource::GetChest());
+            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, uint8_t, bool, uint8_t)) SetPickupItems)(
+                NewPickup, &NewPickup->PrimaryPickupItemEntry, &a,
+                (uint8_t)EFortPickupSourceTypeFlag::GetContainer(), false,
+                (uint8_t)EFortPickupSpawnSource::GetChest());
         else
-            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, bool)) SetPickupItems)(NewPickup, &NewPickup->PrimaryPickupItemEntry, &a, false);
+            ((void(*)(AFortPickupAthena*, FFortItemEntry*, TArray<FFortItemEntry>*, bool)) SetPickupItems)(
+                NewPickup, &NewPickup->PrimaryPickupItemEntry, &a, false);
     }
     else
         NewPickup->OnRep_PrimaryPickupItemEntry();
-    //NewPickup->OnRep_PrimaryPickupItemEntry();
 
     NewPickup->PawnWhoDroppedPickup = Pawn;
 
-
-    //auto bFloorLoot = Container->IsA<ATiered_Athena_FloorLoot_01_C>() || Container->IsA<ATiered_Athena_FloorLoot_Warmup_C>();
-    //UFortKismetLibrary::TossPickupFromContainer(UWorld::GetWorld(), Container, NewPickup, 1, 0, Container->LootTossConeHalfAngle_Athena, Container->LootTossDirection_Athena, Container->LootTossSpeed_Athena, false);
     static auto tpfcPtr = UFortKismetLibrary::GetDefaultObj()->GetFunction("TossPickupFromContainer");
     if (tpfcPtr)
     {
         if (!UFortKismetLibrary::TossPickupFromContainer__Ptr)
             UFortKismetLibrary::TossPickupFromContainer__Ptr = tpfcPtr;
 
-        UFortKismetLibrary::TossPickupFromContainer(UWorld::GetWorld(), Container, NewPickup, 10, (int32)std::clamp((float)rand() * 0.0003357036f, 0.f, 10.f), Container->LootTossConeHalfAngle_Athena, Container->LootTossDirection_Athena, Container->LootTossSpeed_Athena, Container->bForceHidePickupMinimapIndicator);
+        UFortKismetLibrary::TossPickupFromContainer(UWorld::GetWorld(), Container, NewPickup, 10,
+            (int32)std::clamp((float)rand() * 0.0003357036f, 0.f, 10.f),
+            Container->LootTossConeHalfAngle_Athena, Container->LootTossDirection_Athena,
+            Container->LootTossSpeed_Athena, Container->bForceHidePickupMinimapIndicator);
     }
     else
     {
         auto FinalLoc = Loc + (Container->GetActorForwardVector() * Container->LootFinalLocation.X) + (Container->GetActorRightVector() * Container->LootFinalLocation.Y) + (Container->GetActorUpVector() * Container->LootFinalLocation.Z);
 
-        NewPickup->TossPickup(Loc, Pawn, -1, true, true, EFortPickupSourceTypeFlag::GetContainer(), EFortPickupSpawnSource::GetChest());
+        NewPickup->TossPickup(Loc, Pawn, -1, true, true, EFortPickupSourceTypeFlag::GetContainer(),
+            EFortPickupSpawnSource::GetChest());
     }
 
     NewPickup->bTossedFromContainer = true;
@@ -4585,7 +3349,6 @@ AFortPickupAthena* AFortInventory::SpawnPickup(ABuildingContainer* Container, FF
 
     return NewPickup;
 }
-
 
 bool AFortInventory::IsPrimaryQuickbar(const UFortItemDefinition* ItemDefinition)
 {
@@ -4603,18 +3366,15 @@ bool AFortInventory::IsPrimaryQuickbar(const UFortItemDefinition* ItemDefinition
 
 void AFortInventory::TickRegeneratingItems()
 {
-    if (RegeneratingInventoryItems.empty() &&
-        RechargingWeaponAmmo.empty() &&
-        PendingGhostModeCleanups.empty() &&
-        TrackedGhostModeSessions.empty())
+    if (RegeneratingInventoryItems.empty() && RechargingWeaponAmmo.empty() &&
+        PendingGhostModeCleanups.empty() && TrackedGhostModeSessions.empty())
         return;
 
     auto World = UWorld::GetWorld();
     if (!World)
         return;
 
-    const double NowSeconds =
-        UGameplayStatics::GetTimeSeconds(World);
+    const double NowSeconds = UGameplayStatics::GetTimeSeconds(World);
 
     TickTrackedGhostModeSessions(NowSeconds);
     TickPendingGhostModeCleanups(NowSeconds);
@@ -4626,35 +3386,24 @@ void AFortInventory::TickRegeneratingItems()
         auto Owner = State.Owner.Get();
         auto AmmoDefinition = State.AmmoDefinition.Get();
 
-        if (!Owner || !Owner->WorldInventory || !AmmoDefinition ||
-            State.MaxCount <= 0 ||
-            !std::isfinite(State.CooldownSeconds) ||
-            State.CooldownSeconds <= 0.0)
+        if (!Owner || !Owner->WorldInventory || !AmmoDefinition || State.MaxCount <= 0 ||
+            !std::isfinite(State.CooldownSeconds) || State.CooldownSeconds <= 0.0)
         {
             RemoveRegenItemAt(Index);
             continue;
         }
 
         auto Inventory = Owner->WorldInventory;
-        auto ReplicatedEntry =
-            Inventory->Inventory.ReplicatedEntries.Search(
+        auto ReplicatedEntry = Inventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
-                    return AreGuidsEqual(
-                            Candidate.ItemGuid,
-                            State.ItemGuid) &&
+                    return AreGuidsEqual(Candidate.ItemGuid, State.ItemGuid) &&
                         Candidate.ItemDefinition == AmmoDefinition;
-                },
-                FFortItemEntry::Size());
-        auto ItemInstance =
-            Inventory->Inventory.ItemInstances.Search(
-                [&](UFortWorldItem* Candidate)
+                }, FFortItemEntry::Size());
+        auto ItemInstance = Inventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Candidate)
                 {
-                    return Candidate &&
-                        AreGuidsEqual(
-                            Candidate->ItemEntry.ItemGuid,
-                            State.ItemGuid) &&
-                        Candidate->ItemEntry.ItemDefinition ==
+                    return Candidate && AreGuidsEqual(Candidate->ItemEntry.ItemGuid,
+                            State.ItemGuid) && Candidate->ItemEntry.ItemDefinition ==
                             AmmoDefinition;
                 });
 
@@ -4676,38 +3425,27 @@ void AFortInventory::TickRegeneratingItems()
             continue;
         }
 
-        int32 NewCount = min(
-            max(ReplicatedEntry->Count, 0) + 1,
-            State.MaxCount);
+        int32 NewCount = min(max(ReplicatedEntry->Count, 0) + 1, State.MaxCount);
         ReplicatedEntry->Count = NewCount;
         (*ItemInstance)->ItemEntry.Count = NewCount;
         (*ItemInstance)->ItemEntry.bIsDirty = true;
 
-        const bool bReachedMaximum =
-            NewCount >= State.MaxCount;
+        const bool bReachedMaximum = NewCount >= State.MaxCount;
         const int32 MaximumCount = State.MaxCount;
-        const auto DefinitionName =
-            AmmoDefinition->Name.ToString();
+        const auto DefinitionName = AmmoDefinition->Name.ToString();
         if (bReachedMaximum)
         {
             RemoveRegenItemAt(Index);
         }
         else
         {
-            // One charge is restored per complete cooldown. Starting the
-            // next interval from the current server time prevents a hitch
-            // from granting several queued charges in a single frame.
-            State.NextRefillTime =
-                NowSeconds + State.CooldownSeconds;
+            State.NextRefillTime = NowSeconds + State.CooldownSeconds;
             ++Index;
         }
 
         Inventory->UpdateEntry(*ReplicatedEntry);
-        SDK::DbgLog(
-            "[ItemRegen] refilled definition=%s count=%d max=%d\n",
-            DefinitionName.c_str(),
-            NewCount,
-            MaximumCount);
+        SDK::DbgLog("[ItemRegen] refilled definition=%s count=%d max=%d\n", DefinitionName.c_str(),
+            NewCount, MaximumCount);
     }
 
     for (size_t Index = 0;
@@ -4715,13 +3453,9 @@ void AFortInventory::TickRegeneratingItems()
     {
         auto& State = RechargingWeaponAmmo[Index];
         auto Owner = State.Owner.Get();
-        auto WeaponDefinition =
-            State.WeaponDefinition.Get();
-        if (!Owner || !Owner->WorldInventory ||
-            !WeaponDefinition ||
-            State.MaxLoadedAmmo <= 0 ||
-            State.RechargeAmount <= 0 ||
-            !std::isfinite(State.RechargeIntervalSeconds) ||
+        auto WeaponDefinition = State.WeaponDefinition.Get();
+        if (!Owner || !Owner->WorldInventory || !WeaponDefinition || State.MaxLoadedAmmo <= 0 ||
+            State.RechargeAmount <= 0 || !std::isfinite(State.RechargeIntervalSeconds) ||
             State.RechargeIntervalSeconds <= 0.0)
         {
             RemoveRechargingWeaponAt(Index);
@@ -4729,133 +3463,80 @@ void AFortInventory::TickRegeneratingItems()
         }
 
         auto Inventory = Owner->WorldInventory;
-        auto ReplicatedEntry =
-            Inventory->Inventory.ReplicatedEntries.Search(
+        auto ReplicatedEntry = Inventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
-                    return AreGuidsEqual(
-                            Candidate.ItemGuid,
-                            State.ItemGuid) &&
-                        Candidate.ItemDefinition ==
-                            WeaponDefinition;
-                },
-                FFortItemEntry::Size());
-        auto ItemInstance =
-            Inventory->Inventory.ItemInstances.Search(
-                [&](UFortWorldItem* Candidate)
+                    return AreGuidsEqual(Candidate.ItemGuid, State.ItemGuid) &&
+                        Candidate.ItemDefinition == WeaponDefinition;
+                }, FFortItemEntry::Size());
+        auto ItemInstance = Inventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Candidate)
                 {
-                    return Candidate &&
-                        AreGuidsEqual(
-                            Candidate->ItemEntry.ItemGuid,
-                            State.ItemGuid) &&
-                        Candidate->ItemEntry.ItemDefinition ==
+                    return Candidate && AreGuidsEqual(Candidate->ItemEntry.ItemGuid,
+                            State.ItemGuid) && Candidate->ItemEntry.ItemDefinition ==
                             WeaponDefinition;
                 });
-        if (!ReplicatedEntry || !ItemInstance ||
-            !*ItemInstance)
+        if (!ReplicatedEntry || !ItemInstance || !*ItemInstance)
         {
             RemoveRechargingWeaponAt(Index);
             continue;
         }
 
-        int32 CurrentLoadedAmmo =
-            std::clamp(
-                ReplicatedEntry->LoadedAmmo,
-                0,
-                State.MaxLoadedAmmo);
+        int32 CurrentLoadedAmmo = std::clamp(ReplicatedEntry->LoadedAmmo, 0, State.MaxLoadedAmmo);
 
-        // A rechargeable weapon cannot legitimately spend a charge while a
-        // different item is equipped. Some native equip/unequip paths write
-        // a cached holstered actor's old AmmoCount back into the item row.
-        // Preserve the last server-observed charge in that case instead of
-        // making the player wait through the same interval twice.
-        if (CurrentLoadedAmmo < State.LastObservedLoadedAmmo &&
-            !ResolveEquippedWeaponForItem(
-                Owner,
-                WeaponDefinition,
-                State.ItemGuid))
+        if (CurrentLoadedAmmo < State.LastObservedLoadedAmmo && !ResolveEquippedWeaponForItem(Owner,
+                WeaponDefinition, State.ItemGuid))
         {
             CurrentLoadedAmmo = State.LastObservedLoadedAmmo;
             ReplicatedEntry->LoadedAmmo = CurrentLoadedAmmo;
-            (*ItemInstance)->ItemEntry.LoadedAmmo =
-                CurrentLoadedAmmo;
+            (*ItemInstance)->ItemEntry.LoadedAmmo = CurrentLoadedAmmo;
             (*ItemInstance)->ItemEntry.bIsDirty = true;
             Inventory->UpdateEntry(*ReplicatedEntry);
             BroadcastWorldItemAmmoChanged(*ItemInstance);
-            SyncKnownWeaponAmmo(
-                Owner,
-                WeaponDefinition,
-                State.ItemGuid,
-                CurrentLoadedAmmo);
+            SyncKnownWeaponAmmo(Owner, WeaponDefinition, State.ItemGuid, CurrentLoadedAmmo);
         }
 
         if (CurrentLoadedAmmo >= State.MaxLoadedAmmo)
         {
-            if (State.LastObservedLoadedAmmo !=
-                State.MaxLoadedAmmo)
+            if (State.LastObservedLoadedAmmo != State.MaxLoadedAmmo)
             {
-                SyncKnownWeaponAmmo(
-                    Owner,
-                    WeaponDefinition,
-                    State.ItemGuid,
-                    State.MaxLoadedAmmo);
+                SyncKnownWeaponAmmo(Owner, WeaponDefinition, State.ItemGuid, State.MaxLoadedAmmo);
             }
-            State.LastObservedLoadedAmmo =
-                State.MaxLoadedAmmo;
+            State.LastObservedLoadedAmmo = State.MaxLoadedAmmo;
             State.NextRefillTime = 0.0;
             ++Index;
             continue;
         }
 
-        // The native FN30 recharge component normally wins this race.
-        // If it restored a charge, observe the increase and defer this
-        // watchdog for another full interval instead of double-granting.
-        if (CurrentLoadedAmmo >
-            State.LastObservedLoadedAmmo)
+        if (CurrentLoadedAmmo > State.LastObservedLoadedAmmo)
         {
-            SyncKnownWeaponAmmo(
-                Owner,
-                WeaponDefinition,
-                State.ItemGuid,
-                CurrentLoadedAmmo);
-            State.LastObservedLoadedAmmo =
-                CurrentLoadedAmmo;
-            State.NextRefillTime =
-                NowSeconds +
-                State.RechargeIntervalSeconds +
+            SyncKnownWeaponAmmo(Owner, WeaponDefinition, State.ItemGuid, CurrentLoadedAmmo);
+            State.LastObservedLoadedAmmo = CurrentLoadedAmmo;
+            State.NextRefillTime = NowSeconds + State.RechargeIntervalSeconds +
                 NativeRechargeGraceSeconds;
-            NotifyWeaponRechargeStarted(
-                Owner, State.ItemGuid, NowSeconds);
+            NotifyWeaponRechargeStarted(Owner, State.ItemGuid, NowSeconds);
             ++Index;
             continue;
         }
         bool bStartedRechargeCycle = false;
-        if (CurrentLoadedAmmo <
-            State.LastObservedLoadedAmmo)
+        if (CurrentLoadedAmmo <State.LastObservedLoadedAmmo)
         {
-            State.LastObservedLoadedAmmo =
-                CurrentLoadedAmmo;
+            State.LastObservedLoadedAmmo = CurrentLoadedAmmo;
             if (State.NextRefillTime <= 0.0)
             {
-                State.NextRefillTime =
-                    NowSeconds +
-                    State.RechargeIntervalSeconds +
+                State.NextRefillTime = NowSeconds + State.RechargeIntervalSeconds +
                     NativeRechargeGraceSeconds;
                 bStartedRechargeCycle = true;
             }
         }
         else if (State.NextRefillTime <= 0.0)
         {
-            State.NextRefillTime =
-                NowSeconds +
-                State.RechargeIntervalSeconds +
+            State.NextRefillTime = NowSeconds + State.RechargeIntervalSeconds +
                 NativeRechargeGraceSeconds;
             bStartedRechargeCycle = true;
         }
         if (bStartedRechargeCycle)
         {
-            NotifyWeaponRechargeStarted(
-                Owner, State.ItemGuid, NowSeconds);
+            NotifyWeaponRechargeStarted(Owner, State.ItemGuid, NowSeconds);
         }
 
         if (NowSeconds < State.NextRefillTime)
@@ -4864,23 +3545,15 @@ void AFortInventory::TickRegeneratingItems()
             continue;
         }
 
-        int32 NewLoadedAmmo =
-            min(
-                CurrentLoadedAmmo +
-                    State.RechargeAmount,
-                State.MaxLoadedAmmo);
+        int32 NewLoadedAmmo = min(CurrentLoadedAmmo + State.RechargeAmount, State.MaxLoadedAmmo);
         ReplicatedEntry->LoadedAmmo = NewLoadedAmmo;
         auto WorldItem = *ItemInstance;
-        WorldItem->ItemEntry.LoadedAmmo =
-            NewLoadedAmmo;
+        WorldItem->ItemEntry.LoadedAmmo = NewLoadedAmmo;
         WorldItem->ItemEntry.bIsDirty = true;
-        State.LastObservedLoadedAmmo =
-            NewLoadedAmmo;
+        State.LastObservedLoadedAmmo = NewLoadedAmmo;
 
-        const int32 MaximumLoadedAmmo =
-            State.MaxLoadedAmmo;
-        const auto DefinitionName =
-            WeaponDefinition->Name.ToString();
+        const int32 MaximumLoadedAmmo = State.MaxLoadedAmmo;
+        const auto DefinitionName = WeaponDefinition->Name.ToString();
         if (NewLoadedAmmo >= State.MaxLoadedAmmo)
         {
             State.NextRefillTime = 0.0;
@@ -4888,40 +3561,27 @@ void AFortInventory::TickRegeneratingItems()
         }
         else
         {
-            State.NextRefillTime =
-                NowSeconds +
-                State.RechargeIntervalSeconds +
+            State.NextRefillTime = NowSeconds + State.RechargeIntervalSeconds +
                 NativeRechargeGraceSeconds;
-            NotifyWeaponRechargeStarted(
-                Owner, State.ItemGuid, NowSeconds);
+            NotifyWeaponRechargeStarted(Owner, State.ItemGuid, NowSeconds);
             ++Index;
         }
 
         Inventory->UpdateEntry(*ReplicatedEntry);
         BroadcastWorldItemAmmoChanged(WorldItem);
-        const int32 SyncedWeaponActors =
-            SyncKnownWeaponAmmo(
-                Owner,
-                WeaponDefinition,
-                State.ItemGuid,
-                NewLoadedAmmo);
-        SDK::DbgLog(
-            "[WeaponRecharge] fallback-refilled "
-            "definition=%s ammo=%d/%d actor-sync-count=%d\n",
-            DefinitionName.c_str(),
-            NewLoadedAmmo,
-            MaximumLoadedAmmo,
-            SyncedWeaponActors);
+        const int32 SyncedWeaponActors = SyncKnownWeaponAmmo(Owner, WeaponDefinition,
+                State.ItemGuid, NewLoadedAmmo);
+        SDK::DbgLog("[WeaponRecharge] fallback-refilled "
+            "definition=%s ammo=%d/%d actor-sync-count=%d\n", DefinitionName.c_str(), NewLoadedAmmo,
+            MaximumLoadedAmmo, SyncedWeaponActors);
     }
 }
 
-bool AFortInventory::BeginTrackedRechargeEquip(
-    AFortPlayerControllerAthena* PlayerController,
+bool AFortInventory::BeginTrackedRechargeEquip(AFortPlayerControllerAthena* PlayerController,
     const FGuid& ItemGuid)
 {
     if (!PlayerController || !PlayerController->WorldInventory ||
-        !FFortItemEntry::HasLoadedAmmo() ||
-        !FFortItemEntry::HasItemGuid() ||
+        !FFortItemEntry::HasLoadedAmmo() || !FFortItemEntry::HasItemGuid() ||
         !FFortItemEntry::HasItemDefinition())
     {
         return false;
@@ -4929,8 +3589,7 @@ bool AFortInventory::BeginTrackedRechargeEquip(
 
     for (auto& State : RechargingWeaponAmmo)
     {
-        if (State.Owner.Get() != PlayerController ||
-            !AreGuidsEqual(State.ItemGuid, ItemGuid))
+        if (State.Owner.Get() != PlayerController || !AreGuidsEqual(State.ItemGuid, ItemGuid))
         {
             continue;
         }
@@ -4940,43 +3599,23 @@ bool AFortInventory::BeginTrackedRechargeEquip(
             return false;
 
         auto Inventory = PlayerController->WorldInventory;
-        auto ReplicatedEntry =
-            Inventory->Inventory.ReplicatedEntries.Search(
+        auto ReplicatedEntry = Inventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
-                    return AreGuidsEqual(
-                            Candidate.ItemGuid,
-                            ItemGuid) &&
-                        Candidate.ItemDefinition ==
-                            WeaponDefinition;
-                },
-                FFortItemEntry::Size());
+                    return AreGuidsEqual(Candidate.ItemGuid, ItemGuid) &&
+                        Candidate.ItemDefinition == WeaponDefinition;
+                }, FFortItemEntry::Size());
         if (!ReplicatedEntry)
             return false;
 
-        int32 SnapshotLoadedAmmo = std::clamp(
-            ReplicatedEntry->LoadedAmmo,
-            0,
-            State.MaxLoadedAmmo);
-        if (!ResolveEquippedWeaponForItem(
-                PlayerController,
-                WeaponDefinition,
-                ItemGuid))
+        int32 SnapshotLoadedAmmo = std::clamp(ReplicatedEntry->LoadedAmmo, 0, State.MaxLoadedAmmo);
+        if (!ResolveEquippedWeaponForItem(PlayerController, WeaponDefinition, ItemGuid))
         {
-            // While offhand, only a native recharge can legitimately raise
-            // the value. A lower value is a stale cached-actor write.
-            SnapshotLoadedAmmo = max(
-                SnapshotLoadedAmmo,
-                State.LastObservedLoadedAmmo);
+            SnapshotLoadedAmmo = max(SnapshotLoadedAmmo, State.LastObservedLoadedAmmo);
         }
 
-        State.EquipSnapshotLoadedAmmo =
-            std::clamp(
-                SnapshotLoadedAmmo,
-                0,
-                State.MaxLoadedAmmo);
-        State.EquipSnapshotNextRefillTime =
-            State.NextRefillTime;
+        State.EquipSnapshotLoadedAmmo = std::clamp(SnapshotLoadedAmmo, 0, State.MaxLoadedAmmo);
+        State.EquipSnapshotNextRefillTime = State.NextRefillTime;
         State.bEquipInProgress = true;
         return true;
     }
@@ -4984,34 +3623,26 @@ bool AFortInventory::BeginTrackedRechargeEquip(
     return false;
 }
 
-void AFortInventory::FinishTrackedRechargeEquip(
-    AFortPlayerControllerAthena* PlayerController,
-    const FGuid& ItemGuid,
-    AFortWeapon* EquippedWeapon)
+void AFortInventory::FinishTrackedRechargeEquip(AFortPlayerControllerAthena* PlayerController,
+    const FGuid& ItemGuid, AFortWeapon* EquippedWeapon)
 {
     if (!PlayerController)
         return;
 
     for (auto& State : RechargingWeaponAmmo)
     {
-        if (State.Owner.Get() != PlayerController ||
-            !AreGuidsEqual(State.ItemGuid, ItemGuid) ||
+        if (State.Owner.Get() != PlayerController || !AreGuidsEqual(State.ItemGuid, ItemGuid) ||
             !State.bEquipInProgress)
         {
             continue;
         }
 
-        const int32 SnapshotLoadedAmmo = std::clamp(
-            State.EquipSnapshotLoadedAmmo,
-            0,
+        const int32 SnapshotLoadedAmmo = std::clamp(State.EquipSnapshotLoadedAmmo, 0,
             State.MaxLoadedAmmo);
-        const double SnapshotNextRefillTime =
-            State.EquipSnapshotNextRefillTime;
+        const double SnapshotNextRefillTime = State.EquipSnapshotNextRefillTime;
         State.bEquipInProgress = false;
         State.LastObservedLoadedAmmo = SnapshotLoadedAmmo;
-        State.NextRefillTime =
-            SnapshotLoadedAmmo >= State.MaxLoadedAmmo
-                ? 0.0
+        State.NextRefillTime = SnapshotLoadedAmmo >= State.MaxLoadedAmmo ? 0.0
                 : SnapshotNextRefillTime;
 
         auto WeaponDefinition = State.WeaponDefinition.Get();
@@ -5019,43 +3650,28 @@ void AFortInventory::FinishTrackedRechargeEquip(
         if (!WeaponDefinition || !Inventory)
             return;
 
-        auto ReplicatedEntry =
-            Inventory->Inventory.ReplicatedEntries.Search(
+        auto ReplicatedEntry = Inventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Candidate)
                 {
-                    return AreGuidsEqual(
-                            Candidate.ItemGuid,
-                            ItemGuid) &&
-                        Candidate.ItemDefinition ==
-                            WeaponDefinition;
-                },
-                FFortItemEntry::Size());
-        auto ItemInstance =
-            Inventory->Inventory.ItemInstances.Search(
-                [&](UFortWorldItem* Candidate)
+                    return AreGuidsEqual(Candidate.ItemGuid, ItemGuid) &&
+                        Candidate.ItemDefinition == WeaponDefinition;
+                }, FFortItemEntry::Size());
+        auto ItemInstance = Inventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Candidate)
                 {
-                    return Candidate &&
-                        AreGuidsEqual(
-                            Candidate->ItemEntry.ItemGuid,
-                            ItemGuid) &&
-                        Candidate->ItemEntry.ItemDefinition ==
-                            WeaponDefinition;
+                    return Candidate && AreGuidsEqual(Candidate->ItemEntry.ItemGuid, ItemGuid) &&
+                        Candidate->ItemEntry.ItemDefinition == WeaponDefinition;
                 });
 
         bool bInventoryChanged = false;
-        if (ReplicatedEntry &&
-            ReplicatedEntry->LoadedAmmo != SnapshotLoadedAmmo)
+        if (ReplicatedEntry && ReplicatedEntry->LoadedAmmo != SnapshotLoadedAmmo)
         {
-            ReplicatedEntry->GetLoadedAmmo() =
-                SnapshotLoadedAmmo;
+            ReplicatedEntry->GetLoadedAmmo() = SnapshotLoadedAmmo;
             bInventoryChanged = true;
         }
-        if (ItemInstance && *ItemInstance &&
-            (*ItemInstance)->ItemEntry.LoadedAmmo !=
+        if (ItemInstance && *ItemInstance && (*ItemInstance)->ItemEntry.LoadedAmmo !=
                 SnapshotLoadedAmmo)
         {
-            (*ItemInstance)->ItemEntry.GetLoadedAmmo() =
-                SnapshotLoadedAmmo;
+            (*ItemInstance)->ItemEntry.GetLoadedAmmo() = SnapshotLoadedAmmo;
             (*ItemInstance)->ItemEntry.bIsDirty = true;
             bInventoryChanged = true;
         }
@@ -5065,131 +3681,74 @@ void AFortInventory::FinishTrackedRechargeEquip(
             BroadcastWorldItemAmmoChanged(*ItemInstance);
 
         bool bReturnedWeaponSynced = false;
-        if (EquippedWeapon &&
-            IsLiveRechargeObject(EquippedWeapon) &&
-            EquippedWeapon->HasItemEntryGuid() &&
-            AreGuidsEqual(
-                EquippedWeapon->ItemEntryGuid,
-                ItemGuid) &&
-            (!EquippedWeapon->HasWeaponData() ||
-                EquippedWeapon->WeaponData ==
+        if (EquippedWeapon && IsLiveRechargeObject(EquippedWeapon) &&
+            EquippedWeapon->HasItemEntryGuid() && AreGuidsEqual(EquippedWeapon->ItemEntryGuid,
+                ItemGuid) && (!EquippedWeapon->HasWeaponData() || EquippedWeapon->WeaponData ==
                     WeaponDefinition))
         {
-            bReturnedWeaponSynced = SyncWeaponAmmo(
-                EquippedWeapon,
-                SnapshotLoadedAmmo);
+            bReturnedWeaponSynced = SyncWeaponAmmo(EquippedWeapon, SnapshotLoadedAmmo);
         }
 
-        const int32 SyncedKnownActors =
-            bReturnedWeaponSynced
-                ? 1
-                : SyncKnownWeaponAmmo(
-                    PlayerController,
-                    WeaponDefinition,
-                    ItemGuid,
-                    SnapshotLoadedAmmo);
+        const int32 SyncedKnownActors = bReturnedWeaponSynced ? 1 : SyncKnownWeaponAmmo(
+                    PlayerController, WeaponDefinition, ItemGuid, SnapshotLoadedAmmo);
 
         if (SnapshotLoadedAmmo < State.MaxLoadedAmmo)
         {
             auto World = UWorld::GetWorld();
-            const double NowSeconds = World
-                ? UGameplayStatics::GetTimeSeconds(World)
-                : 0.0;
+            const double NowSeconds = World ? UGameplayStatics::GetTimeSeconds(World) : 0.0;
             if (State.NextRefillTime <= 0.0 && World)
             {
-                State.NextRefillTime =
-                    NowSeconds +
-                    State.RechargeIntervalSeconds +
+                State.NextRefillTime = NowSeconds + State.RechargeIntervalSeconds +
                     NativeRechargeGraceSeconds;
             }
 
             if (State.NextRefillTime > 0.0)
             {
-                const double OriginalStartTime = max(
-                    0.0,
-                    State.NextRefillTime -
-                        State.RechargeIntervalSeconds -
-                        NativeRechargeGraceSeconds);
-                NotifyWeaponRechargeStarted(
-                    PlayerController,
-                    ItemGuid,
-                    OriginalStartTime);
+                const double OriginalStartTime = max(0.0, State.NextRefillTime -
+                        State.RechargeIntervalSeconds - NativeRechargeGraceSeconds);
+                NotifyWeaponRechargeStarted(PlayerController, ItemGuid, OriginalStartTime);
             }
         }
 
-        SDK::DbgLog(
-            "[WeaponRecharge] equip-reconciled "
+        SDK::DbgLog("[WeaponRecharge] equip-reconciled "
             "definition=%s ammo=%d/%d inventory-restored=%d "
-            "returned-sync=%d actor-sync-count=%d\n",
-            WeaponDefinition->Name.ToString().c_str(),
-            SnapshotLoadedAmmo,
-            State.MaxLoadedAmmo,
-            bInventoryChanged ? 1 : 0,
-            bReturnedWeaponSynced ? 1 : 0,
-            SyncedKnownActors);
+            "returned-sync=%d actor-sync-count=%d\n", WeaponDefinition->Name.ToString().c_str(),
+            SnapshotLoadedAmmo, State.MaxLoadedAmmo, bInventoryChanged ? 1 : 0,
+            bReturnedWeaponSynced ? 1 : 0, SyncedKnownActors);
         return;
     }
 }
 
 void AFortInventory::BeginNativeDeathInventoryRetention(
-    AFortPlayerControllerAthena* PlayerController,
-    const std::vector<FGuid>& ItemGuids)
+    AFortPlayerControllerAthena* PlayerController, const std::vector<FGuid>& ItemGuids)
 {
     if (!PlayerController || ItemGuids.empty())
         return;
 
-    NativeDeathInventoryRetention[PlayerController] =
-        ItemGuids;
+    NativeDeathInventoryRetention[PlayerController] = ItemGuids;
 }
 
-void AFortInventory::EndNativeDeathInventoryRetention(
-    AFortPlayerControllerAthena* PlayerController)
+void AFortInventory::EndNativeDeathInventoryRetention(AFortPlayerControllerAthena* PlayerController)
 {
     if (PlayerController)
-        NativeDeathInventoryRetention.erase(
-            PlayerController);
+        NativeDeathInventoryRetention.erase(PlayerController);
 }
-
 
 void AFortInventory::UpdateEntry(FFortItemEntry& Entry)
 {
     if (!this)
         return; // wtf 3.5
 
-
-    /*auto ent = Inventory.ReplicatedEntries.Search([&](FFortItemEntry& item)
-        { return item.ItemGuid == Entry.ItemGuid; }, FFortItemEntry::Size());
-    if (ent)
-        *ent = Entry;*/
-
-        /*auto ent2 = Inventory.ItemInstances.Search([&](UFortWorldItem* item)
-            { return item->ItemEntry.ItemGuid == Entry.ItemGuid; });
-        if (ent2)
-            (*ent2)->ItemEntry = Entry;*/
-            //memcpy((PBYTE)&(*ent)->ItemEntry, (const PBYTE)&Entry, FFortItemEntry::Size());
-
     Update(&Entry);
 }
 
-using RemoveInventoryItemWithQuickBarFn = bool(*)(
-    IInterface*,
-    FGuid&,
-    int32,
-    bool,
-    bool);
+using RemoveInventoryItemWithQuickBarFn = bool(*)(IInterface*, FGuid&, int32, bool, bool);
 
-using RemoveInventoryItemSingleFlagFn = bool(*)(
-    IInterface*,
-    FGuid&,
-    int32,
-    bool);
+using RemoveInventoryItemSingleFlagFn = bool(*)(IInterface*, FGuid&, int32, bool);
 
 enum class ERemoveInventoryItemAbi
 {
-    None,
-    QuickBarFlagOnly,
-    WithoutQuickBarFlag,
-    WithQuickBarFlag
+    None, QuickBarFlagOnly, WithoutQuickBarFlag, WithQuickBarFlag
 };
 
 RemoveInventoryItemWithQuickBarFn
@@ -5198,263 +3757,155 @@ RemoveInventoryItemSingleFlagFn
     RemoveInventoryItemQuickBarOnlyOG = nullptr;
 RemoveInventoryItemSingleFlagFn
     RemoveInventoryItemWithoutQuickBarOG = nullptr;
-ERemoveInventoryItemAbi RemoveInventoryItemAbi =
-    ERemoveInventoryItemAbi::None;
+ERemoveInventoryItemAbi RemoveInventoryItemAbi = ERemoveInventoryItemAbi::None;
 
-bool CallRemoveInventoryItemOriginal(
-    IInterface* Interface,
-    FGuid& ItemGuid,
-    int32 Count,
-    bool bForceRemoveFromQuickBars,
-    bool bForceRemoval)
+bool CallRemoveInventoryItemOriginal(IInterface* Interface, FGuid& ItemGuid, int32 Count,
+    bool bForceRemoveFromQuickBars, bool bForceRemoval)
 {
-    if (RemoveInventoryItemAbi ==
-            ERemoveInventoryItemAbi::WithQuickBarFlag &&
+    if (RemoveInventoryItemAbi == ERemoveInventoryItemAbi::WithQuickBarFlag &&
         RemoveInventoryItemWithQuickBarOG)
     {
-        return RemoveInventoryItemWithQuickBarOG(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return RemoveInventoryItemWithQuickBarOG(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
 
-    if (RemoveInventoryItemAbi ==
-            ERemoveInventoryItemAbi::QuickBarFlagOnly &&
+    if (RemoveInventoryItemAbi == ERemoveInventoryItemAbi::QuickBarFlagOnly &&
         RemoveInventoryItemQuickBarOnlyOG)
     {
-        return RemoveInventoryItemQuickBarOnlyOG(
-            Interface,
-            ItemGuid,
-            Count,
+        return RemoveInventoryItemQuickBarOnlyOG(Interface, ItemGuid, Count,
             bForceRemoveFromQuickBars);
     }
 
-    if (RemoveInventoryItemAbi ==
-            ERemoveInventoryItemAbi::WithoutQuickBarFlag &&
+    if (RemoveInventoryItemAbi == ERemoveInventoryItemAbi::WithoutQuickBarFlag &&
         RemoveInventoryItemWithoutQuickBarOG)
     {
-        return RemoveInventoryItemWithoutQuickBarOG(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoval);
+        return RemoveInventoryItemWithoutQuickBarOG(Interface, ItemGuid, Count, bForceRemoval);
     }
 
     return false;
 }
 
-bool RemoveInventoryItemInternal(
-    IInterface* Interface,
-    FGuid& ItemGuid,
-    int32 Count,
-    bool bForceRemoveFromQuickBars,
-    bool bForceRemoval)
+bool RemoveInventoryItemInternal(IInterface* Interface, FGuid& ItemGuid, int32 Count,
+    bool bForceRemoveFromQuickBars, bool bForceRemoval)
 {
     if (!Interface)
     {
-        return CallRemoveInventoryItemOriginal(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return CallRemoveInventoryItemOriginal(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
 
     auto PlayerControllerClass = FindClass("FortPlayerController");
-    auto PlayerControllerSuper =
-        PlayerControllerClass
-            ? PlayerControllerClass->GetSuper()
+    auto PlayerControllerSuper = PlayerControllerClass ? PlayerControllerClass->GetSuper()
             : nullptr;
     if (!PlayerControllerSuper)
     {
-        return CallRemoveInventoryItemOriginal(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return CallRemoveInventoryItemOriginal(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
 
-    const uint64 InterfaceOffset =
-        static_cast<uint64>(
-            PlayerControllerSuper->GetPropertiesSize()) +
+    const uint64 InterfaceOffset = static_cast<uint64>(PlayerControllerSuper->GetPropertiesSize()) +
         (VersionInfo.EngineVersion >= 4.27 ? 16ull : 8ull);
-    const uint64 InterfaceAddress =
-        reinterpret_cast<uint64>(Interface);
+    const uint64 InterfaceAddress = reinterpret_cast<uint64>(Interface);
     if (InterfaceAddress < InterfaceOffset)
     {
-        return CallRemoveInventoryItemOriginal(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return CallRemoveInventoryItemOriginal(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
 
-    auto PlayerController =
-        reinterpret_cast<AFortPlayerControllerAthena*>(
+    auto PlayerController = reinterpret_cast<AFortPlayerControllerAthena*>(
             InterfaceAddress - InterfaceOffset);
     if (!SDK::MemReadable(PlayerController, sizeof(void*)))
     {
-        return CallRemoveInventoryItemOriginal(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return CallRemoveInventoryItemOriginal(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
 
-    if (auto Retention =
-            NativeDeathInventoryRetention.find(
-                PlayerController);
-        Retention !=
-            NativeDeathInventoryRetention.end())
+    if (auto Retention = NativeDeathInventoryRetention.find(PlayerController);
+        Retention != NativeDeathInventoryRetention.end())
     {
-        const bool bRetainItem =
-            std::any_of(
-                Retention->second.begin(),
-                Retention->second.end(),
+        const bool bRetainItem = std::any_of(Retention->second.begin(), Retention->second.end(),
                 [&](const FGuid& RetainedGuid)
                 {
                     return
-                        RetainedGuid.A == ItemGuid.A &&
-                        RetainedGuid.B == ItemGuid.B &&
-                        RetainedGuid.C == ItemGuid.C &&
-                        RetainedGuid.D == ItemGuid.D;
+                        RetainedGuid.A == ItemGuid.A && RetainedGuid.B == ItemGuid.B &&
+                        RetainedGuid.C == ItemGuid.C && RetainedGuid.D == ItemGuid.D;
                 });
         if (bRetainItem)
             return true;
     }
 
     auto WorldInventory = PlayerController->WorldInventory;
-    if (!WorldInventory ||
-        !SDK::MemReadable(WorldInventory, sizeof(void*)) ||
-        Count == 0)
+    if (!WorldInventory || !SDK::MemReadable(WorldInventory, sizeof(void*)) || Count == 0)
     {
-        return CallRemoveInventoryItemOriginal(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return CallRemoveInventoryItemOriginal(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
 
-    auto ItemInstance =
-        WorldInventory->Inventory.ItemInstances.Search(
-            [&](UFortWorldItem* Item)
+    auto ItemInstance = WorldInventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Item)
             {
-                return Item &&
-                    Item->ItemEntry.ItemGuid == ItemGuid;
+                return Item && Item->ItemEntry.ItemGuid == ItemGuid;
             });
-    auto ItemEntry =
-        WorldInventory->Inventory.ReplicatedEntries.Search(
-            [&](FFortItemEntry& Entry)
+    auto ItemEntry = WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry)
             {
                 return Entry.ItemGuid == ItemGuid;
-            },
-            FFortItemEntry::Size());
+            }, FFortItemEntry::Size());
     if (!ItemEntry)
     {
-        return CallRemoveInventoryItemOriginal(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return CallRemoveInventoryItemOriginal(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
     auto ItemDefinition = ItemEntry->ItemDefinition;
 
-    // Item instances are not materialized consistently for every inventory
-    // stack on every supported build. A valid replicated row is sufficient
-    // to identify and suppress ordinary consumption. The quickbar flag is
-    // commonly set when the final trap or throwable is used, so only the
-    // distinct force-removal flag may override Infinite Ammo here.
-    if (!UFortKismetLibrary::IsGhostModeItemDefinition(
-            ItemDefinition) &&
-        AFortInventory::ShouldBypassItemConsumption(
-            PlayerController, Count, bForceRemoval))
+    if (!UFortKismetLibrary::IsGhostModeItemDefinition(ItemDefinition) &&
+        AFortInventory::ShouldBypassItemConsumption(PlayerController, Count, bForceRemoval))
     {
         return true;
     }
 
     if (!ItemInstance || !*ItemInstance)
     {
-        // Forced-overflow gadgets are not guaranteed to materialize a
-        // UFortWorldItem on 6.21. Sending AGID_SpookyMist through the stripped
-        // native remover in that case erases its replicated row without ever
-        // reaching AFortInventory::Remove, so neither the controller exit nor
-        // the cosmetic restore runs. Keep this exact gadget on the same
-        // authoritative terminal-removal path regardless of instance state.
-        if (UFortKismetLibrary::IsGhostModeItemDefinition(
-                ItemDefinition))
+        if (UFortKismetLibrary::IsGhostModeItemDefinition(ItemDefinition))
         {
-            const int32 ExistingCount =
-                max(ItemEntry->Count, 0);
-            const bool bTerminalRemoval =
-                Count < 0 || bForceRemoval ||
-                ExistingCount <= 0 ||
+            const int32 ExistingCount = max(ItemEntry->Count, 0);
+            const bool bTerminalRemoval = Count < 0 || bForceRemoval || ExistingCount <= 0 ||
                 Count >= ExistingCount;
             if (bTerminalRemoval)
             {
                 WorldInventory->Remove(ItemGuid);
-                SDK::DbgLog(
-                    "[GhostMode] removed instance-less backing "
+                SDK::DbgLog("[GhostMode] removed instance-less backing "
                     "entry through inventory lifecycle "
-                    "controller=%p count=%d\n",
-                    static_cast<void*>(PlayerController),
+                    "controller=%p count=%d\n", static_cast<void*>(PlayerController),
                     ExistingCount);
             }
             else
             {
-                ItemEntry->Count =
-                    max(ExistingCount - Count, 0);
+                ItemEntry->Count = max(ExistingCount - Count, 0);
                 WorldInventory->UpdateEntry(*ItemEntry);
             }
             return true;
         }
 
-        return CallRemoveInventoryItemOriginal(
-            Interface,
-            ItemGuid,
-            Count,
-            bForceRemoveFromQuickBars,
-            bForceRemoval);
+        return CallRemoveInventoryItemOriginal(Interface, ItemGuid, Count,
+            bForceRemoveFromQuickBars, bForceRemoval);
     }
 
     auto Item = *ItemInstance;
-    const bool bForceRemoveItem =
-        bForceRemoveFromQuickBars || bForceRemoval;
+    const bool bForceRemoveItem = bForceRemoveFromQuickBars || bForceRemoval;
 
-    auto AmmoDefinition =
-        ItemDefinition
-            ? ItemDefinition->Cast<UFortAmmoItemDefinition>()
+    auto AmmoDefinition = ItemDefinition ? ItemDefinition->Cast<UFortAmmoItemDefinition>()
             : nullptr;
 
-    const float ItemLevel =
-        Item->ItemEntry.Level > 0
-            ? static_cast<float>(Item->ItemEntry.Level)
+    const float ItemLevel = Item->ItemEntry.Level > 0 ? static_cast<float>(Item->ItemEntry.Level)
             : 1.0f;
     double RegenCooldownSeconds = 0.0;
     int32 RegenMaximumCount = 0;
-    if (Count > 0 && !bForceRemoveItem && AmmoDefinition &&
-        AmmoDefinition->HasRegenCooldown())
+    if (Count > 0 && !bForceRemoveItem && AmmoDefinition && AmmoDefinition->HasRegenCooldown())
     {
-        RegenCooldownSeconds =
-            AmmoDefinition->EvaluateRegenCooldown(ItemLevel);
+        RegenCooldownSeconds = AmmoDefinition->EvaluateRegenCooldown(ItemLevel);
 
-        // GetMaxStackSize can depend on an attribute set for some item
-        // types. The pre-consumption count is an authoritative lower
-        // bound and preserves the full charge capacity if that lookup is
-        // unavailable in a server-only session.
-        RegenMaximumCount = max(
-            AmmoDefinition->GetMaxStackSize(),
-            ItemEntry->Count);
-        if (RegenMaximumCount <= 0 ||
-            RegenMaximumCount > 10000 ||
-            !std::isfinite(RegenCooldownSeconds) ||
-            RegenCooldownSeconds <= 0.0 ||
+        RegenMaximumCount = max(AmmoDefinition->GetMaxStackSize(), ItemEntry->Count);
+        if (RegenMaximumCount <= 0 || RegenMaximumCount > 10000 ||
+            !std::isfinite(RegenCooldownSeconds) || RegenCooldownSeconds <= 0.0 ||
             RegenCooldownSeconds > 3600.0)
         {
             RegenCooldownSeconds = 0.0;
@@ -5463,133 +3914,77 @@ bool RemoveInventoryItemInternal(
     }
 
     bool bKeepFinalStackEmpty = false;
-    if (Count > 0 &&
-        !bForceRemoveItem &&
-        ItemDefinition &&
+    if (Count > 0 && !bForceRemoveItem && ItemDefinition &&
         ItemDefinition->HasbPersistInInventoryWhenFinalStackEmpty() &&
         ItemDefinition->bPersistInInventoryWhenFinalStackEmpty)
     {
-        auto OtherStack =
-            WorldInventory->Inventory.ReplicatedEntries.Search(
+        auto OtherStack = WorldInventory->Inventory.ReplicatedEntries.Search(
                 [&](FFortItemEntry& Entry)
                 {
-                    return Entry.ItemDefinition == ItemDefinition &&
-                        Entry.ItemGuid != ItemGuid &&
+                    return Entry.ItemDefinition == ItemDefinition && Entry.ItemGuid != ItemGuid &&
                         Entry.Count > 0;
-                },
-                FFortItemEntry::Size());
+                }, FFortItemEntry::Size());
         bKeepFinalStackEmpty = !OtherStack;
     }
 
-    const int32 RemovedCount =
-        WorldInventory->RemoveItem(
-            ItemGuid,
-            Count,
-            bKeepFinalStackEmpty);
+    const int32 RemovedCount = WorldInventory->RemoveItem(ItemGuid, Count, bKeepFinalStackEmpty);
 
     if (RemovedCount > 0 && RegenMaximumCount > 0)
     {
-        ScheduleRegeneratingInventoryItem(
-            PlayerController,
-            AmmoDefinition,
-            ItemGuid,
-            RegenMaximumCount,
-            RegenCooldownSeconds);
+        ScheduleRegeneratingInventoryItem(PlayerController, AmmoDefinition, ItemGuid,
+            RegenMaximumCount, RegenCooldownSeconds);
     }
 
-    // Reaching a persistent empty stack or removing an already-empty stale
-    // entry can legitimately remove zero units while still succeeding.
     return true;
 }
 
-bool RemoveInventoryItemWithQuickBar(
-    IInterface* Interface,
-    FGuid& ItemGuid,
-    int32 Count,
-    bool bForceRemoveFromQuickBars,
-    bool bForceRemoval)
+bool RemoveInventoryItemWithQuickBar(IInterface* Interface, FGuid& ItemGuid, int32 Count,
+    bool bForceRemoveFromQuickBars, bool bForceRemoval)
 {
-    return RemoveInventoryItemInternal(
-        Interface,
-        ItemGuid,
-        Count,
-        bForceRemoveFromQuickBars,
+    return RemoveInventoryItemInternal(Interface, ItemGuid, Count, bForceRemoveFromQuickBars,
         bForceRemoval);
 }
 
-bool RemoveInventoryItemWithoutQuickBar(
-    IInterface* Interface,
-    FGuid& ItemGuid,
-    int32 Count,
+bool RemoveInventoryItemWithoutQuickBar(IInterface* Interface, FGuid& ItemGuid, int32 Count,
     bool bForceRemoval)
 {
-    return RemoveInventoryItemInternal(
-        Interface,
-        ItemGuid,
-        Count,
-        false,
-        bForceRemoval);
+    return RemoveInventoryItemInternal(Interface, ItemGuid, Count, false, bForceRemoval);
 }
 
-bool RemoveInventoryItemQuickBarOnly(
-    IInterface* Interface,
-    FGuid& ItemGuid,
-    int32 Count,
+bool RemoveInventoryItemQuickBarOnly(IInterface* Interface, FGuid& ItemGuid, int32 Count,
     bool bForceRemoveFromQuickBars)
 {
-    return RemoveInventoryItemInternal(
-        Interface,
-        ItemGuid,
-        Count,
-        bForceRemoveFromQuickBars,
+    return RemoveInventoryItemInternal(Interface, ItemGuid, Count, bForceRemoveFromQuickBars,
         false);
 }
 
 ERemoveInventoryItemAbi ResolveRemoveInventoryItemAbi()
 {
-    // The reflected RPC is a separate function, but its named flag changes
-    // track the three interface layouts seen in the supported binaries.
-    // Treat that correlation as a selector, never as permission to guess an
-    // unfamiliar native ABI.
-    const auto ControllerClass =
-        AFortPlayerControllerAthena::StaticClass();
-    const auto ControllerDefault =
-        ControllerClass
-            ? ControllerClass->GetDefaultObj()
-            : nullptr;
-    const auto ServerRemoveInventoryItem =
-        ControllerDefault
-            ? ControllerDefault->GetFunction(
-                "ServerRemoveInventoryItem")
-            : nullptr;
+    const auto ControllerClass = AFortPlayerControllerAthena::StaticClass();
+    const auto ControllerDefault = ControllerClass ? ControllerClass->GetDefaultObj() : nullptr;
+    const auto ServerRemoveInventoryItem = ControllerDefault ? ControllerDefault->GetFunction(
+                "ServerRemoveInventoryItem") : nullptr;
 
     if (ServerRemoveInventoryItem)
     {
-        constexpr uint64 CPF_Parm =
-            0x0000000000000080;
-        constexpr uint64 CPF_ReturnParm =
-            0x0000000000000400;
-        const auto Parameters =
-            ServerRemoveInventoryItem->GetParamsNamed();
-        const bool bHasMetadata =
-            !Parameters.NameOffsetMap.empty();
+        constexpr uint64 CPF_Parm = 0x0000000000000080;
+        constexpr uint64 CPF_ReturnParm = 0x0000000000000400;
+        const auto Parameters = ServerRemoveInventoryItem->GetParamsNamed();
+        const bool bHasMetadata = !Parameters.NameOffsetMap.empty();
         bool bHasItemGuid = false;
         bool bHasCount = false;
         bool bHasForceRemoval = false;
         bool bHasQuickBarFlag = false;
         bool bHasUnknownParameter = false;
 
-        for (const auto& Parameter :
-            Parameters.NameOffsetMap)
+        for (const auto& Parameter : Parameters.NameOffsetMap)
         {
-            if (!(Parameter.PropertyFlags & CPF_Parm) ||
-                (Parameter.PropertyFlags & CPF_ReturnParm))
+            if (!(Parameter.PropertyFlags & CPF_Parm) || (Parameter.PropertyFlags & CPF_ReturnParm))
             {
                 continue;
             }
 
-            if (Parameter.Name == "ItemGuid" ||
-                Parameter.Name == "ItemGUID")
+            if (Parameter.Name == "ItemGuid" || Parameter.Name == "ItemGUID")
             {
                 bHasItemGuid = true;
             }
@@ -5597,10 +3992,7 @@ ERemoveInventoryItemAbi ResolveRemoveInventoryItemAbi()
             {
                 bHasCount = true;
             }
-            else if (
-                Parameter.Name ==
-                    "bForceRemoveFromQuickBars" ||
-                Parameter.Name ==
+            else if (Parameter.Name == "bForceRemoveFromQuickBars" || Parameter.Name ==
                     "bForceRemoveFromQuickbars")
             {
                 bHasQuickBarFlag = true;
@@ -5615,58 +4007,40 @@ ERemoveInventoryItemAbi ResolveRemoveInventoryItemAbi()
             }
         }
 
-        if (bHasItemGuid && bHasCount &&
-            bHasForceRemoval && bHasQuickBarFlag &&
+        if (bHasItemGuid && bHasCount && bHasForceRemoval && bHasQuickBarFlag &&
             !bHasUnknownParameter)
         {
-            return ERemoveInventoryItemAbi::
-                WithQuickBarFlag;
+            return ERemoveInventoryItemAbi::WithQuickBarFlag;
         }
 
-        if (bHasItemGuid && bHasCount &&
-            bHasQuickBarFlag && !bHasForceRemoval &&
+        if (bHasItemGuid && bHasCount && bHasQuickBarFlag && !bHasForceRemoval &&
             !bHasUnknownParameter)
         {
-            return ERemoveInventoryItemAbi::
-                QuickBarFlagOnly;
+            return ERemoveInventoryItemAbi::QuickBarFlagOnly;
         }
 
-        if (bHasItemGuid && bHasCount &&
-            bHasForceRemoval && !bHasQuickBarFlag &&
+        if (bHasItemGuid && bHasCount && bHasForceRemoval && !bHasQuickBarFlag &&
             !bHasUnknownParameter)
         {
-            return ERemoveInventoryItemAbi::
-                WithoutQuickBarFlag;
+            return ERemoveInventoryItemAbi::WithoutQuickBarFlag;
         }
 
-        // A partial or unfamiliar reflected layout is evidence that this
-        // build should not receive a guessed native detour.
         if (bHasMetadata)
             return ERemoveInventoryItemAbi::None;
     }
 
-    // These fallbacks are only for an empty reflected layout and only where
-    // the native interface form is independently evidenced. Do not turn an
-    // unknown or zero version into a guessed detour.
-    const double FortniteVersion =
-        VersionInfo.FortniteVersion;
+    const double FortniteVersion = VersionInfo.FortniteVersion;
     if (FortniteVersion == 1.72)
     {
-        return ERemoveInventoryItemAbi::
-            QuickBarFlagOnly;
+        return ERemoveInventoryItemAbi::QuickBarFlagOnly;
     }
 
-    const bool bKnownFiveArgumentBuild =
-        (FortniteVersion >= 1.91 &&
-            FortniteVersion <= 6.00) ||
-        FortniteVersion == 1.10 ||
-        FortniteVersion == 1.11 ||
-        FortniteVersion == 10.40 ||
+    const bool bKnownFiveArgumentBuild = (FortniteVersion >= 1.91 && FortniteVersion <= 6.00) ||
+        FortniteVersion == 1.10 || FortniteVersion == 1.11 || FortniteVersion == 10.40 ||
         FortniteVersion == 13.40;
     if (bKnownFiveArgumentBuild)
     {
-        return ERemoveInventoryItemAbi::
-            WithQuickBarFlag;
+        return ERemoveInventoryItemAbi::WithQuickBarFlag;
     }
 
     return ERemoveInventoryItemAbi::None;
@@ -5677,11 +4051,7 @@ void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
     if (!Item)
         return;
 
-    // The item instance is the first durable copy of the magazine. Update it
-    // even when a legacy build cannot resolve the owning controller or its
-    // replicated row yet; otherwise a later equip can resurrect stale ammo.
-    const int32 PreviousItemLoadedAmmo =
-        Item->ItemEntry.LoadedAmmo;
+    const int32 PreviousItemLoadedAmmo = Item->ItemEntry.LoadedAmmo;
     Item->ItemEntry.LoadedAmmo = LoadedAmmo;
     Item->ItemEntry.bIsDirty = true;
 
@@ -5689,46 +4059,25 @@ void SetLoadedAmmo(UFortWorldItem* Item, int LoadedAmmo)
     if (!PlayerController || !PlayerController->WorldInventory)
         return;
 
-    //PlayerController->WorldInventory->UpdateEntry(Item->ItemEntry);
     auto repEnt = PlayerController->WorldInventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& item)
         { return item.ItemGuid == Item->ItemEntry.ItemGuid; }, FFortItemEntry::Size());
     if (!repEnt)
         return;
 
-    const int32 PreviousLoadedAmmo =
-        repEnt == &Item->ItemEntry
-            ? PreviousItemLoadedAmmo
+    const int32 PreviousLoadedAmmo = repEnt == &Item->ItemEntry ? PreviousItemLoadedAmmo
             : repEnt->LoadedAmmo;
-    auto WeaponDefinition =
-        Item->ItemEntry.ItemDefinition
-            ? Item->ItemEntry.ItemDefinition->Cast<
-                UFortWeaponItemDefinition>()
-            : nullptr;
+    auto WeaponDefinition = Item->ItemEntry.ItemDefinition ? Item->ItemEntry.ItemDefinition->Cast<
+                UFortWeaponItemDefinition>() : nullptr;
 
-    // Persist the magazine value reported by the native weapon path.
-    // Re-equipping hydrates AFortWeapon::AmmoCount from this item entry, so
-    // retaining the previous/full value here makes every weapon swap look
-    // like a free reload. Infinite Ammo is enforced against reserve-ammo and
-    // consumable-stack removal instead: magazines behave normally and can be
-    // reloaded forever without traps, throwables, or reserve ammo decreasing.
     repEnt->LoadedAmmo = LoadedAmmo;
     PlayerController->WorldInventory->UpdateEntry(*repEnt);
     BroadcastWorldItemAmmoChanged(Item);
 
-    if (WeaponDefinition &&
-        IsTrackedRechargingWeaponAmmo(
-            PlayerController,
+    if (WeaponDefinition && IsTrackedRechargingWeaponAmmo(PlayerController,
             Item->ItemEntry.ItemGuid))
     {
-        // The grant-time capability check keeps this per-shot path limited
-        // to weapons that actually advertise rechargeable loaded ammo.
-        ObserveRechargingWeaponAmmo(
-            PlayerController,
-            WeaponDefinition,
-            Item->ItemEntry.ItemGuid,
-            Item->ItemEntry.Level,
-            PreviousLoadedAmmo,
-            LoadedAmmo);
+        ObserveRechargingWeaponAmmo(PlayerController, WeaponDefinition, Item->ItemEntry.ItemGuid,
+            Item->ItemEntry.Level, PreviousLoadedAmmo, LoadedAmmo);
     }
 }
 
@@ -5746,39 +4095,22 @@ void SetPhantomReserveAmmo(UFortWorldItem* Item, unsigned int PhantomReserveAmmo
     if (!repEnt)
         return;
 
-    const int32 PreviousPhantomReserveAmmo =
-        repEnt->PhantomReserveAmmo;
-    auto WeaponDefinition =
-        Item->ItemEntry.ItemDefinition
-            ? Item->ItemEntry.ItemDefinition->Cast<
-                UFortWeaponItemDefinition>()
-            : nullptr;
-    const bool bPreservePhantomReserve =
-        AFortInventory::ShouldBypassItemConsumption(
-            PlayerController, 1, false) &&
-        ResolveEquippedWeaponForItem(
-            PlayerController,
-            WeaponDefinition,
-            Item->ItemEntry.ItemGuid) &&
-        PreviousPhantomReserveAmmo > 0 &&
-        PhantomReserveAmmo <=
-            static_cast<unsigned int>(
-                (std::numeric_limits<int32>::max)()) &&
-        static_cast<int32>(PhantomReserveAmmo) <
-            PreviousPhantomReserveAmmo;
-    int32 AppliedPhantomReserveAmmo =
-        bPreservePhantomReserve
-            ? PreviousPhantomReserveAmmo
+    const int32 PreviousPhantomReserveAmmo = repEnt->PhantomReserveAmmo;
+    auto WeaponDefinition = Item->ItemEntry.ItemDefinition ? Item->ItemEntry.ItemDefinition->Cast<
+                UFortWeaponItemDefinition>() : nullptr;
+    const bool bPreservePhantomReserve = AFortInventory::ShouldBypassItemConsumption(
+            PlayerController, 1, false) && ResolveEquippedWeaponForItem(PlayerController,
+            WeaponDefinition, Item->ItemEntry.ItemGuid) && PreviousPhantomReserveAmmo > 0 &&
+        PhantomReserveAmmo <= static_cast<unsigned int>((std::numeric_limits<int32>::max)()) &&
+        static_cast<int32>(PhantomReserveAmmo) <PreviousPhantomReserveAmmo;
+    int32 AppliedPhantomReserveAmmo = bPreservePhantomReserve ? PreviousPhantomReserveAmmo
             : static_cast<int32>(PhantomReserveAmmo);
 
-    repEnt->PhantomReserveAmmo =
-        AppliedPhantomReserveAmmo;
-    Item->ItemEntry.PhantomReserveAmmo =
-        AppliedPhantomReserveAmmo;
+    repEnt->PhantomReserveAmmo = AppliedPhantomReserveAmmo;
+    Item->ItemEntry.PhantomReserveAmmo = AppliedPhantomReserveAmmo;
     PlayerController->WorldInventory->UpdateEntry(*repEnt);
     Item->ItemEntry.bIsDirty = true;
 }
-
 
 void SpawnPickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Ret)
 {
@@ -5794,7 +4126,8 @@ void SpawnPickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Ret)
     Stack.StepCompiledIn(&Direction);
     Stack.IncrementCode();
 
-    *Ret = AFortInventory::SpawnPickup(Position, ItemDefinition, NumberToSpawn, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetSupplyDrop());
+    *Ret = AFortInventory::SpawnPickup(Position, ItemDefinition, NumberToSpawn, -1,
+        EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetSupplyDrop());
 }
 
 void SpawnGameModePickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Ret)
@@ -5817,79 +4150,43 @@ void SpawnGameModePickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Re
     if (!ItemDefinition || NumberToSpawn <= 0)
         return;
 
-    const UClass* GameModePickupClass =
-        FindClass("FortGameModePickup");
+    const UClass* GameModePickupClass = FindClass("FortGameModePickup");
     const UClass* OverrideClass = PickupClass.Get();
     if (!OverrideClass)
         OverrideClass = GameModePickupClass;
-    const UObject* PickupDefault =
-        OverrideClass ? OverrideClass->GetDefaultObj() : nullptr;
-    if (!GameModePickupClass ||
-        !PickupDefault ||
-        !PickupDefault->IsA(GameModePickupClass))
+    const UObject* PickupDefault = OverrideClass ? OverrideClass->GetDefaultObj() : nullptr;
+    if (!GameModePickupClass || !PickupDefault || !PickupDefault->IsA(GameModePickupClass))
     {
-        SDK::DbgLog(
-            "[SupplyDrop] rejected invalid game-mode pickup class=%p item=%p\n",
-            (void*)OverrideClass,
-            (void*)ItemDefinition);
+        SDK::DbgLog("[SupplyDrop] rejected invalid game-mode pickup class=%p item=%p\n",
+            (void*)OverrideClass, (void*)ItemDefinition);
         return;
     }
 
-    const bool bCurrentAshtonStone =
-        FFortAthenaNativeLTMCompatibility::
-            IsCurrentAshtonStone(
+    const bool bCurrentAshtonStone = FFortAthenaNativeLTMCompatibility::IsCurrentAshtonStone(
                 TriggeringPawn, ItemDefinition);
     if (bCurrentAshtonStone)
     {
-        if (FFortAthenaNativeLTMCompatibility::
-                IsAshtonStoneCaptured(
-                    ItemDefinition))
+        if (FFortAthenaNativeLTMCompatibility::IsAshtonStoneCaptured(ItemDefinition))
         {
-            SDK::DbgLog(
-                "[Ashton1040] suppressed deferred pickup "
-                "spawn for captured stone item=%s\n",
-                ItemDefinition->Name.ToString().c_str());
+            SDK::DbgLog("[Ashton1040] suppressed deferred pickup "
+                "spawn for captured stone item=%s\n", ItemDefinition->Name.ToString().c_str());
             return;
         }
 
-        // The rock carrier can disappear before its already-queued SpawnLoot
-        // callback runs. In that gap the compatibility watchdog may restore
-        // the missing gem; reuse it here instead of materializing a second
-        // copy of the same stone. Scan the common game-mode base so a
-        // color-specific subclass and the compatibility base are both seen.
         UWorld* World = UWorld::GetWorld();
-        auto ExistingActors =
-            World
-                ? UGameplayStatics::GetAllActorsOfClass(
-                      World, GameModePickupClass)
-                : TArray<AActor*>{};
-        if (ExistingActors.Num() >= 0 &&
-            ExistingActors.Num() <= 256 &&
-            ExistingActors.Max() >=
-                ExistingActors.Num() &&
-            ExistingActors.Max() <= 512)
+        auto ExistingActors = World ? UGameplayStatics::GetAllActorsOfClass(
+                      World, GameModePickupClass) : TArray<AActor*>{};
+        if (ExistingActors.Num() >= 0 && ExistingActors.Num() <= 256 && ExistingActors.Max() >=
+                ExistingActors.Num() && ExistingActors.Max() <= 512)
         {
             for (auto Actor : ExistingActors)
             {
-                auto ExistingPickup =
-                    Actor &&
-                            Actor->IsA(
-                                GameModePickupClass)
-                        ? Actor->Cast<
-                              AFortPickupAthena>()
-                        : nullptr;
-                if (!ExistingPickup ||
-                    !ExistingPickup->HasAuthority() ||
-                    (ExistingPickup
-                         ->HasbActorIsBeingDestroyed() &&
-                     ExistingPickup
-                         ->bActorIsBeingDestroyed) ||
-                    (ExistingPickup->HasbPickedUp() &&
-                     ExistingPickup->bPickedUp) ||
-                    ExistingPickup
-                            ->PrimaryPickupItemEntry
-                            .ItemDefinition !=
-                        ItemDefinition)
+                auto ExistingPickup = Actor && Actor->IsA(GameModePickupClass) ? Actor->Cast<
+                              AFortPickupAthena>() : nullptr;
+                if (!ExistingPickup || !ExistingPickup->HasAuthority() || (ExistingPickup
+                         ->HasbActorIsBeingDestroyed() && ExistingPickup->bActorIsBeingDestroyed) ||
+                    (ExistingPickup->HasbPickedUp() && ExistingPickup->bPickedUp) || ExistingPickup
+                            ->PrimaryPickupItemEntry.ItemDefinition != ItemDefinition)
                 {
                     continue;
                 }
@@ -5897,15 +4194,10 @@ void SpawnGameModePickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Re
                 ExistingPickup->SetLifeSpan(0.0f);
                 ExistingPickup->ForceNetUpdate();
                 *Ret = ExistingPickup;
-                SDK::DbgLog(
-                    "[Ashton1040] reused existing stone "
+                SDK::DbgLog("[Ashton1040] reused existing stone "
                     "pickup for deferred carrier callback "
-                    "item=%s pickup=%p class=%s\n",
-                    ItemDefinition->Name
-                        .ToString().c_str(),
-                    static_cast<void*>(
-                        ExistingPickup),
-                    ExistingPickup->Class->Name
+                    "item=%s pickup=%p class=%s\n", ItemDefinition->Name.ToString().c_str(),
+                    static_cast<void*>(ExistingPickup), ExistingPickup->Class->Name
                         .ToString().c_str());
                 break;
             }
@@ -5915,39 +4207,19 @@ void SpawnGameModePickup_(UObject* Object, FFrame& Stack, AFortPickupAthena** Re
             return;
     }
 
-    // 10.40's Ashton rock supply drops use this native UFunction instead of
-    // SpawnPickup so the six stone definitions retain their authored custom
-    // pickup classes. The stripped server has no usable body for it; spawning
-    // the generic pickup here would also bypass Ashton's lifecycle delegates.
-    *Ret = AFortInventory::SpawnPickup(
-        Position,
-        ItemDefinition,
-        NumberToSpawn,
-        -1,
-        EFortPickupSourceTypeFlag::GetOther(),
-        EFortPickupSpawnSource::GetSupplyDrop(),
-        TriggeringPawn,
-        true,
-        false,
-        OverrideClass);
+    *Ret = AFortInventory::SpawnPickup(Position, ItemDefinition, NumberToSpawn, -1,
+        EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetSupplyDrop(),
+        TriggeringPawn, true, false, OverrideClass);
 
     if (*Ret)
     {
-        // FortGameModePickup objectives are persistent world objectives. The
-        // generic TossPickup path can inherit a finite pickup lifespan, which
-        // made every uncollected Infinity Stone expire and caused the Ashton
-        // watchdog to spawn it again. A zero lifespan clears that timer.
         (*Ret)->SetLifeSpan(0.0f);
         (*Ret)->ForceNetUpdate();
     }
 
     SDK::DbgLog(
         "[SupplyDrop] game-mode pickup item=%p class=%p result=%p direction=(%.1f,%.1f,%.1f)\n",
-        (void*)ItemDefinition,
-        (void*)OverrideClass,
-        (void*)*Ret,
-        Direction.X,
-        Direction.Y,
+        (void*)ItemDefinition, (void*)OverrideClass, (void*)*Ret, Direction.X, Direction.Y,
         Direction.Z);
 }
 
@@ -5973,44 +4245,30 @@ void AFortInventory::PostLoadHook()
     ClearAbility_ = FindClearAbility();
     SDK::DbgLog("  [FI] 1 finds done\n");
 
-    const auto RemoveInventoryItemAddress =
-        FindRemoveInventoryItem();
-    RemoveInventoryItemAbi =
-        ResolveRemoveInventoryItemAbi();
+    const auto RemoveInventoryItemAddress = FindRemoveInventoryItem();
+    RemoveInventoryItemAbi = ResolveRemoveInventoryItemAbi();
 
     bool bRemoveInventoryItemHooked = false;
-    if (RemoveInventoryItemAddress &&
-        RemoveInventoryItemAbi ==
+    if (RemoveInventoryItemAddress && RemoveInventoryItemAbi ==
             ERemoveInventoryItemAbi::WithQuickBarFlag)
     {
-        Utils::Hook(
-            RemoveInventoryItemAddress,
-            RemoveInventoryItemWithQuickBar,
+        Utils::Hook(RemoveInventoryItemAddress, RemoveInventoryItemWithQuickBar,
             RemoveInventoryItemWithQuickBarOG);
-        bRemoveInventoryItemHooked =
-            RemoveInventoryItemWithQuickBarOG != nullptr;
+        bRemoveInventoryItemHooked = RemoveInventoryItemWithQuickBarOG != nullptr;
     }
-    else if (RemoveInventoryItemAddress &&
-        RemoveInventoryItemAbi ==
+    else if (RemoveInventoryItemAddress && RemoveInventoryItemAbi ==
             ERemoveInventoryItemAbi::QuickBarFlagOnly)
     {
-        Utils::Hook(
-            RemoveInventoryItemAddress,
-            RemoveInventoryItemQuickBarOnly,
+        Utils::Hook(RemoveInventoryItemAddress, RemoveInventoryItemQuickBarOnly,
             RemoveInventoryItemQuickBarOnlyOG);
-        bRemoveInventoryItemHooked =
-            RemoveInventoryItemQuickBarOnlyOG != nullptr;
+        bRemoveInventoryItemHooked = RemoveInventoryItemQuickBarOnlyOG != nullptr;
     }
-    else if (RemoveInventoryItemAddress &&
-        RemoveInventoryItemAbi ==
+    else if (RemoveInventoryItemAddress && RemoveInventoryItemAbi ==
             ERemoveInventoryItemAbi::WithoutQuickBarFlag)
     {
-        Utils::Hook(
-            RemoveInventoryItemAddress,
-            RemoveInventoryItemWithoutQuickBar,
+        Utils::Hook(RemoveInventoryItemAddress, RemoveInventoryItemWithoutQuickBar,
             RemoveInventoryItemWithoutQuickBarOG);
-        bRemoveInventoryItemHooked =
-            RemoveInventoryItemWithoutQuickBarOG != nullptr;
+        bRemoveInventoryItemHooked = RemoveInventoryItemWithoutQuickBarOG != nullptr;
     }
 
     const char* RemoveInventoryItemAbiName = "unresolved";
@@ -6028,18 +4286,9 @@ void AFortInventory::PostLoadHook()
     default:
         break;
     }
-    SDK::DbgLog(
-        "  [FI] 2 RemoveInventoryItem %s "
-        "(abi=%s target=%p)\n",
-        bRemoveInventoryItemHooked
-            ? "hooked"
-            : "unavailable",
-        RemoveInventoryItemAbiName,
-        reinterpret_cast<void*>(
-            RemoveInventoryItemAddress));
-    // need to see if these are used
-    //Utils::Hook(FindRemoveInventoryStateValue(), RemoveInventoryStateValue);
-    //Utils::Hook(FindSetInventoryStateValue(), SetInventoryStateValue);
+    SDK::DbgLog("  [FI] 2 RemoveInventoryItem %s "
+        "(abi=%s target=%p)\n", bRemoveInventoryItemHooked ? "hooked" : "unavailable",
+        RemoveInventoryItemAbiName, reinterpret_cast<void*>(RemoveInventoryItemAddress));
 
     auto SetOwningInventory = Memcury::Scanner::FindPattern("48 85 D2 74 ? 80 BA ? ? ? ? ? 75 ? 48 89 91").Get();
     if (!SetOwningInventory)
@@ -6064,56 +4313,38 @@ void AFortInventory::PostLoadHook()
         if (SetOwningInventoryIdx)
         {
             auto HasPhantomReserveAmmo = FFortItemEntry::HasPhantomReserveAmmo();
-            const uint32 LoadedAmmoSetterIndex =
-                uint32(
-                    SetOwningInventoryIdx -
-                    (HasPhantomReserveAmmo
-                        ? (VersionInfo.EngineVersion < 4.27
-                            ? 2
-                            : 3)
-                        : 1));
+            const uint32 LoadedAmmoSetterIndex = uint32(SetOwningInventoryIdx -
+                    (HasPhantomReserveAmmo ? (VersionInfo.EngineVersion < 4.27 ? 2 : 3) : 1));
 
-            Utils::Hook<UFortWorldItem>(
-                LoadedAmmoSetterIndex,
-                SetLoadedAmmo);
+            Utils::Hook<UFortWorldItem>(LoadedAmmoSetterIndex, SetLoadedAmmo);
             if (HasPhantomReserveAmmo)
                 Utils::Hook<UFortWorldItem>(uint32(SetOwningInventoryIdx - (VersionInfo.EngineVersion < 4.27 ? 1 : 2)), SetPhantomReserveAmmo);
 
-            SDK::DbgLog(
-                "[WeaponRecharge] loaded-ammo setter hook "
-                "installed index=%u\n",
-                LoadedAmmoSetterIndex);
+            SDK::DbgLog("[WeaponRecharge] loaded-ammo setter hook "
+                "installed index=%u\n", LoadedAmmoSetterIndex);
         }
         else
         {
-            SDK::DbgLog(
-                "[WeaponRecharge] loaded-ammo setter hook "
+            SDK::DbgLog("[WeaponRecharge] loaded-ammo setter hook "
                 "unavailable: owner setter vft index missing\n");
         }
     }
     else
     {
-        SDK::DbgLog(
-            "[WeaponRecharge] loaded-ammo setter hook "
+        SDK::DbgLog("[WeaponRecharge] loaded-ammo setter hook "
             "unavailable: owner setter signature missing\n");
     }
 
     SDK::DbgLog("  [FI] 3 SetOwningInventory block done\n");
     if (auto sd = DefaultObjImpl("FortAthenaSupplyDrop"))
     {
-        if (auto SpawnPickupFunction =
-                sd->GetFunction("SpawnPickup"))
+        if (auto SpawnPickupFunction = sd->GetFunction("SpawnPickup"))
         {
-            Utils::ExecHook(
-                SpawnPickupFunction,
-                SpawnPickup_);
+            Utils::ExecHook(SpawnPickupFunction, SpawnPickup_);
         }
-        if (auto SpawnGameModePickupFunction =
-                sd->GetFunction("SpawnGameModePickup"))
+        if (auto SpawnGameModePickupFunction = sd->GetFunction("SpawnGameModePickup"))
         {
-            Utils::ExecHook(
-                SpawnGameModePickupFunction,
-                SpawnGameModePickup_);
+            Utils::ExecHook(SpawnGameModePickupFunction, SpawnGameModePickup_);
         }
     }
     SDK::DbgLog("  [FI] 4 PostLoadHook complete\n");

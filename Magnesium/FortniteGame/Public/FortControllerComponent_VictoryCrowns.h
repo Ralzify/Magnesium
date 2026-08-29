@@ -13,8 +13,8 @@ public:
     DEFINE_PROP(CrownInventoryItemClass, TSoftObjectPtr<UFortWorldItemDefinition>);
     DEFINE_PROP(VictoryCrownPlaylistData, UDataTable*);
     DEFINE_PROP(SourceTagsForRoyalRoyale, FGameplayTagContainer*);
-	DEFINE_BITFIELD_PROP(bWonCrownInMatch);
-	DEFINE_BITFIELD_PROP(bWonRoyalRoyale);
+    DEFINE_BITFIELD_PROP(bWonCrownInMatch);
+    DEFINE_BITFIELD_PROP(bWonRoyalRoyale);
 
     DEFINE_FUNC(OnRep_WonCrownInMatch, void);
     DEFINE_FUNC(OnRep_WonRoyalRoyale, void);

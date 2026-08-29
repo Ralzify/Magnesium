@@ -104,9 +104,7 @@ public:
 
 enum EInlineObjectiveStatTagCheckEntryType : uint8
 {
-    Target = 0,
-    Source = 1,
-    Context = 2
+    Target = 0, Source = 1, Context = 2
 };
 
 struct FInlineObjectiveStatTagCheckEntry
@@ -180,7 +178,6 @@ public:
     DEFINE_FUNC(HandleQuestObjectiveUpdated, void);
 };
 
-
 class UFortQuestManager : public UObject
 {
 public:
@@ -195,19 +192,19 @@ public:
     DEFINE_FUNC(HandleQuestUpdated, void);
     DEFINE_FUNC(HandleQuestObjectiveUpdated, void);
 
-    // Custom gameplay hooks use this checked entry point because a controller
-    // can expose a QuestManager before Fortnite has created its native
-    // StatManager. Dispatching during that window enters native stat code with
-    // a null manager.
     static bool TrySendStatEvent(AActor* PlayerController, long long StatEvent,
-        int32 Count, bool bAllowQueueStatEvent,
-        UObject* TargetObject = nullptr,
+        int32 Count, bool bAllowQueueStatEvent, UObject* TargetObject = nullptr,
         FGameplayTagContainer TargetTags = FGameplayTagContainer(),
         FGameplayTagContainer AdditionalSourceTags = FGameplayTagContainer(),
         bool* QuestActive = nullptr, bool* QuestCompleted = nullptr);
-    void SendStatEvent__Internal(AActor* PlayerController, long long StatEvent, int32 Count, UObject* TargetObject, FGameplayTagContainer TargetTags, FGameplayTagContainer SourceTags, FGameplayTagContainer ContextTags, bool* QuestActive, bool* QuestCompleted);
-    void SendStatEvent(AActor* PlayerController, long long StatEvent, int32 Count, bool bAllowQueueStatEvent, UObject* TargetObject = nullptr, FGameplayTagContainer TargetTags = FGameplayTagContainer(), FGameplayTagContainer AdditionalSourceTags = FGameplayTagContainer(), bool* QuestActive = nullptr, bool* QuestCompleted = nullptr);
-
+    void SendStatEvent__Internal(AActor* PlayerController, long long StatEvent, int32 Count,
+        UObject* TargetObject, FGameplayTagContainer TargetTags, FGameplayTagContainer SourceTags,
+        FGameplayTagContainer ContextTags, bool* QuestActive, bool* QuestCompleted);
+    void SendStatEvent(AActor* PlayerController, long long StatEvent, int32 Count,
+        bool bAllowQueueStatEvent, UObject* TargetObject = nullptr,
+        FGameplayTagContainer TargetTags = FGameplayTagContainer(),
+        FGameplayTagContainer AdditionalSourceTags = FGameplayTagContainer(),
+        bool* QuestActive = nullptr, bool* QuestCompleted = nullptr);
 
     InitPostLoadHooks;
 };

@@ -1,12 +1,4 @@
 #pragma once
-// ============================================================================
-// Magnesium shared support types
-//
-// Small, version-independent types shared by the support layer
-// (VersionFeatureAdapter, AISkillProfile, AIDebugLogger) and by the bot AI
-// module. Nothing here describes behavior; behavior states live with the
-// system that owns them.
-// ============================================================================
 #include "../../../pch.h"
 
 class AFortPlayerControllerAthena;
@@ -17,27 +9,14 @@ class AFortGameStateAthena;
 class ABuildingContainer;
 class AFortPickupAthena;
 
-// Match phase as observed by the support layer (version independent -
-// derived from the gameserver state, never from one hardcoded enum).
 enum class EPlayerAIMatchPhase : uint8_t
 {
-    None,
-    WaitingForServer,
-    PreMatch,
-    Transport,
-    InProgress,
-    Ended,
+    None, WaitingForServer, PreMatch, Transport, InProgress, Ended,
 };
 
-// Skill profiles used to vary AI competence.
 enum class EPlayerAISkillProfile : uint8_t
 {
-    Beginner,
-    Average,
-    Advanced,
-    Aggressive,
-    Passive,
-    Testing, // internal / perfect-aim testing only, never picked randomly
+    Beginner, Average, Advanced, Aggressive, Passive, Testing,
 };
 
 inline const char* PlayerAIMatchPhaseToString(EPlayerAIMatchPhase Phase)
@@ -54,7 +33,6 @@ inline const char* PlayerAIMatchPhaseToString(EPlayerAIMatchPhase Phase)
     return "Unknown";
 }
 
-// Small random helpers shared by the support layer and the bot AI module.
 inline float PlayerAIRandRange(float Min, float Max)
 {
     if (Max <= Min)
@@ -73,4 +51,3 @@ inline bool PlayerAIRandChance(float Chance01)
 {
     return PlayerAIRandRange(0.f, 1.f) < Chance01;
 }
-

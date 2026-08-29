@@ -13,124 +13,32 @@ struct FCustomSafeZoneNode;
 
 enum EGSStatus
 {
-    NotReady,
-    Ready,
-    Joinable,
-    StartedMatch,
-    Ended,
+    NotReady, Ready, Joinable, StartedMatch, Ended,
 };
 
 enum class Playlist : int
 {
-    Solos,
-    Duos,
-    Trios,
-    Squads,
-    GetawaySolos,
-    GetawayDuos,
-    GetawaySquads,
-    InfinityGauntletSolos,
-    ZBSolos,
-    ZBDuos,
-    ZBTrios,
-    ZBSquads,
-    Playground,
-    Creative,
-    OneShotSolos,
-    OneShotDuos,
-    OneShotSquads,
-    SiphonSolos,
-    SiphonDuos,
-    SiphonSquads,
-    UnvSolos,
-    UnvDuos,
-    UnvTrios,
-    UnvSquads,
-    SlideSolos,
-    SlideDuos,
-    FILSolos,
-    FILDuos,
-    FILSquads,
-    TournamentSolos,
-    TournamentDuos,
-    TournamentTrios,
-    TournamentSquads,
-    ArenaSolos,
-    ArenaDuos,
-    ArenaTrios,
-    ArenaSquads,
-    ArenaZBSolos,
-    ArenaZBDuos,
-    ArenaZBTrios,
-    ArenaZBSquads,
-    Gav,
-    Retrac1v1,
-    RetracTurtle,
-    RetracWater,
-    TiltedZW,
-    OnlyUp,
-    Twine1v1,
-    Boxfight,
-    Backrooms,
-    Event,
-    Custom,
-    DeepFriedSquads,
-    ArsenalSolos,
-    FoodFight,
-    WicksBountySolo,
-    WicksBountyDuo,
-    WicksBountySquads,
-    BountySolo,
-    BountyDuo,
-    BountySquads,
-    AvengersEndgame,
-    DiscoDomination,
-    ScoreRoyaleSolo,
-    ScoreRoyaleDuos,
-    ScoreRoyaleSquads
+    Solos, Duos, Trios, Squads, GetawaySolos, GetawayDuos, GetawaySquads, InfinityGauntletSolos,
+    ZBSolos, ZBDuos, ZBTrios, ZBSquads, Playground, Creative, OneShotSolos, OneShotDuos,
+    OneShotSquads, SiphonSolos, SiphonDuos, SiphonSquads, UnvSolos, UnvDuos, UnvTrios, UnvSquads,
+    SlideSolos, SlideDuos, FILSolos, FILDuos, FILSquads, TournamentSolos, TournamentDuos,
+    TournamentTrios, TournamentSquads, ArenaSolos, ArenaDuos, ArenaTrios, ArenaSquads, ArenaZBSolos,
+    ArenaZBDuos, ArenaZBTrios, ArenaZBSquads, Gav, Retrac1v1, RetracTurtle, RetracWater, TiltedZW,
+    OnlyUp, Twine1v1, Boxfight, Backrooms, Event, Custom, DeepFriedSquads, ArsenalSolos, FoodFight,
+    WicksBountySolo, WicksBountyDuo, WicksBountySquads, BountySolo, BountyDuo, BountySquads,
+    AvengersEndgame, DiscoDomination, ScoreRoyaleSolo, ScoreRoyaleDuos, ScoreRoyaleSquads
 };
 
 enum class Plot : int
 {
-    Temperate,
-    Meadow,
-    Arctic,
-    Fortress,
-    IceLake,
-    Canyon,
-    Arid,
-    Wasteland,
-    Tropical,
-    RiverEdge,
-    Volcano,
-    Sandbar,
-    Caldera,
-    Kevin,
-    BlackGlass,
-    Grid,
-    Block,
-    GrassyHill,
-    Shoreline,
-    Archipelago,
-    Horseshoe,
-    Shark,
-    FloatingHub,
-    Fortilla,
-    Debris,
-    Custom
+    Temperate, Meadow, Arctic, Fortress, IceLake, Canyon, Arid, Wasteland, Tropical, RiverEdge,
+    Volcano, Sandbar, Caldera, Kevin, BlackGlass, Grid, Block, GrassyHill, Shoreline, Archipelago,
+    Horseshoe, Shark, FloatingHub, Fortilla, Debris, Custom
 };
 
 enum class Map : int
 {
-    Papaya,
-    Crucible,
-    TutorialMap,
-    EmptyTest,
-    Faceoff,
-    Playground,
-    DADBRO,
-    Kevin,
-    FlatGrid,
+    Papaya, Crucible, TutorialMap, EmptyTest, Faceoff, Playground, DADBRO, Kevin, FlatGrid,
     PropHunt,
 };
 
@@ -144,74 +52,51 @@ public:
         static_cast<int>(Playlist::Solos)
     };
     static inline int SelectedPlot = static_cast<int>(Plot::Temperate);
-	static inline int SelectedMap = static_cast<int>(Map::Faceoff);
+    static inline int SelectedMap = static_cast<int>(Map::Faceoff);
     static void Init();
     static void MarkServerJoinable();
     static void ResetServerLifecycle();
 
     static int GetSelectedPlaylist();
     static void PublishSelectedPlaylist(int Value);
-    // True for ordinary playlists whose generic Match-tab settings may own
-    // gameplay policy. Special maps, Creative, and Events keep authored state.
     static bool UsesDefaultMatchSettings(int Value);
-    static bool GetNormalizedSafeZoneSelection(
-        float& U,
-        float& V);
-    static void RestoreNormalizedSafeZoneSelection(
-        bool bHasSelection,
-        float U,
-        float V);
+    static bool GetNormalizedSafeZoneSelection(float& U, float& V);
+    static void RestoreNormalizedSafeZoneSelection(bool bHasSelection, float U, float V);
     static void ResetPreferenceEditorState();
 
-    // Drains the Custom Safe Zone minimap load request (UE asset loading is
-    // game-thread-only). Called by the pre-Start GetMaxTickRate pump and the
-    // server tick hooks; it also refreshes the authoritative map transform.
     static void SafeZoneMapGameTick();
     static void ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo);
-    // Reports whether normalized moving-zone nodes can be projected using a
-    // stable transform for this match. Original Athena has a known capture
-    // transform; newer maps must publish runtime map data beyond MapInfo's
-    // provisional center-only fallback.
-    static bool IsCustomSafeZoneMapProjectionReady(
-        AFortAthenaMapInfo* MapInfo);
-    // Game-thread-only pure projection helper for authored moving-zone nodes.
-    // Resolves normalized minimap coordinates without mutating configuration;
-    // the caller's Z component is preserved.
-    static bool TryResolveSafeZoneMapPoint(
-        AFortAthenaMapInfo* MapInfo,
-        float U,
-        float V,
+    static bool IsCustomSafeZoneMapProjectionReady(AFortAthenaMapInfo* MapInfo);
+    static bool TryResolveSafeZoneMapPoint(AFortAthenaMapInfo* MapInfo, float U, float V,
         FVector& OutCenter);
-    // Resolves a complete immutable draft with one authoritative transform
-    // lookup. Non-normalized nodes are copied unchanged and the output is
-    // replaced only after every normalized node projects successfully.
-    static bool TryResolveSafeZoneMapPoints(
-        AFortAthenaMapInfo* MapInfo,
-        const std::vector<FCustomSafeZoneNode>& Nodes,
-        std::vector<FVector>& OutCenters);
+    static bool TryResolveSafeZoneMapPoints(AFortAthenaMapInfo* MapInfo,
+        const std::vector<FCustomSafeZoneNode>& Nodes, std::vector<FVector>& OutCenters);
 #if defined(_DEBUG)
     static void RunCustomSafeZoneRenderSelfTests();
 #endif
 
-    // Records an actor created by the authoritative `spawn`/`summon` command
-    // while Trickshot mode and spawned-object tracking are enabled. The preset
-    // manager owns only this exact actor instance; Actor::Owner remains
-    // available for normal gameplay and replication semantics.
-    static void RegisterTrickshotSpawnedActor(
-        AActor* Actor,
-        AFortPlayerControllerAthena* Controller,
-        const std::string& CanonicalClassPath);
+    static void RegisterTrickshotSpawnedActor(AActor* Actor,
+        AFortPlayerControllerAthena* Controller, const std::string& CanonicalClassPath);
 
     static bool IsArenaPlaylist()
     {
         const int Selected = GetSelectedPlaylist();
-        return Selected == static_cast<int>(Playlist::ArenaSolos) || Selected == static_cast<int>(Playlist::ArenaDuos) || Selected == static_cast<int>(Playlist::ArenaTrios) || Selected == static_cast<int>(Playlist::ArenaSquads) || Selected == static_cast<int>(Playlist::Gav) || Selected == static_cast<int>(Playlist::TiltedZW) || Selected == static_cast<int>(Playlist::RetracWater);
+        return Selected == static_cast<int>(Playlist::ArenaSolos) ||
+            Selected == static_cast<int>(Playlist::ArenaDuos) ||
+            Selected == static_cast<int>(Playlist::ArenaTrios) ||
+            Selected == static_cast<int>(Playlist::ArenaSquads) ||
+            Selected == static_cast<int>(Playlist::Gav) ||
+            Selected == static_cast<int>(Playlist::TiltedZW) ||
+            Selected == static_cast<int>(Playlist::RetracWater);
     }
 
     static bool IsTournamentPlaylist()
     {
         const int Selected = GetSelectedPlaylist();
-        return Selected == static_cast<int>(Playlist::TournamentSolos) || Selected == static_cast<int>(Playlist::TournamentDuos) || Selected == static_cast<int>(Playlist::TournamentTrios) || Selected == static_cast<int>(Playlist::TournamentSquads);
+        return Selected == static_cast<int>(Playlist::TournamentSolos) ||
+            Selected == static_cast<int>(Playlist::TournamentDuos) ||
+            Selected == static_cast<int>(Playlist::TournamentTrios) ||
+            Selected == static_cast<int>(Playlist::TournamentSquads);
     }
 
     static inline FString* GetRequestURL(UObject* Connection)
@@ -220,16 +105,13 @@ public:
             return nullptr;
 
         const auto ReflectedOffset = Connection->GetOffset("RequestURL");
-        if (ReflectedOffset != static_cast<uint32>(-1) &&
-            ReflectedOffset <= 0x10000)
+        if (ReflectedOffset != static_cast<uint32>(-1) && ReflectedOffset <= 0x10000)
         {
             return reinterpret_cast<FString*>(
                 reinterpret_cast<uint8*>(Connection) + ReflectedOffset);
         }
 
-        // These offsets are retained only for the verified legacy layouts that
-        // predate a usable reflected field. UE5 connection layouts vary by
-        // cohort; never guess 0x1B8 there just to obtain a display label.
+        // These offsets hold only for the verified legacy layouts. UE5 varies by cohort, so never guess 0x1B8 there.
         if (VersionInfo.EngineVersion >= 5.0)
             return nullptr;
         if (VersionInfo.EngineVersion <= 4.20)
@@ -242,20 +124,11 @@ public:
         return nullptr;
     }
 
-    // Refreshes authoritative PlayerState display names on the game thread
-    // when a cache consumer has requested them. The menu renders on its own
-    // thread and must not call ProcessEvent there.
     static void PlayerNamesGameTick();
-    static std::string GetPlayerNameFromConnection(
+    static std::string GetPlayerNameFromConnection(UNetConnection* Connection);
+    static std::string GetPlayerName(AFortPlayerStateAthena* PlayerState,
         UNetConnection* Connection);
-    static std::string GetPlayerName(
-        AFortPlayerStateAthena* PlayerState,
-        UNetConnection* Connection);
-    // Game-thread callers may resolve a connectionless synthetic player's
-    // replicated PlayerState name directly. UI/render-thread callers must keep
-    // using the cache-only GetPlayerName overload above.
-    static std::string GetPlayerNameGameThread(
-        AFortPlayerStateAthena* PlayerState,
+    static std::string GetPlayerNameGameThread(AFortPlayerStateAthena* PlayerState,
         UNetConnection* Connection);
 };
 

@@ -4,7 +4,6 @@
 
 struct FRealCurve
 {
-
 };
 
 struct FSimpleCurveKey
@@ -57,7 +56,8 @@ public:
             return Value;
 
         float Out = 0.f;
-        UDataTableFunctionLibrary::EvaluateCurveTableRow(Curve.CurveTable, Curve.RowName, i, nullptr, &Out, FString());
+        UDataTableFunctionLibrary::EvaluateCurveTableRow(Curve.CurveTable, Curve.RowName, i,
+            nullptr, &Out, FString());
         return Value * Out;
     }
 };

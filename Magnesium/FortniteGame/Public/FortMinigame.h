@@ -53,9 +53,6 @@ public:
     DEFINE_FUNC(AddMinigamePlayer, void);
     DEFINE_FUNC(OnRep_CurrentState, void);
 
-    // Watchdog for builds without the native SetState hook (everything below
-    // 18.00): logs every minigame state change and unsticks the start sequence
-    // when the native path stalls waiting on a teleport that never happens.
     static void TickCreativeMinigames();
 public:
     DefHookOg(void, SetState, AFortMinigame* Minigame, uint8 NewState);

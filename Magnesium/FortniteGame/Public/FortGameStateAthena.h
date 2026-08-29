@@ -8,10 +8,8 @@
 class AFortAthenaMutator;
 class UFortItemDefinition;
 
-using FPickupLifecycleDelegate =
-    TMulticastInlineDelegate<void(UObject*, UFortItemDefinition*)>;
-using FMutatorGameplayEventDelegate =
-    TMulticastInlineDelegate<void(int32, int32, int32, int32)>;
+using FPickupLifecycleDelegate = TMulticastInlineDelegate<void(UObject*, UFortItemDefinition*)>;
+using FMutatorGameplayEventDelegate = TMulticastInlineDelegate<void(int32, int32, int32, int32)>;
 
 struct FGameMemberInfo : public FFastArraySerializerItem
 {
@@ -47,9 +45,7 @@ struct FGameplayMutatorObjectDataArray : public FFastArraySerializer
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FGameplayMutatorObjectDataArray);
 
-    DEFINE_STRUCT_PROP(
-        ObjectDataList,
-        TArray<FGameplayMutatorObjectData>);
+    DEFINE_STRUCT_PROP(ObjectDataList, TArray<FGameplayMutatorObjectData>);
 };
 
 struct FAdditionalLevelStreamed
@@ -131,15 +127,13 @@ public:
     DEFINE_STATIC_FUNC(SpawnAircraft, AFortAthenaAircraft*);
 };
 
-
 struct FBoxSphereBounds final
 {
 public:
-    struct FVector                                Origin;                                            // 0x0000(0x0018)(Edit, BlueprintVisible, ZeroConstructor, SaveGame, IsPlainOldData, NoDestructor, HasGetValueTypeHash, NativeAccessSpecifierPublic)
-    struct FVector                                BoxExtent;                                         // 0x0018(0x0018)(Edit, BlueprintVisible, ZeroConstructor, SaveGame, IsPlainOldData, NoDestructor, HasGetValueTypeHash, NativeAccessSpecifierPublic)
-    double                                        SphereRadius;                                      // 0x0030(0x0008)(Edit, BlueprintVisible, ZeroConstructor, SaveGame, IsPlainOldData, NoDestructor, HasGetValueTypeHash, NativeAccessSpecifierPublic)
+    struct FVector                                Origin; // 0x0000(0x0018)
+    struct FVector                                BoxExtent; // 0x0018(0x0018)
+    double                                        SphereRadius; // 0x0030(0x0008)
 };
-
 
 class AFortAthenaMapInfo : public AActor
 {
@@ -177,7 +171,6 @@ public:
 
     DEFINE_STRUCT_PROP(bIsFinishedStreaming, bool);
 };
-
 
 class AFortCreativePortalManager : public AActor
 {
@@ -259,17 +252,12 @@ public:
     DEFINE_PROP(SafeZonePhase, uint8);
     DEFINE_PROP(GamePhase, uint8);
     DEFINE_PROP(GamePhaseStep, uint8);
-    // Native Athena death handling consults this separately from the
-    // playlist's RespawnType. In 10.40, Getaway's mutator can leave the
-    // playlist configured for respawns while this switch is still false,
-    // preventing the client respawn handshake from starting.
+    // Native death handling reads this separately from RespawnType, and 10.40's Getaway mutator can leave it false.
     DEFINE_PROP(bCheatRespawnEnabled, bool);
     DEFINE_PROP(Aircrafts, TArray<AFortAthenaAircraft*>);
     DEFINE_PROP(Aircraft, AFortAthenaAircraft*);
     DEFINE_PROP(FlightPathMidLine, FAircraftFlightInfo);
-    DEFINE_PROP(
-        MutatorObjectDataArray,
-        FGameplayMutatorObjectDataArray);
+    DEFINE_PROP(MutatorObjectDataArray, FGameplayMutatorObjectDataArray);
     DEFINE_PROP(SafeZonesStartTime, float);
     DEFINE_PROP(AirCraftBehavior, uint8);
     DEFINE_PROP(CachedSafeZoneStartUp, uint8);

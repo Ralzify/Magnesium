@@ -31,95 +31,59 @@ namespace AutoHosting
         std::atomic_bool GCustomSafeZoneRefreshRequested{ false };
 
         nlohmann::json GDocument = nlohmann::json::object();
-        nlohmann::json GDefaultPreferences =
-            nlohmann::json::object();
+        nlohmann::json GDefaultPreferences = nlohmann::json::object();
         nlohmann::json GStoredPreferences = nlohmann::json::object();
         std::string GLastSerializedDocument;
         ULONGLONG GNextSavePollMs = 0;
 
-        // FConfiguration stores resolved paths as pointers. These owners keep
-        // strings restored from JSON alive for the entire process.
         std::wstring GPlaylistPath;
         std::wstring GCreativePlotPath;
         std::wstring GCustomMapPath;
 
-        template <typename T>
-        T ClampValue(T Value, T Minimum, T Maximum)
+        template <typename T> T ClampValue(T Value, T Minimum, T Maximum)
         {
             return (std::max)(Minimum, (std::min)(Value, Maximum));
         }
 
-        bool ReadBool(
-            const nlohmann::json& Object,
-            const char* Key,
-            bool Fallback)
+        bool ReadBool(const nlohmann::json& Object, const char* Key, bool Fallback)
         {
             const auto It = Object.find(Key);
-            return It != Object.end() && It->is_boolean()
-                ? It->get<bool>()
-                : Fallback;
+            return It != Object.end() && It->is_boolean() ? It->get<bool>() : Fallback;
         }
 
-        int ReadInt(
-            const nlohmann::json& Object,
-            const char* Key,
-            int Fallback)
+        int ReadInt(const nlohmann::json& Object, const char* Key, int Fallback)
         {
             const auto It = Object.find(Key);
-            return It != Object.end() && It->is_number_integer()
-                ? It->get<int>()
-                : Fallback;
+            return It != Object.end() && It->is_number_integer() ? It->get<int>() : Fallback;
         }
 
-        float ReadFloat(
-            const nlohmann::json& Object,
-            const char* Key,
-            float Fallback)
+        float ReadFloat(const nlohmann::json& Object, const char* Key, float Fallback)
         {
             const auto It = Object.find(Key);
-            return It != Object.end() && It->is_number()
-                ? It->get<float>()
-                : Fallback;
+            return It != Object.end() && It->is_number() ? It->get<float>() : Fallback;
         }
 
-        double ReadDouble(
-            const nlohmann::json& Object,
-            const char* Key,
-            double Fallback)
+        double ReadDouble(const nlohmann::json& Object, const char* Key, double Fallback)
         {
             const auto It = Object.find(Key);
-            return It != Object.end() && It->is_number()
-                ? It->get<double>()
-                : Fallback;
+            return It != Object.end() && It->is_number() ? It->get<double>() : Fallback;
         }
 
-        std::string ReadString(
-            const nlohmann::json& Object,
-            const char* Key,
+        std::string ReadString(const nlohmann::json& Object, const char* Key,
             const std::string& Fallback = {})
         {
             const auto It = Object.find(Key);
-            return It != Object.end() && It->is_string()
-                ? It->get<std::string>()
-                : Fallback;
+            return It != Object.end() && It->is_string() ? It->get<std::string>() : Fallback;
         }
 
-        const nlohmann::json& ReadObject(
-            const nlohmann::json& Parent,
-            const char* Key)
+        const nlohmann::json& ReadObject(const nlohmann::json& Parent, const char* Key)
         {
-            static const nlohmann::json Empty =
-                nlohmann::json::object();
+            static const nlohmann::json Empty = nlohmann::json::object();
             const auto It = Parent.find(Key);
-            return It != Parent.end() && It->is_object()
-                ? *It
-                : Empty;
+            return It != Parent.end() && It->is_object() ? *It : Empty;
         }
 
-        bool TryReadFiniteNumber(
-            const nlohmann::json& Object,
-            const char* Key,
-            double& Value)
+        bool TryReadFiniteNumber(const nlohmann::json& Object, const char* Key, double& Value)
         {
             const auto It = Object.find(Key);
             if (It == Object.end() || !It->is_number())
@@ -140,10 +104,7 @@ namespace AutoHosting
             }
         }
 
-        bool TryReadRequiredBool(
-            const nlohmann::json& Object,
-            const char* Key,
-            bool& Value)
+        bool TryReadRequiredBool(const nlohmann::json& Object, const char* Key, bool& Value)
         {
             const auto It = Object.find(Key);
             if (It == Object.end() || !It->is_boolean())
@@ -153,14 +114,10 @@ namespace AutoHosting
             return true;
         }
 
-        bool TryReadRequiredInt(
-            const nlohmann::json& Object,
-            const char* Key,
-            int& Value)
+        bool TryReadRequiredInt(const nlohmann::json& Object, const char* Key, int& Value)
         {
             const auto It = Object.find(Key);
-            if (It == Object.end() ||
-                !It->is_number_integer())
+            if (It == Object.end() || !It->is_number_integer())
             {
                 return false;
             }
@@ -176,9 +133,7 @@ namespace AutoHosting
             }
         }
 
-        bool TryReadOptionalDuration(
-            const nlohmann::json& Object,
-            const char* Key,
+        bool TryReadOptionalDuration(const nlohmann::json& Object, const char* Key,
             std::optional<float>& Value)
         {
             const auto It = Object.find(Key);
@@ -189,10 +144,8 @@ namespace AutoHosting
             }
 
             double ParsedValue = 0.0;
-            if (!TryReadFiniteNumber(Object, Key, ParsedValue) ||
-                ParsedValue <
-                    FCustomSafeZoneSequence::MinimumDurationSeconds ||
-                ParsedValue >
+            if (!TryReadFiniteNumber(Object, Key, ParsedValue) || ParsedValue <
+                    FCustomSafeZoneSequence::MinimumDurationSeconds || ParsedValue >
                     FCustomSafeZoneSequence::MaximumDurationSeconds)
             {
                 return false;
@@ -202,51 +155,38 @@ namespace AutoHosting
             return true;
         }
 
-        bool TryReadCustomSafeZoneSequence(
-            const nlohmann::json& LateGame,
-            FCustomSafeZoneSequence& Sequence,
-            bool bAllowLegacyRadiusIncreases = false)
+        bool TryReadCustomSafeZoneSequence(const nlohmann::json& LateGame,
+            FCustomSafeZoneSequence& Sequence, bool bAllowLegacyRadiusIncreases = false)
         {
-            const auto SequenceIt =
-                LateGame.find("safe_zone_sequence");
-            if (SequenceIt == LateGame.end() ||
-                !SequenceIt->is_object())
+            const auto SequenceIt = LateGame.find("safe_zone_sequence");
+            if (SequenceIt == LateGame.end() || !SequenceIt->is_object())
             {
                 return false;
             }
 
             const auto& SavedSequence = *SequenceIt;
             int SequenceSchemaVersion = -1;
-            if (!TryReadRequiredInt(
-                    SavedSequence,
-                    "schema_version",
-                    SequenceSchemaVersion) ||
-                SequenceSchemaVersion !=
-                    FCustomSafeZoneSequence::SchemaVersion)
+            if (!TryReadRequiredInt(SavedSequence, "schema_version", SequenceSchemaVersion) ||
+                SequenceSchemaVersion != FCustomSafeZoneSequence::SchemaVersion)
             {
                 return false;
             }
 
             const auto NodesIt = SavedSequence.find("nodes");
-            if (NodesIt == SavedSequence.end() ||
-                !NodesIt->is_array() ||
-                NodesIt->size() <
-                    FCustomSafeZoneSequence::MinimumNodeCount ||
-                NodesIt->size() >
+            if (NodesIt == SavedSequence.end() || !NodesIt->is_array() || NodesIt->size() <
+                    FCustomSafeZoneSequence::MinimumNodeCount || NodesIt->size() >
                     FCustomSafeZoneSequence::MaximumNodeCount)
             {
                 return false;
             }
 
             FCustomSafeZoneSequence ParsedSequence;
-            const auto CloseFinalIt =
-                SavedSequence.find("close_final_circle");
+            const auto CloseFinalIt = SavedSequence.find("close_final_circle");
             if (CloseFinalIt != SavedSequence.end())
             {
                 if (!CloseFinalIt->is_boolean())
                     return false;
-                ParsedSequence.bCloseFinalCircle =
-                    CloseFinalIt->get<bool>();
+                ParsedSequence.bCloseFinalCircle = CloseFinalIt->get<bool>();
             }
             ParsedSequence.Nodes.clear();
             ParsedSequence.Nodes.reserve(NodesIt->size());
@@ -262,21 +202,12 @@ namespace AutoHosting
                 double NormalizedV = 0.0;
                 double RadiusCm = 0.0;
                 bool bHasNormalized = false;
-                if (!TryReadFiniteNumber(
-                        SavedNode, "world_x", WorldX) ||
-                    !TryReadFiniteNumber(
-                        SavedNode, "world_y", WorldY) ||
-                    !TryReadFiniteNumber(
-                        SavedNode, "world_z", WorldZ) ||
-                    !TryReadRequiredBool(
-                        SavedNode,
-                        "has_normalized",
-                        bHasNormalized) ||
-                    !TryReadFiniteNumber(
-                        SavedNode, "u", NormalizedU) ||
-                    !TryReadFiniteNumber(
-                        SavedNode, "v", NormalizedV) ||
-                    !TryReadFiniteNumber(
+                if (!TryReadFiniteNumber(SavedNode, "world_x", WorldX) || !TryReadFiniteNumber(
+                        SavedNode, "world_y", WorldY) || !TryReadFiniteNumber(
+                        SavedNode, "world_z", WorldZ) || !TryReadRequiredBool(SavedNode,
+                        "has_normalized", bHasNormalized) || !TryReadFiniteNumber(
+                        SavedNode, "u", NormalizedU) || !TryReadFiniteNumber(
+                        SavedNode, "v", NormalizedV) || !TryReadFiniteNumber(
                         SavedNode, "radius_cm", RadiusCm))
                 {
                     return false;
@@ -285,24 +216,14 @@ namespace AutoHosting
                 FCustomSafeZoneNode Node;
                 Node.Center = FVector(WorldX, WorldY, WorldZ);
                 Node.bHasNormalizedCenter = bHasNormalized;
-                Node.NormalizedU = static_cast<float>(ClampValue(
-                    NormalizedU, 0.0, 1.0));
-                Node.NormalizedV = static_cast<float>(ClampValue(
-                    NormalizedV, 0.0, 1.0));
-                Node.RadiusCm = static_cast<float>(ClampValue(
-                    RadiusCm,
-                    static_cast<double>(
-                        FCustomSafeZoneSequence::MinimumRadiusCm),
-                    static_cast<double>(
+                Node.NormalizedU = static_cast<float>(ClampValue(NormalizedU, 0.0, 1.0));
+                Node.NormalizedV = static_cast<float>(ClampValue(NormalizedV, 0.0, 1.0));
+                Node.RadiusCm = static_cast<float>(ClampValue(RadiusCm, static_cast<double>(
+                        FCustomSafeZoneSequence::MinimumRadiusCm), static_cast<double>(
                         FCustomSafeZoneSequence::MaximumRadiusCm)));
-                if (!TryReadOptionalDuration(
-                        SavedNode,
-                        "hold_before_next_seconds",
-                        Node.HoldBeforeNextSeconds) ||
-                    !TryReadOptionalDuration(
-                        SavedNode,
-                        "move_to_next_seconds",
-                        Node.MoveToNextSeconds))
+                if (!TryReadOptionalDuration(SavedNode, "hold_before_next_seconds",
+                        Node.HoldBeforeNextSeconds) || !TryReadOptionalDuration(SavedNode,
+                        "move_to_next_seconds", Node.MoveToNextSeconds))
                 {
                     return false;
                 }
@@ -310,9 +231,6 @@ namespace AutoHosting
                 ParsedSequence.Nodes.push_back(std::move(Node));
             }
 
-            // Only the profile migration path may read the old expansion
-            // semantics. Every ordinary reader fails closed instead of
-            // publishing a sequence that violates the current invariant.
             if (!bAllowLegacyRadiusIncreases &&
                 ParsedSequence.FindFirstRadiusIncreaseEdge().has_value())
                 return false;
@@ -321,8 +239,7 @@ namespace AutoHosting
             return true;
         }
 
-        nlohmann::json CaptureCustomSafeZoneSequence(
-            const FCustomSafeZoneSequence& Sequence)
+        nlohmann::json CaptureCustomSafeZoneSequence(const FCustomSafeZoneSequence& Sequence)
         {
             nlohmann::json SavedNodes = nlohmann::json::array();
             for (const auto& Node : Sequence.Nodes)
@@ -332,41 +249,31 @@ namespace AutoHosting
                     { "world_y", Node.Center.Y },
                     { "world_z", Node.Center.Z },
                     {
-                        "has_normalized",
-                        Node.bHasNormalizedCenter
+                        "has_normalized", Node.bHasNormalizedCenter
                     },
                     { "u", Node.NormalizedU },
                     { "v", Node.NormalizedV },
                     { "radius_cm", Node.RadiusCm }
                 };
-                SavedNode["hold_before_next_seconds"] =
-                    Node.HoldBeforeNextSeconds.has_value()
-                        ? nlohmann::json(
-                            *Node.HoldBeforeNextSeconds)
-                        : nlohmann::json(nullptr);
-                SavedNode["move_to_next_seconds"] =
-                    Node.MoveToNextSeconds.has_value()
-                        ? nlohmann::json(
-                            *Node.MoveToNextSeconds)
-                        : nlohmann::json(nullptr);
+                SavedNode["hold_before_next_seconds"] = Node.HoldBeforeNextSeconds.has_value()
+                        ? nlohmann::json(*Node.HoldBeforeNextSeconds) : nlohmann::json(nullptr);
+                SavedNode["move_to_next_seconds"] = Node.MoveToNextSeconds.has_value()
+                        ? nlohmann::json(*Node.MoveToNextSeconds) : nlohmann::json(nullptr);
                 SavedNodes.push_back(std::move(SavedNode));
             }
 
             return {
                 {
-                    "schema_version",
-                    FCustomSafeZoneSequence::SchemaVersion
+                    "schema_version", FCustomSafeZoneSequence::SchemaVersion
                 },
                 {
-                    "close_final_circle",
-                    Sequence.bCloseFinalCircle
+                    "close_final_circle", Sequence.bCloseFinalCircle
                 },
                 { "nodes", std::move(SavedNodes) }
             };
         }
 
-        FCustomSafeZoneNode ReadLegacyCustomSafeZoneNode(
-            const nlohmann::json& LateGame)
+        FCustomSafeZoneNode ReadLegacyCustomSafeZoneNode(const nlohmann::json& LateGame)
         {
             double WorldX = 0.0;
             double WorldY = 0.0;
@@ -374,45 +281,29 @@ namespace AutoHosting
             double RadiusCm = 100000.0;
             double NormalizedU = 0.5;
             double NormalizedV = 0.5;
-            TryReadFiniteNumber(
-                LateGame, "safe_zone_center_x", WorldX);
-            TryReadFiniteNumber(
-                LateGame, "safe_zone_center_y", WorldY);
-            TryReadFiniteNumber(
-                LateGame, "safe_zone_center_z", WorldZ);
-            TryReadFiniteNumber(
-                LateGame, "safe_zone_radius", RadiusCm);
-            TryReadFiniteNumber(
-                LateGame, "safe_zone_u", NormalizedU);
-            TryReadFiniteNumber(
-                LateGame, "safe_zone_v", NormalizedV);
+            TryReadFiniteNumber(LateGame, "safe_zone_center_x", WorldX);
+            TryReadFiniteNumber(LateGame, "safe_zone_center_y", WorldY);
+            TryReadFiniteNumber(LateGame, "safe_zone_center_z", WorldZ);
+            TryReadFiniteNumber(LateGame, "safe_zone_radius", RadiusCm);
+            TryReadFiniteNumber(LateGame, "safe_zone_u", NormalizedU);
+            TryReadFiniteNumber(LateGame, "safe_zone_v", NormalizedV);
 
             FCustomSafeZoneNode Node;
             Node.Center = FVector(WorldX, WorldY, WorldZ);
-            if (!std::isfinite(Node.Center.X) ||
-                !std::isfinite(Node.Center.Y) ||
+            if (!std::isfinite(Node.Center.X) || !std::isfinite(Node.Center.Y) ||
                 !std::isfinite(Node.Center.Z))
             {
                 Node.Center = FVector{};
             }
-            Node.bHasNormalizedCenter = ReadBool(
-                LateGame, "has_normalized_safe_zone", false);
-            Node.NormalizedU = ClampValue(
-                static_cast<float>(NormalizedU), 0.f, 1.f);
-            Node.NormalizedV = ClampValue(
-                static_cast<float>(NormalizedV), 0.f, 1.f);
-            Node.RadiusCm = ClampValue(
-                static_cast<float>(RadiusCm),
-                FCustomSafeZoneSequence::MinimumRadiusCm,
-                FCustomSafeZoneSequence::MaximumRadiusCm);
+            Node.bHasNormalizedCenter = ReadBool(LateGame, "has_normalized_safe_zone", false);
+            Node.NormalizedU = ClampValue(static_cast<float>(NormalizedU), 0.f, 1.f);
+            Node.NormalizedV = ClampValue(static_cast<float>(NormalizedV), 0.f, 1.f);
+            Node.RadiusCm = ClampValue(static_cast<float>(RadiusCm),
+                FCustomSafeZoneSequence::MinimumRadiusCm, FCustomSafeZoneSequence::MaximumRadiusCm);
             return Node;
         }
 
-        // Root schema 1 remains unchanged. Upgrade every stored version
-        // profile in-place so switching Fortnite builds cannot resurrect an
-        // unmigrated scalar-only custom zone.
-        bool MigrateCustomSafeZonePreferences(
-            nlohmann::json& Preferences)
+        bool MigrateCustomSafeZonePreferences(nlohmann::json& Preferences)
         {
             if (!Preferences.is_object())
                 return false;
@@ -421,15 +312,12 @@ namespace AutoHosting
             if (!LateGame.is_object())
                 LateGame = nlohmann::json::object();
 
-            const FCustomSafeZoneNode LegacyNode =
-                ReadLegacyCustomSafeZoneNode(LateGame);
+            const FCustomSafeZoneNode LegacyNode = ReadLegacyCustomSafeZoneNode(LateGame);
             FCustomSafeZoneSequence Sequence;
             bool bMovingZone = false;
             const bool bHasMovingFlag = TryReadRequiredBool(
                 LateGame, "custom_moving_zone", bMovingZone);
-            const bool bHasValidSequence =
-                TryReadCustomSafeZoneSequence(
-                    LateGame, Sequence, true);
+            const bool bHasValidSequence = TryReadCustomSafeZoneSequence(LateGame, Sequence, true);
             if (!bHasValidSequence)
             {
                 Sequence = FCustomSafeZoneSequence{};
@@ -441,14 +329,9 @@ namespace AutoHosting
                 bMovingZone = false;
             }
 
-            // Schema version 1 did allow big -> small -> big. Preserve the
-            // authored centers and timings while making every legacy increase
-            // equal to its preceding radius. The normalized sequence is then
-            // written back into the same profile before it can be applied.
             for (size_t Index = 1; Index < Sequence.Nodes.size(); ++Index)
             {
-                Sequence.Nodes[Index].RadiusCm = (std::min)(
-                    Sequence.Nodes[Index].RadiusCm,
+                Sequence.Nodes[Index].RadiusCm = (std::min)(Sequence.Nodes[Index].RadiusCm,
                     Sequence.Nodes[Index - 1].RadiusCm);
             }
 
@@ -459,17 +342,14 @@ namespace AutoHosting
             LateGame["safe_zone_center_y"] = First.Center.Y;
             LateGame["safe_zone_center_z"] = First.Center.Z;
             LateGame["safe_zone_radius"] = First.RadiusCm;
-            LateGame["has_normalized_safe_zone"] =
-                First.bHasNormalizedCenter;
+            LateGame["has_normalized_safe_zone"] = First.bHasNormalizedCenter;
             LateGame["safe_zone_u"] = First.NormalizedU;
             LateGame["safe_zone_v"] = First.NormalizedV;
-            LateGame["safe_zone_sequence"] =
-                CaptureCustomSafeZoneSequence(Sequence);
+            LateGame["safe_zone_sequence"] = CaptureCustomSafeZoneSequence(Sequence);
             return true;
         }
 
-        void MigrateAllCustomSafeZoneProfiles(
-            nlohmann::json& Profiles)
+        void MigrateAllCustomSafeZoneProfiles(nlohmann::json& Profiles)
         {
             if (!Profiles.is_object())
                 return;
@@ -480,8 +360,7 @@ namespace AutoHosting
                 if (!Profile.is_object())
                     continue;
                 auto PreferencesIt = Profile.find("preferences");
-                if (PreferencesIt == Profile.end() ||
-                    !PreferencesIt->is_object())
+                if (PreferencesIt == Profile.end() || !PreferencesIt->is_object())
                 {
                     continue;
                 }
@@ -506,14 +385,14 @@ namespace AutoHosting
                     { "has_normalized_safe_zone", true },
                     { "safe_zone_u", 0.25 },
                     { "safe_zone_v", 0.75 }
-                } }
+                }
+            }
             };
             assert(MigrateCustomSafeZonePreferences(LegacyPreferences));
             auto& MigratedLateGame = LegacyPreferences["lategame"];
             assert(!MigratedLateGame["custom_moving_zone"].get<bool>());
             FCustomSafeZoneSequence MigratedSequence;
-            assert(TryReadCustomSafeZoneSequence(
-                MigratedLateGame, MigratedSequence));
+            assert(TryReadCustomSafeZoneSequence(MigratedLateGame, MigratedSequence));
             assert(MigratedSequence.Nodes.size() == 1);
             assert(MigratedSequence.Nodes[0].Center.X == 1234.0);
             assert(MigratedSequence.Nodes[0].RadiusCm == 25000.f);
@@ -529,64 +408,49 @@ namespace AutoHosting
             Authored.bCloseFinalCircle = true;
             nlohmann::json RoundTripLateGame = {
                 { "custom_moving_zone", true },
-                { "safe_zone_sequence",
-                    CaptureCustomSafeZoneSequence(Authored) }
+                { "safe_zone_sequence", CaptureCustomSafeZoneSequence(Authored) }
             };
             FCustomSafeZoneSequence RoundTrip;
-            assert(TryReadCustomSafeZoneSequence(
-                RoundTripLateGame, RoundTrip));
+            assert(TryReadCustomSafeZoneSequence(RoundTripLateGame, RoundTrip));
             assert(RoundTrip.Nodes.size() == 2);
             assert(RoundTrip.Nodes[0].HoldBeforeNextSeconds == 0.f);
             assert(RoundTrip.Nodes[0].MoveToNextSeconds == 12.5f);
             assert(RoundTrip.Nodes[1].RadiusCm == 35000.f);
             assert(RoundTrip.bCloseFinalCircle);
 
-            // Existing schema-one objects predate this optional flag. They
-            // continue to mean "leave the final circle open".
-            auto LegacySequenceObject =
-                CaptureCustomSafeZoneSequence(Authored);
+            auto LegacySequenceObject = CaptureCustomSafeZoneSequence(Authored);
             LegacySequenceObject.erase("close_final_circle");
             FCustomSafeZoneSequence LegacySequenceRoundTrip;
-            assert(TryReadCustomSafeZoneSequence(
-                nlohmann::json{
+            assert(TryReadCustomSafeZoneSequence(nlohmann::json{
                     { "safe_zone_sequence", LegacySequenceObject }
-                },
-                LegacySequenceRoundTrip));
+                }, LegacySequenceRoundTrip));
             assert(!LegacySequenceRoundTrip.bCloseFinalCircle);
 
-            auto InvalidCloseObject =
-                CaptureCustomSafeZoneSequence(Authored);
+            auto InvalidCloseObject = CaptureCustomSafeZoneSequence(Authored);
             InvalidCloseObject["close_final_circle"] = "yes";
             FCustomSafeZoneSequence InvalidCloseSequence;
-            assert(!TryReadCustomSafeZoneSequence(
-                nlohmann::json{
+            assert(!TryReadCustomSafeZoneSequence(nlohmann::json{
                     { "safe_zone_sequence", InvalidCloseObject }
-                },
-                InvalidCloseSequence));
+                }, InvalidCloseSequence));
             nlohmann::json InvalidClosePreferences = {
                 { "lategame", {
                     { "custom_moving_zone", true },
                     { "safe_zone_center_x", 91.0 },
                     { "safe_zone_radius", 17000.0 },
                     { "safe_zone_sequence", InvalidCloseObject }
-                } }
+                }
+            }
             };
-            assert(MigrateCustomSafeZonePreferences(
-                InvalidClosePreferences));
-            auto& InvalidCloseFallback =
-                InvalidClosePreferences["lategame"];
-            assert(!InvalidCloseFallback[
-                "custom_moving_zone"].get<bool>());
+            assert(MigrateCustomSafeZonePreferences(InvalidClosePreferences));
+            auto& InvalidCloseFallback = InvalidClosePreferences["lategame"];
+            assert(!InvalidCloseFallback["custom_moving_zone"].get<bool>());
             FCustomSafeZoneSequence InvalidCloseFallbackSequence;
-            assert(TryReadCustomSafeZoneSequence(
-                InvalidCloseFallback,
+            assert(TryReadCustomSafeZoneSequence(InvalidCloseFallback,
                 InvalidCloseFallbackSequence));
             assert(!InvalidCloseFallbackSequence.bCloseFinalCircle);
             assert(InvalidCloseFallbackSequence.Nodes.size() == 1);
             assert(InvalidCloseFallbackSequence.Nodes[0].Center.X == 91.0);
 
-            // Previously-authored expanding sequences preserve their geometry
-            // and timing, but each larger radius is reduced to its predecessor.
             FCustomSafeZoneSequence Expanding = Authored;
             Expanding.Nodes[1].RadiusCm = 65000.f;
             nlohmann::json ExpandingPreferences = {
@@ -594,19 +458,15 @@ namespace AutoHosting
                     { "custom_moving_zone", true },
                     { "safe_zone_center_x", 77.0 },
                     { "safe_zone_radius", 18000.0 },
-                    { "safe_zone_sequence",
-                        CaptureCustomSafeZoneSequence(Expanding) }
-                } }
+                    { "safe_zone_sequence", CaptureCustomSafeZoneSequence(Expanding) }
+                }
+            }
             };
-            assert(MigrateCustomSafeZonePreferences(
-                ExpandingPreferences));
-            auto& NormalizedExpandingLateGame =
-                ExpandingPreferences["lategame"];
-            assert(NormalizedExpandingLateGame[
-                "custom_moving_zone"].get<bool>());
+            assert(MigrateCustomSafeZonePreferences(ExpandingPreferences));
+            auto& NormalizedExpandingLateGame = ExpandingPreferences["lategame"];
+            assert(NormalizedExpandingLateGame["custom_moving_zone"].get<bool>());
             FCustomSafeZoneSequence NormalizedExpanding;
-            assert(TryReadCustomSafeZoneSequence(
-                NormalizedExpandingLateGame, NormalizedExpanding));
+            assert(TryReadCustomSafeZoneSequence(NormalizedExpandingLateGame, NormalizedExpanding));
             assert(NormalizedExpanding.Nodes.size() == 2);
             assert(NormalizedExpanding.Nodes[0].RadiusCm == 40000.f);
             assert(NormalizedExpanding.Nodes[1].RadiusCm == 40000.f);
@@ -621,16 +481,16 @@ namespace AutoHosting
                     { "safe_zone_sequence", {
                         { "schema_version", 1 },
                         { "nodes", nlohmann::json::array() }
-                    } }
-                } }
+                    }
+                }
+                }
+            }
             };
-            assert(MigrateCustomSafeZonePreferences(
-                MalformedPreferences));
+            assert(MigrateCustomSafeZonePreferences(MalformedPreferences));
             auto& FallbackLateGame = MalformedPreferences["lategame"];
             assert(!FallbackLateGame["custom_moving_zone"].get<bool>());
             FCustomSafeZoneSequence Fallback;
-            assert(TryReadCustomSafeZoneSequence(
-                FallbackLateGame, Fallback));
+            assert(TryReadCustomSafeZoneSequence(FallbackLateGame, Fallback));
             assert(Fallback.Nodes.size() == 1);
             assert(Fallback.Nodes[0].Center.X == 99.0);
             assert(Fallback.Nodes[0].RadiusCm == 15000.f);
@@ -642,8 +502,7 @@ namespace AutoHosting
             MigrateAllCustomSafeZoneProfiles(Profiles);
             for (const auto& Entry : Profiles.items())
             {
-                const auto& LateGame =
-                    Entry.value()["preferences"]["lategame"];
+                const auto& LateGame = Entry.value()["preferences"]["lategame"];
                 assert(LateGame.contains("custom_moving_zone"));
                 assert(LateGame.contains("safe_zone_sequence"));
             }
@@ -655,31 +514,15 @@ namespace AutoHosting
             if (!Value || !*Value)
                 return {};
 
-            const int WideLength =
-                static_cast<int>(wcslen(Value));
-            const int Utf8Length = WideCharToMultiByte(
-                CP_UTF8,
-                WC_ERR_INVALID_CHARS,
-                Value,
-                WideLength,
-                nullptr,
-                0,
-                nullptr,
-                nullptr);
+            const int WideLength = static_cast<int>(wcslen(Value));
+            const int Utf8Length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, Value,
+                WideLength, nullptr, 0, nullptr, nullptr);
             if (Utf8Length <= 0)
                 return {};
 
-            std::string Result(
-                static_cast<size_t>(Utf8Length), '\0');
-            if (WideCharToMultiByte(
-                    CP_UTF8,
-                    WC_ERR_INVALID_CHARS,
-                    Value,
-                    WideLength,
-                    Result.data(),
-                    Utf8Length,
-                    nullptr,
-                    nullptr) <= 0)
+            std::string Result(static_cast<size_t>(Utf8Length), '\0');
+            if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, Value, WideLength, Result.data(),
+                    Utf8Length, nullptr, nullptr) <= 0)
             {
                 return {};
             }
@@ -691,25 +534,14 @@ namespace AutoHosting
             if (Value.empty())
                 return {};
 
-            const int WideLength = MultiByteToWideChar(
-                CP_UTF8,
-                MB_ERR_INVALID_CHARS,
-                Value.data(),
-                static_cast<int>(Value.size()),
-                nullptr,
-                0);
+            const int WideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, Value.data(),
+                static_cast<int>(Value.size()), nullptr, 0);
             if (WideLength <= 0)
                 return {};
 
-            std::wstring Result(
-                static_cast<size_t>(WideLength), L'\0');
-            if (MultiByteToWideChar(
-                    CP_UTF8,
-                    MB_ERR_INVALID_CHARS,
-                    Value.data(),
-                    static_cast<int>(Value.size()),
-                    Result.data(),
-                    WideLength) <= 0)
+            std::wstring Result(static_cast<size_t>(WideLength), L'\0');
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, Value.data(),
+                    static_cast<int>(Value.size()), Result.data(), WideLength) <= 0)
             {
                 return {};
             }
@@ -733,26 +565,20 @@ namespace AutoHosting
         {
             std::ostringstream Stream;
             Stream.imbue(std::locale::classic());
-            Stream << "fn_" << std::fixed << std::setprecision(2)
-                << VersionInfo.FortniteVersion;
+            Stream << "fn_" << std::fixed << std::setprecision(2) << VersionInfo.FortniteVersion;
             return Stream.str();
         }
 
         fs::path SettingsPath()
         {
             wchar_t LocalAppData[MAX_PATH]{};
-            if (FAILED(SHGetFolderPathW(
-                    nullptr,
-                    CSIDL_LOCAL_APPDATA,
-                    nullptr,
-                    SHGFP_TYPE_CURRENT,
+            if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT,
                     LocalAppData)))
             {
                 return {};
             }
 
-            return fs::path(LocalAppData) /
-                L"Magnesium" / L"auto_hosting.json";
+            return fs::path(LocalAppData) / L"Magnesium" / L"auto_hosting.json";
         }
 
         nlohmann::json CapturePreferences()
@@ -795,16 +621,12 @@ namespace AutoHosting
                 { "snow_value", FConfiguration::SnowValue.load(std::memory_order_acquire) }
             };
 
-            auto SafeZoneSequence =
-                FConfiguration::GetCustomSafeZoneSequenceSnapshot();
-            if (!SafeZoneSequence ||
-                SafeZoneSequence->Nodes.empty())
+            auto SafeZoneSequence = FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+            if (!SafeZoneSequence || SafeZoneSequence->Nodes.empty())
             {
-                SafeZoneSequence =
-                    std::make_shared<const FCustomSafeZoneSequence>();
+                SafeZoneSequence = std::make_shared<const FCustomSafeZoneSequence>();
             }
-            const auto& LegacySafeZoneNode =
-                SafeZoneSequence->Nodes.front();
+            const auto& LegacySafeZoneNode = SafeZoneSequence->Nodes.front();
 
             Preferences["lategame"] = {
                 { "enabled", FConfiguration::bLateGame.load(std::memory_order_acquire) },
@@ -823,10 +645,8 @@ namespace AutoHosting
 
             Preferences["lategame"]["has_normalized_safe_zone"] =
                 LegacySafeZoneNode.bHasNormalizedCenter;
-            Preferences["lategame"]["safe_zone_u"] =
-                LegacySafeZoneNode.NormalizedU;
-            Preferences["lategame"]["safe_zone_v"] =
-                LegacySafeZoneNode.NormalizedV;
+            Preferences["lategame"]["safe_zone_u"] = LegacySafeZoneNode.NormalizedU;
+            Preferences["lategame"]["safe_zone_v"] = LegacySafeZoneNode.NormalizedV;
             Preferences["lategame"]["safe_zone_sequence"] =
                 CaptureCustomSafeZoneSequence(*SafeZoneSequence);
 
@@ -860,9 +680,9 @@ namespace AutoHosting
             };
 
             Preferences["ltm_configuration"] = {
-                { "food_fight_objective_health",
-                    FConfiguration::FoodFightObjectiveHealth.load(
-                        std::memory_order_acquire) }
+                { "food_fight_objective_health", FConfiguration::FoodFightObjectiveHealth.load(
+                        std::memory_order_acquire)
+                    }
             };
 
             Preferences["gameplay"] = {
@@ -915,15 +735,7 @@ namespace AutoHosting
 
         void RefreshPostStartPreferences()
         {
-            // A full snapshot is always taken by either the manual Start
-            // action or the Auto Host countdown before bReadyToStart is
-            // published. After that point, refresh the options which remain
-            // editable in the Match and Trickshot stages. Keeping the
-            // selection/path/loadout portions of the launch snapshot intact
-            // also avoids sampling their non-atomic owners while the server
-            // thread is active.
-            if (!GStoredPreferences.is_object() ||
-                GStoredPreferences.empty())
+            if (!GStoredPreferences.is_object() || GStoredPreferences.empty())
             {
                 GStoredPreferences = CapturePreferences();
                 return;
@@ -932,199 +744,131 @@ namespace AutoHosting
             auto& Match = GStoredPreferences["match"];
             if (!Match.is_object())
                 Match = nlohmann::json::object();
-            Match["auto_bus_start"] =
-                FConfiguration::bAutoBusStart.load(
+            Match["auto_bus_start"] = FConfiguration::bAutoBusStart.load(std::memory_order_acquire);
+            Match["bus_start_delay"] = FConfiguration::BusStartDelay.load(
                     std::memory_order_acquire);
-            Match["bus_start_delay"] =
-                FConfiguration::BusStartDelay.load(
+            Match["bus_settings_user_override"] = FConfiguration::bBusSettingsUserOverride.load(
                     std::memory_order_acquire);
-            Match["bus_settings_user_override"] =
-                FConfiguration::bBusSettingsUserOverride.load(
+            Match["auto_dump"] = FConfiguration::bAutoDump.load(std::memory_order_acquire);
+            Match["use_custom_map"] = FConfiguration::bIsCustomMap.load(std::memory_order_acquire);
+            Match["one_kill_ends_game"] = FConfiguration::AutoEndGame.load(
                     std::memory_order_acquire);
-            Match["auto_dump"] =
-                FConfiguration::bAutoDump.load(
+            Match["show_trickshot_tab"] = FConfiguration::bEnableTrickshotTab.load(
                     std::memory_order_acquire);
-            Match["use_custom_map"] =
-                FConfiguration::bIsCustomMap.load(
+            Match["max_tick_rate"] = FConfiguration::MaxTickRate.load(std::memory_order_acquire);
+            Match["max_tick_rate_user_override"] = FConfiguration::bMaxTickRateUserOverride.load(
                     std::memory_order_acquire);
-            Match["one_kill_ends_game"] =
-                FConfiguration::AutoEndGame.load(
-                    std::memory_order_acquire);
-            Match["show_trickshot_tab"] =
-                FConfiguration::bEnableTrickshotTab.load(
-                    std::memory_order_acquire);
-            Match["max_tick_rate"] =
-                FConfiguration::MaxTickRate.load(
-                    std::memory_order_acquire);
-            Match["max_tick_rate_user_override"] =
-                FConfiguration::bMaxTickRateUserOverride.load(
-                    std::memory_order_acquire);
-            Match["port"] =
-                FConfiguration::Port.load(
-                    std::memory_order_acquire);
-            Match["player_has_pickaxe"] =
-                FConfiguration::bHasPickaxe.load(
+            Match["port"] = FConfiguration::Port.load(std::memory_order_acquire);
+            Match["player_has_pickaxe"] = FConfiguration::bHasPickaxe.load(
                     std::memory_order_acquire);
 
             auto& Respawns = GStoredPreferences["respawns"];
             if (!Respawns.is_object())
                 Respawns = nlohmann::json::object();
-            Respawns["enabled"] =
-                FConfiguration::bForceRespawns.load(
+            Respawns["enabled"] = FConfiguration::bForceRespawns.load(std::memory_order_acquire);
+            Respawns["storm_respawns"] = FConfiguration::PermanentRespawn.load(
                     std::memory_order_acquire);
-            Respawns["storm_respawns"] =
-                FConfiguration::PermanentRespawn.load(
+            Respawns["keep_inventory"] = FConfiguration::bKeepInventory.load(
                     std::memory_order_acquire);
-            Respawns["keep_inventory"] =
-                FConfiguration::bKeepInventory.load(
+            Respawns["midzone_respawns"] = FConfiguration::bMidZoneRespawning.load(
                     std::memory_order_acquire);
-            Respawns["midzone_respawns"] =
-                FConfiguration::bMidZoneRespawning.load(
+            Respawns["join_in_progress"] = FConfiguration::bJoinInProgress.load(
                     std::memory_order_acquire);
-            Respawns["join_in_progress"] =
-                FConfiguration::bJoinInProgress.load(
-                    std::memory_order_acquire);
-            Respawns["respawn_time"] =
-                FConfiguration::RespawnTime.load(
-                    std::memory_order_acquire);
-            Respawns["respawn_height"] =
-                FConfiguration::RespawnHeight.load(
+            Respawns["respawn_time"] = FConfiguration::RespawnTime.load(std::memory_order_acquire);
+            Respawns["respawn_height"] = FConfiguration::RespawnHeight.load(
                     std::memory_order_acquire);
 
-            auto& LTMConfiguration =
-                GStoredPreferences["ltm_configuration"];
+            auto& LTMConfiguration = GStoredPreferences["ltm_configuration"];
             if (!LTMConfiguration.is_object())
                 LTMConfiguration = nlohmann::json::object();
             LTMConfiguration["food_fight_objective_health"] =
-                FConfiguration::FoodFightObjectiveHealth.load(
-                    std::memory_order_acquire);
+                FConfiguration::FoodFightObjectiveHealth.load(std::memory_order_acquire);
 
             auto& Gameplay = GStoredPreferences["gameplay"];
             if (!Gameplay.is_object())
                 Gameplay = nlohmann::json::object();
-            Gameplay["glider_redeploy"] =
-                FConfiguration::bGliderRedeploy.load(
+            Gameplay["glider_redeploy"] = FConfiguration::bGliderRedeploy.load(
                     std::memory_order_acquire);
-            Gameplay["infinite_materials"] =
-                FConfiguration::bInfiniteMats.load(
+            Gameplay["infinite_materials"] = FConfiguration::bInfiniteMats.load(
                     std::memory_order_acquire);
-            Gameplay["infinite_ammo"] =
-                FConfiguration::bInfiniteAmmo.load(
+            Gameplay["infinite_ammo"] = FConfiguration::bInfiniteAmmo.load(
                     std::memory_order_acquire);
-            Gameplay["cheat_commands"] =
-                FConfiguration::bEnableCheats.load(
+            Gameplay["cheat_commands"] = FConfiguration::bEnableCheats.load(
                     std::memory_order_acquire);
-            Gameplay["siphon"] =
-                FConfiguration::bSiphon.load(
+            Gameplay["siphon"] = FConfiguration::bSiphon.load(std::memory_order_acquire);
+            Gameplay["siphon_amount"] = FConfiguration::SiphonAmount.load(
                     std::memory_order_acquire);
-            Gameplay["siphon_amount"] =
-                FConfiguration::SiphonAmount.load(
+            Gameplay["siphon_animation"] = FConfiguration::SiphonAnimType.load(
                     std::memory_order_acquire);
-            Gameplay["siphon_animation"] =
-                FConfiguration::SiphonAnimType.load(
-                    std::memory_order_acquire);
-            Gameplay["dbno"] =
-                FConfiguration::bEnableDBNO.load(
-                    std::memory_order_acquire);
+            Gameplay["dbno"] = FConfiguration::bEnableDBNO.load(std::memory_order_acquire);
 
             auto& Trickshot = GStoredPreferences["trickshot"];
             if (!Trickshot.is_object())
                 Trickshot = nlohmann::json::object();
             Trickshot["save_and_track_spawned_objects"] =
-                FConfiguration::bSaveAndTrackSpawnedObjects.load(
+                FConfiguration::bSaveAndTrackSpawnedObjects.load(std::memory_order_acquire);
+            Trickshot["save_waypoints"] = FConfiguration::bSaveWaypoints.load(
                     std::memory_order_acquire);
-            Trickshot["save_waypoints"] =
-                FConfiguration::bSaveWaypoints.load(
+            Trickshot["swag_lines"] = FConfiguration::bUseWinLines.load(std::memory_order_acquire);
+            Trickshot["infinite_render"] = FConfiguration::bInfiniteRender.load(
                     std::memory_order_acquire);
-            Trickshot["swag_lines"] =
-                FConfiguration::bUseWinLines.load(
+            Trickshot["randomize_arena_points"] = FConfiguration::RandomizeArenaPoints.load(
                     std::memory_order_acquire);
-            Trickshot["infinite_render"] =
-                FConfiguration::bInfiniteRender.load(
+            Trickshot["player_map_icons"] = FConfiguration::bPlayerMapIcons.load(
                     std::memory_order_acquire);
-            Trickshot["randomize_arena_points"] =
-                FConfiguration::RandomizeArenaPoints.load(
+            Trickshot["auto_reload_on_waypoint_tp"] = FConfiguration::bAutoReloadOnWaypointTP.load(
                     std::memory_order_acquire);
-            Trickshot["player_map_icons"] =
-                FConfiguration::bPlayerMapIcons.load(
+            Trickshot["remove_ice_on_waypoint_tp"] = FConfiguration::bRemoveIceOnWaypointTP.load(
                     std::memory_order_acquire);
-            Trickshot["auto_reload_on_waypoint_tp"] =
-                FConfiguration::bAutoReloadOnWaypointTP.load(
+            Trickshot["auto_god_mode"] = FConfiguration::bAutoGodMode.load(
                     std::memory_order_acquire);
-            Trickshot["remove_ice_on_waypoint_tp"] =
-                FConfiguration::bRemoveIceOnWaypointTP.load(
-                    std::memory_order_acquire);
-            Trickshot["auto_god_mode"] =
-                FConfiguration::bAutoGodMode.load(
-                    std::memory_order_acquire);
-            Trickshot["auto_god_mode_type"] =
-                FConfiguration::AutoGodModeType.load(
+            Trickshot["auto_god_mode_type"] = FConfiguration::AutoGodModeType.load(
                     std::memory_order_acquire);
             Trickshot["auto_god_mode_exclude_last_player"] =
-                FConfiguration::bAutoGodModeExcludeLastPlayer.load(
+                FConfiguration::bAutoGodModeExcludeLastPlayer.load(std::memory_order_acquire);
+            Trickshot["randomize_kills"] = FConfiguration::RandomizeKills.load(
                     std::memory_order_acquire);
-            Trickshot["randomize_kills"] =
-                FConfiguration::RandomizeKills.load(
+            Trickshot["randomize_levels"] = FConfiguration::RandomizeLevels.load(
                     std::memory_order_acquire);
-            Trickshot["randomize_levels"] =
-                FConfiguration::RandomizeLevels.load(
+            Trickshot["disable_jump_fatigue"] = FConfiguration::bDisableJumpFatigue.load(
                     std::memory_order_acquire);
-            Trickshot["disable_jump_fatigue"] =
-                FConfiguration::bDisableJumpFatigue.load(
+            Trickshot["disable_supply_drops"] = FConfiguration::bDisableSupplyDrops.load(
                     std::memory_order_acquire);
-            Trickshot["disable_supply_drops"] =
-                FConfiguration::bDisableSupplyDrops.load(
+            Trickshot["vehicle_bump_launch"] = FConfiguration::bVehicleBumpLaunch.load(
                     std::memory_order_acquire);
-            Trickshot["vehicle_bump_launch"] =
-                FConfiguration::bVehicleBumpLaunch.load(
+            Trickshot["cannon_launch_animations"] = FConfiguration::bCannonLaunchAnimations.load(
                     std::memory_order_acquire);
-            Trickshot["cannon_launch_animations"] =
-                FConfiguration::bCannonLaunchAnimations.load(
+            Trickshot["cannon_launch_x_multiplier"] = FConfiguration::CannonLaunchXMultiplier.load(
                     std::memory_order_acquire);
-            Trickshot["cannon_launch_x_multiplier"] =
-                FConfiguration::CannonLaunchXMultiplier.load(
+            Trickshot["cannon_launch_y_multiplier"] = FConfiguration::CannonLaunchYMultiplier.load(
                     std::memory_order_acquire);
-            Trickshot["cannon_launch_y_multiplier"] =
-                FConfiguration::CannonLaunchYMultiplier.load(
+            Trickshot["cannon_launch_z_multiplier"] = FConfiguration::CannonLaunchZMultiplier.load(
                     std::memory_order_acquire);
-            Trickshot["cannon_launch_z_multiplier"] =
-                FConfiguration::CannonLaunchZMultiplier.load(
+            Trickshot["crown_slow_motion"] = FConfiguration::bCrownSlomo.load(
                     std::memory_order_acquire);
-            Trickshot["crown_slow_motion"] =
-                FConfiguration::bCrownSlomo.load(
+            Trickshot["cancel_velocity_on_win"] = FConfiguration::bCancelVelocityOnWin.load(
                     std::memory_order_acquire);
-            Trickshot["cancel_velocity_on_win"] =
-                FConfiguration::bCancelVelocityOnWin.load(
+            Trickshot["auto_pause_time_of_day"] = FConfiguration::bAutoPauseTODM.load(
                     std::memory_order_acquire);
-            Trickshot["auto_pause_time_of_day"] =
-                FConfiguration::bAutoPauseTODM.load(
-                    std::memory_order_acquire);
-            Trickshot["time_of_day"] =
-                FConfiguration::TODMTime.load(
-                    std::memory_order_acquire);
+            Trickshot["time_of_day"] = FConfiguration::TODMTime.load(std::memory_order_acquire);
 
-            auto& CalendarPreferences =
-                GStoredPreferences["calendar"];
+            auto& CalendarPreferences = GStoredPreferences["calendar"];
             if (!CalendarPreferences.is_object())
                 CalendarPreferences = nlohmann::json::object();
-            CalendarPreferences["snow_on_match_start"] =
-                FConfiguration::bSnowOnMatchStart.load(
+            CalendarPreferences["snow_on_match_start"] = FConfiguration::bSnowOnMatchStart.load(
                     std::memory_order_acquire);
-            CalendarPreferences["snow_value"] =
-                FConfiguration::SnowValue.load(
+            CalendarPreferences["snow_value"] = FConfiguration::SnowValue.load(
                     std::memory_order_acquire);
         }
 
         void RefreshStoredCustomSafeZonePreferences()
         {
-            if (!GStoredPreferences.is_object() ||
-                GStoredPreferences.empty())
+            if (!GStoredPreferences.is_object() || GStoredPreferences.empty())
             {
                 return;
             }
 
-            const auto Sequence =
-                FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+            const auto Sequence = FConfiguration::GetCustomSafeZoneSequenceSnapshot();
             if (!Sequence || Sequence->Nodes.empty())
                 return;
 
@@ -1133,21 +877,17 @@ namespace AutoHosting
                 LateGame = nlohmann::json::object();
 
             const auto& First = Sequence->Nodes.front();
-            LateGame["custom_safe_zone"] =
-                FConfiguration::bCustomSafeZone.load(
+            LateGame["custom_safe_zone"] = FConfiguration::bCustomSafeZone.load(
                     std::memory_order_acquire);
-            LateGame["custom_moving_zone"] =
-                Sequence->bMovingZoneEnabled;
+            LateGame["custom_moving_zone"] = Sequence->bMovingZoneEnabled;
             LateGame["safe_zone_center_x"] = First.Center.X;
             LateGame["safe_zone_center_y"] = First.Center.Y;
             LateGame["safe_zone_center_z"] = First.Center.Z;
             LateGame["safe_zone_radius"] = First.RadiusCm;
-            LateGame["has_normalized_safe_zone"] =
-                First.bHasNormalizedCenter;
+            LateGame["has_normalized_safe_zone"] = First.bHasNormalizedCenter;
             LateGame["safe_zone_u"] = First.NormalizedU;
             LateGame["safe_zone_v"] = First.NormalizedV;
-            LateGame["safe_zone_sequence"] =
-                CaptureCustomSafeZoneSequence(*Sequence);
+            LateGame["safe_zone_sequence"] = CaptureCustomSafeZoneSequence(*Sequence);
         }
 
         bool ApplyPreferences(const nlohmann::json& Preferences)
@@ -1155,44 +895,25 @@ namespace AutoHosting
             if (!Preferences.is_object())
                 return false;
 
-            const auto& Paths =
-                ReadObject(Preferences, "resolved_paths");
-            const std::string PlaylistPath =
-                ReadString(Paths, "playlist");
-            const std::string CreativePlotPath =
-                ReadString(Paths, "creative_plot");
-            const std::string CustomMapPath =
-                ReadString(Paths, "custom_map");
-            const std::wstring ResolvedPlaylistPath =
-                Utf8ToWide(PlaylistPath);
-            if (PlaylistPath.empty() ||
-                ResolvedPlaylistPath.empty())
+            const auto& Paths = ReadObject(Preferences, "resolved_paths");
+            const std::string PlaylistPath = ReadString(Paths, "playlist");
+            const std::string CreativePlotPath = ReadString(Paths, "creative_plot");
+            const std::string CustomMapPath = ReadString(Paths, "custom_map");
+            const std::wstring ResolvedPlaylistPath = Utf8ToWide(PlaylistPath);
+            if (PlaylistPath.empty() || ResolvedPlaylistPath.empty())
             {
                 return false;
             }
 
-            const auto& Selection =
-                ReadObject(Preferences, "selection");
-            const int SelectedPlaylist = ClampValue(
-                ReadInt(
-                    Selection,
-                    "playlist",
-                    static_cast<int>(Playlist::Solos)),
-                static_cast<int>(Playlist::Solos),
+            const auto& Selection = ReadObject(Preferences, "selection");
+            const int SelectedPlaylist = ClampValue(ReadInt(Selection, "playlist",
+                    static_cast<int>(Playlist::Solos)), static_cast<int>(Playlist::Solos),
                 static_cast<int>(Playlist::ScoreRoyaleSquads));
-            const int SelectedPlot = ClampValue(
-                ReadInt(
-                    Selection,
-                    "creative_plot",
-                    static_cast<int>(Plot::Temperate)),
-                static_cast<int>(Plot::Temperate),
+            const int SelectedPlot = ClampValue(ReadInt(Selection, "creative_plot",
+                    static_cast<int>(Plot::Temperate)), static_cast<int>(Plot::Temperate),
                 static_cast<int>(Plot::Custom));
-            const int SelectedMap = ClampValue(
-                ReadInt(
-                    Selection,
-                    "custom_map",
-                    static_cast<int>(Map::Faceoff)),
-                static_cast<int>(Map::Papaya),
+            const int SelectedMap = ClampValue(ReadInt(Selection, "custom_map",
+                    static_cast<int>(Map::Faceoff)), static_cast<int>(Map::Papaya),
                 static_cast<int>(Map::PropHunt));
 
             GUI::SelectedPlaylist = SelectedPlaylist;
@@ -1205,641 +926,268 @@ namespace AutoHosting
             GCustomMapPath = Utf8ToWide(CustomMapPath);
 
             FConfiguration::Playlist = GPlaylistPath.c_str();
-            FConfiguration::CreativePlot =
-                GCreativePlotPath.c_str();
+            FConfiguration::CreativePlot = GCreativePlotPath.c_str();
             FConfiguration::CustomMap = GCustomMapPath.c_str();
 
-            const auto& Match =
-                ReadObject(Preferences, "match");
-            FConfiguration::bAutoBusStart.store(
-                ReadBool(Match, "auto_bus_start", true),
+            const auto& Match = ReadObject(Preferences, "match");
+            FConfiguration::bAutoBusStart.store(ReadBool(Match, "auto_bus_start", true),
                 std::memory_order_release);
-            FConfiguration::BusStartDelay.store(
-                ClampValue(
-                    ReadFloat(Match, "bus_start_delay", 90.f),
-                    0.f, 300.f),
+            FConfiguration::BusStartDelay.store(ClampValue(
+                    ReadFloat(Match, "bus_start_delay", 90.f), 0.f, 300.f),
                 std::memory_order_release);
-            FConfiguration::bBusSettingsUserOverride.store(
-                ReadBool(
-                    Match,
-                    "bus_settings_user_override",
-                    false),
+            FConfiguration::bBusSettingsUserOverride.store(ReadBool(Match,
+                    "bus_settings_user_override", false), std::memory_order_release);
+            FConfiguration::bAutoDump.store(false, std::memory_order_release);
+            FConfiguration::bIsCustomMap.store(ReadBool(Match, "use_custom_map", false),
                 std::memory_order_release);
-            // Do not restore this diagnostic switch.  Older preference files
-            // commonly contain the old default of true, which makes every
-            // launch synchronously enumerate the entire UObject registry
-            // twice before bWorldIsReady can be published.  The GUI can still
-            // enable a dump explicitly for the current launch.
-            FConfiguration::bAutoDump.store(
-                false,
+            FConfiguration::AutoEndGame.store(ReadBool(Match, "one_kill_ends_game", false),
                 std::memory_order_release);
-            FConfiguration::bIsCustomMap.store(
-                ReadBool(Match, "use_custom_map", false),
-                std::memory_order_release);
-            FConfiguration::AutoEndGame.store(
-                ReadBool(
-                    Match,
-                    "one_kill_ends_game",
-                    false),
-                std::memory_order_release);
-            FConfiguration::SetTrickshotTabEnabled(
-                ReadBool(
-                    Match,
-                    "show_trickshot_tab",
-                    false));
-            const auto MaxTickRateIt =
-                Match.find("max_tick_rate");
-            const bool bHasSavedMaxTickRate =
-                MaxTickRateIt != Match.end() &&
+            FConfiguration::SetTrickshotTabEnabled(ReadBool(Match, "show_trickshot_tab", false));
+            const auto MaxTickRateIt = Match.find("max_tick_rate");
+            const bool bHasSavedMaxTickRate = MaxTickRateIt != Match.end() &&
                 MaxTickRateIt->is_number();
-            const float SavedMaxTickRate =
-                FConfiguration::ClampMaxTickRate(
-                    ReadFloat(
-                        Match,
-                        "max_tick_rate",
-                        FConfiguration::GetDefaultMaxTickRate()));
-            const auto MaxTickRateOverrideIt =
-                Match.find("max_tick_rate_user_override");
-            const bool bHasMaxTickRateOverrideMarker =
-                MaxTickRateOverrideIt != Match.end() &&
+            const float SavedMaxTickRate = FConfiguration::ClampMaxTickRate(ReadFloat(Match,
+                        "max_tick_rate", FConfiguration::GetDefaultMaxTickRate()));
+            const auto MaxTickRateOverrideIt = Match.find("max_tick_rate_user_override");
+            const bool bHasMaxTickRateOverrideMarker = MaxTickRateOverrideIt != Match.end() &&
                 MaxTickRateOverrideIt->is_boolean();
-            // Schema-1 profiles predate the override marker. Their stored 30
-            // was the launcher default, while any other value was necessarily
-            // selected or supplied by a playlist preset and must survive.
-            const bool bMaxTickRateUserOverride =
-                bHasMaxTickRateOverrideMarker
-                    ? MaxTickRateOverrideIt->get<bool>()
-                    : bHasSavedMaxTickRate &&
-                        SavedMaxTickRate !=
-                            FConfiguration::LegacyMaxTickRate;
-            FConfiguration::bMaxTickRateUserOverride.store(
-                bMaxTickRateUserOverride,
+            const bool bMaxTickRateUserOverride = bHasMaxTickRateOverrideMarker
+                    ? MaxTickRateOverrideIt->get<bool>() : bHasSavedMaxTickRate &&
+                        SavedMaxTickRate != FConfiguration::LegacyMaxTickRate;
+            FConfiguration::bMaxTickRateUserOverride.store(bMaxTickRateUserOverride,
                 std::memory_order_release);
-            FConfiguration::MaxTickRate.store(
-                bMaxTickRateUserOverride
-                    ? SavedMaxTickRate
-                    : FConfiguration::GetDefaultMaxTickRate(),
+            FConfiguration::MaxTickRate.store(bMaxTickRateUserOverride ? SavedMaxTickRate
+                    : FConfiguration::GetDefaultMaxTickRate(), std::memory_order_release);
+            FConfiguration::Port.store(ClampValue(ReadInt(Match, "port", 7777), 1, 65535),
                 std::memory_order_release);
-            FConfiguration::Port.store(
-                ClampValue(
-                    ReadInt(Match, "port", 7777),
-                    1, 65535),
-                std::memory_order_release);
-            FConfiguration::bHasPickaxe.store(
-                ReadBool(
-                    Match,
-                    "player_has_pickaxe",
-                    true),
+            FConfiguration::bHasPickaxe.store(ReadBool(Match, "player_has_pickaxe", true),
                 std::memory_order_release);
 
-            const auto& Event =
-                ReadObject(Preferences, "event");
-            FConfiguration::bAutoStartEvent.store(
-                ReadBool(Event, "auto_start", false),
+            const auto& Event = ReadObject(Preferences, "event");
+            FConfiguration::bAutoStartEvent.store(ReadBool(Event, "auto_start", false),
                 std::memory_order_release);
-            FConfiguration::EventStartTime.store(
-                ClampValue(
-                    ReadFloat(Event, "start_delay", 120.f),
-                    30.f, 300.f),
-                std::memory_order_release);
+            FConfiguration::EventStartTime.store(ClampValue(ReadFloat(Event, "start_delay", 120.f),
+                    30.f, 300.f), std::memory_order_release);
 
-            const auto& LateGame =
-                ReadObject(Preferences, "lategame");
-            FConfiguration::bLateGame.store(
-                ReadBool(LateGame, "enabled", true),
+            const auto& LateGame = ReadObject(Preferences, "lategame");
+            FConfiguration::bLateGame.store(ReadBool(LateGame, "enabled", true),
                 std::memory_order_release);
-            FConfiguration::bMovingBus.store(
-                ReadBool(LateGame, "moving_bus", true),
+            FConfiguration::bMovingBus.store(ReadBool(LateGame, "moving_bus", true),
                 std::memory_order_release);
-            FConfiguration::bLateGameLongZone.store(
-                ReadBool(LateGame, "long_zone", false),
+            FConfiguration::bLateGameLongZone.store(ReadBool(LateGame, "long_zone", false),
                 std::memory_order_release);
-            FConfiguration::bUseVersionizedLoadout.store(
-                ReadBool(
-                    LateGame,
-                    "versionized_loadout",
-                    true),
+            FConfiguration::bUseVersionizedLoadout.store(ReadBool(LateGame, "versionized_loadout",
+                    true), std::memory_order_release);
+            FConfiguration::bUseCustomLoadout.store(ReadBool(LateGame, "custom_loadout", false),
                 std::memory_order_release);
-            FConfiguration::bUseCustomLoadout.store(
-                ReadBool(
-                    LateGame,
-                    "custom_loadout",
-                    false),
+            FConfiguration::LateGameZone.store(ClampValue(ReadInt(LateGame, "starting_zone",
+                        FConfiguration::LateGameZone.load(std::memory_order_acquire)), 1, 7),
                 std::memory_order_release);
-            FConfiguration::LateGameZone.store(
-                ClampValue(
-                    ReadInt(
-                        LateGame,
-                        "starting_zone",
-                        FConfiguration::LateGameZone.load(
-                            std::memory_order_acquire)),
-                    1, 7),
-                std::memory_order_release);
-            FConfiguration::SetCustomSafeZoneEnabled(
-                ReadBool(
-                    LateGame,
-                    "custom_safe_zone",
-                    false));
+            FConfiguration::SetCustomSafeZoneEnabled(ReadBool(LateGame, "custom_safe_zone", false));
 
-            // Build a fully valid legacy node first. It is the atomic fallback
-            // for old profiles and for any malformed nested moving-zone data.
-            const FCustomSafeZoneNode LegacySafeZoneNode =
-                ReadLegacyCustomSafeZoneNode(LateGame);
+            const FCustomSafeZoneNode LegacySafeZoneNode = ReadLegacyCustomSafeZoneNode(LateGame);
 
             FCustomSafeZoneSequence SavedSafeZoneSequence;
-            const bool bEnableCustomMovingZone =
-                ReadBool(
-                    LateGame,
-                    "custom_moving_zone",
-                    false);
-            const bool bHasValidSafeZoneSequence =
-                TryReadCustomSafeZoneSequence(
+            const bool bEnableCustomMovingZone = ReadBool(LateGame, "custom_moving_zone", false);
+            const bool bHasValidSafeZoneSequence = TryReadCustomSafeZoneSequence(
                     LateGame, SavedSafeZoneSequence) &&
-                FConfiguration::PublishCustomSafeZoneSequence(
-                    std::move(SavedSafeZoneSequence),
+                FConfiguration::PublishCustomSafeZoneSequence(std::move(SavedSafeZoneSequence),
                     bEnableCustomMovingZone);
             if (!bHasValidSafeZoneSequence)
             {
-                // PublishLegacyCustomSafeZone disables moving before replacing
-                // the immutable snapshot, so a bad nested object can never be
-                // observed as an enabled partial sequence.
-                FConfiguration::PublishLegacyCustomSafeZone(
-                    LegacySafeZoneNode);
+                FConfiguration::PublishLegacyCustomSafeZone(LegacySafeZoneNode);
             }
             else if (bEnableCustomMovingZone)
             {
-                // Moving sequences need native phase deadlines to advance.
-                // Enforce the same mutual exclusion as the GUI for Auto Host
-                // profiles that can start before the editor gets a frame.
-                FConfiguration::bLateGameLongZone.store(
-                    false, std::memory_order_release);
+                FConfiguration::bLateGameLongZone.store(false, std::memory_order_release);
             }
 
             const auto PublishedSafeZoneSequence =
                 FConfiguration::GetCustomSafeZoneSequenceSnapshot();
-            const auto& PublishedLegacyNode =
-                PublishedSafeZoneSequence->Nodes.front();
-            GUI::RestoreNormalizedSafeZoneSelection(
-                PublishedLegacyNode.bHasNormalizedCenter,
-                PublishedLegacyNode.NormalizedU,
-                PublishedLegacyNode.NormalizedV);
+            const auto& PublishedLegacyNode = PublishedSafeZoneSequence->Nodes.front();
+            GUI::RestoreNormalizedSafeZoneSelection(PublishedLegacyNode.bHasNormalizedCenter,
+                PublishedLegacyNode.NormalizedU, PublishedLegacyNode.NormalizedV);
 
-            const auto& Loadout =
-                ReadObject(Preferences, "loadout");
-            FConfiguration::Primary = Utf8ToFString(
-                ReadString(Loadout, "primary"));
-            FConfiguration::Secondary = Utf8ToFString(
-                ReadString(Loadout, "secondary"));
-            FConfiguration::Tertiary = Utf8ToFString(
-                ReadString(Loadout, "tertiary"));
-            FConfiguration::Quaternary = Utf8ToFString(
-                ReadString(Loadout, "quaternary"));
-            FConfiguration::Quinary = Utf8ToFString(
-                ReadString(Loadout, "quinary"));
-            FConfiguration::Traps = Utf8ToFString(
-                ReadString(Loadout, "traps"));
-            FConfiguration::PrimaryAmount.store(
-                (std::max)(
-                    0,
-                    ReadInt(
-                        Loadout,
-                        "primary_amount",
-                        1)),
-                std::memory_order_release);
-            FConfiguration::SecondaryAmount.store(
-                (std::max)(
-                    0,
-                    ReadInt(
-                        Loadout,
-                        "secondary_amount",
-                        1)),
-                std::memory_order_release);
-            FConfiguration::TertiaryAmount.store(
-                (std::max)(
-                    0,
-                    ReadInt(
-                        Loadout,
-                        "tertiary_amount",
-                        1)),
-                std::memory_order_release);
-            FConfiguration::QuaternaryAmount.store(
-                (std::max)(
-                    0,
-                    ReadInt(
-                        Loadout,
-                        "quaternary_amount",
-                        1)),
-                std::memory_order_release);
-            FConfiguration::QuinaryAmount.store(
-                (std::max)(
-                    0,
-                    ReadInt(
-                        Loadout,
-                        "quinary_amount",
-                        1)),
-                std::memory_order_release);
-            FConfiguration::TrapsAmount.store(
-                (std::max)(
-                    0,
-                    ReadInt(
-                        Loadout,
-                        "traps_amount",
-                        6)),
+            const auto& Loadout = ReadObject(Preferences, "loadout");
+            FConfiguration::Primary = Utf8ToFString(ReadString(Loadout, "primary"));
+            FConfiguration::Secondary = Utf8ToFString(ReadString(Loadout, "secondary"));
+            FConfiguration::Tertiary = Utf8ToFString(ReadString(Loadout, "tertiary"));
+            FConfiguration::Quaternary = Utf8ToFString(ReadString(Loadout, "quaternary"));
+            FConfiguration::Quinary = Utf8ToFString(ReadString(Loadout, "quinary"));
+            FConfiguration::Traps = Utf8ToFString(ReadString(Loadout, "traps"));
+            FConfiguration::PrimaryAmount.store((std::max)(0, ReadInt(Loadout, "primary_amount",
+                        1)), std::memory_order_release);
+            FConfiguration::SecondaryAmount.store((std::max)(0, ReadInt(Loadout, "secondary_amount",
+                        1)), std::memory_order_release);
+            FConfiguration::TertiaryAmount.store((std::max)(0, ReadInt(Loadout, "tertiary_amount",
+                        1)), std::memory_order_release);
+            FConfiguration::QuaternaryAmount.store((std::max)(0, ReadInt(Loadout,
+                        "quaternary_amount", 1)), std::memory_order_release);
+            FConfiguration::QuinaryAmount.store((std::max)(0, ReadInt(Loadout, "quinary_amount",
+                        1)), std::memory_order_release);
+            FConfiguration::TrapsAmount.store((std::max)(0, ReadInt(Loadout, "traps_amount", 6)),
                 std::memory_order_release);
 
-            const auto& Respawns =
-                ReadObject(Preferences, "respawns");
-            FConfiguration::bForceRespawns.store(
-                ReadBool(Respawns, "enabled", false),
+            const auto& Respawns = ReadObject(Preferences, "respawns");
+            FConfiguration::bForceRespawns.store(ReadBool(Respawns, "enabled", false),
                 std::memory_order_release);
-            FConfiguration::PermanentRespawn.store(
-                ReadBool(
-                    Respawns,
-                    "storm_respawns",
-                    false),
+            FConfiguration::PermanentRespawn.store(ReadBool(Respawns, "storm_respawns", false),
                 std::memory_order_release);
-            FConfiguration::bKeepInventory.store(
-                ReadBool(
-                    Respawns,
-                    "keep_inventory",
-                    false),
+            FConfiguration::bKeepInventory.store(ReadBool(Respawns, "keep_inventory", false),
                 std::memory_order_release);
-            FConfiguration::bMidZoneRespawning.store(
-                ReadBool(
-                    Respawns,
-                    "midzone_respawns",
-                    false),
+            FConfiguration::bMidZoneRespawning.store(ReadBool(Respawns, "midzone_respawns", false),
                 std::memory_order_release);
-            FConfiguration::bJoinInProgress.store(
-                ReadBool(
-                    Respawns,
-                    "join_in_progress",
-                    false),
+            FConfiguration::bJoinInProgress.store(ReadBool(Respawns, "join_in_progress", false),
                 std::memory_order_release);
-            FConfiguration::RespawnTime.store(
-                ClampValue(
-                    ReadInt(Respawns, "respawn_time", 3),
-                    1, 10),
-                std::memory_order_release);
-            FConfiguration::RespawnHeight.store(
-                ClampValue(
-                    ReadInt(
-                        Respawns,
-                        "respawn_height",
-                        20000),
-                    1000, 50000),
-                std::memory_order_release);
-            FConfiguration::HasCustomRespawnPoint.store(
-                ReadBool(
-                    Respawns,
-                    "has_custom_point",
-                    false),
-                std::memory_order_release);
-            FConfiguration::CustomRespawnPoint =
-                FVector(
-                    ReadDouble(
-                        Respawns,
-                        "custom_point_x",
-                        0.0),
-                    ReadDouble(
-                        Respawns,
-                        "custom_point_y",
-                        0.0),
-                    ReadDouble(
-                        Respawns,
-                        "custom_point_z",
-                        0.0));
+            FConfiguration::RespawnTime.store(ClampValue(ReadInt(Respawns, "respawn_time", 3),
+                    1, 10), std::memory_order_release);
+            FConfiguration::RespawnHeight.store(ClampValue(ReadInt(Respawns, "respawn_height",
+                        20000), 1000, 50000), std::memory_order_release);
+            FConfiguration::HasCustomRespawnPoint.store(ReadBool(Respawns, "has_custom_point",
+                    false), std::memory_order_release);
+            FConfiguration::CustomRespawnPoint = FVector(ReadDouble(Respawns, "custom_point_x",
+                        0.0), ReadDouble(Respawns, "custom_point_y", 0.0), ReadDouble(Respawns,
+                        "custom_point_z", 0.0));
 
-            const auto& LTMConfiguration =
-                ReadObject(Preferences, "ltm_configuration");
-            const int FoodFightObjectiveHealth = ReadInt(
-                LTMConfiguration,
-                "food_fight_objective_health",
-                FConfiguration::FoodFightObjectiveHealthAuthored);
-            FConfiguration::FoodFightObjectiveHealth.store(
-                FoodFightObjectiveHealth ==
-                        FConfiguration::
-                            FoodFightObjectiveHealthAuthored
-                    ? FConfiguration::
-                        FoodFightObjectiveHealthAuthored
-                    : ClampValue(
-                          FoodFightObjectiveHealth,
-                          FConfiguration::
-                              FoodFightObjectiveHealthMinimum,
-                          FConfiguration::
-                              GetFoodFightObjectiveHealthMaximum()),
+            const auto& LTMConfiguration = ReadObject(Preferences, "ltm_configuration");
+            const int FoodFightObjectiveHealth = ReadInt(LTMConfiguration,
+                "food_fight_objective_health", FConfiguration::FoodFightObjectiveHealthAuthored);
+            FConfiguration::FoodFightObjectiveHealth.store(FoodFightObjectiveHealth ==
+                        FConfiguration::FoodFightObjectiveHealthAuthored ? FConfiguration::
+                        FoodFightObjectiveHealthAuthored : ClampValue(FoodFightObjectiveHealth,
+                          FConfiguration::FoodFightObjectiveHealthMinimum, FConfiguration::
+                              GetFoodFightObjectiveHealthMaximum()), std::memory_order_release);
+
+            const auto& Gameplay = ReadObject(Preferences, "gameplay");
+            FConfiguration::bGliderRedeploy.store(FConfiguration::
+                    IsGliderRedeploySupportedBuild() && ReadBool(Gameplay, "glider_redeploy",
+                    false), std::memory_order_release);
+            FConfiguration::bInfiniteMats.store(ReadBool(Gameplay, "infinite_materials", true),
+                std::memory_order_release);
+            FConfiguration::bInfiniteAmmo.store(ReadBool(Gameplay, "infinite_ammo", true),
+                std::memory_order_release);
+            FConfiguration::bEnableCheats.store(ReadBool(Gameplay, "cheat_commands", false),
+                std::memory_order_release);
+            FConfiguration::bSiphon.store(ReadBool(Gameplay, "siphon", false),
+                std::memory_order_release);
+            FConfiguration::SiphonAmount.store(ReadInt(Gameplay, "siphon_amount", 50),
+                std::memory_order_release);
+            FConfiguration::SiphonAnimType.store((std::max)(0, ReadInt(Gameplay, "siphon_animation",
+                        0)), std::memory_order_release);
+            FConfiguration::bEnableDBNO.store(ReadBool(Gameplay, "dbno", true),
                 std::memory_order_release);
 
-            const auto& Gameplay =
-                ReadObject(Preferences, "gameplay");
-            FConfiguration::bGliderRedeploy.store(
-                FConfiguration::
-                    IsGliderRedeploySupportedBuild() &&
-                ReadBool(
-                    Gameplay,
-                    "glider_redeploy",
-                    false),
+            const auto& Bots = ReadObject(Preferences, "bots");
+            FConfiguration::BotHealth.store(ReadInt(Bots, "health", 21), std::memory_order_release);
+            FConfiguration::BotShield.store(ReadInt(Bots, "shield", 21), std::memory_order_release);
+            FConfiguration::UseCustomBotNames.store(ReadBool(Bots, "use_custom_names", false),
                 std::memory_order_release);
-            FConfiguration::bInfiniteMats.store(
-                ReadBool(
-                    Gameplay,
-                    "infinite_materials",
-                    true),
-                std::memory_order_release);
-            FConfiguration::bInfiniteAmmo.store(
-                ReadBool(
-                    Gameplay,
-                    "infinite_ammo",
-                    true),
-                std::memory_order_release);
-            FConfiguration::bEnableCheats.store(
-                ReadBool(
-                    Gameplay,
-                    "cheat_commands",
-                    false),
-                std::memory_order_release);
-            FConfiguration::bSiphon.store(
-                ReadBool(Gameplay, "siphon", false),
-                std::memory_order_release);
-            FConfiguration::SiphonAmount.store(
-                ReadInt(
-                    Gameplay,
-                    "siphon_amount",
-                    50),
-                std::memory_order_release);
-            FConfiguration::SiphonAnimType.store(
-                (std::max)(
-                    0,
-                    ReadInt(
-                        Gameplay,
-                        "siphon_animation",
-                        0)),
-                std::memory_order_release);
-            FConfiguration::bEnableDBNO.store(
-                ReadBool(Gameplay, "dbno", true),
-                std::memory_order_release);
+            FConfiguration::BotName = ReadString(Bots, "name", "Magnesium Bot ");
 
-            const auto& Bots =
-                ReadObject(Preferences, "bots");
-            FConfiguration::BotHealth.store(
-                ReadInt(Bots, "health", 21),
+            const auto& Trickshot = ReadObject(Preferences, "trickshot");
+            FConfiguration::bSaveAndTrackSpawnedObjects.store(ReadBool(Trickshot,
+                    "save_and_track_spawned_objects", true), std::memory_order_release);
+            FConfiguration::bSaveWaypoints.store(ReadBool(Trickshot, "save_waypoints", true),
                 std::memory_order_release);
-            FConfiguration::BotShield.store(
-                ReadInt(Bots, "shield", 21),
+            FConfiguration::bUseWinLines.store(ReadBool(Trickshot, "swag_lines", true),
                 std::memory_order_release);
-            FConfiguration::UseCustomBotNames.store(
-                ReadBool(
-                    Bots,
-                    "use_custom_names",
-                    false),
+            FConfiguration::bInfiniteRender.store(ReadBool(Trickshot, "infinite_render", false),
                 std::memory_order_release);
-            FConfiguration::BotName =
-                ReadString(
-                    Bots,
-                    "name",
-                    "Magnesium Bot ");
-
-            const auto& Trickshot =
-                ReadObject(Preferences, "trickshot");
-            FConfiguration::bSaveAndTrackSpawnedObjects.store(
-                ReadBool(
-                    Trickshot,
-                    "save_and_track_spawned_objects",
-                    true),
+            FConfiguration::RandomizeArenaPoints.store(ReadBool(Trickshot, "randomize_arena_points",
+                    false), std::memory_order_release);
+            FConfiguration::bPlayerMapIcons.store(ReadBool(Trickshot, "player_map_icons", false),
                 std::memory_order_release);
-            FConfiguration::bSaveWaypoints.store(
-                ReadBool(
-                    Trickshot,
-                    "save_waypoints",
-                    true),
+            FConfiguration::bAutoReloadOnWaypointTP.store(ReadBool(Trickshot,
+                    "auto_reload_on_waypoint_tp", FConfiguration::bEnableTrickshotTab.load(
+                        std::memory_order_acquire)), std::memory_order_release);
+            FConfiguration::bRemoveIceOnWaypointTP.store(VersionInfo.FortniteVersion >= 6.01 &&
+                    ReadBool(Trickshot, "remove_ice_on_waypoint_tp",
+                        FConfiguration::bEnableTrickshotTab.load(std::memory_order_acquire)),
                 std::memory_order_release);
-            FConfiguration::bUseWinLines.store(
-                ReadBool(
-                    Trickshot,
-                    "swag_lines",
-                    true),
+            FConfiguration::bAutoGodMode.store(ReadBool(Trickshot, "auto_god_mode", false),
                 std::memory_order_release);
-            FConfiguration::bInfiniteRender.store(
-                ReadBool(
-                    Trickshot,
-                    "infinite_render",
-                    false),
-                std::memory_order_release);
-            FConfiguration::RandomizeArenaPoints.store(
-                ReadBool(
-                    Trickshot,
-                    "randomize_arena_points",
-                    false),
-                std::memory_order_release);
-            FConfiguration::bPlayerMapIcons.store(
-                ReadBool(
-                    Trickshot,
-                    "player_map_icons",
-                    false),
-                std::memory_order_release);
-            FConfiguration::bAutoReloadOnWaypointTP.store(
-                ReadBool(
-                    Trickshot,
-                    "auto_reload_on_waypoint_tp",
-                    FConfiguration::bEnableTrickshotTab.load(
-                        std::memory_order_acquire)),
-                std::memory_order_release);
-            FConfiguration::bRemoveIceOnWaypointTP.store(
-                VersionInfo.FortniteVersion >= 6.01 &&
-                    ReadBool(
-                        Trickshot,
-                        "remove_ice_on_waypoint_tp",
-                        FConfiguration::bEnableTrickshotTab.load(
-                            std::memory_order_acquire)),
-                std::memory_order_release);
-            FConfiguration::bAutoGodMode.store(
-                ReadBool(
-                    Trickshot,
-                    "auto_god_mode",
-                    false),
-                std::memory_order_release);
-            FConfiguration::AutoGodModeType.store(
-                ClampValue(
-                    ReadInt(
-                        Trickshot,
-                        "auto_god_mode_type",
-                        (int)FConfiguration::EAutoGodMode::Maximum),
+            FConfiguration::AutoGodModeType.store(ClampValue(ReadInt(Trickshot,
+                        "auto_god_mode_type", (int)FConfiguration::EAutoGodMode::Maximum),
                     (int)FConfiguration::EAutoGodMode::Maximum,
-                    (int)FConfiguration::EAutoGodMode::Minimum),
+                    (int)FConfiguration::EAutoGodMode::Minimum), std::memory_order_release);
+            FConfiguration::bAutoGodModeExcludeLastPlayer.store(ReadBool(Trickshot,
+                    "auto_god_mode_exclude_last_player", false), std::memory_order_release);
+            FConfiguration::RandomizeKills.store(ReadBool(Trickshot, "randomize_kills", false),
                 std::memory_order_release);
-            FConfiguration::bAutoGodModeExcludeLastPlayer.store(
-                ReadBool(
-                    Trickshot,
-                    "auto_god_mode_exclude_last_player",
-                    false),
+            FConfiguration::RandomizeLevels.store(ReadBool(Trickshot, "randomize_levels", false),
                 std::memory_order_release);
-            FConfiguration::RandomizeKills.store(
-                ReadBool(
-                    Trickshot,
-                    "randomize_kills",
-                    false),
+            FConfiguration::bDisableJumpFatigue.store(ReadBool(Trickshot, "disable_jump_fatigue",
+                    false), std::memory_order_release);
+            FConfiguration::bDisableSupplyDrops.store(ReadBool(Trickshot, "disable_supply_drops",
+                    FConfiguration::bEnableTrickshotTab.load(std::memory_order_acquire)),
                 std::memory_order_release);
-            FConfiguration::RandomizeLevels.store(
-                ReadBool(
-                    Trickshot,
-                    "randomize_levels",
-                    false),
+            FConfiguration::bVehicleBumpLaunch.store(VersionInfo.FortniteVersion >= 4.30 &&
+                    ReadBool(Trickshot, "vehicle_bump_launch",
+                        !FConfiguration::bEnableTrickshotTab.load(std::memory_order_acquire)),
                 std::memory_order_release);
-            FConfiguration::bDisableJumpFatigue.store(
-                ReadBool(
-                    Trickshot,
-                    "disable_jump_fatigue",
-                    false),
+            FConfiguration::bCannonLaunchAnimations.store(VersionInfo.FortniteVersion < 8.00 ||
+                    ReadBool(Trickshot, "cannon_launch_animations", true),
                 std::memory_order_release);
-            FConfiguration::bDisableSupplyDrops.store(
-                ReadBool(
-                    Trickshot,
-                    "disable_supply_drops",
-                    FConfiguration::bEnableTrickshotTab.load(
-                        std::memory_order_acquire)),
+            FConfiguration::CannonLaunchXMultiplier.store(ClampValue(ReadFloat(Trickshot,
+                        "cannon_launch_x_multiplier", 1.f), 0.f, 5.f), std::memory_order_release);
+            FConfiguration::CannonLaunchYMultiplier.store(ClampValue(ReadFloat(Trickshot,
+                        "cannon_launch_y_multiplier", 1.f), 0.f, 5.f), std::memory_order_release);
+            FConfiguration::CannonLaunchZMultiplier.store(ClampValue(ReadFloat(Trickshot,
+                        "cannon_launch_z_multiplier", 1.f), 0.f, 5.f), std::memory_order_release);
+            FConfiguration::bCrownSlomo.store(ReadBool(Trickshot, "crown_slow_motion", true),
                 std::memory_order_release);
-            FConfiguration::bVehicleBumpLaunch.store(
-                VersionInfo.FortniteVersion >= 4.30 &&
-                    ReadBool(
-                        Trickshot,
-                        "vehicle_bump_launch",
-                        !FConfiguration::bEnableTrickshotTab.load(
-                            std::memory_order_acquire)),
-                std::memory_order_release);
-            FConfiguration::bCannonLaunchAnimations.store(
-                VersionInfo.FortniteVersion < 8.00 ||
-                    ReadBool(
-                        Trickshot,
-                        "cannon_launch_animations",
-                        true),
-                std::memory_order_release);
-            FConfiguration::CannonLaunchXMultiplier.store(
-                ClampValue(
-                    ReadFloat(
-                        Trickshot,
-                        "cannon_launch_x_multiplier",
-                        1.f),
-                    0.f, 5.f),
-                std::memory_order_release);
-            FConfiguration::CannonLaunchYMultiplier.store(
-                ClampValue(
-                    ReadFloat(
-                        Trickshot,
-                        "cannon_launch_y_multiplier",
-                        1.f),
-                    0.f, 5.f),
-                std::memory_order_release);
-            FConfiguration::CannonLaunchZMultiplier.store(
-                ClampValue(
-                    ReadFloat(
-                        Trickshot,
-                        "cannon_launch_z_multiplier",
-                        1.f),
-                    0.f, 5.f),
-                std::memory_order_release);
-            FConfiguration::bCrownSlomo.store(
-                ReadBool(
-                    Trickshot,
-                    "crown_slow_motion",
-                    true),
-                std::memory_order_release);
-            FConfiguration::bCancelVelocityOnWin.store(
-                ReadBool(
-                    Trickshot,
-                    "cancel_velocity_on_win",
-                    false),
-                std::memory_order_release);
-            FConfiguration::bAutoPauseTODM.store(
-                ReadBool(
-                    Trickshot,
-                    "auto_pause_time_of_day",
-                    false),
-                std::memory_order_release);
-            FConfiguration::TODMTime.store(
-                ClampValue(
-                    ReadFloat(
-                        Trickshot,
-                        "time_of_day",
-                        7.f),
-                    0.f, 24.f),
-                std::memory_order_release);
+            FConfiguration::bCancelVelocityOnWin.store(ReadBool(Trickshot, "cancel_velocity_on_win",
+                    false), std::memory_order_release);
+            FConfiguration::bAutoPauseTODM.store(ReadBool(Trickshot, "auto_pause_time_of_day",
+                    false), std::memory_order_release);
+            FConfiguration::TODMTime.store(ClampValue(ReadFloat(Trickshot, "time_of_day", 7.f),
+                    0.f, 24.f), std::memory_order_release);
 
-            if (!FConfiguration::bEnableTrickshotTab.load(
-                    std::memory_order_acquire))
+            if (!FConfiguration::bEnableTrickshotTab.load(std::memory_order_acquire))
             {
                 FConfiguration::ResetTrickshotSettings();
             }
 
-            // Profiles are per Fortnite version, so a stored snow value always
-            // belongs to the model the running build uses.
-            const auto& CalendarPreferences =
-                ReadObject(Preferences, "calendar");
-            const Calendar::FSnowVersionModel SnowModel =
-                Calendar::GetSnowVersionModel();
-            FConfiguration::bSnowOnMatchStart.store(
-                ReadBool(
-                    CalendarPreferences,
-                    "snow_on_match_start",
-                    false),
-                std::memory_order_release);
-            FConfiguration::SnowValue.store(
-                ClampValue(
-                    ReadFloat(
-                        CalendarPreferences,
-                        "snow_value",
-                        0.f),
-                    SnowModel.Min,
-                    SnowModel.Max),
-                std::memory_order_release);
+            const auto& CalendarPreferences = ReadObject(Preferences, "calendar");
+            const Calendar::FSnowVersionModel SnowModel = Calendar::GetSnowVersionModel();
+            FConfiguration::bSnowOnMatchStart.store(ReadBool(CalendarPreferences,
+                    "snow_on_match_start", false), std::memory_order_release);
+            FConfiguration::SnowValue.store(ClampValue(ReadFloat(CalendarPreferences, "snow_value",
+                        0.f), SnowModel.Min, SnowModel.Max), std::memory_order_release);
 
             return true;
         }
 
-        nlohmann::json BuildDocument(
-            bool ForcePreferenceSnapshot)
+        nlohmann::json BuildDocument(bool ForcePreferenceSnapshot)
         {
-            nlohmann::json Document =
-                GDocument.is_object()
-                    ? GDocument
-                    : nlohmann::json::object();
-            Document["schema_version"] =
-                SettingsSchemaVersion;
+            nlohmann::json Document = GDocument.is_object() ? GDocument : nlohmann::json::object();
+            Document["schema_version"] = SettingsSchemaVersion;
 
             if (!Document["profiles"].is_object())
                 Document["profiles"] = nlohmann::json::object();
             MigrateAllCustomSafeZoneProfiles(Document["profiles"]);
 
-            auto& Profile =
-                Document["profiles"][CurrentProfileKey()];
+            auto& Profile = Document["profiles"][CurrentProfileKey()];
             if (!Profile.is_object())
                 Profile = nlohmann::json::object();
 
             Profile["auto_host"] = {
                 {
-                    "enabled",
-                    FConfiguration::bAutoHost.load(
-                        std::memory_order_acquire)
+                    "enabled", FConfiguration::bAutoHost.load(std::memory_order_acquire)
                 },
                 {
-                    "delay_seconds",
-                    ClampValue(
-                        FConfiguration::
-                            AutoHostDelaySeconds.load(
-                                std::memory_order_acquire),
-                        1, 60)
+                    "delay_seconds", ClampValue(FConfiguration::AutoHostDelaySeconds.load(
+                                std::memory_order_acquire), 1, 60)
                 },
                 {
-                    "save_settings",
-                    FConfiguration::bSaveAutoHostSettings.load(
+                    "save_settings", FConfiguration::bSaveAutoHostSettings.load(
                         std::memory_order_acquire)
                 }
             };
 
-            const bool bSaveSettings =
-                FConfiguration::bSaveAutoHostSettings.load(
+            const bool bSaveSettings = FConfiguration::bSaveAutoHostSettings.load(
                     std::memory_order_acquire);
-            const bool bReadyToStart =
-                FConfiguration::bReadyToStart.load(
+            const bool bReadyToStart = FConfiguration::bReadyToStart.load(
                     std::memory_order_acquire);
             if (bSaveSettings)
             {
@@ -1848,11 +1196,9 @@ namespace AutoHosting
                 else
                     RefreshPostStartPreferences();
 
-                if (GStoredPreferences.is_object() &&
-                    !GStoredPreferences.empty())
+                if (GStoredPreferences.is_object() && !GStoredPreferences.empty())
                 {
-                    Profile["preferences"] =
-                        GStoredPreferences;
+                    Profile["preferences"] = GStoredPreferences;
                 }
             }
             else
@@ -1864,9 +1210,7 @@ namespace AutoHosting
             return Document;
         }
 
-        bool WriteDocument(
-            const nlohmann::json& Document,
-            const std::string& Serialized)
+        bool WriteDocument(const nlohmann::json& Document, const std::string& Serialized)
         {
             const fs::path Path = SettingsPath();
             if (Path.empty())
@@ -1877,12 +1221,10 @@ namespace AutoHosting
             }
 
             std::error_code Error;
-            fs::create_directories(
-                Path.parent_path(), Error);
+            fs::create_directories(Path.parent_path(), Error);
             if (Error)
             {
-                SDK::DbgLog(
-                    "[AutoHosting] Failed to create settings directory: %s\n",
+                SDK::DbgLog("[AutoHosting] Failed to create settings directory: %s\n",
                     Error.message().c_str());
                 return false;
             }
@@ -1890,13 +1232,10 @@ namespace AutoHosting
             fs::path TemporaryPath = Path;
             TemporaryPath += L".tmp";
             {
-                std::ofstream File(
-                    TemporaryPath,
-                    std::ios::binary | std::ios::trunc);
+                std::ofstream File(TemporaryPath, std::ios::binary | std::ios::trunc);
                 if (!File)
                 {
-                    SDK::DbgLog(
-                        "[AutoHosting] Failed to open temporary settings file\n");
+                    SDK::DbgLog("[AutoHosting] Failed to open temporary settings file\n");
                     return false;
                 }
 
@@ -1904,20 +1243,15 @@ namespace AutoHosting
                 File.flush();
                 if (!File)
                 {
-                    SDK::DbgLog(
-                        "[AutoHosting] Failed while writing settings\n");
+                    SDK::DbgLog("[AutoHosting] Failed while writing settings\n");
                     return false;
                 }
             }
 
-            if (!MoveFileExW(
-                    TemporaryPath.c_str(),
-                    Path.c_str(),
-                    MOVEFILE_REPLACE_EXISTING |
+            if (!MoveFileExW(TemporaryPath.c_str(), Path.c_str(), MOVEFILE_REPLACE_EXISTING |
                         MOVEFILE_WRITE_THROUGH))
             {
-                SDK::DbgLog(
-                    "[AutoHosting] Failed to commit settings (error %lu)\n",
+                SDK::DbgLog("[AutoHosting] Failed to commit settings (error %lu)\n",
                     GetLastError());
                 DeleteFileW(TemporaryPath.c_str());
                 return false;
@@ -1932,16 +1266,12 @@ namespace AutoHosting
         {
             try
             {
-                if (GCustomSafeZoneRefreshRequested.exchange(
-                        false, std::memory_order_acq_rel))
+                if (GCustomSafeZoneRefreshRequested.exchange(false, std::memory_order_acq_rel))
                 {
                     RefreshStoredCustomSafeZonePreferences();
                 }
-                const nlohmann::json Document =
-                    BuildDocument(
-                        ForcePreferenceSnapshot);
-                const std::string Serialized =
-                    Document.dump();
+                const nlohmann::json Document = BuildDocument(ForcePreferenceSnapshot);
+                const std::string Serialized = Document.dump();
                 if (Serialized == GLastSerializedDocument)
                     return;
 
@@ -1949,9 +1279,7 @@ namespace AutoHosting
             }
             catch (const std::exception& Error)
             {
-                SDK::DbgLog(
-                    "[AutoHosting] Failed to save settings: %s\n",
-                    Error.what());
+                SDK::DbgLog("[AutoHosting] Failed to save settings: %s\n", Error.what());
             }
         }
     }
@@ -1961,41 +1289,24 @@ namespace AutoHosting
 #if defined(_DEBUG)
         RunCustomSafeZoneJsonSelfTests();
 #endif
-        FConfiguration::bAutoHost.store(
-            false, std::memory_order_release);
-        FConfiguration::bSaveAutoHostSettings.store(
-            false, std::memory_order_release);
-        FConfiguration::AutoHostDelaySeconds.store(
-            FConfiguration::DefaultAutoHostDelaySeconds,
+        FConfiguration::bAutoHost.store(false, std::memory_order_release);
+        FConfiguration::bSaveAutoHostSettings.store(false, std::memory_order_release);
+        FConfiguration::AutoHostDelaySeconds.store(FConfiguration::DefaultAutoHostDelaySeconds,
             std::memory_order_release);
-        FConfiguration::MaxTickRate.store(
-            FConfiguration::GetDefaultMaxTickRate(),
+        FConfiguration::MaxTickRate.store(FConfiguration::GetDefaultMaxTickRate(),
             std::memory_order_release);
-        FConfiguration::bMaxTickRateUserOverride.store(
-            false, std::memory_order_release);
-        GRestoredPreferences.store(
-            false, std::memory_order_release);
-        GCustomSafeZoneRefreshRequested.store(
-            false, std::memory_order_release);
-        GCountdownDeadlineMs.store(
-            0, std::memory_order_release);
-        GPostMatchShutdownDeadlineMs.store(
-            0, std::memory_order_release);
+        FConfiguration::bMaxTickRateUserOverride.store(false, std::memory_order_release);
+        GRestoredPreferences.store(false, std::memory_order_release);
+        GCustomSafeZoneRefreshRequested.store(false, std::memory_order_release);
+        GCountdownDeadlineMs.store(0, std::memory_order_release);
+        GPostMatchShutdownDeadlineMs.store(0, std::memory_order_release);
         GStoredPreferences = nlohmann::json::object();
 
-        // These two defaults are version-owned by the Match UI. Seed them
-        // before taking the pristine reset snapshot so Reset Preferences
-        // exactly matches a clean launch for the running Fortnite build.
-        FConfiguration::LateGameZone.store(
-            FConfiguration::IsS27() ? 1 : 4,
+        FConfiguration::LateGameZone.store(FConfiguration::IsS27() ? 1 : 4,
             std::memory_order_release);
-        FConfiguration::bAutoDump.store(
-            false,
-            std::memory_order_release);
-        FConfiguration::PublishLegacyCustomSafeZone(
-            FCustomSafeZoneNode{});
-        GUI::RestoreNormalizedSafeZoneSelection(
-            false, 0.5f, 0.5f);
+        FConfiguration::bAutoDump.store(false, std::memory_order_release);
+        FConfiguration::PublishLegacyCustomSafeZone(FCustomSafeZoneNode{});
+        GUI::RestoreNormalizedSafeZoneSelection(false, 0.5f, 0.5f);
         GDefaultPreferences = CapturePreferences();
 
         const fs::path Path = SettingsPath();
@@ -2009,67 +1320,43 @@ namespace AutoHosting
         try
         {
             File >> GDocument;
-            if (!GDocument.is_object() ||
-                ReadInt(
-                    GDocument,
-                    "schema_version",
+            if (!GDocument.is_object() || ReadInt(GDocument, "schema_version",
                     -1) != SettingsSchemaVersion)
             {
-                SDK::DbgLog(
-                    "[AutoHosting] Ignoring unsupported settings schema\n");
+                SDK::DbgLog("[AutoHosting] Ignoring unsupported settings schema\n");
                 GDocument = nlohmann::json::object();
                 return;
             }
 
-            // Normalize every legacy moving-zone profile before selecting and
-            // applying the current version. Keep the on-disk serialization as
-            // the comparison baseline so the next save persists any migration.
             GLastSerializedDocument = GDocument.dump();
             auto ProfilesIt = GDocument.find("profiles");
-            if (ProfilesIt != GDocument.end() &&
-                ProfilesIt->is_object())
+            if (ProfilesIt != GDocument.end() && ProfilesIt->is_object())
             {
                 MigrateAllCustomSafeZoneProfiles(*ProfilesIt);
             }
-            const auto& Profiles =
-                ReadObject(GDocument, "profiles");
-            const auto ProfileIt =
-                Profiles.find(CurrentProfileKey());
-            if (ProfileIt == Profiles.end() ||
-                !ProfileIt->is_object())
+            const auto& Profiles = ReadObject(GDocument, "profiles");
+            const auto ProfileIt = Profiles.find(CurrentProfileKey());
+            if (ProfileIt == Profiles.end() || !ProfileIt->is_object())
             {
                 return;
             }
 
             const auto& Profile = *ProfileIt;
-            const auto& AutoHost =
-                ReadObject(Profile, "auto_host");
-            const bool bEnabled =
-                ReadBool(AutoHost, "enabled", false);
-            const bool bSaveSettings =
-                ReadBool(AutoHost, "save_settings", false);
-            const int DelaySeconds = ClampValue(
-                ReadInt(
-                    AutoHost,
-                    "delay_seconds",
-                    FConfiguration::
-                        DefaultAutoHostDelaySeconds),
-                1, 60);
+            const auto& AutoHost = ReadObject(Profile, "auto_host");
+            const bool bEnabled = ReadBool(AutoHost, "enabled", false);
+            const bool bSaveSettings = ReadBool(AutoHost, "save_settings", false);
+            const int DelaySeconds = ClampValue(ReadInt(AutoHost, "delay_seconds", FConfiguration::
+                        DefaultAutoHostDelaySeconds), 1, 60);
 
-            FConfiguration::AutoHostDelaySeconds.store(
-                DelaySeconds, std::memory_order_release);
-            FConfiguration::bSaveAutoHostSettings.store(
-                bSaveSettings, std::memory_order_release);
+            FConfiguration::AutoHostDelaySeconds.store(DelaySeconds, std::memory_order_release);
+            FConfiguration::bSaveAutoHostSettings.store(bSaveSettings, std::memory_order_release);
 
-            const auto& Preferences =
-                ReadObject(Profile, "preferences");
-            if (bSaveSettings && Preferences.is_object() &&
-                !Preferences.empty() &&
+            const auto& Preferences = ReadObject(Profile, "preferences");
+            if (bSaveSettings && Preferences.is_object() && !Preferences.empty() &&
                 ApplyPreferences(Preferences))
             {
                 GStoredPreferences = Preferences;
-                GRestoredPreferences.store(
-                    true, std::memory_order_release);
+                GRestoredPreferences.store(true, std::memory_order_release);
             }
             else if (bSaveSettings)
             {
@@ -2078,80 +1365,59 @@ namespace AutoHosting
                 GStoredPreferences = nlohmann::json::object();
             }
 
-            FConfiguration::bAutoHost.store(
-                bEnabled, std::memory_order_release);
+            FConfiguration::bAutoHost.store(bEnabled, std::memory_order_release);
             SDK::DbgLog(
                 "[AutoHosting] Loaded %s; autoHost=%d saveSettings=%d restoredPreferences=%d delay=%d\n",
-                CurrentProfileKey().c_str(),
-                bEnabled ? 1 : 0,
-                bSaveSettings ? 1 : 0,
-                GRestoredPreferences.load(std::memory_order_acquire) ? 1 : 0,
-                DelaySeconds);
+                CurrentProfileKey().c_str(), bEnabled ? 1 : 0, bSaveSettings ? 1 : 0,
+                GRestoredPreferences.load(std::memory_order_acquire) ? 1 : 0, DelaySeconds);
         }
         catch (const std::exception& Error)
         {
-            SDK::DbgLog(
-                "[AutoHosting] Settings are invalid; automatic startup was disabled: %s\n",
+            SDK::DbgLog("[AutoHosting] Settings are invalid; automatic startup was disabled: %s\n",
                 Error.what());
             GDocument = nlohmann::json::object();
-            GStoredPreferences =
-                nlohmann::json::object();
+            GStoredPreferences = nlohmann::json::object();
             GLastSerializedDocument.clear();
-            FConfiguration::bAutoHost.store(
-                false, std::memory_order_release);
-            FConfiguration::bSaveAutoHostSettings.store(
-                false, std::memory_order_release);
+            FConfiguration::bAutoHost.store(false, std::memory_order_release);
+            FConfiguration::bSaveAutoHostSettings.store(false, std::memory_order_release);
         }
     }
 
     bool HasRestoredPreferences()
     {
-        return GRestoredPreferences.load(
-            std::memory_order_acquire);
+        return GRestoredPreferences.load(std::memory_order_acquire);
     }
 
     void ArmCountdown()
     {
-        if (!FConfiguration::bAutoHost.load(
-                std::memory_order_acquire) ||
-            FConfiguration::bReadyToStart.load(
-                std::memory_order_acquire))
+        if (!FConfiguration::bAutoHost.load(std::memory_order_acquire) ||
+            FConfiguration::bReadyToStart.load(std::memory_order_acquire))
         {
             CancelCountdown();
             return;
         }
 
-        const int DelaySeconds = ClampValue(
-            FConfiguration::AutoHostDelaySeconds.load(
-                std::memory_order_acquire),
-            1, 60);
-        GCountdownDeadlineMs.store(
-            GetTickCount64() +
-                static_cast<ULONGLONG>(DelaySeconds) * 1000,
+        const int DelaySeconds = ClampValue(FConfiguration::AutoHostDelaySeconds.load(
+                std::memory_order_acquire), 1, 60);
+        GCountdownDeadlineMs.store(GetTickCount64() + static_cast<ULONGLONG>(DelaySeconds) * 1000,
             std::memory_order_release);
     }
 
     void CancelCountdown()
     {
-        GCountdownDeadlineMs.store(
-            0, std::memory_order_release);
+        GCountdownDeadlineMs.store(0, std::memory_order_release);
     }
 
     bool IsCountdownActive()
     {
-        return GCountdownDeadlineMs.load(
-                   std::memory_order_acquire) != 0 &&
-            FConfiguration::bAutoHost.load(
-                std::memory_order_acquire) &&
-            !FConfiguration::bReadyToStart.load(
-                std::memory_order_acquire);
+        return GCountdownDeadlineMs.load(std::memory_order_acquire) != 0 &&
+            FConfiguration::bAutoHost.load(std::memory_order_acquire) &&
+            !FConfiguration::bReadyToStart.load(std::memory_order_acquire);
     }
 
     int GetRemainingSeconds()
     {
-        const ULONGLONG Deadline =
-            GCountdownDeadlineMs.load(
-                std::memory_order_acquire);
+        const ULONGLONG Deadline = GCountdownDeadlineMs.load(std::memory_order_acquire);
         if (Deadline == 0)
             return 0;
 
@@ -2159,22 +1425,17 @@ namespace AutoHosting
         if (Now >= Deadline)
             return 0;
 
-        return static_cast<int>(
-            (Deadline - Now + 999) / 1000);
+        return static_cast<int>((Deadline - Now + 999) / 1000);
     }
 
     void TickCountdown()
     {
-        const ULONGLONG Deadline =
-            GCountdownDeadlineMs.load(
-                std::memory_order_acquire);
+        const ULONGLONG Deadline = GCountdownDeadlineMs.load(std::memory_order_acquire);
         if (Deadline == 0)
             return;
 
-        if (!FConfiguration::bAutoHost.load(
-                std::memory_order_acquire) ||
-            FConfiguration::bReadyToStart.load(
-                std::memory_order_acquire))
+        if (!FConfiguration::bAutoHost.load(std::memory_order_acquire) ||
+            FConfiguration::bReadyToStart.load(std::memory_order_acquire))
         {
             CancelCountdown();
             return;
@@ -2183,90 +1444,59 @@ namespace AutoHosting
         if (GetTickCount64() < Deadline)
             return;
 
-        // Save the exact configuration that the server thread will consume,
-        // then use the same release-store as the manual Start Server action.
         SaveNow(true);
         CancelCountdown();
-        FConfiguration::bReadyToStart.store(
-            true, std::memory_order_release);
+        FConfiguration::bReadyToStart.store(true, std::memory_order_release);
     }
 
     void OnAuthoritativeMatchEnded()
     {
-        if (!FConfiguration::bAutoHost.load(
-                std::memory_order_acquire))
+        if (!FConfiguration::bAutoHost.load(std::memory_order_acquire))
         {
             return;
         }
 
         ULONGLONG ExpectedDeadline = 0;
-        const ULONGLONG Deadline =
-            GetTickCount64() + PostMatchShutdownDelayMs;
-        if (GPostMatchShutdownDeadlineMs.compare_exchange_strong(
-                ExpectedDeadline,
-                Deadline,
-                std::memory_order_release,
-                std::memory_order_relaxed))
+        const ULONGLONG Deadline = GetTickCount64() + PostMatchShutdownDelayMs;
+        if (GPostMatchShutdownDeadlineMs.compare_exchange_strong(ExpectedDeadline, Deadline,
+                std::memory_order_release, std::memory_order_relaxed))
         {
-            SDK::DbgLog(
-                "[AutoHosting] Match ended; full server shutdown armed for 10 seconds\n");
+            SDK::DbgLog("[AutoHosting] Match ended; full server shutdown armed for 10 seconds\n");
         }
     }
 
     void TickPostMatchShutdown()
     {
-        ULONGLONG Deadline =
-            GPostMatchShutdownDeadlineMs.load(
-                std::memory_order_acquire);
-        if (Deadline == 0 &&
-            FConfiguration::bAutoHost.load(
-                std::memory_order_acquire) &&
-            GUI::gsStatus.load(
-                std::memory_order_acquire) == Ended)
+        ULONGLONG Deadline = GPostMatchShutdownDeadlineMs.load(std::memory_order_acquire);
+        if (Deadline == 0 && FConfiguration::bAutoHost.load(std::memory_order_acquire) &&
+            GUI::gsStatus.load(std::memory_order_acquire) == Ended)
         {
-            // A winner/death callback can publish Ended after the final
-            // NetDriver lifecycle poll, especially on Iris seasons. The GUI
-            // keeps polling independently, so let it arm the same idempotent
-            // deadline even if replication has already stopped.
             OnAuthoritativeMatchEnded();
-            Deadline =
-                GPostMatchShutdownDeadlineMs.load(
-                    std::memory_order_acquire);
+            Deadline = GPostMatchShutdownDeadlineMs.load(std::memory_order_acquire);
         }
         if (Deadline == 0)
             return;
 
-        if (!FConfiguration::bAutoHost.load(
-                std::memory_order_acquire))
+        if (!FConfiguration::bAutoHost.load(std::memory_order_acquire))
         {
-            GPostMatchShutdownDeadlineMs.compare_exchange_strong(
-                Deadline,
-                0,
-                std::memory_order_release,
-                std::memory_order_relaxed);
+            GPostMatchShutdownDeadlineMs.compare_exchange_strong(Deadline, 0,
+                std::memory_order_release, std::memory_order_relaxed);
             return;
         }
 
         const ULONGLONG Now = GetTickCount64();
-        if (Now < Deadline ||
-            !GPostMatchShutdownDeadlineMs.compare_exchange_strong(
-                Deadline,
-                0,
-                std::memory_order_acq_rel,
-                std::memory_order_acquire))
+        if (Now < Deadline || !GPostMatchShutdownDeadlineMs.compare_exchange_strong(Deadline, 0,
+                std::memory_order_acq_rel, std::memory_order_acquire))
         {
             return;
         }
 
-        SDK::DbgLog(
-            "[AutoHosting] Post-match delay elapsed; closing the full server process\n");
+        SDK::DbgLog("[AutoHosting] Post-match delay elapsed; closing the full server process\n");
         if (!TerminateProcess(GetCurrentProcess(), 0))
         {
-            SDK::DbgLog(
-                "[AutoHosting] Full server shutdown failed (error %lu); retrying\n",
+            SDK::DbgLog("[AutoHosting] Full server shutdown failed (error %lu); retrying\n",
                 GetLastError());
-            GPostMatchShutdownDeadlineMs.store(
-                Now + 1000, std::memory_order_release);
+            GPostMatchShutdownDeadlineMs.store(Now + 1000, std::memory_order_release);
         }
     }
 
@@ -2287,27 +1517,20 @@ namespace AutoHosting
 
     void RequestCustomSafeZonePreferenceRefresh()
     {
-        GCustomSafeZoneRefreshRequested.store(
-            true, std::memory_order_release);
+        GCustomSafeZoneRefreshRequested.store(true, std::memory_order_release);
     }
 
     void ResetPreferences()
     {
         CancelCountdown();
-        GPostMatchShutdownDeadlineMs.store(
-            0, std::memory_order_release);
-        FConfiguration::bAutoHost.store(
-            false, std::memory_order_release);
-        FConfiguration::bSaveAutoHostSettings.store(
-            false, std::memory_order_release);
-        FConfiguration::AutoHostDelaySeconds.store(
-            FConfiguration::DefaultAutoHostDelaySeconds,
+        GPostMatchShutdownDeadlineMs.store(0, std::memory_order_release);
+        FConfiguration::bAutoHost.store(false, std::memory_order_release);
+        FConfiguration::bSaveAutoHostSettings.store(false, std::memory_order_release);
+        FConfiguration::AutoHostDelaySeconds.store(FConfiguration::DefaultAutoHostDelaySeconds,
             std::memory_order_release);
-        GRestoredPreferences.store(
-            false, std::memory_order_release);
+        GRestoredPreferences.store(false, std::memory_order_release);
 
-        if (!FConfiguration::bReadyToStart.load(
-                std::memory_order_acquire))
+        if (!FConfiguration::bReadyToStart.load(std::memory_order_acquire))
         {
             if (ApplyPreferences(GDefaultPreferences))
             {
@@ -2315,14 +1538,10 @@ namespace AutoHosting
             }
             else
             {
-                SDK::DbgLog(
-                    "[AutoHosting] Failed to restore the in-memory default profile\n");
+                SDK::DbgLog("[AutoHosting] Failed to restore the in-memory default profile\n");
             }
         }
 
-        // Reset Preferences is the explicit escape hatch for persistence.
-        // Remove every version profile so no older snapshot can reappear when
-        // the user launches a different Fortnite build later.
         GDocument = nlohmann::json::object();
         GStoredPreferences = nlohmann::json::object();
         GLastSerializedDocument.clear();

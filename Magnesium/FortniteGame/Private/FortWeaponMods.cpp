@@ -77,9 +77,7 @@ namespace
         uint32 Size;
     };
 
-    bool ValidateFunctionSchema(
-        UFunction* Function,
-        std::initializer_list<FExpectedParam> Inputs,
+    bool ValidateFunctionSchema(UFunction* Function, std::initializer_list<FExpectedParam> Inputs,
         uint32 ReturnSize = 0)
     {
         if (!Function)
@@ -109,8 +107,7 @@ namespace
                 return false;
 
             const auto& Expected = *(Inputs.begin() + InputIndex);
-            if (Param.Name != Expected.Name ||
-                Param.ElementSize != Expected.Size ||
+            if (Param.Name != Expected.Name || Param.ElementSize != Expected.Size ||
                 Param.Offset + Expected.Size > Params.Size)
             {
                 return false;
@@ -122,24 +119,16 @@ namespace
         return InputIndex == Inputs.size() && bFoundReturn;
     }
 
-    UFunction* ResolveValidatedFunction(
-        const UObject* Object,
-        const char* FunctionName,
-        std::initializer_list<FExpectedParam> Inputs,
-        uint32 ReturnSize = 0)
+    UFunction* ResolveValidatedFunction(const UObject* Object, const char* FunctionName,
+        std::initializer_list<FExpectedParam> Inputs, uint32 ReturnSize = 0)
     {
-        auto Function = Object
-            ? Object->GetFunction(FunctionName)
-            : nullptr;
-        return ValidateFunctionSchema(Function, Inputs, ReturnSize)
-            ? Function
-            : nullptr;
+        auto Function = Object ? Object->GetFunction(FunctionName) : nullptr;
+        return ValidateFunctionSchema(Function, Inputs, ReturnSize) ? Function : nullptr;
     }
 
     bool ResolvePushModelApi()
     {
-        if (PushModelApi.Helpers &&
-            PushModelApi.MarkPropertyDirty)
+        if (PushModelApi.Helpers && PushModelApi.MarkPropertyDirty)
         {
             return true;
         }
@@ -149,22 +138,15 @@ namespace
             return false;
         PushModelApi.NextResolveTimeMs = CurrentTimeMs + 5000ULL;
 
-        auto HelpersClass = FindObject<UClass>(
-            L"/Script/Engine.NetPushModelHelpers");
+        auto HelpersClass = FindObject<UClass>(L"/Script/Engine.NetPushModelHelpers");
         if (!HelpersClass)
             HelpersClass = SDK::FindClass("NetPushModelHelpers");
 
-        const UObject* Helpers = HelpersClass
-            ? HelpersClass->GetDefaultObj()
-            : nullptr;
-        UFunction* MarkPropertyDirty = ResolveValidatedFunction(
-            Helpers,
-            "MarkPropertyDirty",
+        const UObject* Helpers = HelpersClass ? HelpersClass->GetDefaultObj() : nullptr;
+        UFunction* MarkPropertyDirty = ResolveValidatedFunction(Helpers, "MarkPropertyDirty",
             {
                 { "Object", uint32(sizeof(UObject*)) },
-                // Modern cooked FNameProperty parameters serialize only the
-                // live comparison index (4 bytes), even though this SDK's
-                // convenience FName wrapper also stores a Number field.
+                // Modern cooked FNameProperty parameters serialize only the 4-byte comparison index, unlike this SDK's FName wrapper.
                 { "PropertyName", uint32(sizeof(int32)) }
             });
         if (!Helpers || !MarkPropertyDirty)
@@ -191,10 +173,8 @@ namespace
             return false;
 
         FName PropertyName(L"WeaponModSlots");
-        PushModelApi.Helpers->Call<void>(
-            PushModelApi.MarkPropertyDirty,
-            static_cast<UObject*>(Weapon),
-            PropertyName);
+        PushModelApi.Helpers->Call<void>(PushModelApi.MarkPropertyDirty,
+            static_cast<UObject*>(Weapon), PropertyName);
         return true;
     }
 
@@ -204,55 +184,43 @@ namespace
             return true;
 
         const ULONGLONG CurrentTimeMs = GetTickCount64();
-        if (NativeApi.bAttempted &&
-            CurrentTimeMs < NativeApi.NextAttemptTimeMs)
+        if (NativeApi.bAttempted && CurrentTimeMs < NativeApi.NextAttemptTimeMs)
         {
             return false;
         }
 
         NativeApi.bAttempted = true;
         NativeApi.Attempts++;
-        NativeApi.Library =
-            SDK::DefaultObjImpl("FortWeaponModFunctionLibrary");
+        NativeApi.Library = SDK::DefaultObjImpl("FortWeaponModFunctionLibrary");
         if (!NativeApi.Library)
         {
-            const ULONGLONG RetryDelayMs =
-                (std::min)(
-                    30000ULL,
-                    2000ULL *
-                        static_cast<ULONGLONG>(
+            const ULONGLONG RetryDelayMs = (std::min)(30000ULL, 2000ULL * static_cast<ULONGLONG>(
                             NativeApi.Attempts));
-            NativeApi.NextAttemptTimeMs =
-                CurrentTimeMs + RetryDelayMs;
+            NativeApi.NextAttemptTimeMs = CurrentTimeMs + RetryDelayMs;
             return false;
         }
         NativeApi.NextAttemptTimeMs = 0;
 
         const uint32 PointerSize = uint32(sizeof(UObject*));
-        NativeApi.GetRandomWeaponModSetData = ResolveValidatedFunction(
-            NativeApi.Library,
+        NativeApi.GetRandomWeaponModSetData = ResolveValidatedFunction(NativeApi.Library,
             "GetRandomWeaponModSetData",
             {
                 { "WorldContext", PointerSize },
                 { "WeaponItemDefinition", PointerSize }
-            },
-            PointerSize);
-        NativeApi.ApplyModSetToPickup = ResolveValidatedFunction(
-            NativeApi.Library,
+            }, PointerSize);
+        NativeApi.ApplyModSetToPickup = ResolveValidatedFunction(NativeApi.Library,
             "ApplyModSetToPickup",
             {
                 { "ModSet", PointerSize },
                 { "WeaponPickup", PointerSize }
             });
-        NativeApi.AssignPlayerNameToWeapon = ResolveValidatedFunction(
-            NativeApi.Library,
+        NativeApi.AssignPlayerNameToWeapon = ResolveValidatedFunction(NativeApi.Library,
             "AssignPlayerNameToWeapon",
             {
                 { "PlayerState", PointerSize },
                 { "Weapon", PointerSize }
             });
-        NativeApi.AssignPlayerNameToItemEntry = ResolveValidatedFunction(
-            NativeApi.Library,
+        NativeApi.AssignPlayerNameToItemEntry = ResolveValidatedFunction(NativeApi.Library,
             "AssignPlayerNameToItemEntry",
             {
                 { "PlayerState", PointerSize },
@@ -261,10 +229,8 @@ namespace
 
         SDK::DbgLog(
             "[WeaponMods] Native helper API FN %.2f: random=%d apply=%d nameWeapon=%d nameEntry=%d\n",
-            VersionInfo.FortniteVersion,
-            NativeApi.GetRandomWeaponModSetData != nullptr,
-            NativeApi.ApplyModSetToPickup != nullptr,
-            NativeApi.AssignPlayerNameToWeapon != nullptr,
+            VersionInfo.FortniteVersion, NativeApi.GetRandomWeaponModSetData != nullptr,
+            NativeApi.ApplyModSetToPickup != nullptr, NativeApi.AssignPlayerNameToWeapon != nullptr,
             NativeApi.AssignPlayerNameToItemEntry != nullptr);
 
         return true;
@@ -278,8 +244,7 @@ namespace
         const ULONGLONG CurrentTimeMs = GetTickCount64();
         if (CurrentTimeMs < NextSlotLayoutResolveTimeMs)
             return false;
-        NextSlotLayoutResolveTimeMs =
-            CurrentTimeMs + 5000ULL;
+        NextSlotLayoutResolveTimeMs = CurrentTimeMs + 5000ULL;
 
         const auto SlotStruct = SDK::FindStruct("FortWeaponModSlot");
         if (!SlotStruct)
@@ -311,37 +276,30 @@ namespace
             return true;
 
         const ULONGLONG CurrentTimeMs = GetTickCount64();
-        if (CurrentTimeMs <
-            NextEquippedSlotLayoutResolveTimeMs)
+        if (CurrentTimeMs <NextEquippedSlotLayoutResolveTimeMs)
         {
             return false;
         }
-        NextEquippedSlotLayoutResolveTimeMs =
-            CurrentTimeMs + 5000ULL;
+        NextEquippedSlotLayoutResolveTimeMs = CurrentTimeMs + 5000ULL;
 
-        const auto SlotStruct = SDK::FindStruct(
-            "FortEquippedWeaponModSlot");
+        const auto SlotStruct = SDK::FindStruct("FortEquippedWeaponModSlot");
         if (!SlotStruct)
             return false;
 
         const int32 Size = SlotStruct->GetPropertiesSize();
-        const uint32 EquippedWeaponModOffset =
-            SlotStruct->GetOffset("EquippedWeaponMod");
+        const uint32 EquippedWeaponModOffset = SlotStruct->GetOffset("EquippedWeaponMod");
         if (Size < int32(sizeof(UObject*)) || Size > 0x100 ||
-            EquippedWeaponModOffset == uint32(-1) ||
-            EquippedWeaponModOffset + sizeof(UObject*) >
+            EquippedWeaponModOffset == uint32(-1) || EquippedWeaponModOffset + sizeof(UObject*) >
                 uint32(Size))
         {
             SDK::DbgLog(
-                "[WeaponMods] Invalid FortEquippedWeaponModSlot layout: Size=0x%X Mod=0x%X\n",
-                Size,
+                "[WeaponMods] Invalid FortEquippedWeaponModSlot layout: Size=0x%X Mod=0x%X\n", Size,
                 EquippedWeaponModOffset);
             return false;
         }
 
         EquippedSlotLayout.Size = Size;
-        EquippedSlotLayout.EquippedWeaponModOffset =
-            EquippedWeaponModOffset;
+        EquippedSlotLayout.EquippedWeaponModOffset = EquippedWeaponModOffset;
         NextEquippedSlotLayoutResolveTimeMs = 0;
         return true;
     }
@@ -366,8 +324,7 @@ namespace
 
     const TArray<void*>* GetDefinitionSlots(const UFortItemDefinition* ItemDefinition)
     {
-        auto WeaponDefinition = ItemDefinition
-            ? ItemDefinition->Cast<UFortWeaponItemDefinition>()
+        auto WeaponDefinition = ItemDefinition ? ItemDefinition->Cast<UFortWeaponItemDefinition>()
             : nullptr;
         if (!WeaponDefinition || !WeaponDefinition->HasWeaponModSlots())
             return nullptr;
@@ -381,25 +338,16 @@ namespace
         return Slots ? Slots->Data : nullptr;
     }
 
-    bool DeepAssignSlots(
-        const TArray<void*>& Source,
-        TArray<void*>& Destination,
-        const void* ProtectedDataA = nullptr,
-        const void* ProtectedDataB = nullptr,
+    bool DeepAssignSlots(const TArray<void*>& Source, TArray<void*>& Destination,
+        const void* ProtectedDataA = nullptr, const void* ProtectedDataB = nullptr,
         const void* ProtectedDataC = nullptr)
     {
         const int32 Count = Source.Num();
-        if (Count < 0 ||
-            Count > MaxWeaponModSlots ||
-            Source.Max() < Count ||
-            Source.Max() > 64)
+        if (Count < 0 || Count > MaxWeaponModSlots || Source.Max() < Count || Source.Max() > 64)
         {
             return false;
         }
 
-        // Empty attachment arrays are overwhelmingly ammo, resources,
-        // consumables, and older weapons. Avoid a global reflected-struct
-        // lookup for the common zero-to-zero copy.
         if (Count == 0 && Destination.Num() == 0)
             return true;
 
@@ -417,16 +365,9 @@ namespace
             memcpy(NewData, Source.Data, Bytes);
         }
 
-        // Array assignment in the local SDK only copies Data/Num/Max. Release
-        // an old buffer only when it is demonstrably independent; definition
-        // and sibling-entry aliases must be detached without freeing.
         void* OldData = Destination.Data;
-        const bool bCanReleaseOld =
-            OldData &&
-            OldData != Source.Data &&
-            OldData != ProtectedDataA &&
-            OldData != ProtectedDataB &&
-            OldData != ProtectedDataC &&
+        const bool bCanReleaseOld = OldData && OldData != Source.Data &&
+            OldData != ProtectedDataA && OldData != ProtectedDataB && OldData != ProtectedDataC &&
             IsArrayHeaderSane(Destination, false);
 
         Destination.Data = reinterpret_cast<void**>(NewData);
@@ -481,34 +422,23 @@ namespace
 
     bool SlotsEqual(const TArray<void*>& Left, const TArray<void*>& Right)
     {
-        if (!ResolveSlotLayout() ||
-            !IsArrayHeaderSane(Left, true) ||
-            !IsArrayHeaderSane(Right, true) ||
-            Left.Num() != Right.Num())
+        if (!ResolveSlotLayout() || !IsArrayHeaderSane(Left, true) ||
+            !IsArrayHeaderSane(Right, true) || Left.Num() != Right.Num())
         {
             return false;
         }
 
         for (int32 Index = 0; Index < Left.Num(); ++Index)
         {
-            const uint8* LeftSlot =
-                reinterpret_cast<const uint8*>(Left.Data) +
+            const uint8* LeftSlot = reinterpret_cast<const uint8*>(Left.Data) +
                 size_t(Index) * size_t(SlotLayout.Size);
-            const uint8* RightSlot =
-                reinterpret_cast<const uint8*>(Right.Data) +
+            const uint8* RightSlot = reinterpret_cast<const uint8*>(Right.Data) +
                 size_t(Index) * size_t(SlotLayout.Size);
             UObject* LeftMod = nullptr;
             UObject* RightMod = nullptr;
-            memcpy(
-                &LeftMod,
-                LeftSlot + SlotLayout.WeaponModOffset,
-                sizeof(LeftMod));
-            memcpy(
-                &RightMod,
-                RightSlot + SlotLayout.WeaponModOffset,
-                sizeof(RightMod));
-            if (LeftMod != RightMod ||
-                *(LeftSlot + SlotLayout.DynamicOffset) !=
+            memcpy(&LeftMod, LeftSlot + SlotLayout.WeaponModOffset, sizeof(LeftMod));
+            memcpy(&RightMod, RightSlot + SlotLayout.WeaponModOffset, sizeof(RightMod));
+            if (LeftMod != RightMod || *(LeftSlot + SlotLayout.DynamicOffset) !=
                     *(RightSlot + SlotLayout.DynamicOffset))
             {
                 return false;
@@ -539,30 +469,21 @@ namespace
 
         if (EquippedWeaponSlotsOffset == uint32(-1))
         {
-            EquippedWeaponSlotsOffset =
-                Weapon->GetOffset("EquippedWeaponModSlots");
+            EquippedWeaponSlotsOffset = Weapon->GetOffset("EquippedWeaponModSlots");
         }
         if (EquippedWeaponSlotsOffset == uint32(-1))
             return nullptr;
 
-        return reinterpret_cast<TArray<void*>*>(
-            reinterpret_cast<uint8*>(Weapon) +
+        return reinterpret_cast<TArray<void*>*>(reinterpret_cast<uint8*>(Weapon) +
             EquippedWeaponSlotsOffset);
     }
 
-    bool IsEquippedArrayHeaderSane(
-        const TArray<void*>& EquippedSlots)
+    bool IsEquippedArrayHeaderSane(const TArray<void*>& EquippedSlots)
     {
-        if (!ResolveEquippedSlotLayout() ||
-            EquippedSlots.Num() < 0 ||
-            EquippedSlots.Num() > MaxWeaponModSlots ||
-            EquippedSlots.Max() < EquippedSlots.Num() ||
-            EquippedSlots.Max() > 64 ||
-            (EquippedSlots.Num() > 0 &&
-                (!EquippedSlots.Data ||
-                    !SDK::MemReadable(
-                        EquippedSlots.Data,
-                        size_t(EquippedSlotLayout.Size) *
+        if (!ResolveEquippedSlotLayout() || EquippedSlots.Num() < 0 ||
+            EquippedSlots.Num() > MaxWeaponModSlots || EquippedSlots.Max() < EquippedSlots.Num() ||
+            EquippedSlots.Max() > 64 || (EquippedSlots.Num() > 0 && (!EquippedSlots.Data ||
+                    !SDK::MemReadable(EquippedSlots.Data, size_t(EquippedSlotLayout.Size) *
                             size_t(EquippedSlots.Num())))))
         {
             return false;
@@ -571,32 +492,22 @@ namespace
         return true;
     }
 
-    UObject* GetEquippedSlotMod(
-        const TArray<void*>& EquippedSlots,
-        int32 Index)
+    UObject* GetEquippedSlotMod(const TArray<void*>& EquippedSlots, int32 Index)
     {
-        if (!IsEquippedArrayHeaderSane(EquippedSlots) ||
-            Index < 0 || Index >= EquippedSlots.Num())
+        if (!IsEquippedArrayHeaderSane(EquippedSlots) || Index < 0 || Index >= EquippedSlots.Num())
         {
             return nullptr;
         }
 
         UObject* EquippedMod = nullptr;
-        const uint8* EquippedSlot =
-            reinterpret_cast<const uint8*>(EquippedSlots.Data) +
-            size_t(Index) *
-                size_t(EquippedSlotLayout.Size);
-        memcpy(
-            &EquippedMod,
-            EquippedSlot +
-                EquippedSlotLayout.EquippedWeaponModOffset,
+        const uint8* EquippedSlot = reinterpret_cast<const uint8*>(EquippedSlots.Data) +
+            size_t(Index) * size_t(EquippedSlotLayout.Size);
+        memcpy(&EquippedMod, EquippedSlot + EquippedSlotLayout.EquippedWeaponModOffset,
             sizeof(EquippedMod));
         return EquippedMod;
     }
 
-    bool ContainsEquippedMod(
-        const TArray<void*>& EquippedSlots,
-        UObject* WeaponMod)
+    bool ContainsEquippedMod(const TArray<void*>& EquippedSlots, UObject* WeaponMod)
     {
         if (!WeaponMod)
             return false;
@@ -605,8 +516,7 @@ namespace
             Index < EquippedSlots.Num();
             ++Index)
         {
-            if (GetEquippedSlotMod(EquippedSlots, Index) ==
-                WeaponMod)
+            if (GetEquippedSlotMod(EquippedSlots, Index) == WeaponMod)
             {
                 return true;
             }
@@ -615,12 +525,10 @@ namespace
         return false;
     }
 
-    bool EquippedSlotsMatch(
-        const TArray<void*>& EquippedSlots,
+    bool EquippedSlotsMatch(const TArray<void*>& EquippedSlots,
         const TArray<void*>& ReplicatedSlots)
     {
-        if (!IsEquippedArrayHeaderSane(EquippedSlots) ||
-            !IsArrayHeaderSane(ReplicatedSlots, true))
+        if (!IsEquippedArrayHeaderSane(EquippedSlots) || !IsArrayHeaderSane(ReplicatedSlots, true))
         {
             return false;
         }
@@ -630,8 +538,7 @@ namespace
             Index < ReplicatedSlots.Num();
             ++Index)
         {
-            if (GetSlotMod(ReplicatedSlots, Index))
-                ++DesiredCount;
+            if (GetSlotMod(ReplicatedSlots, Index)) ++DesiredCount;
         }
         if (DesiredCount != EquippedSlots.Num())
             return false;
@@ -640,14 +547,12 @@ namespace
             DesiredIndex < ReplicatedSlots.Num();
             ++DesiredIndex)
         {
-            auto DesiredMod =
-                GetSlotMod(ReplicatedSlots, DesiredIndex);
+            auto DesiredMod = GetSlotMod(ReplicatedSlots, DesiredIndex);
             if (!DesiredMod)
                 continue;
 
             bool bFound = false;
-            bFound = ContainsEquippedMod(
-                EquippedSlots, DesiredMod);
+            bFound = ContainsEquippedMod(EquippedSlots, DesiredMod);
 
             if (!bFound)
                 return false;
@@ -656,12 +561,10 @@ namespace
         return true;
     }
 
-    bool EquippedSlotsAreSubsetOf(
-        const TArray<void*>& EquippedSlots,
+    bool EquippedSlotsAreSubsetOf(const TArray<void*>& EquippedSlots,
         const TArray<void*>& ReplicatedSlots)
     {
-        if (!IsEquippedArrayHeaderSane(EquippedSlots) ||
-            !IsArrayHeaderSane(ReplicatedSlots, true))
+        if (!IsEquippedArrayHeaderSane(EquippedSlots) || !IsArrayHeaderSane(ReplicatedSlots, true))
         {
             return false;
         }
@@ -670,8 +573,7 @@ namespace
             EquippedIndex < EquippedSlots.Num();
             ++EquippedIndex)
         {
-            auto EquippedMod =
-                GetEquippedSlotMod(EquippedSlots, EquippedIndex);
+            auto EquippedMod = GetEquippedSlotMod(EquippedSlots, EquippedIndex);
             if (!EquippedMod)
                 return false;
 
@@ -680,9 +582,7 @@ namespace
                 ReplicatedIndex < ReplicatedSlots.Num();
                 ++ReplicatedIndex)
             {
-                if (GetSlotMod(
-                    ReplicatedSlots, ReplicatedIndex) ==
-                    EquippedMod)
+                if (GetSlotMod(ReplicatedSlots, ReplicatedIndex) == EquippedMod)
                 {
                     bFound = true;
                     break;
@@ -698,53 +598,41 @@ namespace
 
     bool GuidEquals(const FGuid& Left, const FGuid& Right)
     {
-        return Left.A == Right.A && Left.B == Right.B &&
-            Left.C == Right.C && Left.D == Right.D;
+        return Left.A == Right.A && Left.B == Right.B && Left.C == Right.C && Left.D == Right.D;
     }
 
-    FFortItemEntry* FindReplicatedEntry(
-        AFortInventory* Inventory,
-        const FGuid& Guid)
+    FFortItemEntry* FindReplicatedEntry(AFortInventory* Inventory, const FGuid& Guid)
     {
         if (!Inventory)
             return nullptr;
 
-        return Inventory->Inventory.ReplicatedEntries.Search(
-            [&](FFortItemEntry& Entry)
+        return Inventory->Inventory.ReplicatedEntries.Search([&](FFortItemEntry& Entry)
             {
                 return GuidEquals(Entry.ItemGuid, Guid);
-            },
-            FFortItemEntry::Size());
+            }, FFortItemEntry::Size());
     }
 
-    UFortWorldItem* FindItemInstance(
-        AFortInventory* Inventory,
-        const FGuid& Guid)
+    UFortWorldItem* FindItemInstance(AFortInventory* Inventory, const FGuid& Guid)
     {
         if (!Inventory)
             return nullptr;
 
-        auto Item = Inventory->Inventory.ItemInstances.Search(
-            [&](UFortWorldItem* Candidate)
+        auto Item = Inventory->Inventory.ItemInstances.Search([&](UFortWorldItem* Candidate)
             {
                 return Candidate && GuidEquals(Candidate->ItemEntry.ItemGuid, Guid);
             });
         return Item ? *Item : nullptr;
     }
 
-    bool IsOwnedInventoryWeapon(
-        AFortPlayerControllerAthena* PlayerController,
-        AFortWeapon* Weapon)
+    bool IsOwnedInventoryWeapon(AFortPlayerControllerAthena* PlayerController, AFortWeapon* Weapon)
     {
         if (!PlayerController || !Weapon || !PlayerController->WorldInventory ||
-            !PlayerController->MyFortPawn ||
-            Weapon->Instigator != PlayerController->MyFortPawn)
+            !PlayerController->MyFortPawn || Weapon->Instigator != PlayerController->MyFortPawn)
         {
             return false;
         }
 
-        return FindReplicatedEntry(
-            PlayerController->WorldInventory,
+        return FindReplicatedEntry(PlayerController->WorldInventory,
             Weapon->ItemEntryGuid) != nullptr;
     }
 
@@ -753,24 +641,17 @@ namespace
         return ResolveNativeApi() ? NativeApi.Library : nullptr;
     }
 
-    void AssignPlayerNameToModifiedWeapon(
-        AFortPlayerControllerAthena* PlayerController,
-        AFortWeapon* Weapon,
-        FFortItemEntry& Entry)
+    void AssignPlayerNameToModifiedWeapon(AFortPlayerControllerAthena* PlayerController,
+        AFortWeapon* Weapon, FFortItemEntry& Entry)
     {
         const auto Library = GetWeaponModLibrary();
-        auto PlayerState = PlayerController
-            ? PlayerController->PlayerState
-            : nullptr;
+        auto PlayerState = PlayerController ? PlayerController->PlayerState : nullptr;
         if (!Library || !PlayerState)
             return;
 
         if (NativeApi.AssignPlayerNameToWeapon)
         {
-            Library->Call<void>(
-                NativeApi.AssignPlayerNameToWeapon,
-                PlayerState,
-                Weapon);
+            Library->Call<void>(NativeApi.AssignPlayerNameToWeapon, PlayerState, Weapon);
         }
 
         auto AssignEntry = NativeApi.AssignPlayerNameToItemEntry;
@@ -793,12 +674,9 @@ namespace
         }
 
         const uint32 EntrySize = uint32(FFortItemEntry::Size());
-        if (Params.Size == 0 || Params.Size > 0x4000 ||
-            PlayerStateOffset == uint32(-1) ||
-            PlayerStateOffset + sizeof(UObject*) > Params.Size ||
-            EntryOffset == uint32(-1) ||
-            EntryElementSize != EntrySize ||
-            EntryOffset + EntrySize > Params.Size)
+        if (Params.Size == 0 || Params.Size > 0x4000 || PlayerStateOffset == uint32(-1) ||
+            PlayerStateOffset + sizeof(UObject*) > Params.Size || EntryOffset == uint32(-1) ||
+            EntryElementSize != EntrySize || EntryOffset + EntrySize > Params.Size)
         {
             return;
         }
@@ -808,34 +686,20 @@ namespace
             return;
 
         memset(Memory, 0, Params.Size);
-        memcpy(
-            reinterpret_cast<uint8*>(Memory) + PlayerStateOffset,
-            &PlayerState,
+        memcpy(reinterpret_cast<uint8*>(Memory) + PlayerStateOffset, &PlayerState,
             sizeof(PlayerState));
-        memcpy(
-            reinterpret_cast<uint8*>(Memory) + EntryOffset,
-            &Entry,
-            EntrySize);
+        memcpy(reinterpret_cast<uint8*>(Memory) + EntryOffset, &Entry, EntrySize);
 
         Library->ProcessEvent(AssignEntry, Memory);
 
-        // The native function mutates the reflected by-reference entry stored
-        // in the params buffer. Copy its headers back before releasing only the
-        // outer params allocation; nested Unreal arrays remain engine-owned.
-        memcpy(
-            &Entry,
-            reinterpret_cast<uint8*>(Memory) + EntryOffset,
-            EntrySize);
+        memcpy(&Entry, reinterpret_cast<uint8*>(Memory) + EntryOffset, EntrySize);
         FMemory::Free(Memory);
     }
 
-    bool ResolvePurchaseRpcLayout(
-        UFunction* Function,
-        FWeaponModRpcLayout& OutLayout)
+    bool ResolvePurchaseRpcLayout(UFunction* Function, FWeaponModRpcLayout& OutLayout)
     {
         OutLayout = {};
-        if (!ValidateFunctionSchema(
-            Function,
+        if (!ValidateFunctionSchema(Function,
             {
                 { "WeaponMod", uint32(sizeof(UObject*)) },
                 { "Weapon", uint32(sizeof(UObject*)) }
@@ -855,10 +719,8 @@ namespace
                 WeaponOffset = Param.Offset;
         }
 
-        if (Params.Size == 0 || Params.Size > 0x100 ||
-            WeaponModOffset == uint32(-1) ||
-            WeaponOffset == uint32(-1) ||
-            WeaponModOffset + sizeof(UObject*) > Params.Size ||
+        if (Params.Size == 0 || Params.Size > 0x100 || WeaponModOffset == uint32(-1) ||
+            WeaponOffset == uint32(-1) || WeaponModOffset + sizeof(UObject*) > Params.Size ||
             WeaponOffset + sizeof(AFortWeapon*) > Params.Size)
         {
             return false;
@@ -871,32 +733,20 @@ namespace
         return true;
     }
 
-    bool DecodePurchaseRpc(
-        const FWeaponModRpcLayout& Layout,
-        const FFrame& Stack,
-        UObject*& OutWeaponMod,
-        AFortWeapon*& OutWeapon)
+    bool DecodePurchaseRpc(const FWeaponModRpcLayout& Layout, const FFrame& Stack,
+        UObject*& OutWeaponMod, AFortWeapon*& OutWeapon)
     {
         OutWeaponMod = nullptr;
         OutWeapon = nullptr;
 
-        // These server RPCs arrive through ProcessEvent with a compiled-in
-        // parameter frame. Reading Locals by the validated reflected offsets
-        // leaves the original FFrame entirely untouched for Epic's native exec.
         if (!Layout.Function || Stack.Code || !Stack.Locals ||
             !SDK::MemReadable(Stack.Locals, Layout.ParamsSize))
         {
             return false;
         }
 
-        memcpy(
-            &OutWeaponMod,
-            Stack.Locals + Layout.WeaponModOffset,
-            sizeof(OutWeaponMod));
-        memcpy(
-            &OutWeapon,
-            Stack.Locals + Layout.WeaponOffset,
-            sizeof(OutWeapon));
+        memcpy(&OutWeaponMod, Stack.Locals + Layout.WeaponModOffset, sizeof(OutWeaponMod));
+        memcpy(&OutWeapon, Stack.Locals + Layout.WeaponOffset, sizeof(OutWeapon));
         return OutWeaponMod && OutWeapon;
     }
 
@@ -907,22 +757,16 @@ namespace
         return Owner ? Owner->Cast<AFortPlayerControllerAthena>() : nullptr;
     }
 
-    bool ValidateModRequest(
-        UObject* Context,
-        UObject* WeaponMod,
-        AFortWeapon* Weapon,
+    bool ValidateModRequest(UObject* Context, UObject* WeaponMod, AFortWeapon* Weapon,
         AFortPlayerControllerAthena*& OutPlayerController)
     {
         OutPlayerController = GetComponentOwnerController(Context);
         const auto ModClass = SDK::FindClass("FortWeaponModItemDefinition");
-        return OutPlayerController && WeaponMod && ModClass &&
-            WeaponMod->IsA(ModClass) &&
+        return OutPlayerController && WeaponMod && ModClass && WeaponMod->IsA(ModClass) &&
             IsOwnedInventoryWeapon(OutPlayerController, Weapon);
     }
 
-    bool ApplySlotsToWeaponActor(
-        AFortWeapon* Weapon,
-        const TArray<void*>& SourceSlots)
+    bool ApplySlotsToWeaponActor(AFortWeapon* Weapon, const TArray<void*>& SourceSlots)
     {
         if (!Weapon || !IsArrayHeaderSane(SourceSlots, true))
             return false;
@@ -931,53 +775,37 @@ namespace
         if (!WeaponSlots || !IsArrayHeaderSane(*WeaponSlots, true))
             return false;
 
-        const bool bReplicatedSlotsMatch =
-            SlotsEqual(*WeaponSlots, SourceSlots);
+        const bool bReplicatedSlotsMatch = SlotsEqual(*WeaponSlots, SourceSlots);
         auto EquippedSlots = GetEquippedWeaponSlots(Weapon);
-        if (!EquippedSlots ||
-            !IsEquippedArrayHeaderSane(*EquippedSlots))
+        if (!EquippedSlots || !IsEquippedArrayHeaderSane(*EquippedSlots))
         {
             return false;
         }
-        if (bReplicatedSlotsMatch &&
-            EquippedSlotsMatch(*EquippedSlots, SourceSlots))
+        if (bReplicatedSlotsMatch && EquippedSlotsMatch(*EquippedSlots, SourceSlots))
         {
             return true;
         }
 
-        auto OnRep = Weapon->GetFunction(
-            "OnRep_ReplicatedWeaponModSlots");
+        auto OnRep = Weapon->GetFunction("OnRep_ReplicatedWeaponModSlots");
         if (!OnRep)
             OnRep = Weapon->GetFunction("OnRep_WeaponModSlots");
-        if (!ValidateFunctionSchema(
-            OnRep,
+        if (!ValidateFunctionSchema(OnRep,
             {
                 {
-                    "PreviousModSlots",
-                    uint32(sizeof(TArray<void*>))
+                    "PreviousModSlots", uint32(sizeof(TArray<void*>))
                 }
             }))
         {
             return false;
         }
 
-        // Push-model builds do not discover a raw reflected-array write from
-        // ForceNetUpdate alone. Resolve the exact helper before touching the
-        // actor so a late-loaded or incompatible helper fails without leaving
-        // local and observer state divergent.
         if (!bReplicatedSlotsMatch && !ResolvePushModelApi())
             return false;
 
         TArray<void*> PreviousSlots{};
         if (bReplicatedSlotsMatch)
         {
-            // A freshly spawned weapon can already contain the replicated
-            // slots while its runtime ability/effect handles are still empty.
-            // Represent the actually equipped subset as the previous raw
-            // state so OnRep adds only missing mods and cannot double-grant
-            // a mod that native equip already initialized.
-            if (!EquippedSlotsAreSubsetOf(
-                *EquippedSlots, SourceSlots) ||
+            if (!EquippedSlotsAreSubsetOf(*EquippedSlots, SourceSlots) ||
                 !DeepAssignSlots(SourceSlots, PreviousSlots))
             {
                 return false;
@@ -988,25 +816,18 @@ namespace
                 ++Index)
             {
                 auto Mod = GetSlotMod(PreviousSlots, Index);
-                if (!Mod ||
-                    ContainsEquippedMod(*EquippedSlots, Mod))
+                if (!Mod || ContainsEquippedMod(*EquippedSlots, Mod))
                 {
                     continue;
                 }
 
-                uint8* Slot =
-                    reinterpret_cast<uint8*>(
-                        PreviousSlots.Data) +
+                uint8* Slot = reinterpret_cast<uint8*>(PreviousSlots.Data) +
                     size_t(Index) * size_t(SlotLayout.Size);
                 UObject* EmptyMod = nullptr;
-                memcpy(
-                    Slot + SlotLayout.WeaponModOffset,
-                    &EmptyMod,
-                    sizeof(EmptyMod));
+                memcpy(Slot + SlotLayout.WeaponModOffset, &EmptyMod, sizeof(EmptyMod));
             }
         }
-        else if (!DeepAssignSlots(
-            *WeaponSlots, PreviousSlots))
+        else if (!DeepAssignSlots(*WeaponSlots, PreviousSlots))
         {
             return false;
         }
@@ -1014,14 +835,9 @@ namespace
         if (!bReplicatedSlotsMatch)
         {
             const void* DefinitionData = Weapon->WeaponData &&
-                Weapon->WeaponData->HasWeaponModSlots()
-                ? Weapon->WeaponData->WeaponModSlots.Data
+                Weapon->WeaponData->HasWeaponModSlots() ? Weapon->WeaponData->WeaponModSlots.Data
                 : nullptr;
-            if (!DeepAssignSlots(
-                SourceSlots,
-                *WeaponSlots,
-                DefinitionData,
-                SourceSlots.Data,
+            if (!DeepAssignSlots(SourceSlots, *WeaponSlots, DefinitionData, SourceSlots.Data,
                 EquippedSlots ? EquippedSlots->Data : nullptr))
             {
                 PreviousSlots.Free();
@@ -1037,19 +853,13 @@ namespace
         return true;
     }
 
-    void CommitOwnedSlots(
-        TArray<void*>& OwnedSlots,
-        TArray<void*>& Destination,
-        const void* ProtectedDataA = nullptr,
-        const void* ProtectedDataB = nullptr,
+    void CommitOwnedSlots(TArray<void*>& OwnedSlots, TArray<void*>& Destination,
+        const void* ProtectedDataA = nullptr, const void* ProtectedDataB = nullptr,
         const void* ProtectedDataC = nullptr)
     {
         void* OldData = Destination.Data;
-        const bool bCanReleaseOld =
-            OldData &&
-            OldData != ProtectedDataA &&
-            OldData != ProtectedDataB &&
-            OldData != ProtectedDataC &&
+        const bool bCanReleaseOld = OldData && OldData != ProtectedDataA &&
+            OldData != ProtectedDataB && OldData != ProtectedDataC &&
             IsArrayHeaderSane(Destination, false);
 
         Destination = OwnedSlots;
@@ -1067,49 +877,34 @@ bool FFortWeaponMods::IsSupported()
     return VersionInfo.FortniteVersion >= 28.0;
 }
 
-bool FFortWeaponMods::HasEntrySlots(
-    const FFortItemEntry& Entry)
+bool FFortWeaponMods::HasEntrySlots(const FFortItemEntry& Entry)
 {
-    if (!IsSupported() ||
-        !FFortItemEntry::HasWeaponModSlots() ||
-        !Entry.ItemDefinition)
+    if (!IsSupported() || !FFortItemEntry::HasWeaponModSlots() || !Entry.ItemDefinition)
     {
         return false;
     }
 
-    auto WeaponDefinition =
-        Entry.ItemDefinition->Cast<
-            UFortWeaponItemDefinition>();
+    auto WeaponDefinition = Entry.ItemDefinition->Cast<UFortWeaponItemDefinition>();
     const auto& Slots = Entry.WeaponModSlots;
-    return WeaponDefinition &&
-        WeaponDefinition->HasWeaponModSlots() &&
-        Slots.Num() > 0 &&
-        Slots.Num() <= MaxWeaponModSlots &&
-        Slots.Max() >= Slots.Num() &&
-        Slots.Max() <= 64 &&
+    return WeaponDefinition && WeaponDefinition->HasWeaponModSlots() && Slots.Num() > 0 &&
+        Slots.Num() <= MaxWeaponModSlots && Slots.Max() >= Slots.Num() && Slots.Max() <= 64 &&
         Slots.Data;
 }
 
-bool FFortWeaponMods::CopyDefinitionSlotsToEntry(
-    const UFortWeaponItemDefinition* WeaponDefinition,
+bool FFortWeaponMods::CopyDefinitionSlotsToEntry(const UFortWeaponItemDefinition* WeaponDefinition,
     FFortItemEntry& Destination)
 {
-    if (!IsSupported() || !WeaponDefinition ||
-        !WeaponDefinition->HasWeaponModSlots() ||
+    if (!IsSupported() || !WeaponDefinition || !WeaponDefinition->HasWeaponModSlots() ||
         !FFortItemEntry::HasWeaponModSlots())
     {
         return false;
     }
 
-    return DeepAssignSlots(
-        WeaponDefinition->WeaponModSlots,
-        Destination.WeaponModSlots,
+    return DeepAssignSlots(WeaponDefinition->WeaponModSlots, Destination.WeaponModSlots,
         WeaponDefinition->WeaponModSlots.Data);
 }
 
-bool FFortWeaponMods::CopyEntrySlots(
-    const FFortItemEntry& Source,
-    FFortItemEntry& Destination)
+bool FFortWeaponMods::CopyEntrySlots(const FFortItemEntry& Source, FFortItemEntry& Destination)
 {
     if (!IsSupported() || !FFortItemEntry::HasWeaponModSlots())
         return false;
@@ -1117,24 +912,18 @@ bool FFortWeaponMods::CopyEntrySlots(
     if (&Source == &Destination)
         return true;
 
-    if (Source.WeaponModSlots.Num() == 0 &&
-        Destination.WeaponModSlots.Num() == 0)
+    if (Source.WeaponModSlots.Num() == 0 && Destination.WeaponModSlots.Num() == 0)
     {
         return true;
     }
 
-    if (Source.WeaponModSlots.Data !=
-            Destination.WeaponModSlots.Data &&
-        SlotsEqual(
-            Source.WeaponModSlots,
-            Destination.WeaponModSlots))
+    if (Source.WeaponModSlots.Data != Destination.WeaponModSlots.Data && SlotsEqual(
+            Source.WeaponModSlots, Destination.WeaponModSlots))
     {
         return true;
     }
 
-    return DeepAssignSlots(
-        Source.WeaponModSlots,
-        Destination.WeaponModSlots,
+    return DeepAssignSlots(Source.WeaponModSlots, Destination.WeaponModSlots,
         GetDefinitionSlotData(Destination.ItemDefinition));
 }
 
@@ -1145,8 +934,7 @@ void FFortWeaponMods::FreeEntrySlots(FFortItemEntry& Entry)
 
     auto& Slots = Entry.WeaponModSlots;
     const void* DefinitionData = GetDefinitionSlotData(Entry.ItemDefinition);
-    if (Slots.Data && Slots.Data != DefinitionData &&
-        IsArrayHeaderSane(Slots, false))
+    if (Slots.Data && Slots.Data != DefinitionData && IsArrayHeaderSane(Slots, false))
     {
         FMemory::Free(Slots.Data);
     }
@@ -1156,9 +944,7 @@ void FFortWeaponMods::FreeEntrySlots(FFortItemEntry& Entry)
     Slots.MaxElements = 0;
 }
 
-void FFortWeaponMods::InitializePickup(
-    AFortPickupAthena* Pickup,
-    const FFortItemEntry& SourceEntry,
+void FFortWeaponMods::InitializePickup(AFortPickupAthena* Pickup, const FFortItemEntry& SourceEntry,
     bool bAllowRandomMods)
 {
     if (!Pickup || !HasEntrySlots(SourceEntry))
@@ -1167,82 +953,59 @@ void FFortWeaponMods::InitializePickup(
     CopyEntrySlots(SourceEntry, Pickup->PrimaryPickupItemEntry);
 
     auto WeaponDefinition = SourceEntry.ItemDefinition
-        ? SourceEntry.ItemDefinition->Cast<UFortWeaponItemDefinition>()
-        : nullptr;
-    if (!bAllowRandomMods || !WeaponDefinition ||
-        HasDynamicSlots(SourceEntry.WeaponModSlots))
+        ? SourceEntry.ItemDefinition->Cast<UFortWeaponItemDefinition>() : nullptr;
+    if (!bAllowRandomMods || !WeaponDefinition || HasDynamicSlots(SourceEntry.WeaponModSlots))
     {
         return;
     }
 
     const auto Library = GetWeaponModLibrary();
-    if (!Library ||
-        !NativeApi.GetRandomWeaponModSetData ||
-        !NativeApi.ApplyModSetToPickup)
+    if (!Library || !NativeApi.GetRandomWeaponModSetData || !NativeApi.ApplyModSetToPickup)
     {
         return;
     }
 
-    const UObject* ModSet = Library->Call<const UObject*>(
-        NativeApi.GetRandomWeaponModSetData,
-        UWorld::GetWorld(),
-        WeaponDefinition);
+    const UObject* ModSet = Library->Call<const UObject*>(NativeApi.GetRandomWeaponModSetData,
+        UWorld::GetWorld(), WeaponDefinition);
     if (ModSet)
     {
-        Library->Call<void>(
-            NativeApi.ApplyModSetToPickup,
-            ModSet,
-            Pickup);
+        Library->Call<void>(NativeApi.ApplyModSetToPickup, ModSet, Pickup);
     }
 }
 
-bool FFortWeaponMods::ApplyEntrySlotsAfterEquip(
-    AFortWeapon* Weapon,
-    const FFortItemEntry& Entry)
+bool FFortWeaponMods::ApplyEntrySlotsAfterEquip(AFortWeapon* Weapon, const FFortItemEntry& Entry)
 {
     if (!Weapon || !HasEntrySlots(Entry))
         return false;
 
-    return ApplySlotsToWeaponActor(
-        Weapon, Entry.WeaponModSlots);
+    return ApplySlotsToWeaponActor(Weapon, Entry.WeaponModSlots);
 }
 
-bool FFortWeaponMods::SyncWeaponSlotsToInventory(
-    AFortPlayerControllerAthena* PlayerController,
+bool FFortWeaponMods::SyncWeaponSlotsToInventory(AFortPlayerControllerAthena* PlayerController,
     AFortWeapon* Weapon)
 {
     if (!IsSupported() || !IsOwnedInventoryWeapon(PlayerController, Weapon))
         return false;
 
     auto Inventory = PlayerController->WorldInventory;
-    auto ReplicatedEntry = FindReplicatedEntry(
-        Inventory, Weapon->ItemEntryGuid);
-    auto ItemInstance = FindItemInstance(
-        Inventory, Weapon->ItemEntryGuid);
+    auto ReplicatedEntry = FindReplicatedEntry(Inventory, Weapon->ItemEntryGuid);
+    auto ItemInstance = FindItemInstance(Inventory, Weapon->ItemEntryGuid);
     auto WeaponSlots = GetWeaponSlots(Weapon);
-    if (!ReplicatedEntry || !WeaponSlots ||
-        !IsArrayHeaderSane(*WeaponSlots, true))
+    if (!ReplicatedEntry || !WeaponSlots || !IsArrayHeaderSane(*WeaponSlots, true))
     {
         return false;
     }
 
-    if (!FFortItemEntry::HasWeaponModSlots() ||
-        !IsArrayHeaderSane(
-            ReplicatedEntry->WeaponModSlots, false) ||
-        (ItemInstance &&
-            !IsArrayHeaderSane(
+    if (!FFortItemEntry::HasWeaponModSlots() || !IsArrayHeaderSane(
+            ReplicatedEntry->WeaponModSlots, false) || (ItemInstance && !IsArrayHeaderSane(
                 ItemInstance->ItemEntry.WeaponModSlots, false)))
     {
         return false;
     }
 
-    // Allocate both durable copies before replacing either owner. A failed
-    // allocation therefore cannot leave the replicated entry and item
-    // instance reporting different attachment sets.
     TArray<void*> NewReplicatedSlots{};
     TArray<void*> NewInstanceSlots{};
-    if (!DeepAssignSlots(*WeaponSlots, NewReplicatedSlots) ||
-        (ItemInstance &&
+    if (!DeepAssignSlots(*WeaponSlots, NewReplicatedSlots) || (ItemInstance &&
             !DeepAssignSlots(*WeaponSlots, NewInstanceSlots)))
     {
         NewReplicatedSlots.Free();
@@ -1250,47 +1013,31 @@ bool FFortWeaponMods::SyncWeaponSlotsToInventory(
         return false;
     }
 
-    const void* OldItemData = ItemInstance
-        ? ItemInstance->ItemEntry.WeaponModSlots.Data
-        : nullptr;
-    CommitOwnedSlots(
-        NewReplicatedSlots,
-        ReplicatedEntry->WeaponModSlots,
-        GetDefinitionSlotData(ReplicatedEntry->ItemDefinition),
-        OldItemData,
-        WeaponSlots->Data);
+    const void* OldItemData = ItemInstance ? ItemInstance->ItemEntry.WeaponModSlots.Data : nullptr;
+    CommitOwnedSlots(NewReplicatedSlots, ReplicatedEntry->WeaponModSlots,
+        GetDefinitionSlotData(ReplicatedEntry->ItemDefinition), OldItemData, WeaponSlots->Data);
 
     if (ItemInstance)
     {
-        CommitOwnedSlots(
-            NewInstanceSlots,
-            ItemInstance->ItemEntry.WeaponModSlots,
+        CommitOwnedSlots(NewInstanceSlots, ItemInstance->ItemEntry.WeaponModSlots,
             GetDefinitionSlotData(ItemInstance->ItemEntry.ItemDefinition),
-            ReplicatedEntry->WeaponModSlots.Data,
-            WeaponSlots->Data);
+            ReplicatedEntry->WeaponModSlots.Data, WeaponSlots->Data);
     }
 
-    AssignPlayerNameToModifiedWeapon(
-        PlayerController, Weapon, *ReplicatedEntry);
+    AssignPlayerNameToModifiedWeapon(PlayerController, Weapon, *ReplicatedEntry);
     Inventory->Update(ReplicatedEntry);
 
-    // Native UpdateItemInstances can shallow-copy the replicated array header;
-    // it can also move the fast-array storage. Reacquire both objects before
-    // dereferencing either entry again.
-    ReplicatedEntry = FindReplicatedEntry(
-        Inventory, Weapon->ItemEntryGuid);
+    // Native UpdateItemInstances can move the fast-array storage, so reacquire both objects before using them again.
+    ReplicatedEntry = FindReplicatedEntry(Inventory, Weapon->ItemEntryGuid);
     ItemInstance = FindItemInstance(Inventory, Weapon->ItemEntryGuid);
     if (!ReplicatedEntry)
         return false;
 
     if (ItemInstance)
     {
-        DeepAssignSlots(
-            *WeaponSlots,
-            ItemInstance->ItemEntry.WeaponModSlots,
+        DeepAssignSlots(*WeaponSlots, ItemInstance->ItemEntry.WeaponModSlots,
             GetDefinitionSlotData(ItemInstance->ItemEntry.ItemDefinition),
-            ReplicatedEntry->WeaponModSlots.Data,
-            WeaponSlots->Data);
+            ReplicatedEntry->WeaponModSlots.Data, WeaponSlots->Data);
     }
 
     Inventory->ForceNetUpdate();
@@ -1300,20 +1047,14 @@ bool FFortWeaponMods::SyncWeaponSlotsToInventory(
 
 namespace
 {
-    void ProcessNativeBenchRpc(
-        const char* Operation,
-        UObject* Context,
-        FFrame& Stack,
-        const FWeaponModRpcLayout& Layout,
-        void (*Original)(UObject*, FFrame&))
+    void ProcessNativeBenchRpc(const char* Operation, UObject* Context, FFrame& Stack,
+        const FWeaponModRpcLayout& Layout, void (*Original)(UObject*, FFrame&))
     {
         if (!Original)
         {
             if (BenchResolveLogCount++ < 4)
             {
-                SDK::DbgLog(
-                    "[WeaponMods] %s rejected: native RPC exec unavailable\n",
-                    Operation);
+                SDK::DbgLog("[WeaponMods] %s rejected: native RPC exec unavailable\n", Operation);
             }
             return;
         }
@@ -1321,19 +1062,13 @@ namespace
         UObject* WeaponMod = nullptr;
         AFortWeapon* Weapon = nullptr;
         AFortPlayerControllerAthena* PlayerController = nullptr;
-        if (!FFortWeaponMods::IsSupported() ||
-            !DecodePurchaseRpc(
-                Layout, Stack, WeaponMod, Weapon) ||
-            !ValidateModRequest(
-                Context,
-                WeaponMod,
-                Weapon,
+        if (!FFortWeaponMods::IsSupported() || !DecodePurchaseRpc(
+                Layout, Stack, WeaponMod, Weapon) || !ValidateModRequest(Context, WeaponMod, Weapon,
                 PlayerController))
         {
             if (BenchRejectLogCount++ < 8)
             {
-                SDK::DbgLog(
-                    "[WeaponMods] %s rejected: invalid frame, mod, or owned weapon\n",
+                SDK::DbgLog("[WeaponMods] %s rejected: invalid frame, mod, or owned weapon\n",
                     Operation);
             }
             return;
@@ -1341,28 +1076,21 @@ namespace
 
         auto WeaponSlots = GetWeaponSlots(Weapon);
         TArray<void*> PreviousSlots{};
-        if (!WeaponSlots ||
-            !IsArrayHeaderSane(*WeaponSlots, true) ||
+        if (!WeaponSlots || !IsArrayHeaderSane(*WeaponSlots, true) ||
             !DeepAssignSlots(*WeaponSlots, PreviousSlots))
         {
             if (BenchRejectLogCount++ < 8)
             {
-                SDK::DbgLog(
-                    "[WeaponMods] %s rejected: actor slot snapshot unavailable\n",
+                SDK::DbgLog("[WeaponMods] %s rejected: actor slot snapshot unavailable\n",
                     Operation);
             }
             return;
         }
 
-        // Epic's component remains authoritative for the offered attachment,
-        // station state, price, currency spend, replacement/default behavior,
-        // and the actual actor mutation. The original frame has not been
-        // stepped or otherwise changed by our inspection above.
         Original(Context, Stack);
 
         WeaponSlots = GetWeaponSlots(Weapon);
-        if (!WeaponSlots ||
-            !IsArrayHeaderSane(*WeaponSlots, true) ||
+        if (!WeaponSlots || !IsArrayHeaderSane(*WeaponSlots, true) ||
             SlotsEqual(PreviousSlots, *WeaponSlots))
         {
             if (BenchUnchangedLogCount++ < 8)
@@ -1375,16 +1103,12 @@ namespace
             return;
         }
 
-        if (!FFortWeaponMods::SyncWeaponSlotsToInventory(
-            PlayerController, Weapon))
+        if (!FFortWeaponMods::SyncWeaponSlotsToInventory(PlayerController, Weapon))
         {
-            const bool bRolledBack =
-                ApplySlotsToWeaponActor(Weapon, PreviousSlots);
+            const bool bRolledBack = ApplySlotsToWeaponActor(Weapon, PreviousSlots);
             if (BenchSyncFailureLogCount++ < 8)
             {
-                SDK::DbgLog(
-                    "[WeaponMods] %s inventory sync failed; actor rollback=%d\n",
-                    Operation,
+                SDK::DbgLog("[WeaponMods] %s inventory sync failed; actor rollback=%d\n", Operation,
                     bRolledBack);
             }
         }
@@ -1393,34 +1117,20 @@ namespace
     }
 }
 
-void FFortWeaponMods::ServerPurchaseWeaponModForWeapon_(
-    UObject* Context,
-    FFrame& Stack)
+void FFortWeaponMods::ServerPurchaseWeaponModForWeapon_(UObject* Context, FFrame& Stack)
 {
-    ProcessNativeBenchRpc(
-        "purchase",
-        Context,
-        Stack,
-        PurchaseRpcLayout,
+    ProcessNativeBenchRpc("purchase", Context, Stack, PurchaseRpcLayout,
         ServerPurchaseWeaponModForWeapon_OG);
 }
 
-void FFortWeaponMods::ServerPurchaseRemoveMod_(
-    UObject* Context,
-    FFrame& Stack)
+void FFortWeaponMods::ServerPurchaseRemoveMod_(UObject* Context, FFrame& Stack)
 {
-    ProcessNativeBenchRpc(
-        "remove",
-        Context,
-        Stack,
-        RemoveRpcLayout,
-        ServerPurchaseRemoveMod_OG);
+    ProcessNativeBenchRpc("remove", Context, Stack, RemoveRpcLayout, ServerPurchaseRemoveMod_OG);
 }
 
 void FFortWeaponMods::EnsureBenchHooks()
 {
-    if (!IsSupported() ||
-        (bPurchaseHookInstalled && bRemoveHookInstalled))
+    if (!IsSupported() || (bPurchaseHookInstalled && bRemoveHookInstalled))
     {
         return;
     }
@@ -1434,23 +1144,18 @@ void FFortWeaponMods::EnsureBenchHooks()
     {
         if (BenchResolveLogCount++ < 4)
         {
-            SDK::DbgLog(
-                "[WeaponMods] Bench hook deferred: slot layout unavailable\n");
+            SDK::DbgLog("[WeaponMods] Bench hook deferred: slot layout unavailable\n");
         }
         return;
     }
 
-    const auto ComponentClass = SDK::FindClass(
-        "FortWeaponModStationComponent");
-    auto Component = ComponentClass
-        ? ComponentClass->GetDefaultObj()
-        : nullptr;
+    const auto ComponentClass = SDK::FindClass("FortWeaponModStationComponent");
+    auto Component = ComponentClass ? ComponentClass->GetDefaultObj() : nullptr;
     if (!Component)
     {
         if (BenchResolveLogCount++ < 4)
         {
-            SDK::DbgLog(
-                "[WeaponMods] Bench hook deferred: component unavailable on FN %.2f\n",
+            SDK::DbgLog("[WeaponMods] Bench hook deferred: component unavailable on FN %.2f\n",
                 VersionInfo.FortniteVersion);
         }
         return;
@@ -1458,26 +1163,19 @@ void FFortWeaponMods::EnsureBenchHooks()
 
     if (!bPurchaseHookInstalled)
     {
-        auto Purchase = Component->GetFunction(
-            "ServerPurchaseWeaponModForWeapon");
+        auto Purchase = Component->GetFunction("ServerPurchaseWeaponModForWeapon");
         FWeaponModRpcLayout Layout{};
-        if (ResolvePurchaseRpcLayout(Purchase, Layout) &&
-            Purchase->ExecFunction)
+        if (ResolvePurchaseRpcLayout(Purchase, Layout) && Purchase->ExecFunction)
         {
-            const void* Detour =
-                reinterpret_cast<void*>(
-                    ServerPurchaseWeaponModForWeapon_);
+            const void* Detour = reinterpret_cast<void*>(ServerPurchaseWeaponModForWeapon_);
             if (Purchase->ExecFunction != Detour)
             {
                 PurchaseRpcLayout = Layout;
-                Utils::ExecHook(
-                    Purchase,
-                    ServerPurchaseWeaponModForWeapon_,
+                Utils::ExecHook(Purchase, ServerPurchaseWeaponModForWeapon_,
                     ServerPurchaseWeaponModForWeapon_OG);
             }
 
-            bPurchaseHookInstalled =
-                Purchase->ExecFunction == Detour &&
+            bPurchaseHookInstalled = Purchase->ExecFunction == Detour &&
                 ServerPurchaseWeaponModForWeapon_OG != nullptr;
         }
         else if (BenchResolveLogCount++ < 4)
@@ -1489,26 +1187,18 @@ void FFortWeaponMods::EnsureBenchHooks()
 
     if (!bRemoveHookInstalled)
     {
-        auto Remove = Component->GetFunction(
-            "ServerPurchaseRemoveMod");
+        auto Remove = Component->GetFunction("ServerPurchaseRemoveMod");
         FWeaponModRpcLayout Layout{};
-        if (ResolvePurchaseRpcLayout(Remove, Layout) &&
-            Remove->ExecFunction)
+        if (ResolvePurchaseRpcLayout(Remove, Layout) && Remove->ExecFunction)
         {
-            const void* Detour =
-                reinterpret_cast<void*>(
-                    ServerPurchaseRemoveMod_);
+            const void* Detour = reinterpret_cast<void*>(ServerPurchaseRemoveMod_);
             if (Remove->ExecFunction != Detour)
             {
                 RemoveRpcLayout = Layout;
-                Utils::ExecHook(
-                    Remove,
-                    ServerPurchaseRemoveMod_,
-                    ServerPurchaseRemoveMod_OG);
+                Utils::ExecHook(Remove, ServerPurchaseRemoveMod_, ServerPurchaseRemoveMod_OG);
             }
 
-            bRemoveHookInstalled =
-                Remove->ExecFunction == Detour &&
+            bRemoveHookInstalled = Remove->ExecFunction == Detour &&
                 ServerPurchaseRemoveMod_OG != nullptr;
         }
         else if (BenchResolveLogCount++ < 4)

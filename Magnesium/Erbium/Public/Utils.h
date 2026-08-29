@@ -3,12 +3,10 @@
 #include "MinHook.h"
 #include "Finders.h"
 
-
 class Utils {
     static inline void* _NpFH = nullptr;
 public:
-    template <class _Ot = void*>
-    static void Hook(uint64_t _Ptr, void* _Detour, _Ot& _Orig = _NpFH)
+    template <class _Ot = void*> static void Hook(uint64_t _Ptr, void* _Detour, _Ot& _Orig = _NpFH)
     {
         if (!_Ptr || !SDK::MemReadable((void*)_Ptr, 1)) // unresolved/invalid target
             return;
@@ -26,7 +24,7 @@ public:
     template <typename _Ct, typename _Ot = void*>
     __forceinline static void Hook(uint32_t _Ind, void* _Detour, _Ot& _Orig = _NpFH)
     {
-        if (_Ind >= 0x1000) // invalid index (e.g. GetVTableIndex() failed = -1) — never patch a wild slot
+        if (_Ind >= 0x1000)
             return;
         auto _Vt = _Ct::GetDefaultObj()->Vft;
         if (!std::is_same_v<_Ot, void*>)
@@ -35,8 +33,7 @@ public:
         _HookVT(_Vt, _Ind, _Detour);
     }
 
-    template <typename _Ct>
-    __forceinline static void HookEvery(uint32_t _Ind, void* _Detour)
+    template <typename _Ct> __forceinline static void HookEvery(uint32_t _Ind, void* _Detour)
     {
         if (_Ind >= 0x1000) // invalid vtable index — bail
             return;
@@ -63,8 +60,7 @@ public:
         }
     }
 
-    template <typename _Is>
-    static __forceinline void Patch(uintptr_t ptr, _Is byte)
+    template <typename _Is> static __forceinline void Patch(uintptr_t ptr, _Is byte)
     {
         DWORD og;
         VirtualProtect(LPVOID(ptr), sizeof(_Is), PAGE_EXECUTE_READWRITE, &og);
@@ -83,8 +79,7 @@ public:
         return GetAllInternal(Class, *(TArray<AActor*>*) & ret);
     }
 
-    template <typename _At = AActor>
-    __forceinline static void GetAll(TArray<_At*>& ret)
+    template <typename _At = AActor> __forceinline static void GetAll(TArray<_At*>& ret)
     {
         GetAllInternal(_At::StaticClass(), *(TArray<AActor*>*) & ret);
     }
@@ -100,7 +95,6 @@ public:
         _Fn->ExecFunction = _Detour;
     }
 
-
     template <typename _Ot = void*>
     __forceinline static void ExecHook(const wchar_t* _Name, void* _Detour, _Ot& _Orig = _NpFH)
     {
@@ -115,202 +109,201 @@ public:
     }
 };
 
-#define DEFINE_NEWOBJ_PROP(Name, ...)                                                                                                                                \
-    static inline int32 Name##__Offset = -2;                                                                                                                         \
-    static inline bool Name##__Weak = false;                                                                                                                         \
-    __VA_ARGS__* Get##Name() const                                                                                                                                   \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
-            {                                                                                                                                                        \
-		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
-                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
-                Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                        \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-            else                                                                                                                                                     \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-        }                                                                                                                                                            \
-        return Name##__Weak ? GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset).Get() : GetFromOffset<__VA_ARGS__*>(this, Name##__Offset);            \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    bool Has##Name() const                                                                                                                                           \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else                                                                                                                                                     \
-            {                                                                                                                                                        \
-                if (VersionInfo.FortniteVersion >= 12.10)                                                                                                            \
-                {                                                                                                                                                    \
-                    auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                \
-                    auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                       \
-                    Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                    \
-                }                                                                                                                                                    \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-        }                                                                                                                                                            \
-        return Name##__Offset != -1;                                                                                                                                 \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    __VA_ARGS__* Set##Name(__VA_ARGS__*&& Value) const                                                                                                               \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
-            {                                                                                                                                                        \
-		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
-                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
-                Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                        \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-            else                                                                                                                                                     \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-        }                                                                                                                                                            \
-        if (Name##__Weak)                                                                                                                                            \
-            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value;                                                                                \
-        else                                                                                                                                                         \
-            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value;                                                                                               \
-        return Value;                                                                                                                                                \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    __VA_ARGS__* Set##Name(__VA_ARGS__*& Value) const                                                                                                                \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = this->GetProperty(#Name, 0x8010000);                                                                                                         \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
-            {                                                                                                                                                        \
-		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
-                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
-                Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                        \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-            else                                                                                                                                                     \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-        }                                                                                                                                                            \
-        if (Name##__Weak)                                                                                                                                            \
-            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value;                                                                                \
-        else                                                                                                                                                         \
-            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value;                                                                                               \
-        return Value;                                                                                                                                                \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    __declspec(property(get = Get##Name, put = Set##Name))                                                                                                           \
+#define DEFINE_NEWOBJ_PROP(Name, ...) \
+    static inline int32 Name##__Offset = -2; \
+    static inline bool Name##__Weak = false; \
+    __VA_ARGS__* Get##Name() const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = this->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else if (VersionInfo.FortniteVersion >= 12.10) \
+            { \
+                auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+            else \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+        } \
+        return Name##__Weak ? GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset).Get() : GetFromOffset<__VA_ARGS__*>(this, Name##__Offset); \
+    } \
+ \
+    bool Has##Name() const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = this->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else \
+            { \
+                if (VersionInfo.FortniteVersion >= 12.10) \
+                { \
+                    auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                    auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                    Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                } \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+        } \
+        return Name##__Offset != -1; \
+    } \
+ \
+    __VA_ARGS__* Set##Name(__VA_ARGS__*&& Value) const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = this->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else if (VersionInfo.FortniteVersion >= 12.10) \
+            { \
+                auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+            else \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+        } \
+        if (Name##__Weak) \
+            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value; \
+        else \
+            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value; \
+        return Value; \
+    } \
+ \
+    __VA_ARGS__* Set##Name(__VA_ARGS__*& Value) const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = this->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else if (VersionInfo.FortniteVersion >= 12.10) \
+            { \
+                auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+            else \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+        } \
+        if (Name##__Weak) \
+            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value; \
+        else \
+            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value; \
+        return Value; \
+    } \
+ \
+    __declspec(property(get = Get##Name, put = Set##Name)) \
     __VA_ARGS__* Name;
 
-
-#define DEFINE_STRUCT_NEWOBJ_PROP(Name, ...)                                                                                                                         \
-    static inline int32 Name##__Offset = -2;                                                                                                                         \
-    static inline bool Name##__Weak = false;                                                                                                                         \
-    __VA_ARGS__* Get##Name() const                                                                                                                                   \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
-            {                                                                                                                                                        \
-		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
-                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
-                Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                        \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-            else                                                                                                                                                     \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-        }                                                                                                                                                            \
-        return Name##__Weak ? GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset).Get() : GetFromOffset<__VA_ARGS__*>(this, Name##__Offset);            \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    bool Has##Name() const                                                                                                                                           \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
-            {                                                                                                                                                        \
-		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
-                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
-                Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                        \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-            else                                                                                                                                                     \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-        }                                                                                                                                                            \
-        return Name##__Offset != -1;                                                                                                                                 \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    __VA_ARGS__* Set##Name(__VA_ARGS__*&& Value) const                                                                                                               \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
-            {                                                                                                                                                        \
-		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
-                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
-                Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                        \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-            else                                                                                                                                                     \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-        }                                                                                                                                                            \
-        if (Name##__Weak)                                                                                                                                            \
-            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value;                                                                                \
-        else                                                                                                                                                         \
-            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value;                                                                                               \
-        return Value;                                                                                                                                                \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    __VA_ARGS__* Set##Name(__VA_ARGS__*& Value) const                                                                                                                \
-    {                                                                                                                                                                \
-        if (Name##__Offset == -2)                                                                                                                                    \
-        {                                                                                                                                                            \
-            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000);                                                                                               \
-            if (!Prop)                                                                                                                                               \
-                Name##__Offset = -1;                                                                                                                                 \
-            else if (VersionInfo.FortniteVersion >= 12.10)                                                                                                          \
-            {                                                                                                                                                        \
-		        auto FieldClass = *(void**)(__int64(Prop) + 0x8);                                                                                                    \
-                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10);                                                                                          \
-                Name##__Weak = (FieldFlags & 0x8000000) != 0;                                                                                                        \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-            }                                                                                                                                                        \
-            else                                                                                                                                                     \
-                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);                                                                              \
-        }                                                                                                                                                            \
-        if (Name##__Weak)                                                                                                                                            \
-            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value;                                                                                \
-        else                                                                                                                                                         \
-            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value;                                                                                               \
-        return Value;                                                                                                                                                \
-    }                                                                                                                                                                \
-                                                                                                                                                                     \
-    __declspec(property(get = Get##Name, put = Set##Name))                                                                                                           \
+#define DEFINE_STRUCT_NEWOBJ_PROP(Name, ...) \
+    static inline int32 Name##__Offset = -2; \
+    static inline bool Name##__Weak = false; \
+    __VA_ARGS__* Get##Name() const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else if (VersionInfo.FortniteVersion >= 12.10) \
+            { \
+                auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+            else \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+        } \
+        return Name##__Weak ? GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset).Get() : GetFromOffset<__VA_ARGS__*>(this, Name##__Offset); \
+    } \
+ \
+    bool Has##Name() const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else if (VersionInfo.FortniteVersion >= 12.10) \
+            { \
+                auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+            else \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+        } \
+        return Name##__Offset != -1; \
+    } \
+ \
+    __VA_ARGS__* Set##Name(__VA_ARGS__*&& Value) const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else if (VersionInfo.FortniteVersion >= 12.10) \
+            { \
+                auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+            else \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+        } \
+        if (Name##__Weak) \
+            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value; \
+        else \
+            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value; \
+        return Value; \
+    } \
+ \
+    __VA_ARGS__* Set##Name(__VA_ARGS__*& Value) const \
+    { \
+        if (Name##__Offset == -2) \
+        { \
+            auto Prop = StaticStruct()->GetProperty(#Name, 0x8010000); \
+            if (!Prop) \
+                Name##__Offset = -1; \
+            else if (VersionInfo.FortniteVersion >= 12.10) \
+            { \
+                auto FieldClass = *(void**)(__int64(Prop) + 0x8); \
+                auto FieldFlags = *(uint64_t*)(__int64(FieldClass) + 0x10); \
+                Name##__Weak = (FieldFlags & 0x8000000) != 0; \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+            } \
+            else \
+                Name##__Offset = GetFromOffset<uint32>(Prop, Offsets::Offset_Internal); \
+        } \
+        if (Name##__Weak) \
+            GetFromOffset<TWeakObjectPtr<__VA_ARGS__>>(this, Name##__Offset) = Value; \
+        else \
+            GetFromOffset<__VA_ARGS__*>(this, Name##__Offset) = Value; \
+        return Value; \
+    } \
+ \
+    __declspec(property(get = Get##Name, put = Set##Name)) \
     __VA_ARGS__* Name;
 
 inline std::vector<void(*)()> _HookFuncs;
 inline std::vector<const char*> _HookNames;
 inline std::vector<void(*)()> _PostLoadHookFuncs;
 inline std::vector<const char*> _PostLoadHookNames;
-#define DefHookOg(_Rt, _Name, ...) static inline _Rt (*_Name##OG)(##__VA_ARGS__); static _Rt _Name(##__VA_ARGS__); 
-#define DefUHookOg(_Name) static inline void (*_Name##OG)(UObject*, FFrame&); static void _Name(UObject*, FFrame&); 
+#define DefHookOg(_Rt, _Name, ...) static inline _Rt (*_Name##OG)(##__VA_ARGS__); static _Rt _Name(##__VA_ARGS__);
+#define DefUHookOg(_Name) static inline void (*_Name##OG)(UObject*, FFrame&); static void _Name(UObject*, FFrame&);
 #define DefUHookOgRet(_Rt, _Name) static inline void (*_Name##OG)(UObject*, FFrame&, _Rt*); static void _Name(UObject *, FFrame&, _Rt*);
 #ifdef CLIENT
 #define InitHooks static void Hook();

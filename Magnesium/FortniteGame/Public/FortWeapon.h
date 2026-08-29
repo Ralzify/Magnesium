@@ -44,8 +44,6 @@ class AFortWeaponRanged : public AFortWeapon
 public:
     UCLASS_COMMON_MEMBERS(AFortWeaponRanged);
 
-    // Chapter 5 moved ballistic hit reporting onto the ranged weapon. The
-    // exec hook routes validated reports through Fortnite's native GAS path.
     DefUHookOg(ServerLWProjectile_SetDamageStartAndDirection_);
     DefUHookOg(ServerLWProjectile_EndActiveAbility_);
     DefUHookOg(ServerStopProjectileRequest_);
@@ -53,12 +51,9 @@ public:
     DefUHookOg(MulticastStopProjectileRequestUnreliable_);
     DefUHookOg(ServerNotifyPawnHit_);
 
-    static void NotifyServerAbilityActivationStarted(
-        UObject* AbilitySourceObject);
-    static void NotifyServerAbilityActivated(
-        UObject* AbilitySourceObject);
-    static void NotifyServerAbilityActivationFailed(
-        UObject* AbilitySourceObject);
+    static void NotifyServerAbilityActivationStarted(UObject* AbilitySourceObject);
+    static void NotifyServerAbilityActivated(UObject* AbilitySourceObject);
+    static void NotifyServerAbilityActivationFailed(UObject* AbilitySourceObject);
     static void TickProjectileRelays();
 
     InitPostLoadHooks;

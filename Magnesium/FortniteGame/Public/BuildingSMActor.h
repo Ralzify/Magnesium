@@ -9,12 +9,7 @@ class UFortDecoItemDefinition;
 
 enum class EFortResourceType : uint8
 {
-    Wood = 0,
-    Stone = 1,
-    Metal = 2,
-    Permanite = 3,
-    GoldCurrency = 4,
-    None = 5
+    Wood = 0, Stone = 1, Metal = 2, Permanite = 3, GoldCurrency = 4, None = 5
 };
 
 class EFortResourceType__Enum
@@ -28,9 +23,9 @@ public:
 struct FTierMeshSets final
 {
 public:
-    int32                                         Tier;                                              // 0x0000(0x0004)(Edit, BlueprintVisible, ZeroConstructor, DisableEditOnInstance, IsPlainOldData, NoDestructor, HasGetValueTypeHash, NativeAccessSpecifierPublic)
-    uint8                                         Pad_4[0x4];                                        // 0x0004(0x0004)(Fixing Size After Last Property [ Dumper-7 ])
-    TArray<void*>                                 MeshSets;                                          // 0x0008(0x0010)(Edit, BlueprintVisible, ZeroConstructor, DisableEditOnInstance, NativeAccessSpecifierPublic)
+    int32                                         Tier; // 0x0000(0x0004)
+    uint8                                         Pad_4[0x4]; // 0x0004(0x0004)
+    TArray<void*>                                 MeshSets; // 0x0008(0x0010)
 };
 
 inline uint64_t GetSparseClassData_ = 0;
@@ -165,12 +160,9 @@ public:
         const wchar_t* ItemDefinitionPath = nullptr, int32 AttachmentSlot = -1,
         int32 TrapLevel = -1, int32 OriginalTrapLevel = -1,
         UFortDecoItemDefinition* ResolvedItemDefinition = nullptr,
-        bool bRecoverDeferredPlacement = false,
-        bool bFinalPlacementSweep = false,
-        const std::vector<TWeakObjectPtr<ABuildingSMActor>>*
-            ExcludedActors = nullptr,
-        const std::vector<TWeakObjectPtr<ABuildingSMActor>>*
-            BaselineActors = nullptr);
+        bool bRecoverDeferredPlacement = false, bool bFinalPlacementSweep = false,
+        const std::vector<TWeakObjectPtr<ABuildingSMActor>>* ExcludedActors = nullptr,
+        const std::vector<TWeakObjectPtr<ABuildingSMActor>>* BaselineActors = nullptr);
     static void RegisterTrapDefinition(UClass* TrapClass, UFortDecoItemDefinition* ItemDefinition,
         ABuildingSMActor* TrapActor = nullptr);
     static UFortDecoItemDefinition* GetTrapDefinition(UClass* TrapClass);
@@ -180,7 +172,8 @@ public:
         UClass* ExpectedTrapClass = nullptr);
     static void TickSavedTrapAttachments();
 
-    DefHookOg(void, OnDamageServer, ABuildingSMActor*, float, FGameplayTagContainer, FVector, __int64, AActor*, AActor*, __int64);
+    DefHookOg(void, OnDamageServer, ABuildingSMActor*, float, FGameplayTagContainer, FVector,
+        __int64, AActor*, AActor*, __int64);
     DefUHookOg(ServerSpawnDeco_Implementation);
 
     InitPostLoadHooks;

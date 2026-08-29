@@ -46,7 +46,7 @@
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #pragma warning(push)
-#pragma warning(disable: 4996) // stb_image_write uses sprintf in the HDR path
+#pragma warning(disable: 4996)
 #include "stb_image_write.h"
 #pragma warning(pop)
 #define BCDEC_IMPLEMENTATION
@@ -56,30 +56,17 @@
 
 #pragma comment(lib, "d3d11.lib")
 
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
+    LPARAM lParam);
 
 UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 
-// The client size the launcher layout is built for, in physical pixels. Fixed
-// once in GUI::Init from the DPI of the monitor the window is created on, then
-// held across monitor changes - see ApplyFixedClientSize.
+// Layout target in physical pixels, fixed once from the creating monitor's DPI.
 static int g_ClientWidth = 0;
 static int g_ClientHeight = 0;
 
-// Resizes hWnd so its CLIENT area is exactly g_ClientWidth x g_ClientHeight.
-//
-// Two things make this necessary. CreateWindow and SetWindowPos take the OUTER
-// window rect, so passing the desired client size there silently loses the
-// title bar and border to it. And under per-monitor DPI awareness Windows
-// rescales the non-client area when the window crosses to a monitor with a
-// different DPI, which changes the client size - and therefore the swap chain
-// and io.DisplaySize - out from under a layout that never asked to be resized.
-//
-// Dpi should be the new DPI from WM_DPICHANGED, because GetDpiForWindow still
-// reports the old one while that message is being handled. Pass 0 otherwise.
-// MoveTo repositions the window as well; pass null to resize in place.
-static void ApplyFixedClientSize(
-    HWND hWnd, UINT Dpi = 0, const POINT* MoveTo = nullptr)
+// SetWindowPos takes the outer rect, and per-monitor DPI rescales the non-client area.
+static void ApplyFixedClientSize(HWND hWnd, UINT Dpi = 0, const POINT* MoveTo = nullptr)
 {
     if (!hWnd || g_ClientWidth <= 0 || g_ClientHeight <= 0)
         return;
@@ -88,29 +75,21 @@ static void ApplyFixedClientSize(
     const DWORD ExStyle = (DWORD)GetWindowLongPtrW(hWnd, GWL_EXSTYLE);
     RECT Rect{ 0, 0, g_ClientWidth, g_ClientHeight };
 
-    // The per-DPI variants are Windows 10 1607+. Resolve them dynamically so
-    // this still does the right thing (just without per-monitor non-client
-    // metrics) anywhere older.
     bool bAdjusted = false;
     if (auto User32 = GetModuleHandleW(L"user32.dll"))
     {
-        using FAdjustForDpi =
-            BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+        using FAdjustForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
         using FGetDpiForWindow = UINT(WINAPI*)(HWND);
 
-        auto AdjustForDpi = (FAdjustForDpi)GetProcAddress(
-            User32, "AdjustWindowRectExForDpi");
-        auto GetDpi = (FGetDpiForWindow)GetProcAddress(
-            User32, "GetDpiForWindow");
+        auto AdjustForDpi = (FAdjustForDpi)GetProcAddress(User32, "AdjustWindowRectExForDpi");
+        auto GetDpi = (FGetDpiForWindow)GetProcAddress(User32, "GetDpiForWindow");
 
         if (AdjustForDpi)
         {
-            const UINT EffectiveDpi =
-                Dpi ? Dpi : (GetDpi ? GetDpi(hWnd) : 0);
+            const UINT EffectiveDpi = Dpi ? Dpi : (GetDpi ? GetDpi(hWnd) : 0);
             if (EffectiveDpi)
             {
-                bAdjusted = AdjustForDpi(
-                    &Rect, Style, FALSE, ExStyle, EffectiveDpi) != FALSE;
+                bAdjusted = AdjustForDpi(&Rect, Style, FALSE, ExStyle, EffectiveDpi) != FALSE;
             }
         }
     }
@@ -121,13 +100,8 @@ static void ApplyFixedClientSize(
     if (!MoveTo)
         Flags |= SWP_NOMOVE;
 
-    SetWindowPos(
-        hWnd, nullptr,
-        MoveTo ? MoveTo->x : 0,
-        MoveTo ? MoveTo->y : 0,
-        Rect.right - Rect.left,
-        Rect.bottom - Rect.top,
-        Flags);
+    SetWindowPos(hWnd, nullptr, MoveTo ? MoveTo->x : 0, MoveTo ? MoveTo->y : 0,
+        Rect.right - Rect.left, Rect.bottom - Rect.top, Flags);
 }
 
 static std::atomic<ULONGLONG> GServerJoinableAtMs{ 0 };
@@ -137,9 +111,7 @@ static bool GAutoHostPausedBySafeZoneValidation = false;
 namespace TrickshotManager
 {
     void GameThreadTick();
-    void RegisterSpawnedActor(
-        AActor* Actor,
-        AFortPlayerControllerAthena* Controller,
+    void RegisterSpawnedActor(AActor* Actor, AFortPlayerControllerAthena* Controller,
         const std::string& CanonicalClassPath);
 }
 
@@ -153,10 +125,8 @@ namespace
     UWorld* GPlayerNameCacheWorld = nullptr;
     uint64_t GPlayerNameCacheWorldIdentity = 0;
     ULONGLONG GNextPlayerNameRefreshMs = 0;
-    std::unordered_map<uint64_t, std::string>
-        GPlayerNamesByState;
-    std::unordered_map<uint64_t, std::string>
-        GPlayerNamesByConnection;
+    std::unordered_map<uint64_t, std::string> GPlayerNamesByState;
+    std::unordered_map<uint64_t, std::string> GPlayerNamesByConnection;
 
     struct FPlayerCombatStats
     {
@@ -171,16 +141,13 @@ namespace
     };
 
     constexpr ULONGLONG kPlayerCombatMaxAgeMs = 1000ULL;
-    std::unordered_map<uint64_t, FPlayerCombatStats>
-        GPlayerCombatStatsByState;
+    std::unordered_map<uint64_t, FPlayerCombatStats> GPlayerCombatStatsByState;
 
-    uint64_t GetGuiObjectIdentityGuarded(
-        const UObject* Object) noexcept;
+    uint64_t GetGuiObjectIdentityGuarded(const UObject* Object) noexcept;
 
     int CountConnectedPlayersForDisplay(UWorld* World)
     {
-        if (!GetGuiObjectIdentityGuarded(World) ||
-            !World->HasNetDriver() ||
+        if (!GetGuiObjectIdentityGuarded(World) || !World->HasNetDriver() ||
             !GetGuiObjectIdentityGuarded(World->NetDriver))
         {
             return 0;
@@ -191,31 +158,23 @@ namespace
             return 0;
 
         auto& Connections = Driver->ClientConnections;
-        if (Connections.Num() < 0 ||
-            Connections.Max() < Connections.Num() ||
-            Connections.Max() > 4096 ||
-            (Connections.Num() > 0 &&
-             (!Connections.Data ||
-              !SDK::MemReadable(
-                  Connections.Data,
-                  static_cast<size_t>(Connections.Num()) *
+        if (Connections.Num() < 0 || Connections.Max() < Connections.Num() ||
+            Connections.Max() > 4096 || (Connections.Num() > 0 && (!Connections.Data ||
+              !SDK::MemReadable(Connections.Data, static_cast<size_t>(Connections.Num()) *
                       sizeof(UNetConnection*)))))
         {
             return 0;
         }
 
         std::vector<AFortPlayerControllerAthena*> Players;
-        auto AddConnection =
-            [&](UNetConnection* Connection)
+        auto AddConnection = [&](UNetConnection* Connection)
             {
                 if (!GetGuiObjectIdentityGuarded(Connection))
                     return;
 
                 auto PlayerController = Connection->PlayerController;
-                if (GetGuiObjectIdentityGuarded(PlayerController) &&
-                    std::find(
-                        Players.begin(), Players.end(),
-                        PlayerController) == Players.end())
+                if (GetGuiObjectIdentityGuarded(PlayerController) && std::find(
+                        Players.begin(), Players.end(), PlayerController) == Players.end())
                 {
                     Players.push_back(PlayerController);
                 }
@@ -223,15 +182,9 @@ namespace
                 if (!Connection->HasChildren())
                     return;
                 auto& Children = Connection->Children;
-                if (Children.Num() < 0 ||
-                    Children.Max() < Children.Num() ||
-                    Children.Max() > 256 ||
-                    (Children.Num() > 0 &&
-                     (!Children.Data ||
-                      !SDK::MemReadable(
-                          Children.Data,
-                          static_cast<size_t>(Children.Num()) *
-                              sizeof(UNetConnection*)))))
+                if (Children.Num() < 0 || Children.Max() < Children.Num() || Children.Max() > 256 ||
+                    (Children.Num() > 0 && (!Children.Data || !SDK::MemReadable(Children.Data,
+                          static_cast<size_t>(Children.Num()) * sizeof(UNetConnection*)))))
                 {
                     return;
                 }
@@ -242,10 +195,8 @@ namespace
                     if (!GetGuiObjectIdentityGuarded(Child))
                         continue;
                     auto ChildController = Child->PlayerController;
-                    if (GetGuiObjectIdentityGuarded(ChildController) &&
-                        std::find(
-                            Players.begin(), Players.end(),
-                            ChildController) == Players.end())
+                    if (GetGuiObjectIdentityGuarded(ChildController) && std::find(
+                            Players.begin(), Players.end(), ChildController) == Players.end())
                     {
                         Players.push_back(ChildController);
                     }
@@ -263,9 +214,7 @@ namespace
     class FPlayerNameCacheSharedLock final
     {
     public:
-        FPlayerNameCacheSharedLock() noexcept
-            : Acquired(
-                TryAcquireSRWLockShared(
+        FPlayerNameCacheSharedLock() noexcept : Acquired(TryAcquireSRWLockShared(
                     &GPlayerNameCacheLock) != FALSE)
         {
         }
@@ -276,10 +225,8 @@ namespace
                 ReleaseSRWLockShared(&GPlayerNameCacheLock);
         }
 
-        FPlayerNameCacheSharedLock(
-            const FPlayerNameCacheSharedLock&) = delete;
-        FPlayerNameCacheSharedLock& operator=(
-            const FPlayerNameCacheSharedLock&) = delete;
+        FPlayerNameCacheSharedLock(const FPlayerNameCacheSharedLock&) = delete;
+        FPlayerNameCacheSharedLock& operator=(const FPlayerNameCacheSharedLock&) = delete;
 
         bool owns_lock() const noexcept
         {
@@ -293,9 +240,7 @@ namespace
     class FPlayerNameCacheExclusiveLock final
     {
     public:
-        FPlayerNameCacheExclusiveLock() noexcept
-            : Acquired(
-                TryAcquireSRWLockExclusive(
+        FPlayerNameCacheExclusiveLock() noexcept : Acquired(TryAcquireSRWLockExclusive(
                     &GPlayerNameCacheLock) != FALSE)
         {
         }
@@ -306,10 +251,8 @@ namespace
                 ReleaseSRWLockExclusive(&GPlayerNameCacheLock);
         }
 
-        FPlayerNameCacheExclusiveLock(
-            const FPlayerNameCacheExclusiveLock&) = delete;
-        FPlayerNameCacheExclusiveLock& operator=(
-            const FPlayerNameCacheExclusiveLock&) = delete;
+        FPlayerNameCacheExclusiveLock(const FPlayerNameCacheExclusiveLock&) = delete;
+        FPlayerNameCacheExclusiveLock& operator=(const FPlayerNameCacheExclusiveLock&) = delete;
 
         bool owns_lock() const noexcept
         {
@@ -322,68 +265,50 @@ namespace
 
     void DisablePlayerNameCache() noexcept
     {
-        GPlayerNameCacheRetryAtMs.store(
-            GetTickCount64() + kPlayerNameCacheFaultRetryMs,
+        GPlayerNameCacheRetryAtMs.store(GetTickCount64() + kPlayerNameCacheFaultRetryMs,
             std::memory_order_release);
-        if (!GPlayerNameCacheDisabled.exchange(
-                true, std::memory_order_acq_rel))
+        if (!GPlayerNameCacheDisabled.exchange(true, std::memory_order_acq_rel))
         {
-            OutputDebugStringA(
-                "[PlayerNames] disabled after a guarded fault\n");
+            OutputDebugStringA("[PlayerNames] disabled after a guarded fault\n");
         }
     }
 
     bool TryReenablePlayerNameCache() noexcept
     {
-        if (!GPlayerNameCacheDisabled.load(
-                std::memory_order_acquire))
+        if (!GPlayerNameCacheDisabled.load(std::memory_order_acquire))
         {
             return true;
         }
 
-        if (GetTickCount64() < GPlayerNameCacheRetryAtMs.load(
-                std::memory_order_acquire))
+        if (GetTickCount64() < GPlayerNameCacheRetryAtMs.load(std::memory_order_acquire))
         {
             return false;
         }
 
-        GPlayerNameCacheDisabled.store(
-            false, std::memory_order_release);
-        GPlayerNameCacheRetryAtMs.store(
-            0, std::memory_order_release);
-        OutputDebugStringA(
-            "[PlayerNames] retrying after guarded fault\n");
+        GPlayerNameCacheDisabled.store(false, std::memory_order_release);
+        GPlayerNameCacheRetryAtMs.store(0, std::memory_order_release);
+        OutputDebugStringA("[PlayerNames] retrying after guarded fault\n");
         return true;
     }
 
-    bool TryCopyFStringUtf8(
-        const FString* Value,
-        int32 MaxCharacters,
-        std::string& OutValue)
+    bool TryCopyFStringUtf8(const FString* Value, int32 MaxCharacters, std::string& OutValue)
     {
         OutValue.clear();
-        if (!Value ||
-            !SDK::MemReadable(Value, sizeof(FString)) ||
-            !Value->Data ||
-            Value->NumElements <= 0 ||
-            Value->NumElements > MaxCharacters ||
-            Value->MaxElements < Value->NumElements ||
-            Value->MaxElements > (1 << 20))
+        if (!Value || !SDK::MemReadable(Value, sizeof(FString)) || !Value->Data ||
+            Value->NumElements <= 0 || Value->NumElements > MaxCharacters ||
+            Value->MaxElements < Value->NumElements || Value->MaxElements > (1 << 20))
         {
             return false;
         }
 
-        const size_t ReadBytes =
-            (size_t)Value->NumElements * sizeof(wchar_t);
+        const size_t ReadBytes = (size_t)Value->NumElements * sizeof(wchar_t);
         if (!SDK::MemReadable(Value->Data, ReadBytes))
             return false;
 
         int32 CharacterCount = 0;
-        while (CharacterCount < Value->NumElements &&
-            Value->Data[CharacterCount] != L'\0')
+        while (CharacterCount < Value->NumElements && Value->Data[CharacterCount] != L'\0')
         {
-            const wchar_t Character =
-                Value->Data[CharacterCount];
+            const wchar_t Character = Value->Data[CharacterCount];
             if (Character < L' ')
                 return false;
             CharacterCount++;
@@ -391,60 +316,35 @@ namespace
         if (CharacterCount <= 0)
             return false;
 
-        const int Utf8Bytes = WideCharToMultiByte(
-            CP_UTF8,
-            WC_ERR_INVALID_CHARS,
-            Value->Data,
-            CharacterCount,
-            nullptr,
-            0,
-            nullptr,
-            nullptr);
-        // A connection RequestURL can legitimately be much longer than a
-        // player name because older clients append authentication/options.
-        // Keep the conversion bounded by the caller's validated UTF-16 limit
-        // instead of silently imposing a second 1 KiB cap that made valid
-        // URLs fall through to an unreliable PlayerState placeholder.
+        const int Utf8Bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, Value->Data,
+            CharacterCount, nullptr, 0, nullptr, nullptr);
         const int MaxUtf8Bytes = MaxCharacters * 3;
         if (Utf8Bytes <= 0 || Utf8Bytes > MaxUtf8Bytes)
             return false;
 
         OutValue.resize((size_t)Utf8Bytes);
-        return WideCharToMultiByte(
-            CP_UTF8,
-            WC_ERR_INVALID_CHARS,
-            Value->Data,
-            CharacterCount,
-            OutValue.data(),
-            Utf8Bytes,
-            nullptr,
-            nullptr) == Utf8Bytes;
+        return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, Value->Data, CharacterCount,
+            OutValue.data(), Utf8Bytes, nullptr, nullptr) == Utf8Bytes;
     }
 
-    bool TryReadReflectedPlayerName(
-        AFortPlayerStateAthena* PlayerState,
-        const char* PropertyName,
+    bool TryReadReflectedPlayerName(AFortPlayerStateAthena* PlayerState, const char* PropertyName,
         std::string& OutName)
     {
-        if (!PlayerState || !PropertyName ||
-            !SDK::MemReadable(PlayerState, sizeof(UObject)))
+        if (!PlayerState || !PropertyName || !SDK::MemReadable(PlayerState, sizeof(UObject)))
         {
             return false;
         }
 
-        auto Property = PlayerState->GetProperty(
-            PropertyName, GUESS_PROP_FLAGS(FString));
+        auto Property = PlayerState->GetProperty(PropertyName, GUESS_PROP_FLAGS(FString));
         if (!Property)
             return false;
 
-		if (GetFromOffset<uint32>(
-				Property, Offsets::ElementSize) != sizeof(FString))
+        if (GetFromOffset<uint32>(Property, Offsets::ElementSize) != sizeof(FString))
         {
             return false;
         }
 
-		const uint32 Offset = SDK::ReadPropertyOffset(
-            GetFromOffset<uint32>(
+        const uint32 Offset = SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                 Property, Offsets::Offset_Internal));
         if (Offset == UINT32_MAX || Offset >= 0x10000)
             return false;
@@ -454,9 +354,7 @@ namespace
         return TryCopyFStringUtf8(Value, 512, OutName);
     }
 
-    bool GuardedInvokePlayerNameFunction(
-        AFortPlayerStateAthena* PlayerState,
-        UFunction* Function,
+    bool GuardedInvokePlayerNameFunction(AFortPlayerStateAthena* PlayerState, UFunction* Function,
         void* Parameters) noexcept
     {
         __try
@@ -470,29 +368,20 @@ namespace
         }
     }
 
-    bool TryReadPlayerNameFunction(
-        AFortPlayerStateAthena* PlayerState,
-        std::string& OutName)
+    bool TryReadPlayerNameFunction(AFortPlayerStateAthena* PlayerState, std::string& OutName)
     {
         OutName.clear();
-        if (!PlayerState ||
-            !SDK::MemReadable(PlayerState, sizeof(UObject)))
+        if (!PlayerState || !SDK::MemReadable(PlayerState, sizeof(UObject)))
         {
             return false;
         }
 
-        // This is the same displayed-name source the older menu used. Resolve
-        // the function dynamically instead of using DEFINE_FUNC's one-shot
-        // cache: the earliest supported builds do not expose this UFunction,
-        // and a transient early miss must not permanently disable it.
+        // Resolve per call: the earliest builds lack this UFunction and DEFINE_FUNC caches the miss.
         auto Function = PlayerState->GetFunction("GetPlayerName");
         if (!Function)
             return false;
 
-        // GetPlayerName is stable semantically, but its reflected return offset
-        // is not guaranteed to be byte zero across UProperty/FField layouts.
-        // Resolve the sole named return and invoke a bounded parameter buffer
-        // instead of relying on UObject::Call's iteration-order ABI.
+        // The reflected return offset is not always zero across UProperty/FField layouts.
         const auto Parameters = Function->GetParamsNamed();
         uint32 ReturnValueOffset = UINT32_MAX;
         uint32 ReturnValueSize = 0;
@@ -510,18 +399,12 @@ namespace
         constexpr uint64 CPF_Parm = 0x80;
         constexpr uint64 CPF_OutParm = 0x100;
         constexpr uint64 CPF_ReturnParm = 0x400;
-		const uint32 BufferSize = Parameters.Size;
-        const bool bReturnFits =
-            ReturnValueOffset != UINT32_MAX &&
-            ReturnValueOffset <= BufferSize &&
-            sizeof(FString) <= BufferSize - ReturnValueOffset;
-        if (Parameters.NameOffsetMap.size() != 1 ||
-            BufferSize == 0 || BufferSize > 0x1000 ||
-            !bReturnFits ||
-			(ReturnValueSize != sizeof(FString) ||
-			  !(ReturnValueFlags & CPF_Parm) ||
-			  !(ReturnValueFlags & CPF_OutParm) ||
-			  !(ReturnValueFlags & CPF_ReturnParm)))
+        const uint32 BufferSize = Parameters.Size;
+        const bool bReturnFits = ReturnValueOffset != UINT32_MAX &&
+            ReturnValueOffset <= BufferSize && sizeof(FString) <= BufferSize - ReturnValueOffset;
+        if (Parameters.NameOffsetMap.size() != 1 || BufferSize == 0 || BufferSize > 0x1000 ||
+            !bReturnFits || (ReturnValueSize != sizeof(FString) || !(ReturnValueFlags & CPF_Parm) ||
+              !(ReturnValueFlags & CPF_OutParm) || !(ReturnValueFlags & CPF_ReturnParm)))
         {
             return false;
         }
@@ -530,25 +413,16 @@ namespace
         if (!Memory)
             return false;
         memset(Memory, 0, BufferSize);
-        const bool bInvoked = GuardedInvokePlayerNameFunction(
-            PlayerState, Function, Memory);
+        const bool bInvoked = GuardedInvokePlayerNameFunction(PlayerState, Function, Memory);
         FString Value{};
         if (bInvoked)
         {
-            memcpy(
-                &Value,
-                reinterpret_cast<uint8*>(Memory) + ReturnValueOffset,
-                sizeof(Value));
+            memcpy(&Value, reinterpret_cast<uint8*>(Memory) + ReturnValueOffset, sizeof(Value));
         }
-        const bool Copied =
-            bInvoked && TryCopyFStringUtf8(&Value, 512, OutName);
-        // ProcessEvent constructs the return FString for the caller. The SDK's
-        // TArray destructor is intentionally non-owning, so release this one
-        // explicitly after copying instead of leaking it every cache refresh.
-        if (bInvoked && Value.Data &&
-            Value.NumElements >= 0 &&
-            Value.MaxElements >= Value.NumElements &&
-            Value.MaxElements <= 4096 &&
+        const bool Copied = bInvoked && TryCopyFStringUtf8(&Value, 512, OutName);
+        // The SDK's TArray destructor is non-owning, so free the returned string here.
+        if (bInvoked && Value.Data && Value.NumElements >= 0 &&
+            Value.MaxElements >= Value.NumElements && Value.MaxElements <= 4096 &&
             SDK::MemReadable(Value.Data, sizeof(wchar_t)))
         {
             Value.Free();
@@ -559,35 +433,24 @@ namespace
 
     bool IsGenericPlayerNamePlaceholder(const std::string& Name);
 
-    std::string ResolveAuthoritativePlayerName(
-        AFortPlayerStateAthena* PlayerState)
+    std::string ResolveAuthoritativePlayerName(AFortPlayerStateAthena* PlayerState)
     {
         std::string Name;
         std::string Provisional;
-        // Use Fortnite's displayed PlayerState name before any connection URL
-        // identity. FN30 can put an opaque launcher/profile alias in the join
-        // URL even while GetPlayerName returns the correct in-game label.
         if (TryReadPlayerNameFunction(PlayerState, Name))
         {
             if (!IsGenericPlayerNamePlaceholder(Name))
                 return Name;
             Provisional = Name;
         }
-        if (TryReadReflectedPlayerName(
-                PlayerState, "PlayerNamePrivate", Name))
+        if (TryReadReflectedPlayerName(PlayerState, "PlayerNamePrivate", Name))
         {
             if (!IsGenericPlayerNamePlaceholder(Name))
                 return Name;
             if (Provisional.empty())
                 Provisional = Name;
         }
-        // PlayerNamePrivate can legitimately contain the same temporary
-        // "Player N" placeholder as GetPlayerName while the public replicated
-        // field has already received the canonical label. Probe both fields
-        // independently instead of letting a successful placeholder read
-        // short-circuit the second capability.
-        if (TryReadReflectedPlayerName(
-                PlayerState, "PlayerName", Name))
+        if (TryReadReflectedPlayerName(PlayerState, "PlayerName", Name))
         {
             if (!IsGenericPlayerNamePlaceholder(Name))
                 return Name;
@@ -597,24 +460,16 @@ namespace
         return Provisional;
     }
 
-    bool TryCopyConnectionPlayerNameUnsafe(
-        UNetConnection* Connection,
-        char* OutName,
-        size_t OutCapacity,
-        size_t* OutLength)
+    bool TryCopyConnectionPlayerNameUnsafe(UNetConnection* Connection, char* OutName,
+        size_t OutCapacity, size_t* OutLength)
     {
         if (!OutName || !OutCapacity || !OutLength)
             return false;
         OutName[0] = '\0';
         *OutLength = 0;
 
-        const std::string Name =
-            GUI::GetPlayerNameFromConnection(Connection);
-        // A transient engine-generated "Player N" is not an identity. Leaving
-        // this refresh unresolved preserves any prior canonical cache entry and
-        // lets the next replicated PlayerName update replace the UI fallback.
-        if (Name.empty() || IsGenericPlayerNamePlaceholder(Name) ||
-            Name.size() >= OutCapacity)
+        const std::string Name = GUI::GetPlayerNameFromConnection(Connection);
+        if (Name.empty() || IsGenericPlayerNamePlaceholder(Name) || Name.size() >= OutCapacity)
             return false;
         memcpy(OutName, Name.data(), Name.size());
         OutName[Name.size()] = '\0';
@@ -622,16 +477,12 @@ namespace
         return true;
     }
 
-    bool TryCopyConnectionPlayerNameGuarded(
-        UNetConnection* Connection,
-        char* OutName,
-        size_t OutCapacity,
-        size_t* OutLength) noexcept
+    bool TryCopyConnectionPlayerNameGuarded(UNetConnection* Connection, char* OutName,
+        size_t OutCapacity, size_t* OutLength) noexcept
     {
         __try
         {
-            return TryCopyConnectionPlayerNameUnsafe(
-                Connection, OutName, OutCapacity, OutLength);
+            return TryCopyConnectionPlayerNameUnsafe(Connection, OutName, OutCapacity, OutLength);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -658,8 +509,7 @@ namespace
         }
 
         size_t Index = std::size(Prefix) - 1;
-        while (Index < Name.size() && Name[Index] == ' ')
-            ++Index;
+        while (Index < Name.size() && Name[Index] == ' ') ++Index;
         if (Index == Name.size())
             return false;
         for (; Index < Name.size(); ++Index)
@@ -670,42 +520,30 @@ namespace
         return true;
     }
 
-    bool TryCopyResolvedPlayerNameUnsafe(
-        AFortPlayerStateAthena* PlayerState,
-        UNetConnection* Connection,
-        char* OutName,
-        size_t OutCapacity,
-        size_t* OutLength)
+    bool TryCopyResolvedPlayerNameUnsafe(AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection, char* OutName, size_t OutCapacity, size_t* OutLength)
     {
         if (!OutName || OutCapacity == 0 || !OutLength)
             return false;
         OutName[0] = '\0';
         *OutLength = 0;
 
-        // Prefer the authoritative replicated PlayerState label. RequestURL is
-        // only a compatibility fallback: its private connection offset is not
-        // stable on UE5 and may be unavailable while profile registration is
-        // still settling for a late joiner.
+        // RequestURL's connection offset is private and unstable on UE5.
         std::string Name = ResolveAuthoritativePlayerName(PlayerState);
         if (Name.empty() || IsGenericPlayerNamePlaceholder(Name))
         {
             std::array<char, 1025> ConnectionName{};
             size_t ConnectionNameLength = 0;
-            TryCopyConnectionPlayerNameGuarded(
-                Connection,
-                ConnectionName.data(),
-                ConnectionName.size(),
-                &ConnectionNameLength);
+            TryCopyConnectionPlayerNameGuarded(Connection, ConnectionName.data(),
+                ConnectionName.size(), &ConnectionNameLength);
             if (ConnectionNameLength > 0)
             {
-                std::string ConnectionLabel(
-                    ConnectionName.data(), ConnectionNameLength);
+                std::string ConnectionLabel(ConnectionName.data(), ConnectionNameLength);
                 if (Name.empty() || ConnectionLabel != Name)
                     Name = std::move(ConnectionLabel);
             }
         }
-        if (Name.empty() || IsGenericPlayerNamePlaceholder(Name) ||
-            Name.size() >= OutCapacity)
+        if (Name.empty() || IsGenericPlayerNamePlaceholder(Name) || Name.size() >= OutCapacity)
             return false;
 
         memcpy(OutName, Name.data(), Name.size());
@@ -714,20 +552,12 @@ namespace
         return true;
     }
 
-    bool TryCopyResolvedPlayerNameGuarded(
-        AFortPlayerStateAthena* PlayerState,
-        UNetConnection* Connection,
-        char* OutName,
-        size_t OutCapacity,
-        size_t* OutLength) noexcept
+    bool TryCopyResolvedPlayerNameGuarded(AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection, char* OutName, size_t OutCapacity, size_t* OutLength) noexcept
     {
         __try
         {
-            return TryCopyResolvedPlayerNameUnsafe(
-                PlayerState,
-                Connection,
-                OutName,
-                OutCapacity,
+            return TryCopyResolvedPlayerNameUnsafe(PlayerState, Connection, OutName, OutCapacity,
                 OutLength);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
@@ -768,8 +598,7 @@ namespace
                 const int Low = HexDigitValue(Value[Index + 2]);
                 if (High >= 0 && Low >= 0)
                 {
-                    Decoded.push_back(
-                        (char)((High << 4) | Low));
+                    Decoded.push_back((char)((High << 4) | Low));
                     Index += 2;
                     continue;
                 }
@@ -779,21 +608,15 @@ namespace
         return Decoded;
     }
 
-    bool EqualsAsciiInsensitive(
-        const std::string& Value,
-        size_t Offset,
-        size_t Length,
+    bool EqualsAsciiInsensitive(const std::string& Value, size_t Offset, size_t Length,
         const char* Expected)
     {
         if (!Expected || strlen(Expected) != Length)
             return false;
         for (size_t Index = 0; Index < Length; ++Index)
         {
-            const unsigned char Left =
-                static_cast<unsigned char>(
-                    Value[Offset + Index]);
-            const unsigned char Right =
-                static_cast<unsigned char>(Expected[Index]);
+            const unsigned char Left = static_cast<unsigned char>(Value[Offset + Index]);
+            const unsigned char Right = static_cast<unsigned char>(Expected[Index]);
             if (std::tolower(Left) != std::tolower(Right))
                 return false;
         }
@@ -809,43 +632,23 @@ namespace
             if (Character < 0x20 || Character == 0x7f)
                 return false;
         }
-        return MultiByteToWideChar(
-                   CP_UTF8,
-                   MB_ERR_INVALID_CHARS,
-                   Name.data(),
-                   static_cast<int>(Name.size()),
-                   nullptr,
-                   0) > 0;
+        return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, Name.data(),
+                   static_cast<int>(Name.size()), nullptr, 0) > 0;
     }
 
-    bool TryReadExactURLNameOption(
-        const std::string& URL,
-        const char* Key,
-        std::string& Name)
+    bool TryReadExactURLNameOption(const std::string& URL, const char* Key, std::string& Name)
     {
         Name.clear();
         size_t SegmentStart = 0;
         while (SegmentStart <= URL.size())
         {
-            const size_t SegmentEnd =
-                URL.find_first_of("?&", SegmentStart);
-            const size_t BoundedEnd =
-                SegmentEnd == std::string::npos
-                    ? URL.size()
-                    : SegmentEnd;
-            const size_t Equals =
-                URL.find('=', SegmentStart);
-            if (Equals != std::string::npos &&
-                Equals < BoundedEnd &&
-                EqualsAsciiInsensitive(
-                    URL,
-                    SegmentStart,
-                    Equals - SegmentStart,
-                    Key))
+            const size_t SegmentEnd = URL.find_first_of("?&", SegmentStart);
+            const size_t BoundedEnd = SegmentEnd == std::string::npos ? URL.size() : SegmentEnd;
+            const size_t Equals = URL.find('=', SegmentStart);
+            if (Equals != std::string::npos && Equals < BoundedEnd && EqualsAsciiInsensitive(URL,
+                    SegmentStart, Equals - SegmentStart, Key))
             {
-                auto Candidate = DecodeURLPlayerName(
-                    URL.substr(
-                        Equals + 1,
+                auto Candidate = DecodeURLPlayerName(URL.substr(Equals + 1,
                         BoundedEnd - Equals - 1));
                 if (IsPlausiblePlayerName(Candidate))
                 {
@@ -862,8 +665,7 @@ namespace
 
     bool TryResetPlayerNameCache(UWorld* World)
     {
-        const uint64_t WorldIdentity =
-            GetGuiObjectIdentityGuarded(World);
+        const uint64_t WorldIdentity = GetGuiObjectIdentityGuarded(World);
         FPlayerNameCacheExclusiveLock Lock;
         if (!Lock.owns_lock())
             return false;
@@ -877,12 +679,9 @@ namespace
         return true;
     }
 
-    bool TryBeginPlayerNameRefresh(
-        UWorld* World,
-        ULONGLONG CurrentTimeMs)
+    bool TryBeginPlayerNameRefresh(UWorld* World, ULONGLONG CurrentTimeMs)
     {
-        const uint64_t WorldIdentity =
-            GetGuiObjectIdentityGuarded(World);
+        const uint64_t WorldIdentity = GetGuiObjectIdentityGuarded(World);
         if (!World || !WorldIdentity)
             return false;
 
@@ -890,8 +689,7 @@ namespace
         if (!Lock.owns_lock())
             return false;
 
-        if (GPlayerNameCacheWorld != World ||
-            GPlayerNameCacheWorldIdentity != WorldIdentity)
+        if (GPlayerNameCacheWorld != World || GPlayerNameCacheWorldIdentity != WorldIdentity)
         {
             GPlayerNameCacheWorld = World;
             GPlayerNameCacheWorldIdentity = WorldIdentity;
@@ -908,12 +706,8 @@ namespace
         return true;
     }
 
-    bool TryCopyCachedPlayerNameUnsafe(
-        AFortPlayerStateAthena* PlayerState,
-        UNetConnection* Connection,
-        char* OutName,
-        size_t OutCapacity,
-        size_t* OutLength)
+    bool TryCopyCachedPlayerNameUnsafe(AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection, char* OutName, size_t OutCapacity, size_t* OutLength)
     {
         if (!OutName || OutCapacity == 0 || !OutLength)
             return false;
@@ -921,13 +715,8 @@ namespace
         OutName[0] = '\0';
         *OutLength = 0;
 
-        // Object-array probing is the only fault-prone live-object work in a
-        // cache lookup. Complete it before taking the SRW lock so a guarded
-        // failure can never strand the cache lock in the acquired state.
-        const uint64_t PlayerStateIdentity =
-            GetGuiObjectIdentityGuarded(PlayerState);
-        const uint64_t ConnectionIdentity =
-            GetGuiObjectIdentityGuarded(Connection);
+        const uint64_t PlayerStateIdentity = GetGuiObjectIdentityGuarded(PlayerState);
+        const uint64_t ConnectionIdentity = GetGuiObjectIdentityGuarded(Connection);
 
         FPlayerNameCacheSharedLock Lock;
         if (!Lock.owns_lock())
@@ -936,20 +725,16 @@ namespace
         const std::string* CachedName = nullptr;
         if (PlayerStateIdentity)
         {
-            auto Found = GPlayerNamesByState.find(
-                PlayerStateIdentity);
-            if (Found != GPlayerNamesByState.end() &&
-                !Found->second.empty())
+            auto Found = GPlayerNamesByState.find(PlayerStateIdentity);
+            if (Found != GPlayerNamesByState.end() && !Found->second.empty())
             {
                 CachedName = &Found->second;
             }
         }
         if (!CachedName && ConnectionIdentity)
         {
-            auto Found = GPlayerNamesByConnection.find(
-                ConnectionIdentity);
-            if (Found != GPlayerNamesByConnection.end() &&
-                !Found->second.empty())
+            auto Found = GPlayerNamesByConnection.find(ConnectionIdentity);
+            if (Found != GPlayerNamesByConnection.end() && !Found->second.empty())
             {
                 CachedName = &Found->second;
             }
@@ -964,20 +749,12 @@ namespace
         return true;
     }
 
-    bool TryCopyCachedPlayerNameGuarded(
-        AFortPlayerStateAthena* PlayerState,
-        UNetConnection* Connection,
-        char* OutName,
-        size_t OutCapacity,
-        size_t* OutLength) noexcept
+    bool TryCopyCachedPlayerNameGuarded(AFortPlayerStateAthena* PlayerState,
+        UNetConnection* Connection, char* OutName, size_t OutCapacity, size_t* OutLength) noexcept
     {
         __try
         {
-            return TryCopyCachedPlayerNameUnsafe(
-                PlayerState,
-                Connection,
-                OutName,
-                OutCapacity,
+            return TryCopyCachedPlayerNameUnsafe(PlayerState, Connection, OutName, OutCapacity,
                 OutLength);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
@@ -991,22 +768,14 @@ namespace
         }
     }
 
-    bool TryReadPlayerCombatStatsUnsafe(
-        UWorld* World,
-        AFortPlayerControllerAthena* PlayerController,
-        AFortPlayerStateAthena* PlayerState,
-        AFortPlayerPawnAthena* PlayerPawn,
-        uint64_t WorldIdentity,
-        uint64_t ControllerIdentity,
-        uint64_t PlayerStateIdentity,
-        uint64_t PawnIdentity,
-        ULONGLONG CapturedAtMs,
+    bool TryReadPlayerCombatStatsUnsafe(UWorld* World,
+        AFortPlayerControllerAthena* PlayerController, AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* PlayerPawn, uint64_t WorldIdentity, uint64_t ControllerIdentity,
+        uint64_t PlayerStateIdentity, uint64_t PawnIdentity, ULONGLONG CapturedAtMs,
         FPlayerCombatStats& OutStats)
     {
-        if (!World || !PlayerController ||
-            !PlayerState || !PlayerPawn ||
-            !WorldIdentity || !ControllerIdentity ||
-            !PlayerStateIdentity || !PawnIdentity ||
+        if (!World || !PlayerController || !PlayerState || !PlayerPawn ||
+            !WorldIdentity || !ControllerIdentity || !PlayerStateIdentity || !PawnIdentity ||
             PlayerController->PlayerState != PlayerState)
         {
             return false;
@@ -1015,10 +784,8 @@ namespace
         const auto ControllerOwnsPawn = [&]()
         {
             return
-                (PlayerController->HasMyFortPawn() &&
-                 PlayerController->MyFortPawn == PlayerPawn) ||
-                (PlayerController->HasPawn() &&
-                 PlayerController->Pawn == PlayerPawn);
+                (PlayerController->HasMyFortPawn() && PlayerController->MyFortPawn == PlayerPawn) ||
+                (PlayerController->HasPawn() && PlayerController->Pawn == PlayerPawn);
         };
         if (!ControllerOwnsPawn())
             return false;
@@ -1026,34 +793,22 @@ namespace
         FPlayerCombatStats Stats{};
         Stats.Health = PlayerPawn->GetHealth();
         Stats.Shield = PlayerPawn->GetShield();
-        Stats.Kills = PlayerState->HasKillScore()
-            ? PlayerState->KillScore
-            : (PlayerState->HasKills()
-                   ? PlayerState->Kills
-                   : 0);
+        Stats.Kills = PlayerState->HasKillScore() ? PlayerState->KillScore
+            : (PlayerState->HasKills() ? PlayerState->Kills : 0);
 
         if (!std::isfinite(Stats.Health))
             Stats.Health = 0.f;
         if (!std::isfinite(Stats.Shield))
             Stats.Shield = 0.f;
-        Stats.Health =
-            (std::clamp)(Stats.Health, 0.f, 9999.f);
-        Stats.Shield =
-            (std::clamp)(Stats.Shield, 0.f, 9999.f);
-        Stats.Kills =
-            (std::clamp)(Stats.Kills, 0, 99999);
+        Stats.Health = (std::clamp)(Stats.Health, 0.f, 9999.f);
+        Stats.Shield = (std::clamp)(Stats.Shield, 0.f, 9999.f);
+        Stats.Kills = (std::clamp)(Stats.Kills, 0, 99999);
 
-        // A pawn can change during a respawn while the values above are being
-        // queried. Publish only if the complete object relationship is still
-        // exactly the one that began this sample.
         if (GetGuiObjectIdentityGuarded(World) != WorldIdentity ||
-            GetGuiObjectIdentityGuarded(PlayerController) !=
-                ControllerIdentity ||
-            GetGuiObjectIdentityGuarded(PlayerState) !=
-                PlayerStateIdentity ||
+            GetGuiObjectIdentityGuarded(PlayerController) != ControllerIdentity ||
+            GetGuiObjectIdentityGuarded(PlayerState) != PlayerStateIdentity ||
             GetGuiObjectIdentityGuarded(PlayerPawn) != PawnIdentity ||
-            PlayerController->PlayerState != PlayerState ||
-            !ControllerOwnsPawn())
+            PlayerController->PlayerState != PlayerState || !ControllerOwnsPawn())
         {
             return false;
         }
@@ -1067,24 +822,16 @@ namespace
         return true;
     }
 
-    bool TryReadPlayerCombatStatsGuarded(
-        UWorld* World,
-        AFortPlayerControllerAthena* PlayerController,
-        AFortPlayerStateAthena* PlayerState,
-        AFortPlayerPawnAthena* PlayerPawn,
-        uint64_t WorldIdentity,
-        uint64_t ControllerIdentity,
-        uint64_t PlayerStateIdentity,
-        uint64_t PawnIdentity,
-        ULONGLONG CapturedAtMs,
+    bool TryReadPlayerCombatStatsGuarded(UWorld* World,
+        AFortPlayerControllerAthena* PlayerController, AFortPlayerStateAthena* PlayerState,
+        AFortPlayerPawnAthena* PlayerPawn, uint64_t WorldIdentity, uint64_t ControllerIdentity,
+        uint64_t PlayerStateIdentity, uint64_t PawnIdentity, ULONGLONG CapturedAtMs,
         FPlayerCombatStats& OutStats) noexcept
     {
         __try
         {
-            return TryReadPlayerCombatStatsUnsafe(
-                World, PlayerController, PlayerState, PlayerPawn,
-                WorldIdentity, ControllerIdentity,
-                PlayerStateIdentity, PawnIdentity,
+            return TryReadPlayerCombatStatsUnsafe(World, PlayerController, PlayerState, PlayerPawn,
+                WorldIdentity, ControllerIdentity, PlayerStateIdentity, PawnIdentity,
                 CapturedAtMs, OutStats);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
@@ -1094,26 +841,18 @@ namespace
         }
     }
 
-    bool TryCopyCachedPlayerCombatStats(
-        AFortPlayerControllerAthena* PlayerController,
-        AFortPlayerStateAthena* PlayerState,
-        AFortPlayerPawnAthena* PlayerPawn,
+    bool TryCopyCachedPlayerCombatStats(AFortPlayerControllerAthena* PlayerController,
+        AFortPlayerStateAthena* PlayerState, AFortPlayerPawnAthena* PlayerPawn,
         FPlayerCombatStats& OutStats)
     {
-        GPlayerNameRefreshRequested.store(
-            true, std::memory_order_release);
+        GPlayerNameRefreshRequested.store(true, std::memory_order_release);
         OutStats = {};
         auto World = UWorld::GetWorld();
-        const uint64_t WorldIdentity =
-            GetGuiObjectIdentityGuarded(World);
-        const uint64_t ControllerIdentity =
-            GetGuiObjectIdentityGuarded(PlayerController);
-        const uint64_t PlayerStateIdentity =
-            GetGuiObjectIdentityGuarded(PlayerState);
-        const uint64_t PawnIdentity =
-            GetGuiObjectIdentityGuarded(PlayerPawn);
-        if (!WorldIdentity || !ControllerIdentity ||
-            !PlayerStateIdentity || !PawnIdentity)
+        const uint64_t WorldIdentity = GetGuiObjectIdentityGuarded(World);
+        const uint64_t ControllerIdentity = GetGuiObjectIdentityGuarded(PlayerController);
+        const uint64_t PlayerStateIdentity = GetGuiObjectIdentityGuarded(PlayerState);
+        const uint64_t PawnIdentity = GetGuiObjectIdentityGuarded(PlayerPawn);
+        if (!WorldIdentity || !ControllerIdentity || !PlayerStateIdentity || !PawnIdentity)
         {
             return false;
         }
@@ -1123,14 +862,12 @@ namespace
         if (!Lock.owns_lock())
             return false;
 
-        if (GPlayerNameCacheWorld != World ||
-            GPlayerNameCacheWorldIdentity != WorldIdentity)
+        if (GPlayerNameCacheWorld != World || GPlayerNameCacheWorldIdentity != WorldIdentity)
         {
             return false;
         }
 
-        auto Found = GPlayerCombatStatsByState.find(
-            PlayerStateIdentity);
+        auto Found = GPlayerCombatStatsByState.find(PlayerStateIdentity);
         if (Found == GPlayerCombatStatsByState.end())
             return false;
 
@@ -1138,10 +875,8 @@ namespace
         if (Stats.WorldIdentity != WorldIdentity ||
             Stats.ControllerIdentity != ControllerIdentity ||
             Stats.PlayerStateIdentity != PlayerStateIdentity ||
-            Stats.PawnIdentity != PawnIdentity ||
-            CurrentTimeMs < Stats.CapturedAtMs ||
-            CurrentTimeMs - Stats.CapturedAtMs >
-                kPlayerCombatMaxAgeMs)
+            Stats.PawnIdentity != PawnIdentity || CurrentTimeMs < Stats.CapturedAtMs ||
+            CurrentTimeMs - Stats.CapturedAtMs > kPlayerCombatMaxAgeMs)
         {
             return false;
         }
@@ -1158,20 +893,17 @@ namespace
         if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
             return 0;
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-		constexpr int32 InvalidFlags = 0x20;
-        if (!Item || Item->GetObject() != Object ||
-            (Item->GetFlags() & InvalidFlags))
+        constexpr int32 InvalidFlags = 0x20;
+        if (!Item || Item->GetObject() != Object || (Item->GetFlags() & InvalidFlags))
         {
             return 0;
         }
         return
-            (static_cast<uint64_t>(
-                static_cast<uint32_t>(ObjectIndex)) << 32) |
+            (static_cast<uint64_t>(static_cast<uint32_t>(ObjectIndex)) << 32) |
             static_cast<uint32_t>(Item->SerialRef());
     }
 
-    uint64_t GetGuiObjectIdentityGuarded(
-        const UObject* Object) noexcept
+    uint64_t GetGuiObjectIdentityGuarded(const UObject* Object) noexcept
     {
         __try
         {
@@ -1184,11 +916,9 @@ namespace
     }
 }
 
-std::string GUI::GetPlayerNameFromConnection(
-    UNetConnection* Connection)
+std::string GUI::GetPlayerNameFromConnection(UNetConnection* Connection)
 {
-    if (!Connection ||
-        !SDK::MemReadable(Connection, sizeof(UObject)))
+    if (!Connection || !SDK::MemReadable(Connection, sizeof(UObject)))
     {
         return {};
     }
@@ -1198,9 +928,6 @@ std::string GUI::GetPlayerNameFromConnection(
     if (!TryCopyFStringUtf8(RequestURL, 16384, URL))
         return {};
 
-    // Parse complete option keys instead of accepting the first arbitrary
-    // suffix ending in "Name". Legacy clients can send several name-shaped
-    // options; these keys identify the connection's displayed player name.
     std::string Name;
     if (TryReadExactURLNameOption(URL, "PlayerName", Name) ||
         TryReadExactURLNameOption(URL, "DisplayName", Name) ||
@@ -1211,58 +938,35 @@ std::string GUI::GetPlayerNameFromConnection(
     return {};
 }
 
-std::string GUI::GetPlayerName(
-    AFortPlayerStateAthena* PlayerState,
-    UNetConnection* Connection)
+std::string GUI::GetPlayerName(AFortPlayerStateAthena* PlayerState, UNetConnection* Connection)
 {
-    // Publish demand to the game thread. The authoritative cache is useful
-    // only while a render/gameplay caller is actually consuming player data.
-    GPlayerNameRefreshRequested.store(
-        true, std::memory_order_release);
-    if (GPlayerNameCacheDisabled.load(
-            std::memory_order_acquire))
+    GPlayerNameRefreshRequested.store(true, std::memory_order_release);
+    if (GPlayerNameCacheDisabled.load(std::memory_order_acquire))
     {
         return {};
     }
 
     std::array<char, 1025> Name{};
     size_t NameLength = 0;
-    if (TryCopyCachedPlayerNameGuarded(
-            PlayerState,
-            Connection,
-            Name.data(),
-            Name.size(),
+    if (TryCopyCachedPlayerNameGuarded(PlayerState, Connection, Name.data(), Name.size(),
             &NameLength))
     {
         return std::string(Name.data(), NameLength);
     }
 
-    // The menu renders on a separate thread, so a cache miss must never touch
-    // live Unreal objects. PlayerNamesGameTick reads the connection identity
-    // and any PlayerState fallback on the game thread.
     return {};
 }
 
-std::string GUI::GetPlayerNameGameThread(
-    AFortPlayerStateAthena* PlayerState,
+std::string GUI::GetPlayerNameGameThread(AFortPlayerStateAthena* PlayerState,
     UNetConnection* Connection)
 {
-    // Prefer the snapshot when one exists so ordinary connected players keep
-    // the exact same URL-name resolution as the menu. Cheat bots do not own a
-    // UNetConnection and therefore can never enter that cache; resolving their
-    // PlayerState here is safe because elimination reports run on the game
-    // thread.
     std::string Cached = GetPlayerName(PlayerState, Connection);
     if (!Cached.empty())
         return Cached;
 
     std::array<char, 1025> Resolved{};
     size_t ResolvedLength = 0;
-    if (TryCopyResolvedPlayerNameGuarded(
-            PlayerState,
-            Connection,
-            Resolved.data(),
-            Resolved.size(),
+    if (TryCopyResolvedPlayerNameGuarded(PlayerState, Connection, Resolved.data(), Resolved.size(),
             &ResolvedLength))
     {
         return std::string(Resolved.data(), ResolvedLength);
@@ -1276,56 +980,35 @@ namespace
     void PlayerNamesGameTickUnsafe()
     {
         auto World = UWorld::GetWorld();
-        auto Driver = World
-            ? (UNetDriver*)World->NetDriver
-            : nullptr;
+        auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
         if (!World || !Driver)
         {
-            // Consume only the request observed by this pass. A caller that
-            // publishes fresh demand after this exchange remains pending.
-            GPlayerNameRefreshRequested.exchange(
-                false, std::memory_order_acq_rel);
+            GPlayerNameRefreshRequested.exchange(false, std::memory_order_acq_rel);
             TryResetPlayerNameCache(nullptr);
             return;
         }
 
         const ULONGLONG CurrentTimeMs = GetTickCount64();
-        if (!TryBeginPlayerNameRefresh(
-                World, CurrentTimeMs))
+        if (!TryBeginPlayerNameRefresh(World, CurrentTimeMs))
         {
             return;
         }
 
-        // Do not consume demand while the 250-ms refresh throttle is active.
-        // Exchanging only after TryBegin succeeds also preserves any request
-        // published concurrently while the cache is being rebuilt.
-        GPlayerNameRefreshRequested.exchange(
-            false, std::memory_order_acq_rel);
+        GPlayerNameRefreshRequested.exchange(false, std::memory_order_acq_rel);
 
-        const uint64_t WorldIdentity =
-            GetGuiObjectIdentityGuarded(World);
+        const uint64_t WorldIdentity = GetGuiObjectIdentityGuarded(World);
         if (!WorldIdentity)
             return;
 
-        std::unordered_map<uint64_t, std::string>
-            NamesByState;
-        std::unordered_map<uint64_t, std::string>
-            NamesByConnection;
-        std::unordered_map<uint64_t, FPlayerCombatStats>
-            CombatStatsByState;
-        auto PlayerControllerClass =
-            AFortPlayerControllerAthena::StaticClass();
-        auto PlayerPawnClass =
-            AFortPlayerPawnAthena::StaticClass();
+        std::unordered_map<uint64_t, std::string> NamesByState;
+        std::unordered_map<uint64_t, std::string> NamesByConnection;
+        std::unordered_map<uint64_t, FPlayerCombatStats> CombatStatsByState;
+        auto PlayerControllerClass = AFortPlayerControllerAthena::StaticClass();
+        auto PlayerPawnClass = AFortPlayerPawnAthena::StaticClass();
         auto& Connections = Driver->ClientConnections;
-        if (Connections.Num() < 0 ||
-            Connections.Max() < Connections.Num() ||
-            Connections.Max() > 4096 ||
-            (Connections.Num() > 0 &&
-             (!Connections.Data ||
-              !SDK::MemReadable(
-                  Connections.Data,
-                  static_cast<size_t>(Connections.Num()) *
+        if (Connections.Num() < 0 || Connections.Max() < Connections.Num() ||
+            Connections.Max() > 4096 || (Connections.Num() > 0 && (!Connections.Data ||
+              !SDK::MemReadable(Connections.Data, static_cast<size_t>(Connections.Num()) *
                       sizeof(UNetConnection*)))))
         {
             return;
@@ -1335,53 +1018,36 @@ namespace
             Index++)
         {
             auto Connection = Connections[Index];
-            const uint64_t ConnectionIdentity =
-                GetGuiObjectIdentityGuarded(Connection);
-            auto PlayerController = ConnectionIdentity
-                ? Connection->PlayerController
-                : nullptr;
-            const uint64_t ControllerIdentity =
-                GetGuiObjectIdentityGuarded(PlayerController);
-            auto PlayerState = ControllerIdentity
-                ? (AFortPlayerStateAthena*)
-                    PlayerController->PlayerState
-                : nullptr;
-            const uint64_t PlayerStateIdentity =
-                GetGuiObjectIdentityGuarded(PlayerState);
+            const uint64_t ConnectionIdentity = GetGuiObjectIdentityGuarded(Connection);
+            auto PlayerController = ConnectionIdentity ? Connection->PlayerController : nullptr;
+            const uint64_t ControllerIdentity = GetGuiObjectIdentityGuarded(PlayerController);
+            auto PlayerState = ControllerIdentity ? (AFortPlayerStateAthena*)
+                    PlayerController->PlayerState : nullptr;
+            const uint64_t PlayerStateIdentity = GetGuiObjectIdentityGuarded(PlayerState);
             if (!ConnectionIdentity && !PlayerStateIdentity)
                 continue;
 
             AFortPlayerPawnAthena* PlayerPawn = nullptr;
-            auto FortPlayerController =
-                ControllerIdentity && PlayerControllerClass &&
+            auto FortPlayerController = ControllerIdentity && PlayerControllerClass &&
                 PlayerController->IsA(PlayerControllerClass)
-                    ? (AFortPlayerControllerAthena*)PlayerController
-                    : nullptr;
+                    ? (AFortPlayerControllerAthena*)PlayerController : nullptr;
             uint64_t PawnIdentity = 0;
-            if (FortPlayerController && PlayerPawnClass &&
-                FortPlayerController->HasMyFortPawn())
+            if (FortPlayerController && PlayerPawnClass && FortPlayerController->HasMyFortPawn())
             {
-                auto Candidate =
-                    FortPlayerController->MyFortPawn;
-                const uint64_t CandidateIdentity =
-                    GetGuiObjectIdentityGuarded(Candidate);
-                if (CandidateIdentity &&
-                    Candidate->IsA(PlayerPawnClass))
+                auto Candidate = FortPlayerController->MyFortPawn;
+                const uint64_t CandidateIdentity = GetGuiObjectIdentityGuarded(Candidate);
+                if (CandidateIdentity && Candidate->IsA(PlayerPawnClass))
                 {
                     PlayerPawn = Candidate;
                     PawnIdentity = CandidateIdentity;
                 }
             }
-            if (!PlayerPawn && FortPlayerController &&
-                PlayerPawnClass &&
-                FortPlayerController->HasPawn() &&
-                FortPlayerController->Pawn)
+            if (!PlayerPawn && FortPlayerController && PlayerPawnClass &&
+                FortPlayerController->HasPawn() && FortPlayerController->Pawn)
             {
                 auto Candidate = FortPlayerController->Pawn;
-                const uint64_t CandidateIdentity =
-                    GetGuiObjectIdentityGuarded(Candidate);
-                if (CandidateIdentity &&
-                    Candidate->IsA(PlayerPawnClass))
+                const uint64_t CandidateIdentity = GetGuiObjectIdentityGuarded(Candidate);
+                if (CandidateIdentity && Candidate->IsA(PlayerPawnClass))
                 {
                     PlayerPawn = (AFortPlayerPawnAthena*)Candidate;
                     PawnIdentity = CandidateIdentity;
@@ -1389,44 +1055,25 @@ namespace
             }
 
             FPlayerCombatStats CombatStats{};
-            if (ControllerIdentity && PlayerStateIdentity &&
-                PawnIdentity &&
-                TryReadPlayerCombatStatsGuarded(
-                    World, FortPlayerController,
-                    PlayerState, PlayerPawn,
-                    WorldIdentity, ControllerIdentity,
-                    PlayerStateIdentity, PawnIdentity,
-                    CurrentTimeMs, CombatStats))
+            if (ControllerIdentity && PlayerStateIdentity && PawnIdentity &&
+                TryReadPlayerCombatStatsGuarded(World, FortPlayerController,
+                    PlayerState, PlayerPawn, WorldIdentity, ControllerIdentity,
+                    PlayerStateIdentity, PawnIdentity, CurrentTimeMs, CombatStats))
             {
-                CombatStatsByState.emplace(
-                    PlayerStateIdentity, CombatStats);
+                CombatStatsByState.emplace(PlayerStateIdentity, CombatStats);
             }
 
-            // Resolve the authoritative PlayerState label on the game thread;
-            // the connection URL remains a guarded compatibility fallback.
             std::array<char, 1025> Resolved{};
             size_t ResolvedLength = 0;
-            TryCopyResolvedPlayerNameGuarded(
-                PlayerState,
-                Connection,
-                Resolved.data(),
-                Resolved.size(),
-                &ResolvedLength);
-            std::string Name(
-                Resolved.data(), ResolvedLength);
+            TryCopyResolvedPlayerNameGuarded(PlayerState, Connection, Resolved.data(),
+                Resolved.size(), &ResolvedLength);
+            std::string Name(Resolved.data(), ResolvedLength);
             if (Name.empty())
             {
-                // A disconnect can transiently invalidate one reflected row.
-                // Preserve its previous good label for this refresh rather than
-                // blanking the entire cache or disabling names for everyone.
                 std::array<char, 1025> Cached{};
                 size_t CachedLength = 0;
-                if (TryCopyCachedPlayerNameGuarded(
-                        PlayerState,
-                        Connection,
-                        Cached.data(),
-                        Cached.size(),
-                        &CachedLength))
+                if (TryCopyCachedPlayerNameGuarded(PlayerState, Connection, Cached.data(),
+                        Cached.size(), &CachedLength))
                 {
                     Name.assign(Cached.data(), CachedLength);
                 }
@@ -1436,33 +1083,28 @@ namespace
 
             if (PlayerStateIdentity)
             {
-                NamesByState.emplace(
-                    PlayerStateIdentity, Name);
+                NamesByState.emplace(PlayerStateIdentity, Name);
             }
             if (ConnectionIdentity)
             {
-                NamesByConnection.emplace(
-                    ConnectionIdentity, Name);
+                NamesByConnection.emplace(ConnectionIdentity, Name);
             }
         }
 
         FPlayerNameCacheExclusiveLock Lock;
-        if (Lock.owns_lock() &&
-            GPlayerNameCacheWorld == World &&
+        if (Lock.owns_lock() && GPlayerNameCacheWorld == World &&
             GPlayerNameCacheWorldIdentity == WorldIdentity)
         {
             GPlayerNamesByState.swap(NamesByState);
             GPlayerNamesByConnection.swap(NamesByConnection);
-            GPlayerCombatStatsByState.swap(
-                CombatStatsByState);
+            GPlayerCombatStatsByState.swap(CombatStatsByState);
         }
     }
 }
 
 void GUI::PlayerNamesGameTick()
 {
-    if (!GPlayerNameRefreshRequested.load(
-            std::memory_order_acquire))
+    if (!GPlayerNameRefreshRequested.load(std::memory_order_acquire))
     {
         return;
     }
@@ -1482,14 +1124,12 @@ void GUI::PlayerNamesGameTick()
 
 int GUI::GetSelectedPlaylist()
 {
-    return PublishedSelectedPlaylist.load(
-        std::memory_order_acquire);
+    return PublishedSelectedPlaylist.load(std::memory_order_acquire);
 }
 
 void GUI::PublishSelectedPlaylist(int Value)
 {
-    PublishedSelectedPlaylist.store(
-        Value, std::memory_order_release);
+    PublishedSelectedPlaylist.store(Value, std::memory_order_release);
 }
 
 void GUI::MarkServerJoinable()
@@ -1503,10 +1143,7 @@ void GUI::MarkServerJoinable()
 
     ULONGLONG Expected = 0;
     const ULONGLONG Now = GetTickCount64();
-    GServerJoinableAtMs.compare_exchange_strong(
-        Expected,
-        Now,
-        std::memory_order_release,
+    GServerJoinableAtMs.compare_exchange_strong(Expected, Now, std::memory_order_release,
         std::memory_order_relaxed);
 
     if (gsStatus < Joinable)
@@ -1516,10 +1153,8 @@ void GUI::MarkServerJoinable()
 void GUI::ResetServerLifecycle()
 {
     FConfiguration::ReleaseCustomSafeZoneSequenceForMatch();
-    GServerJoinableAtMs.store(
-        0, std::memory_order_release);
-    gsStatus.store(
-        NotReady, std::memory_order_release);
+    GServerJoinableAtMs.store(0, std::memory_order_release);
+    gsStatus.store(NotReady, std::memory_order_release);
 }
 
 ID3D11ShaderResourceView* g_EmbedTexture = nullptr;
@@ -1530,24 +1165,23 @@ int EmbedHeight = 0;
 ID3D11ShaderResourceView* g_LogoTexture = nullptr;
 int g_LogoW = 0, g_LogoH = 0;
 
-// Grey/dark theme accent (highlights, active tab, checkmarks, sliders) - soft cool silver
 #define ACCENT_R 0.780f
 #define ACCENT_G 0.820f
 #define ACCENT_B 0.910f
 static ImVec4 Accent(float a = 1.f) { return ImVec4(ACCENT_R, ACCENT_G, ACCENT_B, a); }
 static ImVec4 AccentDk(float a = 1.f) { return ImVec4(0.50f, 0.54f, 0.64f, a); } // darker for active
 
-bool LoadTextureFromMemory(const unsigned char* buffer, int buffer_size, ID3D11Device* d3dDevice, ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height)
+bool LoadTextureFromMemory(const unsigned char* buffer, int buffer_size, ID3D11Device* d3dDevice,
+    ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height)
 {
     int image_width = 0;
     int image_height = 0;
-    unsigned char* image_data = stbi_load_from_memory(buffer, buffer_size, &image_width, &image_height, NULL, 4);
+    unsigned char* image_data = stbi_load_from_memory(buffer, buffer_size, &image_width,
+        &image_height, NULL, 4);
 
     if (image_data == NULL)
         return false;
 
-    // Full mip chain + GPU-generated mips so large source images downscale smoothly
-    // to small on-screen sizes (e.g. the 1024px logo) instead of looking pixelated.
     D3D11_TEXTURE2D_DESC desc;
     ZeroMemory(&desc, sizeof(desc));
     desc.Width = image_width;
@@ -1594,9 +1228,8 @@ bool LoadTextureFromMemory(const unsigned char* buffer, int buffer_size, ID3D11D
     return true;
 }
 
-// Upload an already-decoded RGBA8 buffer to a texture on our device. Sibling of
-// LoadTextureFromMemory minus the stb decode; used for extracted map pixels.
-bool CreateTextureFromRGBA8(const unsigned char* rgba, int width, int height, ID3D11Device* d3dDevice, ID3D11ShaderResourceView** out_srv)
+bool CreateTextureFromRGBA8(const unsigned char* rgba, int width, int height,
+    ID3D11Device* d3dDevice, ID3D11ShaderResourceView** out_srv)
 {
     if (!rgba || width <= 0 || height <= 0 || !d3dDevice)
         return false;
@@ -1605,7 +1238,7 @@ bool CreateTextureFromRGBA8(const unsigned char* rgba, int width, int height, ID
     ZeroMemory(&desc, sizeof(desc));
     desc.Width = width;
     desc.Height = height;
-    desc.MipLevels = 0; // full mip chain, GPU-generated (smooth downscale to ~260px)
+    desc.MipLevels = 0;
     desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
@@ -1638,13 +1271,6 @@ bool CreateTextureFromRGBA8(const unsigned char* rgba, int width, int height, ID
     return true;
 }
 
-// ============================================================================
-//  Custom Safe Zone interactive map editor support.
-//  The GUI runs on its own standalone D3D11 device with no bridge into the game
-//  renderer, so the in-game minimap UTexture2D can't be handed to ImGui directly.
-//  We best-effort read its mip0 pixels out of CPU memory, decode to RGBA8, and
-//  upload to *our* device (caching a PNG in Local AppData for reuse).
-// ============================================================================
 namespace SafeZoneMap
 {
     static inline float Clamp(float v, float lo, float hi)
@@ -1656,9 +1282,6 @@ namespace SafeZoneMap
     {
         float CenterX = 0.f;
         float CenterY = 0.f;
-        // World-space vectors from the map center to the right and bottom
-        // edges. Keeping the complete basis supports non-square captures and
-        // authoritative runtime sampling without hard-coding map dimensions.
         float AxisUX = 0.f;
         float AxisUY = 135345.f;
         float AxisVX = -135345.f;
@@ -1667,57 +1290,31 @@ namespace SafeZoneMap
 
     enum class EMapTransformProvenance : uint8_t
     {
-        None,
-        // MapInfo supplies a center, but the axes still come from a version
-        // guess. This is suitable for the frontend preview, never for freezing
-        // normalized geometry on a nonlegacy island.
-        ProvisionalMapInfo,
-        // Chapter 1's cooked Athena capture is a verified compatibility
-        // transform shared by the supported legacy builds.
-        LegacyAthenaCapture,
-        // A stock-island capture measured from Fortnite's own
-        // BPWorldLocationToMapLocation function on representative builds.
-        KnownCaptureCalibration,
-        WorldSettingsExtents,
-        PoiCalibration,
-        NativeMapSampling,
+        None, ProvisionalMapInfo, LegacyAthenaCapture, KnownCaptureCalibration,
+        WorldSettingsExtents, PoiCalibration, NativeMapSampling,
     };
 
-    static bool IsAuthoritativeProjection(
-        EMapTransformProvenance provenance)
+    static bool IsAuthoritativeProjection(EMapTransformProvenance provenance)
     {
-        return provenance ==
-                EMapTransformProvenance::LegacyAthenaCapture ||
-            provenance ==
-                EMapTransformProvenance::KnownCaptureCalibration ||
-            provenance ==
-                EMapTransformProvenance::WorldSettingsExtents ||
-            provenance ==
-                EMapTransformProvenance::PoiCalibration ||
-            provenance ==
+        return provenance == EMapTransformProvenance::LegacyAthenaCapture || provenance ==
+                EMapTransformProvenance::KnownCaptureCalibration || provenance ==
+                EMapTransformProvenance::WorldSettingsExtents || provenance ==
+                EMapTransformProvenance::PoiCalibration || provenance ==
                 EMapTransformProvenance::NativeMapSampling;
     }
 
-    // Game-thread-only cache shared by preflight readiness and batch
-    // projection. It is populated only by a verified transform, so compiling
-    // 32 authored nodes never repeats reflective actor scans or ProcessEvent
-    // sampling for each point.
     struct VerifiedProjectionCache
     {
         UWorld* World = nullptr;
         AFortAthenaMapInfo* MapInfo = nullptr;
         MapTransform Transform{};
-        EMapTransformProvenance Provenance =
-            EMapTransformProvenance::None;
+        EMapTransformProvenance Provenance = EMapTransformProvenance::None;
         ULONGLONG NextProbeMs = 0;
         bool bReady = false;
     };
 
     static VerifiedProjectionCache g_VerifiedProjectionCache{};
 
-    // MapInfo is owned by the game thread while the editor is rendered on the GUI
-    // thread. A small sequence lock publishes a coherent snapshot without ever
-    // handing an Unreal object to the GUI thread.
     static std::atomic<uint32_t> g_TransformSequence{ 0 };
     static std::atomic<float> g_MapCenterX{ 0.f };
     static std::atomic<float> g_MapCenterY{ 0.f };
@@ -1726,45 +1323,28 @@ namespace SafeZoneMap
     static std::atomic<float> g_MapAxisVX{ -135345.f };
     static std::atomic<float> g_MapAxisVY{ 0.f };
 
-    // A map click can happen in the frontend before the Athena map manager
-    // exists. Keep the image-space selection as the source of truth so the
-    // game thread can reproject it when the exact match transform arrives.
     static std::atomic<float> g_SelectedU{ 0.5f };
     static std::atomic<float> g_SelectedV{ 0.5f };
     static std::atomic<bool> g_HasNormalizedSelection{ false };
 
     static bool UsesLegacyAthenaCapture()
     {
-        // The original Chapter 1 terrain uses one stable minimap capture from
-        // the early releases through 10.40. Season OG has its own Rufus
-        // projection. Custom islands always use their own runtime data.
-        return VersionInfo.FortniteVersion < 11.00f &&
-            !FConfiguration::bIsCustomMap.load(
+        // Chapter 1 shares one capture through 10.40; Season OG uses its own Rufus projection.
+        return VersionInfo.FortniteVersion < 11.00f && !FConfiguration::bIsCustomMap.load(
                 std::memory_order_acquire);
     }
 
     enum class EStockCaptureFamily : uint8_t
     {
-        None,
-        Athena,
-        Apollo,
-        Artemis,
-        AsteriaEarly,
-        Asteria,
-        Rufus,
-        Helios,
+        None, Athena, Apollo, Artemis, AsteriaEarly, Asteria, Rufus, Helios,
     };
 
-    static bool TryGetStockCaptureCalibration(
-        float version,
-        bool bCustomMap,
-        MapTransform& out,
+    static bool TryGetStockCaptureCalibration(float version, bool bCustomMap, MapTransform& out,
         EStockCaptureFamily* familyOut = nullptr)
     {
         if (familyOut)
             *familyOut = EStockCaptureFamily::None;
-        if (bCustomMap || !std::isfinite(version) ||
-            version < 0.f || version >= 31.00f)
+        if (bCustomMap || !std::isfinite(version) || version < 0.f || version >= 31.00f)
         {
             return false;
         }
@@ -1774,8 +1354,7 @@ namespace SafeZoneMap
         {
             family = EStockCaptureFamily::Athena;
             out = {
-                32000.f, -25744.f,
-                0.f, 129760.4f, -129760.4f, 0.f
+                32000.f, -25744.f, 0.f, 129760.4f, -129760.4f, 0.f
             };
         }
         else if (version < 19.00f)
@@ -1790,36 +1369,30 @@ namespace SafeZoneMap
         }
         else if (version < 24.00f)
         {
-            // Asteria's first release used the Artemis-sized capture around
-            // Asteria's non-zero texture center.
             family = EStockCaptureFamily::AsteriaEarly;
             out = {
-                9524.f, -9732.f,
-                0.f, 131213.f, -131213.f, 0.f
+                9524.f, -9732.f, 0.f, 131213.f, -131213.f, 0.f
             };
         }
         else if (version < 27.00f)
         {
             family = EStockCaptureFamily::Asteria;
             out = {
-                9524.f, -9732.f,
-                0.f, 149963.f, -149963.f, 0.f
+                9524.f, -9732.f, 0.f, 149963.f, -149963.f, 0.f
             };
         }
         else if (version < 28.00f)
         {
             family = EStockCaptureFamily::Rufus;
             out = {
-                28321.8f, -21131.f,
-                0.f, 131213.f, -131213.f, 0.f
+                28321.8f, -21131.f, 0.f, 131213.f, -131213.f, 0.f
             };
         }
         else
         {
             family = EStockCaptureFamily::Helios;
             out = {
-                8500.f, 508.f,
-                0.f, 149963.f, -149963.f, 0.f
+                8500.f, 508.f, 0.f, 149963.f, -149963.f, 0.f
             };
         }
 
@@ -1828,15 +1401,11 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool TryGetStockCaptureCalibration(
-        MapTransform& out,
+    static bool TryGetStockCaptureCalibration(MapTransform& out,
         EStockCaptureFamily* familyOut = nullptr)
     {
-        return TryGetStockCaptureCalibration(
-            static_cast<float>(VersionInfo.FortniteVersion),
-            FConfiguration::bIsCustomMap.load(
-                std::memory_order_acquire),
-            out, familyOut);
+        return TryGetStockCaptureCalibration(static_cast<float>(VersionInfo.FortniteVersion),
+            FConfiguration::bIsCustomMap.load(std::memory_order_acquire), out, familyOut);
     }
 
     static bool UsesKnownCaptureCalibration()
@@ -1847,20 +1416,11 @@ namespace SafeZoneMap
 
     static MapTransform DefaultTransformForVersion()
     {
-        // Use the same full-capture transform before MapInfo exists that the
-        // authoritative match will use later. These values were reconstructed
-        // from Fortnite's own three-point world-to-map samples across the stock
-        // Athena, Apollo, Artemis, Asteria, Rufus, and Helios families. In
-        // particular, MapWorldScale * MapLayerSize is often only a gameplay
-        // layer (68,800 cm half-span on FN24.20), not the minimap capture.
         MapTransform calibrated;
         if (TryGetStockCaptureCalibration(calibrated))
             return calibrated;
 
         constexpr float extent = 135345.f;
-        // Athena's world plane uses X for map north/south and Y for east/west:
-        // at zero map yaw, image-right is world +Y and image-bottom is world -X.
-        // Runtime data replaces this provisional custom-map transform in-match.
         return { 0.f, 0.f, 0.f, extent, -extent, 0.f };
     }
 
@@ -1929,8 +1489,7 @@ namespace SafeZoneMap
 
     static FCustomSafeZoneSequence EditableSequenceSnapshot()
     {
-        const auto snapshot =
-            FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+        const auto snapshot = FConfiguration::GetCustomSafeZoneSequenceSnapshot();
         if (snapshot && !snapshot->Nodes.empty())
             return *snapshot;
 
@@ -1939,29 +1498,23 @@ namespace SafeZoneMap
         return fallback;
     }
 
-    static void MirrorFirstNormalizedSelection(
-        const FCustomSafeZoneSequence& sequence)
+    static void MirrorFirstNormalizedSelection(const FCustomSafeZoneSequence& sequence)
     {
-        if (sequence.Nodes.empty() ||
-            !sequence.Nodes.front().bHasNormalizedCenter)
+        if (sequence.Nodes.empty() || !sequence.Nodes.front().bHasNormalizedCenter)
         {
             ForgetNormalizedSelection();
             return;
         }
 
-        RememberSelection(
-            sequence.Nodes.front().NormalizedU,
-            sequence.Nodes.front().NormalizedV);
+        RememberSelection(sequence.Nodes.front().NormalizedU, sequence.Nodes.front().NormalizedV);
     }
 
-    static bool ClampRadiiToNonIncreasing(
-        FCustomSafeZoneSequence& sequence)
+    static bool ClampRadiiToNonIncreasing(FCustomSafeZoneSequence& sequence)
     {
         bool changed = false;
         for (size_t index = 1; index < sequence.Nodes.size(); ++index)
         {
-            const float maximumRadius =
-                sequence.Nodes[index - 1].RadiusCm;
+            const float maximumRadius = sequence.Nodes[index - 1].RadiusCm;
             if (sequence.Nodes[index].RadiusCm > maximumRadius)
             {
                 sequence.Nodes[index].RadiusCm = maximumRadius;
@@ -1971,25 +1524,17 @@ namespace SafeZoneMap
         return changed;
     }
 
-    static bool PublishSequence(
-        FCustomSafeZoneSequence sequence,
-        bool bEnableMovingZone)
+    static bool PublishSequence(FCustomSafeZoneSequence sequence, bool bEnableMovingZone)
     {
-        // Inactive authored steps are preserved while the ordinary one-circle
-        // editor is in use. Keep that retained tail valid as circle one changes
-        // so it can never block a stationary publication.
         ClampRadiiToNonIncreasing(sequence);
-        if (!FConfiguration::PublishCustomSafeZoneSequence(
-                sequence, bEnableMovingZone))
+        if (!FConfiguration::PublishCustomSafeZoneSequence(sequence, bEnableMovingZone))
         {
             return false;
         }
 
         MirrorFirstNormalizedSelection(sequence);
-        if (FConfiguration::bReadyToStart.load(
-                std::memory_order_acquire) &&
-            CustomSafeZoneRuntime::GetStatus().
-                bCanCorrectBeforeListen)
+        if (FConfiguration::bReadyToStart.load(std::memory_order_acquire) &&
+            CustomSafeZoneRuntime::GetStatus().bCanCorrectBeforeListen)
         {
             AutoHosting::RequestCustomSafeZonePreferenceRefresh();
         }
@@ -1998,8 +1543,7 @@ namespace SafeZoneMap
 
     static bool HasAnyNormalizedSelection()
     {
-        const auto snapshot =
-            FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+        const auto snapshot = FConfiguration::GetCustomSafeZoneSequenceSnapshot();
         if (snapshot)
         {
             for (const auto& node : snapshot->Nodes)
@@ -2012,20 +1556,12 @@ namespace SafeZoneMap
         return g_HasNormalizedSelection.load(std::memory_order_acquire);
     }
 
-    // Always display the complete capture. FortWorldSettings::PvPMapWorldWidth
-    // is the playable rectangle, while the cooked minimap commonly includes
-    // additional capture space around it. Cropping a fixed number of texels and
-    // then stretching the playable width over the result changes the scale.
-    // The runtime transform below derives the complete capture size from
-    // MapWorldScale and the map manager's logical layer size instead.
     static void GetImageUVs(ImVec2& uv0, ImVec2& uv1)
     {
         uv0 = ImVec2(0.f, 0.f);
         uv1 = ImVec2(1.f, 1.f);
     }
 
-    // Canvas-local pixel (origin top-left, y down) -> UE world (cm), using the
-    // full map basis supplied by WorldSettings or Fortnite's map manager.
     static inline void PixelToWorld(float lx, float ly, float side, const MapTransform& map,
                                     float& worldX, float& worldY)
     {
@@ -2035,7 +1571,6 @@ namespace SafeZoneMap
         worldY = map.CenterY + map.AxisUY * su + map.AxisVY * sv;
     }
 
-    // UE world (cm) -> canvas-local pixel (add the canvas rect-min for screen pos).
     static inline void WorldToPixel(float worldX, float worldY, float side, const MapTransform& map,
                                     float& lx, float& ly)
     {
@@ -2053,76 +1588,52 @@ namespace SafeZoneMap
         ly = side * 0.5f * (1.f + sv);
     }
 
-    static inline void NodeToPixel(
-        const FCustomSafeZoneNode& node,
-        float side,
-        const MapTransform& map,
-        float& lx,
-        float& ly)
+    static inline void NodeToPixel(const FCustomSafeZoneNode& node, float side,
+        const MapTransform& map, float& lx, float& ly)
     {
-        if (node.bHasNormalizedCenter &&
-            std::isfinite(node.NormalizedU) &&
+        if (node.bHasNormalizedCenter && std::isfinite(node.NormalizedU) &&
             std::isfinite(node.NormalizedV))
         {
-            // Image-space coordinates are the authored source of truth. They do
-            // not depend on the game thread publishing the matching world-space
-            // center in a second atomic transaction.
             lx = Clamp(node.NormalizedU, 0.f, 1.f) * side;
             ly = Clamp(node.NormalizedV, 0.f, 1.f) * side;
             return;
         }
 
-        WorldToPixel(
-            (float)node.Center.X, (float)node.Center.Y,
-            side, map, lx, ly);
+        WorldToPixel((float)node.Center.X, (float)node.Center.Y, side, map, lx, ly);
     }
 
     static inline ImVec2 RadiusToPixelAxes(float radiusCm, float side, const MapTransform& map)
     {
         const float extentU = AxisULength(map);
         const float extentV = AxisVLength(map);
-        return ImVec2(radiusCm * side / (2.f * extentU),
-                      radiusCm * side / (2.f * extentV));
+        return ImVec2(radiusCm * side / (2.f * extentU), radiusCm * side / (2.f * extentV));
     }
 
     static void ReprojectRememberedSelection(const MapTransform& map)
     {
-        // A pre-listen rejection deliberately reopens the GUI editor. Do not
-        // let a concurrent game-thread projection race that correction; the
-        // next preflight projects normalized nodes directly from its snapshot.
-        if (FConfiguration::bReadyToStart.load(
-                std::memory_order_acquire) &&
-            CustomSafeZoneRuntime::GetStatus().
-                bCanCorrectBeforeListen)
+        if (FConfiguration::bReadyToStart.load(std::memory_order_acquire) &&
+            CustomSafeZoneRuntime::GetStatus().bCanCorrectBeforeListen)
         {
             return;
         }
 
-        const auto sourceSnapshot =
-            FConfiguration::GetCustomSafeZoneSequenceSnapshot();
-        FCustomSafeZoneSequence sequence = sourceSnapshot
-            ? *sourceSnapshot
+        const auto sourceSnapshot = FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+        FCustomSafeZoneSequence sequence = sourceSnapshot ? *sourceSnapshot
             : EditableSequenceSnapshot();
 
-        // Legacy preference files predate the sequence snapshot. Adopt their
-        // remembered image position into node one only when the snapshot has
-        // no normalized positions of its own.
         bool hasSequenceSelection = false;
         for (const auto& node : sequence.Nodes)
             hasSequenceSelection |= node.bHasNormalizedCenter;
-        if (!hasSequenceSelection &&
-            g_HasNormalizedSelection.load(std::memory_order_acquire) &&
+        if (!hasSequenceSelection && g_HasNormalizedSelection.load(std::memory_order_acquire) &&
             !sequence.Nodes.empty())
         {
             sequence.Nodes.front().bHasNormalizedCenter = true;
-            sequence.Nodes.front().NormalizedU =
-                g_SelectedU.load(std::memory_order_relaxed);
-            sequence.Nodes.front().NormalizedV =
-                g_SelectedV.load(std::memory_order_relaxed);
+            sequence.Nodes.front().NormalizedU = g_SelectedU.load(std::memory_order_relaxed);
+            sequence.Nodes.front().NormalizedV = g_SelectedV.load(std::memory_order_relaxed);
         }
 
         int reprojected = 0;
-		bool changed = false;
+        bool changed = false;
         for (auto& node : sequence.Nodes)
         {
             if (!node.bHasNormalizedCenter)
@@ -2130,16 +1641,14 @@ namespace SafeZoneMap
 
             float worldX = 0.f;
             float worldY = 0.f;
-            PixelToWorld(
-                node.NormalizedU, node.NormalizedV, 1.f, map,
-                worldX, worldY);
-			if (std::abs(node.Center.X - (double)worldX) > 0.01 ||
-				std::abs(node.Center.Y - (double)worldY) > 0.01)
-			{
-				node.Center.X = worldX;
-				node.Center.Y = worldY;
-				changed = true;
-			}
+            PixelToWorld(node.NormalizedU, node.NormalizedV, 1.f, map, worldX, worldY);
+            if (std::abs(node.Center.X - (double)worldX) > 0.01 ||
+                std::abs(node.Center.Y - (double)worldY) > 0.01)
+            {
+                node.Center.X = worldX;
+                node.Center.Y = worldY;
+                changed = true;
+            }
             ++reprojected;
         }
         if (!reprojected || !changed)
@@ -2149,19 +1658,12 @@ namespace SafeZoneMap
         const bool bPublished = sourceSnapshot
             ? FConfiguration::PublishCustomSafeZoneSequenceIfCurrent(
                 sourceSnapshot, sequence, bEnableMovingZone)
-            : FConfiguration::PublishCustomSafeZoneSequence(
-                sequence, bEnableMovingZone);
+            : FConfiguration::PublishCustomSafeZoneSequence(sequence, bEnableMovingZone);
         if (!bPublished)
             return;
         MirrorFirstNormalizedSelection(sequence);
 
-        // Radius is an actual gameplay distance, not an image coordinate. The
-        // frontend uses a provisional map span while the match is loading. If
-        // the drag endpoint is reprojected with the later runtime span, a 240 m
-        // circle can silently become a 550 m circle. Reproject only the center;
-        // preserve the exact distance selected by the user.
-        SDK::DbgLog(
-            "[SafeZoneMap] reprojected %d authored circle(s); world radii preserved\n",
+        SDK::DbgLog("[SafeZoneMap] reprojected %d authored circle(s); world radii preserved\n",
             reprojected);
     }
 
@@ -2178,14 +1680,12 @@ namespace SafeZoneMap
         float End = 0.f;
     };
 
-    static void MergeStormIntervals(
-        std::vector<StormInterval>& intervals)
+    static void MergeStormIntervals(std::vector<StormInterval>& intervals)
     {
         if (intervals.size() < 2)
             return;
 
-        std::sort(
-            intervals.begin(), intervals.end(),
+        std::sort(intervals.begin(), intervals.end(),
             [](const StormInterval& left, const StormInterval& right)
             {
                 return left.Begin < right.Begin;
@@ -2207,12 +1707,8 @@ namespace SafeZoneMap
         intervals.resize(writeIndex + 1);
     }
 
-    static void CollectHorizontalCircleUnionIntervals(
-        const std::vector<ProjectedCircle>& circles,
-        float minimumY,
-        float maximumY,
-        float minimumX,
-        float maximumX,
+    static void CollectHorizontalCircleUnionIntervals(const std::vector<ProjectedCircle>& circles,
+        float minimumY, float maximumY, float minimumX, float maximumX,
         std::vector<StormInterval>& intervals)
     {
         intervals.clear();
@@ -2220,37 +1716,23 @@ namespace SafeZoneMap
         {
             if (circle.Radius.x <= 0.f || circle.Radius.y <= 0.f)
                 continue;
-            // Use the widest cross-section touched anywhere by this scan row.
-            // This makes the clear area conservative: a whole filled rectangle
-            // can never intrude into the true ellipse between row endpoints.
-            const float sampleY = Clamp(
-                circle.Center.y,
-                (std::min)(minimumY, maximumY),
+            const float sampleY = Clamp(circle.Center.y, (std::min)(minimumY, maximumY),
                 (std::max)(minimumY, maximumY));
-            const float normalizedY =
-                (sampleY - circle.Center.y) / circle.Radius.y;
+            const float normalizedY = (sampleY - circle.Center.y) / circle.Radius.y;
             if (fabsf(normalizedY) >= 1.f)
                 continue;
             const float extent = circle.Radius.x * sqrtf(
                 (std::max)(0.f, 1.f - normalizedY * normalizedY));
-            const float begin = Clamp(
-                circle.Center.x - extent, minimumX, maximumX);
-            const float end = Clamp(
-                circle.Center.x + extent, minimumX, maximumX);
+            const float begin = Clamp(circle.Center.x - extent, minimumX, maximumX);
+            const float end = Clamp(circle.Center.x + extent, minimumX, maximumX);
             if (end > begin)
                 intervals.push_back({ begin, end });
         }
         MergeStormIntervals(intervals);
     }
 
-    // Draw the storm exactly once outside the union of every authored circle.
-    // A point covered by any circle stays clear, including circle intersections.
-    static void FillOutsideCircleUnion(
-        ImDrawList* dl,
-        const ImVec2& rmin,
-        const ImVec2& rmax,
-        const std::vector<ProjectedCircle>& circles,
-        ImU32 color)
+    static void FillOutsideCircleUnion(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rmax,
+        const std::vector<ProjectedCircle>& circles, ImU32 color)
     {
         if (circles.empty())
             return;
@@ -2259,8 +1741,7 @@ namespace SafeZoneMap
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
 
         const float height = (std::max)(0.f, rmax.y - rmin.y);
-        const int rowCount = (std::max)(
-            64, (std::min)(512, (int)ceilf(height)));
+        const int rowCount = (std::max)(64, (std::min)(512, (int)ceilf(height)));
         const float rowHeight = height / (float)rowCount;
         std::vector<StormInterval> intervals;
         intervals.reserve(circles.size());
@@ -2268,20 +1749,15 @@ namespace SafeZoneMap
         for (int row = 0; row < rowCount; ++row)
         {
             const float y0 = rmin.y + rowHeight * (float)row;
-            const float y1 = row + 1 == rowCount
-                ? rmax.y
-                : y0 + rowHeight;
-            CollectHorizontalCircleUnionIntervals(
-                circles, y0, y1, rmin.x, rmax.x, intervals);
+            const float y1 = row + 1 == rowCount ? rmax.y : y0 + rowHeight;
+            CollectHorizontalCircleUnionIntervals(circles, y0, y1, rmin.x, rmax.x, intervals);
 
             float stormBegin = rmin.x;
             for (const auto& interval : intervals)
             {
                 if (interval.Begin > stormBegin)
                 {
-                    dl->AddRectFilled(
-                        ImVec2(stormBegin, y0),
-                        ImVec2(interval.Begin, y1), color);
+                    dl->AddRectFilled(ImVec2(stormBegin, y0), ImVec2(interval.Begin, y1), color);
                 }
                 stormBegin = (std::max)(stormBegin, interval.End);
                 if (stormBegin >= rmax.x)
@@ -2289,22 +1765,15 @@ namespace SafeZoneMap
             }
             if (stormBegin < rmax.x)
             {
-                dl->AddRectFilled(
-                    ImVec2(stormBegin, y0),
-                    ImVec2(rmax.x, y1), color);
+                dl->AddRectFilled(ImVec2(stormBegin, y0), ImVec2(rmax.x, y1), color);
             }
         }
 
         dl->Flags = oldFlags;
     }
 
-    // Draw one band segment while removing the union of all intersections
-    // between that segment and the authored ellipses.
-    static void CollectLineCircleUnionIntervals(
-        const ImVec2& p0,
-        const ImVec2& p1,
-        const std::vector<ProjectedCircle>& circles,
-        std::vector<StormInterval>& covered,
+    static void CollectLineCircleUnionIntervals(const ImVec2& p0, const ImVec2& p1,
+        const std::vector<ProjectedCircle>& circles, std::vector<StormInterval>& covered,
         float radiusPadding = 0.f)
     {
         covered.clear();
@@ -2314,12 +1783,8 @@ namespace SafeZoneMap
                 continue;
             const float radiusX = circle.Radius.x + radiusPadding;
             const float radiusY = circle.Radius.y + radiusPadding;
-            const ImVec2 d(
-                (p1.x - p0.x) / radiusX,
-                (p1.y - p0.y) / radiusY);
-            const ImVec2 f(
-                (p0.x - circle.Center.x) / radiusX,
-                (p0.y - circle.Center.y) / radiusY);
+            const ImVec2 d((p1.x - p0.x) / radiusX, (p1.y - p0.y) / radiusY);
+            const ImVec2 f((p0.x - circle.Center.x) / radiusX, (p0.y - circle.Center.y) / radiusY);
             const float a = d.x * d.x + d.y * d.y;
             const float b = 2.f * (f.x * d.x + f.y * d.y);
             const float c = f.x * f.x + f.y * f.y - 1.f;
@@ -2327,40 +1792,28 @@ namespace SafeZoneMap
             if (a <= 0.000001f || discriminant <= 0.f)
                 continue;
             const float root = sqrtf(discriminant);
-            const float begin = Clamp(
-                (-b - root) / (2.f * a), 0.f, 1.f);
-            const float end = Clamp(
-                (-b + root) / (2.f * a), 0.f, 1.f);
+            const float begin = Clamp((-b - root) / (2.f * a), 0.f, 1.f);
+            const float end = Clamp((-b + root) / (2.f * a), 0.f, 1.f);
             if (end > begin)
                 covered.push_back({ begin, end });
         }
         MergeStormIntervals(covered);
     }
 
-    static void AddLineOutsideCircleUnion(
-        ImDrawList* dl,
-        const ImVec2& p0,
-        const ImVec2& p1,
-        const std::vector<ProjectedCircle>& circles,
-        ImU32 color,
-        float thickness)
+    static void AddLineOutsideCircleUnion(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1,
+        const std::vector<ProjectedCircle>& circles, ImU32 color, float thickness)
     {
         std::vector<StormInterval> covered;
         covered.reserve(circles.size());
-        CollectLineCircleUnionIntervals(
-            p0, p1, circles, covered,
-            thickness * 0.5f + 1.f);
+        CollectLineCircleUnionIntervals(p0, p1, circles, covered, thickness * 0.5f + 1.f);
         const ImVec2 delta(p1.x - p0.x, p1.y - p0.y);
         float visibleBegin = 0.f;
         for (const auto& interval : covered)
         {
             if (interval.Begin > visibleBegin)
             {
-                dl->AddLine(
-                    ImVec2(p0.x + delta.x * visibleBegin,
-                           p0.y + delta.y * visibleBegin),
-                    ImVec2(p0.x + delta.x * interval.Begin,
-                           p0.y + delta.y * interval.Begin),
+                dl->AddLine(ImVec2(p0.x + delta.x * visibleBegin, p0.y + delta.y * visibleBegin),
+                    ImVec2(p0.x + delta.x * interval.Begin, p0.y + delta.y * interval.Begin),
                     color, thickness);
             }
             visibleBegin = (std::max)(visibleBegin, interval.End);
@@ -2369,19 +1822,13 @@ namespace SafeZoneMap
         }
         if (visibleBegin < 1.f)
         {
-            dl->AddLine(
-                ImVec2(p0.x + delta.x * visibleBegin,
-                       p0.y + delta.y * visibleBegin),
+            dl->AddLine(ImVec2(p0.x + delta.x * visibleBegin, p0.y + delta.y * visibleBegin),
                 p1, color, thickness);
         }
     }
 
-    static void DrawStormBandsOutsideCircleUnion(
-        ImDrawList* dl,
-        const ImVec2& rmin,
-        const ImVec2& rmax,
-        const std::vector<ProjectedCircle>& circles,
-        ImU32 color)
+    static void DrawStormBandsOutsideCircleUnion(ImDrawList* dl, const ImVec2& rmin,
+        const ImVec2& rmax, const std::vector<ProjectedCircle>& circles, ImU32 color)
     {
         const float width = rmax.x - rmin.x;
         const float height = rmax.y - rmin.y;
@@ -2401,13 +1848,10 @@ namespace SafeZoneMap
             else
                 p1 = ImVec2(rmax.x, rmin.y + diagonal - width);
 
-            AddLineOutsideCircleUnion(
-                dl, p0, p1, circles, color, 4.f);
+            AddLineOutsideCircleUnion(dl, p0, p1, circles, color, 4.f);
         }
     }
 
-    // The storm background is owned exclusively by circle one. Selection and
-    // the number of future outlines can never increase this pass count.
     static constexpr int StormBackgroundPassCount(size_t circleCount)
     {
         return circleCount == 0 ? 0 : 1;
@@ -2421,39 +1865,26 @@ namespace SafeZoneMap
     static inline ImVec2 ScreenNormal(const ImVec2& value)
     {
         const float length = ScreenLength(value);
-        return length > 0.001f
-            ? ImVec2(value.x / length, value.y / length)
-            : ImVec2(1.f, 0.f);
+        return length > 0.001f ? ImVec2(value.x / length, value.y / length) : ImVec2(1.f, 0.f);
     }
 
-    static float EllipseDistanceInDirection(
-        const ImVec2& radius,
-        const ImVec2& unitDirection)
+    static float EllipseDistanceInDirection(const ImVec2& radius, const ImVec2& unitDirection)
     {
         const float rx = (std::max)(radius.x, 1.f);
         const float ry = (std::max)(radius.y, 1.f);
-        const float denominator = sqrtf(
-            unitDirection.x * unitDirection.x / (rx * rx) +
+        const float denominator = sqrtf(unitDirection.x * unitDirection.x / (rx * rx) +
             unitDirection.y * unitDirection.y / (ry * ry));
         return denominator > 0.0001f ? 1.f / denominator : 0.f;
     }
 
-    static bool ProjectedCirclesOverlapOrTouch(
-        const ProjectedCircle& from,
+    static bool ProjectedCirclesOverlapOrTouch(const ProjectedCircle& from,
         const ProjectedCircle& to)
     {
-        // Every map circle is projected through the same transform, so their
-        // axis-aligned ellipses share an aspect ratio. Scaling by the sum of
-        // their axes therefore reduces intersection and containment to one
-        // unit-circle distance test.
-        const float sumRadiusX = (std::max)(
-            fabsf(from.Radius.x) + fabsf(to.Radius.x), 0.001f);
-        const float sumRadiusY = (std::max)(
-            fabsf(from.Radius.y) + fabsf(to.Radius.y), 0.001f);
+        const float sumRadiusX = (std::max)(fabsf(from.Radius.x) + fabsf(to.Radius.x), 0.001f);
+        const float sumRadiusY = (std::max)(fabsf(from.Radius.y) + fabsf(to.Radius.y), 0.001f);
         const float deltaX = to.Center.x - from.Center.x;
         const float deltaY = to.Center.y - from.Center.y;
-        const float normalizedDistanceSquared =
-            deltaX * deltaX / (sumRadiusX * sumRadiusX) +
+        const float normalizedDistanceSquared = deltaX * deltaX / (sumRadiusX * sumRadiusX) +
             deltaY * deltaY / (sumRadiusY * sumRadiusY);
         return normalizedDistanceSquared <= 1.f;
     }
@@ -2471,109 +1902,67 @@ namespace SafeZoneMap
         bool bDrawShaft = false;
     };
 
-    // Build one straight, center-directed transition. Intersecting and
-    // contained circles do not receive an arrow. When a positive exterior gap
-    // is too short for both a useful shaft and the head, place only a head
-    // between the circles.
-    static StraightTransitionArrow BuildStraightTransitionArrow(
-        const ProjectedCircle& from,
+    static StraightTransitionArrow BuildStraightTransitionArrow(const ProjectedCircle& from,
         const ProjectedCircle& to)
     {
         StraightTransitionArrow arrow;
         if (ProjectedCirclesOverlapOrTouch(from, to))
             return arrow;
 
-        const ImVec2 delta(
-            to.Center.x - from.Center.x,
-            to.Center.y - from.Center.y);
+        const ImVec2 delta(to.Center.x - from.Center.x, to.Center.y - from.Center.y);
         const float centerDistance = ScreenLength(delta);
-        const float minimumArrowSpan =
-            TransitionArrowHeadLength +
+        const float minimumArrowSpan = TransitionArrowHeadLength +
             TransitionArrowMinimumVisibleShaft;
 
         arrow.Direction = ScreenNormal(delta);
-        const ImVec2 reverseDirection(
-            -arrow.Direction.x, -arrow.Direction.y);
-        const float fromBoundary = EllipseDistanceInDirection(
-            from.Radius, arrow.Direction);
-        const float toBoundary = EllipseDistanceInDirection(
-            to.Radius, reverseDirection);
-        const ImVec2 sourceBoundaryPoint(
-            from.Center.x + arrow.Direction.x * fromBoundary,
+        const ImVec2 reverseDirection(-arrow.Direction.x, -arrow.Direction.y);
+        const float fromBoundary = EllipseDistanceInDirection(from.Radius, arrow.Direction);
+        const float toBoundary = EllipseDistanceInDirection(to.Radius, reverseDirection);
+        const ImVec2 sourceBoundaryPoint(from.Center.x + arrow.Direction.x * fromBoundary,
             from.Center.y + arrow.Direction.y * fromBoundary);
-        const ImVec2 targetBoundaryPoint(
-            to.Center.x - arrow.Direction.x * toBoundary,
+        const ImVec2 targetBoundaryPoint(to.Center.x - arrow.Direction.x * toBoundary,
             to.Center.y - arrow.Direction.y * toBoundary);
-        const float boundaryGap =
-            centerDistance - fromBoundary - toBoundary;
+        const float boundaryGap = centerDistance - fromBoundary - toBoundary;
 
-        // Keep a numeric guard around the independently calculated trim gap.
         if (boundaryGap <= 0.f)
             return arrow;
 
         arrow.bVisible = true;
-        const float availableSpan = boundaryGap -
-            TransitionArrowBoundaryPadding * 2.f;
+        const float availableSpan = boundaryGap - TransitionArrowBoundaryPadding * 2.f;
 
         if (availableSpan >= minimumArrowSpan)
         {
-            arrow.ShaftStart = ImVec2(
-                sourceBoundaryPoint.x + arrow.Direction.x *
-                    TransitionArrowBoundaryPadding,
-                sourceBoundaryPoint.y + arrow.Direction.y *
+            arrow.ShaftStart = ImVec2(sourceBoundaryPoint.x + arrow.Direction.x *
+                    TransitionArrowBoundaryPadding, sourceBoundaryPoint.y + arrow.Direction.y *
                     TransitionArrowBoundaryPadding);
-            arrow.Tip = ImVec2(
-                targetBoundaryPoint.x - arrow.Direction.x *
-                    TransitionArrowBoundaryPadding,
-                targetBoundaryPoint.y - arrow.Direction.y *
+            arrow.Tip = ImVec2(targetBoundaryPoint.x - arrow.Direction.x *
+                    TransitionArrowBoundaryPadding, targetBoundaryPoint.y - arrow.Direction.y *
                     TransitionArrowBoundaryPadding);
             arrow.bDrawShaft = true;
             return arrow;
         }
 
-        // A positive but tiny exterior gap receives only an arrowhead centered
-        // exactly between its facing boundaries.
-        const ImVec2 headCenter(
-            (sourceBoundaryPoint.x + targetBoundaryPoint.x) * 0.5f,
+        const ImVec2 headCenter((sourceBoundaryPoint.x + targetBoundaryPoint.x) * 0.5f,
             (sourceBoundaryPoint.y + targetBoundaryPoint.y) * 0.5f);
         arrow.ShaftStart = headCenter;
-        arrow.Tip = ImVec2(
-            headCenter.x + arrow.Direction.x *
-                (TransitionArrowHeadLength * 0.5f),
-            headCenter.y + arrow.Direction.y *
-                (TransitionArrowHeadLength * 0.5f));
+        arrow.Tip = ImVec2(headCenter.x + arrow.Direction.x * (TransitionArrowHeadLength * 0.5f),
+            headCenter.y + arrow.Direction.y * (TransitionArrowHeadLength * 0.5f));
         return arrow;
     }
 
-    static void DrawArrowHead(
-        ImDrawList* dl,
-        const ImVec2& tip,
-        const ImVec2& tangent,
-        ImU32 color)
+    static void DrawArrowHead(ImDrawList* dl, const ImVec2& tip, const ImVec2& tangent, ImU32 color)
     {
         const ImVec2 direction = ScreenNormal(tangent);
         const ImVec2 side(-direction.y, direction.x);
         const float halfWidth = 5.f;
-        const ImVec2 base(
-            tip.x - direction.x * TransitionArrowHeadLength,
+        const ImVec2 base(tip.x - direction.x * TransitionArrowHeadLength,
             tip.y - direction.y * TransitionArrowHeadLength);
-        dl->AddTriangleFilled(
-            tip,
-            ImVec2(base.x + side.x * halfWidth,
-                   base.y + side.y * halfWidth),
-            ImVec2(base.x - side.x * halfWidth,
-                   base.y - side.y * halfWidth),
-            color);
+        dl->AddTriangleFilled(tip, ImVec2(base.x + side.x * halfWidth, base.y + side.y * halfWidth),
+            ImVec2(base.x - side.x * halfWidth, base.y - side.y * halfWidth), color);
     }
 
-    // Draw an edge behind the circle outlines. Every route is straight; when
-    // circles are too close for a readable shaft, the arrowhead alone carries
-    // the direction.
-    static void DrawTransitionArrow(
-        ImDrawList* dl,
-        const ProjectedCircle& from,
-        const ProjectedCircle& to,
-        ImU32 color)
+    static void DrawTransitionArrow(ImDrawList* dl, const ProjectedCircle& from,
+        const ProjectedCircle& to, ImU32 color)
     {
         const auto arrow = BuildStraightTransitionArrow(from, to);
         if (!arrow.bVisible)
@@ -2581,55 +1970,33 @@ namespace SafeZoneMap
 
         if (arrow.bDrawShaft)
         {
-            dl->AddLine(
-                arrow.ShaftStart, arrow.Tip,
-                color, 3.f);
+            dl->AddLine(arrow.ShaftStart, arrow.Tip, color, 3.f);
         }
         DrawArrowHead(dl, arrow.Tip, arrow.Direction, color);
     }
 
-    static void DrawStepNumberAtCenter(
-        ImDrawList* dl,
-        const ProjectedCircle& circle,
-        int number,
+    static void DrawStepNumberAtCenter(ImDrawList* dl, const ProjectedCircle& circle, int number,
         bool bSelected)
     {
         char text[16];
         sprintf_s(text, "%d", number);
         const ImVec2 textSize = ImGui::CalcTextSize(text);
-        const ImVec2 position(
-            circle.Center.x - textSize.x * 0.5f,
+        const ImVec2 position(circle.Center.x - textSize.x * 0.5f,
             circle.Center.y - textSize.y * 0.5f);
-        dl->AddText(
-            ImVec2(position.x + 1.f, position.y + 1.f),
-            IM_COL32(8, 12, 24, 235), text);
-        dl->AddText(
-            position,
-            bSelected
-                ? IM_COL32(255, 220, 95, 255)
-                : IM_COL32(255, 255, 255, 255),
-            text);
+        dl->AddText(ImVec2(position.x + 1.f, position.y + 1.f), IM_COL32(8, 12, 24, 235), text);
+        dl->AddText(position, bSelected ? IM_COL32(255, 220, 95, 255)
+                : IM_COL32(255, 255, 255, 255), text);
     }
 
     // Manual override for tuning on a specific engine version (0 = auto-detect).
     static uint32_t g_PlatformDataOffsetOverride = 0;
-    // Player loadout icons reuse this decoder but must stay quiet and small.
-    // These are game-thread-local so the Safe Zone editor keeps its diagnostics
-    // and full-resolution behavior on the GUI thread.
     static thread_local bool g_SuppressTextureExtractionLogs = false;
     static thread_local int32 g_MaxTextureExtractionDimension = 0;
 
-    // EPixelFormat is append-only across the supported UE4 builds. Chapter 2
-    // minimaps can be BC7; treating its 16-byte blocks as same-sized BC3 is what
-    // produced the vertical multicolour corruption on 17.30.
+    // EPixelFormat is append-only here. Chapter 2 minimaps can be BC7, whose 16-byte blocks look like BC3.
     enum : int32
     {
-        PF_B8G8R8A8 = 2,
-        PF_DXT1 = 5,
-        PF_DXT3 = 6,
-        PF_DXT5 = 7,
-        PF_R8G8B8A8 = 37,
-        PF_BC7 = 56
+        PF_B8G8R8A8 = 2, PF_DXT1 = 5, PF_DXT3 = 6, PF_DXT5 = 7, PF_R8G8B8A8 = 37, PF_BC7 = 56
     };
 
     static bool IsKnownFormat(int32 f)
@@ -2648,7 +2015,6 @@ namespace SafeZoneMap
         return blocksX * blocksY * 16; // BC2/BC3/BC7
     }
 
-    // True only if every byte of [p, p+bytes) is committed and readable.
     static bool IsReadable(const void* p, size_t bytes)
     {
         if (!p || bytes == 0) return false;
@@ -2669,64 +2035,44 @@ namespace SafeZoneMap
         return true;
     }
 
-    // Bytes of the committed region from p to the end of its VirtualQuery block.
-    // Restricted to MEM_PRIVATE: texture pixel buffers are FMemory::Malloc heap
-    // allocations. MEM_IMAGE (the EXE) and MEM_MAPPED (pak files) regions also
-    // pass a plain "readable" test and previously produced garbage textures
-    // (2MB of program code decoded as DXT1 == colored static; see 10.40/27.11).
+    // MEM_PRIVATE only: image and pak mappings also read fine but decode as coloured static.
     static size_t RegionSize(const void* p)
     {
         MEMORY_BASIC_INFORMATION mbi{};
-        if (!p || (uintptr_t)p < 0x10000 || VirtualQuery(p, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT) return 0;
+        if (!p || (uintptr_t)p < 0x10000 || VirtualQuery(p, &mbi, sizeof(mbi)) == 0 ||
+            mbi.State != MEM_COMMIT) return 0;
         if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || mbi.Protect == 0) return 0;
-        if (mbi.Type != MEM_PRIVATE) return 0; // heap only: reject EXE image / mapped-file pointers
+        if (mbi.Type != MEM_PRIVATE) return 0;
         size_t before = (const uint8_t*)p - (const uint8_t*)mbi.BaseAddress;
         return mbi.RegionSize > before ? (size_t)(mbi.RegionSize - before) : 0;
     }
 
-    // The strict resident-icon decoder proves the mip layout, dimensions,
-    // encoded byte count and payload identity before and after its bounded
-    // copy. That is strong enough to admit read-only IoStore/pak mappings here
-    // without weakening the legacy heuristic decoder above. Executable/image
-    // mappings remain invalid icon payloads.
     static size_t StrictResidentIconPayloadRegionSize(const void* p)
     {
         MEMORY_BASIC_INFORMATION mbi{};
-        if (!p ||
-            (uintptr_t)p < 0x10000 ||
-            VirtualQuery(p, &mbi, sizeof(mbi)) == 0 ||
+        if (!p || (uintptr_t)p < 0x10000 || VirtualQuery(p, &mbi, sizeof(mbi)) == 0 ||
             mbi.State != MEM_COMMIT)
         {
             return 0;
         }
-        if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
-            mbi.Protect == 0 ||
-            (mbi.Protect &
-                (PAGE_EXECUTE |
-                 PAGE_EXECUTE_READ |
-                 PAGE_EXECUTE_READWRITE |
+        if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || mbi.Protect == 0 || (mbi.Protect &
+                (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                  PAGE_EXECUTE_WRITECOPY)))
         {
             return 0;
         }
-        if (mbi.Type != MEM_PRIVATE &&
-            mbi.Type != MEM_MAPPED)
+        if (mbi.Type != MEM_PRIVATE && mbi.Type != MEM_MAPPED)
         {
             return 0;
         }
-        const size_t Before =
-            static_cast<const uint8_t*>(p) -
+        const size_t Before = static_cast<const uint8_t*>(p) -
             static_cast<const uint8_t*>(mbi.BaseAddress);
-        return mbi.RegionSize > Before
-            ? static_cast<size_t>(mbi.RegionSize - Before)
-            : 0;
+        return mbi.RegionSize > Before ? static_cast<size_t>(mbi.RegionSize - Before) : 0;
     }
 
     static bool IsPow2Dim(int32 v) { return v >= 64 && v <= 16384 && (v & (v - 1)) == 0; }
 
-    // Reject "pixel data" pointers whose first 8 bytes are a code/vtable pointer
-    // into a loaded module - the classic false positive (async-IO handles, linker
-    // objects stored inside FByteBulkData) that decodes as colored static.
+    // A code or vtable pointer in the first 8 bytes means this is not pixel data.
     static bool StartsWithImagePointer(const uint8_t* p)
     {
         if (!IsReadable(p, 8)) return false;
@@ -2744,11 +2090,7 @@ namespace SafeZoneMap
         uint32_t FoundAtOffset = 0;
     };
 
-    // Scan the UTexture2D object for the non-reflected PlatformData pointer by
-    // recognising FTexturePlatformData's header: {int32 SizeX, int32 SizeY,
-    // uint32 PackedData/NumSlices, EPixelFormat PixelFormat}. Reading PixelFormat
-    // from +0x0C (not a "first small int" probe, which grabs PackedData) both
-    // validates the candidate and gives the correct format to decode.
+    // FTexturePlatformData's header is {int32 SizeX, int32 SizeY, uint32 PackedData, EPixelFormat}.
     static bool DetectPlatformData(const void* tex, FPlatformData& out)
     {
         if (!IsReadable(tex, 0x220)) return false;
@@ -2762,31 +2104,14 @@ namespace SafeZoneMap
             int32 sx = *(const int32*)(P + 0x0);
             int32 sy = *(const int32*)(P + 0x4);
             if (!IsPow2Dim(sx) || !IsPow2Dim(sy)) return false;
-            // PixelFormat is at +0x0C (after two dims + PackedData); a couple of
-            // older layouts keep it at +0x08. Take whichever is a known format.
-            const int32 pf0c =
-                *reinterpret_cast<const int32*>(P + 0x0C);
-            const int32 pf08 =
-                *reinterpret_cast<const int32*>(P + 0x08);
-            // UE4 stores PixelFormat as a byte-sized TEnumAsByte in several cooked
-            // FTexturePlatformData layouts. The following padding is not
-            // guaranteed to be zero, so reading four bytes can turn a valid
-            // PF_DXT5 (7) into an unrecognised integer.
-            const int32 pf0cByte =
-                *reinterpret_cast<const uint8_t*>(P + 0x0C);
-            const int32 pf08Byte =
-                *reinterpret_cast<const uint8_t*>(P + 0x08);
-            const int32 pf =
-                IsKnownFormat(pf0c)
-                    ? pf0c
-                    : (IsKnownFormat(pf0cByte)
-                        ? pf0cByte
-                        : (IsKnownFormat(pf08)
-                            ? pf08
-                            : (IsKnownFormat(pf08Byte)
-                                ? pf08Byte
-                                : 0)));
-            if (pf != 0) // strong match: real FTexturePlatformData with a known format
+            const int32 pf0c = *reinterpret_cast<const int32*>(P + 0x0C);
+            const int32 pf08 = *reinterpret_cast<const int32*>(P + 0x08);
+            // PixelFormat is a byte-sized TEnumAsByte in several cooked layouts, and the padding after it is not zeroed.
+            const int32 pf0cByte = *reinterpret_cast<const uint8_t*>(P + 0x0C);
+            const int32 pf08Byte = *reinterpret_cast<const uint8_t*>(P + 0x08);
+            const int32 pf = IsKnownFormat(pf0c) ? pf0c : (IsKnownFormat(pf0cByte) ? pf0cByte
+                        : (IsKnownFormat(pf08) ? pf08 : (IsKnownFormat(pf08Byte) ? pf08Byte : 0)));
+            if (pf != 0)
             {
                 out.Ptr = P; out.SizeX = sx; out.SizeY = sy; out.PixelFormat = pf; out.FoundAtOffset = off;
                 if (!g_SuppressTextureExtractionLogs)
@@ -2801,8 +2126,7 @@ namespace SafeZoneMap
                 if (!g_SuppressTextureExtractionLogs)
                     SDK::DbgLog(
                         "[SafeZoneMap] PlatformData candidate @0x%X ptr=%p %dx%d header pf08=%d pf0c=%d pf10=%d pf14=%d\n",
-                        off, (const void*)P, sx, sy, pf08, pf0c,
-                        *(const int32*)(P + 0x10),
+                        off, (const void*)P, sx, sy, pf08, pf0c, *(const int32*)(P + 0x10),
                         *(const int32*)(P + 0x14));
             }
             return false;
@@ -2814,13 +2138,13 @@ namespace SafeZoneMap
         {
             const uint8_t* P = *(const uint8_t* const*)(base + off);
             if (consider(P, off)) return true;
-            if (IsReadable(P, 8)) // UE5 pointer-to-pointer (PrivatePlatformData) variant
+            if (IsReadable(P, 8))
             {
                 const uint8_t* Q = *(const uint8_t* const*)P;
                 if (consider(Q, off)) return true;
             }
         }
-        if (haveFallback) // no known-format match; fall back to first pow2 candidate
+        if (haveFallback)
         {
             out = fallback;
             if (!g_SuppressTextureExtractionLogs)
@@ -2833,22 +2157,16 @@ namespace SafeZoneMap
         return false;
     }
 
-    // From detected platform data, find mip0's resident pixel bytes (a pointer to
-    // a committed region large enough for neededBytes).
     static bool LooksLikeMip(const uint8_t* mip, int32 sizeX, int32 sizeY)
     {
         if (!IsReadable(mip, 0xA0)) return false;
 
-        // FTexture2DMipMap starts with FByteBulkData, whose size varies heavily
-        // between UE4/UE5 builds. Validate it by finding its trailing dimensions
-        // instead of assuming the dimensions are at byte zero.
         for (uint32_t off = 0; off <= 0x90; off += 4)
         {
             const int32 x = *(const int32*)(mip + off);
             const int32 y = *(const int32*)(mip + off + 4);
             if (x == sizeX && y == sizeY) return true;
         }
-        // Some cooked layouts keep mip dimensions as uint16 values.
         for (uint32_t off = 0; off <= 0x94; off += 2)
         {
             const uint16_t x = *(const uint16_t*)(mip + off);
@@ -2858,8 +2176,7 @@ namespace SafeZoneMap
         return false;
     }
 
-    static const uint8_t* FindMip0Bytes(
-        const FPlatformData& pd, size_t neededBytes)
+    static const uint8_t* FindMip0Bytes(const FPlatformData& pd, size_t neededBytes)
     {
         for (uint32_t moff = 0x0C; moff <= 0x80; moff += 4) // the mips TArray {Data,Num,Max}
         {
@@ -2870,7 +2187,6 @@ namespace SafeZoneMap
             int32 max = *(const int32*)(arrAt + 12);
             if (num < 1 || num > 20 || max < num || !IsReadable(data, 8)) continue;
 
-            // Element may be inline (FTexture2DMipMap) or a pointer (TIndirectArray).
             const uint8_t* mip0 = data;
             const uint8_t* asPtr = *(const uint8_t* const*)data;
             if (LooksLikeMip(asPtr, pd.SizeX, pd.SizeY))
@@ -2895,14 +2211,8 @@ namespace SafeZoneMap
         return nullptr;
     }
 
-    static bool DecodeTextureBytes(
-        const uint8_t* src,
-        int fmt,
-        int w,
-        int h,
-        std::vector<unsigned char>& rgba,
-        int& outW,
-        int& outH)
+    static bool DecodeTextureBytes(const uint8_t* src, int fmt, int w, int h,
+        std::vector<unsigned char>& rgba, int& outW, int& outH)
     {
         if (!src || w <= 0 || h <= 0)
             return false;
@@ -2958,13 +2268,11 @@ namespace SafeZoneMap
         return true;
     }
 
-    // Best-effort: extract the given minimap texture into an RGBA8 buffer.
     static bool ExtractToRGBA(const void* tex, std::vector<unsigned char>& rgba, int& outW, int& outH)
     {
         FPlatformData pd;
         if (!DetectPlatformData(tex, pd)) return false;
-        if (g_MaxTextureExtractionDimension > 0 &&
-            (pd.SizeX > g_MaxTextureExtractionDimension ||
+        if (g_MaxTextureExtractionDimension > 0 && (pd.SizeX > g_MaxTextureExtractionDimension ||
              pd.SizeY > g_MaxTextureExtractionDimension))
         {
             return false;
@@ -2975,12 +2283,10 @@ namespace SafeZoneMap
         int fmt = pd.PixelFormat;
         const uint8_t* src = nullptr;
 
-        // Known format -> look for exactly the mip that size (no size-guessing,
-        // which is what previously decoded BC1 bytes as raw RGBA -> garbled).
         if (IsKnownFormat(fmt))
             src = FindMip0Bytes(pd, FormatBytes(fmt, w, h));
 
-        if (!src) // unknown format or not found: probe by descending size class
+        if (!src)
         {
             const struct { int f; size_t need; } probes[] = {
                 { PF_B8G8R8A8, pixels * 4 },
@@ -2995,18 +2301,13 @@ namespace SafeZoneMap
             if (!src) return false;
         }
 
-        if (!DecodeTextureBytes(
-                src, fmt, w, h,
-                rgba, outW, outH))
+        if (!DecodeTextureBytes(src, fmt, w, h, rgba, outW, outH))
             return false;
         if (!g_SuppressTextureExtractionLogs)
             SDK::DbgLog("[SafeZoneMap] extracted %dx%d fmt=%d ok\n", w, h, fmt);
         return true;
     }
 
-    // SEH guard: chasing unknown cross-version texture layouts can dereference a
-    // bad pointer (e.g. the Rufus minimaps on 27.x). Catch the access violation
-    // and fall back to the numeric editor instead of crashing the GUI thread.
     static bool ExtractToRGBA_Guarded(const void* tex, std::vector<unsigned char>& rgba, int& outW, int& outH)
     {
         __try
@@ -3023,8 +2324,7 @@ namespace SafeZoneMap
 
     constexpr int32 kMaximumResidentIconMips = 20;
     constexpr int32 kMaximumResidentIconDimension = 512;
-    constexpr size_t kMaximumResidentIconBytes =
-        1024 * 1024;
+    constexpr size_t kMaximumResidentIconBytes = 1024 * 1024;
 
     struct FResidentIconMipChain
     {
@@ -3049,38 +2349,25 @@ namespace SafeZoneMap
         size_t ByteCount = 0;
     };
 
-    static bool ReadResidentIconMipDimensions(
-        const uint8_t* Mip,
-        uint16_t Offset,
-        bool Is16Bit,
-        int32& Width,
-        int32& Height,
-        int32& Depth)
+    static bool ReadResidentIconMipDimensions(const uint8_t* Mip, uint16_t Offset, bool Is16Bit,
+        int32& Width, int32& Height, int32& Depth)
     {
-        const size_t Bytes =
-            Is16Bit
-                ? sizeof(uint16_t) * 3
-                : sizeof(uint32_t) * 3;
-        if (!Mip ||
-            !IsReadable(Mip + Offset, Bytes))
+        const size_t Bytes = Is16Bit ? sizeof(uint16_t) * 3 : sizeof(uint32_t) * 3;
+        if (!Mip || !IsReadable(Mip + Offset, Bytes))
         {
             return false;
         }
 
         if (Is16Bit)
         {
-            const auto Values =
-                reinterpret_cast<const uint16_t*>(
-                    Mip + Offset);
+            const auto Values = reinterpret_cast<const uint16_t*>(Mip + Offset);
             Width = Values[0];
             Height = Values[1];
             Depth = Values[2];
         }
         else
         {
-            const auto Values =
-                reinterpret_cast<const uint32_t*>(
-                    Mip + Offset);
+            const auto Values = reinterpret_cast<const uint32_t*>(Mip + Offset);
             Width = static_cast<int32>(Values[0]);
             Height = static_cast<int32>(Values[1]);
             Depth = static_cast<int32>(Values[2]);
@@ -3088,11 +2375,8 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool IsResidentIconMipLayout(
-        const FPlatformData& PlatformData,
-        const FResidentIconMipChain& Chain,
-        uint16_t DimensionOffset,
-        bool DimensionsAre16Bit)
+    static bool IsResidentIconMipLayout(const FPlatformData& PlatformData,
+        const FResidentIconMipChain& Chain, uint16_t DimensionOffset, bool DimensionsAre16Bit)
     {
         for (int32 Index = 0;
              Index < Chain.Num;
@@ -3101,22 +2385,10 @@ namespace SafeZoneMap
             int32 Width = 0;
             int32 Height = 0;
             int32 Depth = 0;
-            if (!ReadResidentIconMipDimensions(
-                    Chain.Mips[Index],
-                    DimensionOffset,
-                    DimensionsAre16Bit,
-                    Width,
-                    Height,
-                    Depth) ||
-                Width !=
-                    (std::max)(
-                        1,
-                        PlatformData.SizeX >> Index) ||
-                Height !=
-                    (std::max)(
-                        1,
-                        PlatformData.SizeY >> Index) ||
-                Depth != 1)
+            if (!ReadResidentIconMipDimensions(Chain.Mips[Index], DimensionOffset,
+                    DimensionsAre16Bit, Width, Height, Depth) || Width != (std::max)(1,
+                        PlatformData.SizeX >> Index) || Height != (std::max)(1,
+                        PlatformData.SizeY >> Index) || Depth != 1)
             {
                 return false;
             }
@@ -3124,12 +2396,10 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool FinalizeResidentIconMipLayout(
-        const FPlatformData& PlatformData,
+    static bool FinalizeResidentIconMipLayout(const FPlatformData& PlatformData,
         FResidentIconMipChain& Chain)
     {
-        if (Chain.MipScanBytes <
-                sizeof(uint16_t) * 3)
+        if (Chain.MipScanBytes <sizeof(uint16_t) * 3)
         {
             return false;
         }
@@ -3137,38 +2407,25 @@ namespace SafeZoneMap
         int LayoutCount = 0;
         uint16_t MatchedOffset = 0;
         bool Matched16Bit = false;
-        const size_t Maximum32BitOffset =
-            Chain.MipScanBytes >= sizeof(uint32_t) * 3
-                ? Chain.MipScanBytes -
-                    sizeof(uint32_t) * 3
-                : 0;
+        const size_t Maximum32BitOffset = Chain.MipScanBytes >= sizeof(uint32_t) * 3
+                ? Chain.MipScanBytes - sizeof(uint32_t) * 3 : 0;
         for (uint16_t Offset = 0;
              Offset <= Maximum32BitOffset;
              Offset += 4)
         {
-            if (IsResidentIconMipLayout(
-                    PlatformData,
-                    Chain,
-                    Offset,
-                    false))
+            if (IsResidentIconMipLayout(PlatformData, Chain, Offset, false))
             {
                 ++LayoutCount;
                 MatchedOffset = Offset;
                 Matched16Bit = false;
             }
         }
-        const size_t Maximum16BitOffset =
-            Chain.MipScanBytes -
-            sizeof(uint16_t) * 3;
+        const size_t Maximum16BitOffset = Chain.MipScanBytes - sizeof(uint16_t) * 3;
         for (uint16_t Offset = 0;
              Offset <= Maximum16BitOffset;
              Offset += 2)
         {
-            if (IsResidentIconMipLayout(
-                    PlatformData,
-                    Chain,
-                    Offset,
-                    true))
+            if (IsResidentIconMipLayout(PlatformData, Chain, Offset, true))
             {
                 ++LayoutCount;
                 MatchedOffset = Offset;
@@ -3183,41 +2440,26 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool ValidateResidentIconMipHeaderUnsafe(
-        const FPlatformData& PlatformData,
-        uint32_t HeaderOffset,
-        FResidentIconMipChain& Result)
+    static bool ValidateResidentIconMipHeaderUnsafe(const FPlatformData& PlatformData,
+        uint32_t HeaderOffset, FResidentIconMipChain& Result)
     {
         Result = {};
-        const uint8_t* Header =
-            PlatformData.Ptr + HeaderOffset;
+        const uint8_t* Header = PlatformData.Ptr + HeaderOffset;
         if (!IsReadable(Header, 16))
             return false;
 
-        const uint8_t* Data =
-            *reinterpret_cast<const uint8_t* const*>(
-                Header);
-        const int32 Num =
-            *reinterpret_cast<const int32*>(
-                Header + 8);
-        const int32 Max =
-            *reinterpret_cast<const int32*>(
-                Header + 12);
-        if (!Data ||
-            (reinterpret_cast<uintptr_t>(Data) & 7) ||
-            Num < 1 ||
-            Num > kMaximumResidentIconMips ||
-            Max < Num ||
-            Max > 64)
+        const uint8_t* Data = *reinterpret_cast<const uint8_t* const*>(Header);
+        const int32 Num = *reinterpret_cast<const int32*>(Header + 8);
+        const int32 Max = *reinterpret_cast<const int32*>(Header + 12);
+        if (!Data || (reinterpret_cast<uintptr_t>(Data) & 7) || Num < 1 ||
+            Num > kMaximumResidentIconMips || Max < Num || Max > 64)
         {
             return false;
         }
 
         FResidentIconMipChain Matched;
         int StorageMatches = 0;
-        auto TryCandidate = [&] (
-            bool IsIndirect,
-            size_t InlineStride)
+        auto TryCandidate = [&] (bool IsIndirect, size_t InlineStride)
         {
             FResidentIconMipChain Candidate;
             Candidate.Header = Header;
@@ -3225,59 +2467,37 @@ namespace SafeZoneMap
             Candidate.Num = Num;
             Candidate.Max = Max;
             Candidate.MipsAreIndirect = IsIndirect;
-            const size_t ElementStride = IsIndirect
-                ? sizeof(const uint8_t*)
-                : InlineStride;
-            Candidate.ArrayStorageBytes =
-                static_cast<size_t>(Max) *
-                ElementStride;
-            Candidate.MipScanBytes = IsIndirect
-                ? 0x100
-                : InlineStride;
-            const size_t ConstructedBytes =
-                static_cast<size_t>(Num) *
-                ElementStride;
-            if (!ElementStride ||
-                !ConstructedBytes ||
-                !IsReadable(Data, ConstructedBytes))
+            const size_t ElementStride = IsIndirect ? sizeof(const uint8_t*) : InlineStride;
+            Candidate.ArrayStorageBytes = static_cast<size_t>(Max) * ElementStride;
+            Candidate.MipScanBytes = IsIndirect ? 0x100 : InlineStride;
+            const size_t ConstructedBytes = static_cast<size_t>(Num) * ElementStride;
+            if (!ElementStride || !ConstructedBytes || !IsReadable(Data, ConstructedBytes))
                 return;
 
-            const uintptr_t ArrayBegin =
-                reinterpret_cast<uintptr_t>(Data);
-            const uintptr_t ArrayEnd =
-                ArrayBegin +
-                Candidate.ArrayStorageBytes;
+            const uintptr_t ArrayBegin = reinterpret_cast<uintptr_t>(Data);
+            const uintptr_t ArrayEnd = ArrayBegin + Candidate.ArrayStorageBytes;
             if (ArrayEnd < ArrayBegin)
                 return;
             for (int32 Index = 0;
                  Index < Num;
                  ++Index)
             {
-                const uint8_t* Mip = IsIndirect
-                    ? reinterpret_cast<
-                        const uint8_t* const*>(Data)[Index]
-                    : Data + InlineStride *
+                const uint8_t* Mip = IsIndirect ? reinterpret_cast<
+                        const uint8_t* const*>(Data)[Index] : Data + InlineStride *
                         static_cast<size_t>(Index);
-                if (!Mip ||
-                    (reinterpret_cast<uintptr_t>(Mip) & 7) ||
-                    !IsReadable(
-                        Mip,
+                if (!Mip || (reinterpret_cast<uintptr_t>(Mip) & 7) || !IsReadable(Mip,
                         Candidate.MipScanBytes))
                 {
                     return;
                 }
-                const uintptr_t MipAddress =
-                    reinterpret_cast<uintptr_t>(Mip);
-                if (IsIndirect &&
-                    MipAddress >= ArrayBegin &&
-                    MipAddress < ArrayEnd)
+                const uintptr_t MipAddress = reinterpret_cast<uintptr_t>(Mip);
+                if (IsIndirect && MipAddress >= ArrayBegin && MipAddress < ArrayEnd)
                 {
                     return;
                 }
                 Candidate.Mips[Index] = Mip;
             }
-            if (!FinalizeResidentIconMipLayout(
-                    PlatformData, Candidate))
+            if (!FinalizeResidentIconMipLayout(PlatformData, Candidate))
             {
                 return;
             }
@@ -3285,10 +2505,7 @@ namespace SafeZoneMap
             ++StorageMatches;
         };
 
-        // UE4 uses both TIndirectArray<FTexture2DMipMap> and an inline
-        // TArray<FTexture2DMipMap> across the supported releases. First try
-        // the pointer-array form, then prove an inline element stride by the
-        // complete halving dimension sequence. Ambiguous layouts fail closed.
+        // Mips are a TIndirectArray on some releases and an inline TArray on others.
         TryCandidate(true, 0);
         if (Num >= 2)
         {
@@ -3306,13 +2523,8 @@ namespace SafeZoneMap
         }
         Result = Matched;
 
-        // Re-read the header and pointer array so a streaming update cannot
-        // turn a partially observed chain into a valid-looking snapshot.
-        if (*reinterpret_cast<
-                const uint8_t* const*>(Header) != Data ||
-            *reinterpret_cast<
-                const int32*>(Header + 8) != Num ||
-            *reinterpret_cast<
+        if (*reinterpret_cast<const uint8_t* const*>(Header) != Data || *reinterpret_cast<
+                const int32*>(Header + 8) != Num || *reinterpret_cast<
                 const int32*>(Header + 12) != Max)
         {
             Result = {};
@@ -3324,20 +2536,14 @@ namespace SafeZoneMap
                  Index < Num;
                  ++Index)
             {
-                if (reinterpret_cast<
-                        const uint8_t* const*>(
-                            Data)[Index] !=
-                    Result.Mips[Index])
+                if (reinterpret_cast<const uint8_t* const*>(Data)[Index] != Result.Mips[Index])
                 {
                     Result = {};
                     return false;
                 }
             }
         }
-        if (!IsResidentIconMipLayout(
-                PlatformData,
-                Result,
-                Result.DimensionOffset,
+        if (!IsResidentIconMipLayout(PlatformData, Result, Result.DimensionOffset,
                 Result.DimensionsAre16Bit))
         {
             Result = {};
@@ -3346,8 +2552,7 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool SnapshotResidentIconMipChainUnsafe(
-        const FPlatformData& PlatformData,
+    static bool SnapshotResidentIconMipChainUnsafe(const FPlatformData& PlatformData,
         FResidentIconMipChain& Result)
     {
         Result = {};
@@ -3357,10 +2562,7 @@ namespace SafeZoneMap
              Offset += 8)
         {
             FResidentIconMipChain Candidate;
-            if (!ValidateResidentIconMipHeaderUnsafe(
-                    PlatformData,
-                    Offset,
-                    Candidate))
+            if (!ValidateResidentIconMipHeaderUnsafe(PlatformData, Offset, Candidate))
             {
                 continue;
             }
@@ -3374,15 +2576,12 @@ namespace SafeZoneMap
         return Matches == 1;
     }
 
-    static bool TrySnapshotResidentIconMipChain(
-        const FPlatformData* PlatformData,
+    static bool TrySnapshotResidentIconMipChain(const FPlatformData* PlatformData,
         FResidentIconMipChain* Result)
     {
         __try
         {
-            return SnapshotResidentIconMipChainUnsafe(
-                *PlatformData,
-                *Result);
+            return SnapshotResidentIconMipChainUnsafe(*PlatformData, *Result);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -3391,15 +2590,11 @@ namespace SafeZoneMap
         }
     }
 
-    static bool TryDetectResidentIconPlatformData(
-        const void* Texture,
-        FPlatformData* PlatformData)
+    static bool TryDetectResidentIconPlatformData(const void* Texture, FPlatformData* PlatformData)
     {
         __try
         {
-            return DetectPlatformData(
-                Texture,
-                *PlatformData);
+            return DetectPlatformData(Texture, *PlatformData);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -3408,45 +2603,26 @@ namespace SafeZoneMap
         }
     }
 
-    static bool IsPointerInResidentIconRange(
-        const uint8_t* Pointer,
-        const uint8_t* Start,
+    static bool IsPointerInResidentIconRange(const uint8_t* Pointer, const uint8_t* Start,
         size_t Size)
     {
         if (!Pointer || !Start || !Size)
             return false;
-        const uintptr_t Value =
-            reinterpret_cast<uintptr_t>(Pointer);
-        const uintptr_t Begin =
-            reinterpret_cast<uintptr_t>(Start);
-        const uintptr_t End =
-            Begin + Size;
-        return End >= Begin &&
-            Value >= Begin &&
-            Value < End;
+        const uintptr_t Value = reinterpret_cast<uintptr_t>(Pointer);
+        const uintptr_t Begin = reinterpret_cast<uintptr_t>(Start);
+        const uintptr_t End = Begin + Size;
+        return End >= Begin && Value >= Begin && Value < End;
     }
 
-    static bool IsResidentIconMipChainCurrentUnsafe(
-        const FPlatformData& PlatformData,
+    static bool IsResidentIconMipChainCurrentUnsafe(const FPlatformData& PlatformData,
         const FResidentIconMipChain& Chain)
     {
-        if (!Chain.Header ||
-            !Chain.Data ||
-            Chain.Num < 1 ||
-            Chain.Num > kMaximumResidentIconMips ||
-            !Chain.MipScanBytes ||
-            !IsReadable(Chain.Header, 16) ||
-            *reinterpret_cast<
-                const uint8_t* const*>(
-                    Chain.Header) != Chain.Data ||
-            *reinterpret_cast<const int32*>(
-                Chain.Header + 8) != Chain.Num ||
-            *reinterpret_cast<const int32*>(
-                Chain.Header + 12) != Chain.Max ||
-            (Chain.MipsAreIndirect &&
-             !IsReadable(
-                 Chain.Data,
-                 static_cast<size_t>(Chain.Num) *
+        if (!Chain.Header || !Chain.Data || Chain.Num < 1 || Chain.Num > kMaximumResidentIconMips ||
+            !Chain.MipScanBytes || !IsReadable(Chain.Header, 16) || *reinterpret_cast<
+                const uint8_t* const*>(Chain.Header) != Chain.Data ||
+            *reinterpret_cast<const int32*>(Chain.Header + 8) != Chain.Num ||
+            *reinterpret_cast<const int32*>(Chain.Header + 12) != Chain.Max ||
+            (Chain.MipsAreIndirect && !IsReadable(Chain.Data, static_cast<size_t>(Chain.Num) *
                     sizeof(const uint8_t*))))
         {
             return false;
@@ -3456,135 +2632,70 @@ namespace SafeZoneMap
              Index < Chain.Num;
              ++Index)
         {
-            const uint8_t* CurrentMip =
-                Chain.MipsAreIndirect
-                    ? reinterpret_cast<
-                        const uint8_t* const*>(
-                            Chain.Data)[Index]
-                    : Chain.Data +
-                        Chain.MipScanBytes *
-                            static_cast<size_t>(Index);
-            if (CurrentMip != Chain.Mips[Index] ||
-                !IsReadable(
-                    CurrentMip,
-                    Chain.MipScanBytes))
+            const uint8_t* CurrentMip = Chain.MipsAreIndirect ? reinterpret_cast<
+                        const uint8_t* const*>(Chain.Data)[Index] : Chain.Data +
+                        Chain.MipScanBytes * static_cast<size_t>(Index);
+            if (CurrentMip != Chain.Mips[Index] || !IsReadable(CurrentMip, Chain.MipScanBytes))
             {
                 return false;
             }
         }
-        return IsResidentIconMipLayout(
-            PlatformData,
-            Chain,
-            Chain.DimensionOffset,
+        return IsResidentIconMipLayout(PlatformData, Chain, Chain.DimensionOffset,
             Chain.DimensionsAre16Bit);
     }
 
-    static int ResidentIconBulkSizeScore(
-        const uint8_t* Mip,
-        uint16_t DimensionOffset,
-        bool DimensionsAre16Bit,
-        uint32_t PointerOffset,
-        size_t MipScanBytes,
-        size_t ExpectedBytes)
+    static int ResidentIconBulkSizeScore(const uint8_t* Mip, uint16_t DimensionOffset,
+        bool DimensionsAre16Bit, uint32_t PointerOffset, size_t MipScanBytes, size_t ExpectedBytes)
     {
-        const uint32_t DimensionBytes =
-            DimensionsAre16Bit
-                ? sizeof(uint16_t) * 3
+        const uint32_t DimensionBytes = DimensionsAre16Bit ? sizeof(uint16_t) * 3
                 : sizeof(uint32_t) * 3;
-        auto Overlaps = [](
-            uint32_t LeftOffset,
-            uint32_t LeftSize,
-            uint32_t RightOffset,
+        auto Overlaps = [](uint32_t LeftOffset, uint32_t LeftSize, uint32_t RightOffset,
             uint32_t RightSize)
         {
-            return LeftOffset <
-                    RightOffset + RightSize &&
-                RightOffset <
-                    LeftOffset + LeftSize;
+            return LeftOffset <RightOffset + RightSize && RightOffset <LeftOffset + LeftSize;
         };
 
         int Score = 0;
         for (uint32_t Offset = 0;
-             Offset + sizeof(uint32_t) <=
-                 MipScanBytes;
+             Offset + sizeof(uint32_t) <= MipScanBytes;
              Offset += 4)
         {
-            if (Overlaps(
-                    Offset,
-                    sizeof(uint32_t),
-                    DimensionOffset,
-                    DimensionBytes) ||
-                Overlaps(
-                    Offset,
-                    sizeof(uint32_t),
-                    PointerOffset,
-                    sizeof(const uint8_t*)))
+            if (Overlaps(Offset, sizeof(uint32_t), DimensionOffset, DimensionBytes) || Overlaps(
+                    Offset, sizeof(uint32_t), PointerOffset, sizeof(const uint8_t*)))
             {
                 continue;
             }
-            const uint32_t Value =
-                *reinterpret_cast<const uint32_t*>(
-                    Mip + Offset);
+            const uint32_t Value = *reinterpret_cast<const uint32_t*>(Mip + Offset);
             if (Value == ExpectedBytes)
             {
-                Score = (std::max)(
-                    Score,
-                    (Offset ==
-                             PointerOffset +
-                                 sizeof(const uint8_t*) ||
-                     Offset + sizeof(uint32_t) ==
-                         PointerOffset)
-                        ? 7
-                        : 3);
+                Score = (std::max)(Score, (Offset == PointerOffset + sizeof(const uint8_t*) ||
+                     Offset + sizeof(uint32_t) == PointerOffset) ? 7 : 3);
             }
         }
         for (uint32_t Offset = 0;
-             Offset + sizeof(uint64_t) <=
-                 MipScanBytes;
+             Offset + sizeof(uint64_t) <= MipScanBytes;
              Offset += 8)
         {
-            if (Overlaps(
-                    Offset,
-                    sizeof(uint64_t),
-                    DimensionOffset,
-                    DimensionBytes) ||
-                Overlaps(
-                    Offset,
-                    sizeof(uint64_t),
-                    PointerOffset,
-                    sizeof(const uint8_t*)))
+            if (Overlaps(Offset, sizeof(uint64_t), DimensionOffset, DimensionBytes) || Overlaps(
+                    Offset, sizeof(uint64_t), PointerOffset, sizeof(const uint8_t*)))
             {
                 continue;
             }
-            const uint64_t Value =
-                *reinterpret_cast<const uint64_t*>(
-                    Mip + Offset);
+            const uint64_t Value = *reinterpret_cast<const uint64_t*>(Mip + Offset);
             if (Value == ExpectedBytes)
             {
-                Score = (std::max)(
-                    Score,
-                    (Offset ==
-                             PointerOffset +
-                                 sizeof(const uint8_t*) ||
-                     Offset + sizeof(uint64_t) ==
-                         PointerOffset)
-                        ? 8
-                        : 4);
+                Score = (std::max)(Score, (Offset == PointerOffset + sizeof(const uint8_t*) ||
+                     Offset + sizeof(uint64_t) == PointerOffset) ? 8 : 4);
             }
         }
         return Score;
     }
 
-    static bool FindResidentIconPayloadUnsafe(
-        const FPlatformData& PlatformData,
-        const FResidentIconMipChain& Chain,
-        int32 MipIndex,
-        FResidentIconPayload& Result)
+    static bool FindResidentIconPayloadUnsafe(const FPlatformData& PlatformData,
+        const FResidentIconMipChain& Chain, int32 MipIndex, FResidentIconPayload& Result)
     {
         Result = {};
-        if (MipIndex < 0 ||
-            MipIndex >= Chain.Num ||
-            !IsResidentIconMipChainCurrentUnsafe(
+        if (MipIndex < 0 || MipIndex >= Chain.Num || !IsResidentIconMipChainCurrentUnsafe(
                 PlatformData, Chain))
         {
             return false;
@@ -3593,40 +2704,17 @@ namespace SafeZoneMap
         int32 Width = 0;
         int32 Height = 0;
         int32 Depth = 0;
-        const uint8_t* Mip =
-            Chain.Mips[MipIndex];
-        if (!ReadResidentIconMipDimensions(
-                Mip,
-                Chain.DimensionOffset,
-                Chain.DimensionsAre16Bit,
-                Width,
-                Height,
-                Depth) ||
-            Width !=
-                (std::max)(
-                    1,
-                    PlatformData.SizeX >> MipIndex) ||
-            Height !=
-                (std::max)(
-                    1,
-                    PlatformData.SizeY >> MipIndex) ||
-            Depth != 1)
+        const uint8_t* Mip = Chain.Mips[MipIndex];
+        if (!ReadResidentIconMipDimensions(Mip, Chain.DimensionOffset, Chain.DimensionsAre16Bit,
+                Width, Height, Depth) || Width != (std::max)(1, PlatformData.SizeX >> MipIndex) ||
+            Height != (std::max)(1, PlatformData.SizeY >> MipIndex) || Depth != 1)
         {
             return false;
         }
 
-        const size_t PixelCount =
-            static_cast<size_t>(Width) *
-            Height;
-        const size_t ExpectedBytes =
-            FormatBytes(
-                PlatformData.PixelFormat,
-                Width,
-                Height);
-        if (!ExpectedBytes ||
-            ExpectedBytes >
-                kMaximumResidentIconBytes ||
-            PixelCount >
+        const size_t PixelCount = static_cast<size_t>(Width) * Height;
+        const size_t ExpectedBytes = FormatBytes(PlatformData.PixelFormat, Width, Height);
+        if (!ExpectedBytes || ExpectedBytes > kMaximumResidentIconBytes || PixelCount >
                 kMaximumResidentIconBytes / 4)
         {
             return false;
@@ -3636,40 +2724,21 @@ namespace SafeZoneMap
         int BestScore = 0;
         bool Ambiguous = false;
         for (uint32_t Offset = 0;
-             Offset + sizeof(const uint8_t*) <=
-                 Chain.MipScanBytes;
+             Offset + sizeof(const uint8_t*) <= Chain.MipScanBytes;
              Offset += 8)
         {
-            const uint32_t DimensionBytes =
-                Chain.DimensionsAre16Bit
-                    ? sizeof(uint16_t) * 3
+            const uint32_t DimensionBytes = Chain.DimensionsAre16Bit ? sizeof(uint16_t) * 3
                     : sizeof(uint32_t) * 3;
-            if (Offset <
-                    Chain.DimensionOffset +
-                        DimensionBytes &&
-                Chain.DimensionOffset <
-                    Offset +
+            if (Offset <Chain.DimensionOffset + DimensionBytes && Chain.DimensionOffset <Offset +
                         sizeof(const uint8_t*))
             {
                 continue;
             }
-            const uint8_t* Candidate =
-                *reinterpret_cast<
-                    const uint8_t* const*>(
-                        Mip + Offset);
-            if (!Candidate ||
-                (reinterpret_cast<
-                    uintptr_t>(Candidate) & 7) ||
-                StrictResidentIconPayloadRegionSize(Candidate) <
-                    ExpectedBytes ||
-                StartsWithImagePointer(Candidate) ||
-                IsPointerInResidentIconRange(
-                    Candidate,
-                    PlatformData.Ptr,
-                    0x100) ||
-                IsPointerInResidentIconRange(
-                    Candidate,
-                    Chain.Data,
+            const uint8_t* Candidate = *reinterpret_cast<const uint8_t* const*>(Mip + Offset);
+            if (!Candidate || (reinterpret_cast<uintptr_t>(Candidate) & 7) ||
+                StrictResidentIconPayloadRegionSize(Candidate) <ExpectedBytes ||
+                StartsWithImagePointer(Candidate) || IsPointerInResidentIconRange(Candidate,
+                    PlatformData.Ptr, 0x100) || IsPointerInResidentIconRange(Candidate, Chain.Data,
                     Chain.ArrayStorageBytes))
             {
                 continue;
@@ -3680,10 +2749,7 @@ namespace SafeZoneMap
                  Index < Chain.Num;
                  ++Index)
             {
-                if (IsPointerInResidentIconRange(
-                        Candidate,
-                        Chain.Mips[Index],
-                        Chain.MipScanBytes))
+                if (IsPointerInResidentIconRange(Candidate, Chain.Mips[Index], Chain.MipScanBytes))
                 {
                     PointsIntoMip = true;
                     break;
@@ -3692,14 +2758,8 @@ namespace SafeZoneMap
             if (PointsIntoMip)
                 continue;
 
-            const int Score =
-                ResidentIconBulkSizeScore(
-                    Mip,
-                    Chain.DimensionOffset,
-                    Chain.DimensionsAre16Bit,
-                    Offset,
-                    Chain.MipScanBytes,
-                    ExpectedBytes);
+            const int Score = ResidentIconBulkSizeScore(Mip, Chain.DimensionOffset,
+                    Chain.DimensionsAre16Bit, Offset, Chain.MipScanBytes, ExpectedBytes);
             if (!Score)
                 continue;
             if (Score > BestScore)
@@ -3708,8 +2768,7 @@ namespace SafeZoneMap
                 BestScore = Score;
                 Ambiguous = false;
             }
-            else if (Score == BestScore &&
-                     Best != Candidate)
+            else if (Score == BestScore && Best != Candidate)
             {
                 Ambiguous = true;
             }
@@ -3725,19 +2784,12 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool TryFindResidentIconPayload(
-        const FPlatformData* PlatformData,
-        const FResidentIconMipChain* Chain,
-        int32 MipIndex,
-        FResidentIconPayload* Result)
+    static bool TryFindResidentIconPayload(const FPlatformData* PlatformData,
+        const FResidentIconMipChain* Chain, int32 MipIndex, FResidentIconPayload* Result)
     {
         __try
         {
-            return FindResidentIconPayloadUnsafe(
-                *PlatformData,
-                *Chain,
-                MipIndex,
-                *Result);
+            return FindResidentIconPayloadUnsafe(*PlatformData, *Chain, MipIndex, *Result);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -3746,63 +2798,40 @@ namespace SafeZoneMap
         }
     }
 
-    static bool CopyResidentIconPayloadUnsafe(
-        const FPlatformData& PlatformData,
-        const FResidentIconMipChain& Chain,
-        const FResidentIconPayload& Expected,
+    static bool CopyResidentIconPayloadUnsafe(const FPlatformData& PlatformData,
+        const FResidentIconMipChain& Chain, const FResidentIconPayload& Expected,
         uint8_t* Destination)
     {
-        if (!Destination ||
-            !Expected.Bytes ||
-            !Expected.ByteCount)
+        if (!Destination || !Expected.Bytes || !Expected.ByteCount)
         {
             return false;
         }
 
         FResidentIconPayload Before;
-        if (!FindResidentIconPayloadUnsafe(
-                PlatformData,
-                Chain,
-                Expected.MipIndex,
-                Before) ||
-            Before.Bytes != Expected.Bytes ||
-            Before.ByteCount != Expected.ByteCount)
+        if (!FindResidentIconPayloadUnsafe(PlatformData, Chain, Expected.MipIndex, Before) ||
+            Before.Bytes != Expected.Bytes || Before.ByteCount != Expected.ByteCount)
         {
             return false;
         }
 
-        memcpy(
-            Destination,
-            Expected.Bytes,
-            Expected.ByteCount);
+        memcpy(Destination, Expected.Bytes, Expected.ByteCount);
 
         FResidentIconPayload After;
-        if (!FindResidentIconPayloadUnsafe(
-                PlatformData,
-                Chain,
-                Expected.MipIndex,
-                After) ||
-            After.Bytes != Expected.Bytes ||
-            After.ByteCount != Expected.ByteCount)
+        if (!FindResidentIconPayloadUnsafe(PlatformData, Chain, Expected.MipIndex, After) ||
+            After.Bytes != Expected.Bytes || After.ByteCount != Expected.ByteCount)
         {
             return false;
         }
         return true;
     }
 
-    static bool TryCopyResidentIconPayload(
-        const FPlatformData* PlatformData,
-        const FResidentIconMipChain* Chain,
-        const FResidentIconPayload* Expected,
+    static bool TryCopyResidentIconPayload(const FPlatformData* PlatformData,
+        const FResidentIconMipChain* Chain, const FResidentIconPayload* Expected,
         uint8_t* Destination)
     {
         __try
         {
-            return CopyResidentIconPayloadUnsafe(
-                *PlatformData,
-                *Chain,
-                *Expected,
-                Destination);
+            return CopyResidentIconPayloadUnsafe(*PlatformData, *Chain, *Expected, Destination);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -3810,26 +2839,18 @@ namespace SafeZoneMap
         }
     }
 
-    static bool ExtractResidentIconToRGBA(
-        const void* Texture,
-        std::vector<unsigned char>& RGBA,
-        int& Width,
-        int& Height)
+    static bool ExtractResidentIconToRGBA(const void* Texture, std::vector<unsigned char>& RGBA,
+        int& Width, int& Height)
     {
         FPlatformData PlatformData;
-        if (!TryDetectResidentIconPlatformData(
-                Texture,
-                &PlatformData) ||
-            !IsKnownFormat(
+        if (!TryDetectResidentIconPlatformData(Texture, &PlatformData) || !IsKnownFormat(
                 PlatformData.PixelFormat))
         {
             return false;
         }
 
         FResidentIconMipChain Chain;
-        if (!TrySnapshotResidentIconMipChain(
-                &PlatformData,
-                &Chain))
+        if (!TrySnapshotResidentIconMipChain(&PlatformData, &Chain))
         {
             return false;
         }
@@ -3838,67 +2859,37 @@ namespace SafeZoneMap
              Index < Chain.Num;
              ++Index)
         {
-            const int32 MipWidth =
-                (std::max)(
-                    1,
-                    PlatformData.SizeX >> Index);
-            const int32 MipHeight =
-                (std::max)(
-                    1,
-                    PlatformData.SizeY >> Index);
-            if (MipWidth >
-                    kMaximumResidentIconDimension ||
-                MipHeight >
+            const int32 MipWidth = (std::max)(1, PlatformData.SizeX >> Index);
+            const int32 MipHeight = (std::max)(1, PlatformData.SizeY >> Index);
+            if (MipWidth > kMaximumResidentIconDimension || MipHeight >
                     kMaximumResidentIconDimension)
             {
                 continue;
             }
 
             FResidentIconPayload Payload;
-            if (!TryFindResidentIconPayload(
-                    &PlatformData,
-                    &Chain,
-                    Index,
-                    &Payload))
+            if (!TryFindResidentIconPayload(&PlatformData, &Chain, Index, &Payload))
             {
                 continue;
             }
 
-            std::vector<unsigned char> Encoded(
-                Payload.ByteCount);
-            if (!TryCopyResidentIconPayload(
-                    &PlatformData,
-                    &Chain,
-                    &Payload,
-                    Encoded.data()))
+            std::vector<unsigned char> Encoded(Payload.ByteCount);
+            if (!TryCopyResidentIconPayload(&PlatformData, &Chain, &Payload, Encoded.data()))
             {
                 continue;
             }
-            return DecodeTextureBytes(
-                Encoded.data(),
-                PlatformData.PixelFormat,
-                Payload.Width,
-                Payload.Height,
-                RGBA,
-                Width,
-                Height);
+            return DecodeTextureBytes(Encoded.data(), PlatformData.PixelFormat, Payload.Width,
+                Payload.Height, RGBA, Width, Height);
         }
         return false;
     }
 
-    static bool ExtractResidentIconToRGBA_Guarded(
-        const void* Texture,
-        std::vector<unsigned char>& RGBA,
-        int& Width,
-        int& Height)
+    static bool ExtractResidentIconToRGBA_Guarded(const void* Texture,
+        std::vector<unsigned char>& RGBA, int& Width, int& Height)
     {
         __try
         {
-            return ExtractResidentIconToRGBA(
-                Texture,
-                RGBA,
-                Width,
-                Height);
+            return ExtractResidentIconToRGBA(Texture, RGBA, Width, Height);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -3906,17 +2897,11 @@ namespace SafeZoneMap
         }
     }
 
-    // ------------------------------------------------------------------------
-    // Game-thread load bridge. UE's loader (StaticLoadObject) is game-thread-
-    // only: calling it from the GUI thread is what faulted on e.g. 17.30/27.x.
-    // The GUI thread only POSTS a request; UNetDriver::TickFlush (game thread)
-    // drains it, loads + extracts the pixels, and the GUI picks them up on a
-    // later Acquire retry (the editor already re-polls every ~3s).
-    // ------------------------------------------------------------------------
+    // StaticLoadObject is game-thread only; calling it from the GUI thread faults on 17.30 and 27.x.
     enum class LoadState : int { Idle = 0, Requested, Ready, Failed, Consumed };
     static std::atomic<int> g_LoadState{ (int)LoadState::Idle };
     static std::atomic<int> g_LoadAttempts{ 0 };
-    static std::vector<unsigned char> g_LoadedRGBA; // written under Requested, read under Ready
+    static std::vector<unsigned char> g_LoadedRGBA;
     static int g_LoadedW = 0, g_LoadedH = 0;
 
     static const UTexture2D* StaticLoadMinimapSEH(const wchar_t* path, const UClass* texClass)
@@ -3932,8 +2917,8 @@ namespace SafeZoneMap
         }
     }
 
-    static int MinimapPathsForVersion(const wchar_t** out, int cap); // fwd
-    static const UTexture2D* FindLoadedMinimapTexture(const wchar_t** paths, int np); // fwd
+    static int MinimapPathsForVersion(const wchar_t** out, int cap);
+    static const UTexture2D* FindLoadedMinimapTexture(const wchar_t** paths, int np);
     static constexpr int kMaxMinimapPaths = 12;
 
     struct MapPoint
@@ -3971,9 +2956,8 @@ namespace SafeZoneMap
         if (!manager || !function)
             return false;
 
-		auto params = function->GetParamsNamed();
-		size_t bufferSize =
-			(size_t)(params.Size > 0 ? params.Size : 0x100);
+        auto params = function->GetParamsNamed();
+        size_t bufferSize = (size_t)(params.Size > 0 ? params.Size : 0x100);
         if (bufferSize < 0x100)
             bufferSize = 0x100;
         if (bufferSize > 0x10000)
@@ -3998,8 +2982,7 @@ namespace SafeZoneMap
 
         for (auto& param : params.NameOffsetMap)
         {
-            const bool isWorldInput =
-                param.Name == "WorldLocation" ||
+            const bool isWorldInput = param.Name == "WorldLocation" ||
                 param.Name == "InWorldLocation" ||
                 param.Name.find("WorldLocation") != UEAllocatedString::npos;
             if (isWorldInput && !wroteInput)
@@ -4012,10 +2995,6 @@ namespace SafeZoneMap
                 continue;
             }
 
-            // The native helper scales its result by this caller-supplied widget
-            // size. Zero produces (0,0) for every world position, which made the
-            // calibration silently fall back to the approximate version bounds.
-            // A size of one makes the result a normalized texture coordinate.
             if (param.Name == "InMapSize" || param.Name == "MapSize")
             {
                 if ((size_t)param.Offset + sizeof(float) > buffer.size())
@@ -4028,8 +3007,7 @@ namespace SafeZoneMap
                 returnOffset = param.Offset;
             else if (param.Name.find("MapLocation") != UEAllocatedString::npos)
                 namedOutputOffset = param.Offset;
-            else if ((param.PropertyFlags & 0x100) != 0 ||
-                     (param.PropertyFlags & 0x400) != 0)
+            else if ((param.PropertyFlags & 0x100) != 0 || (param.PropertyFlags & 0x400) != 0)
                 flaggedOutputOffset = param.Offset;
         }
         if (!wroteInput)
@@ -4098,9 +3076,6 @@ namespace SafeZoneMap
         if (result)
             return result;
 
-        // Older Athena versions create this Blueprint manager lazily (and
-        // dedicated servers may never create an instance). Its CDO still holds
-        // the cooked logical layer size for the currently loaded game version.
         const UObject* blueprintDefault = FindObject<UObject>(
             L"/Game/UI/IngameMap/UIMapManager.Default__UIMapManager_C");
         result = readFrom(blueprintDefault);
@@ -4126,18 +3101,15 @@ namespace SafeZoneMap
         const uint32_t liveCaptureOffset = manager->GetOffset("SceneCapture");
         if (liveCaptureOffset != UINT32_MAX)
         {
-            const UObject* candidate =
-                GetFromOffset<UObject*>(manager, liveCaptureOffset);
+            const UObject* candidate = GetFromOffset<UObject*>(manager, liveCaptureOffset);
             if (candidate && candidate->Class)
                 captureActor = candidate;
         }
 
-        const uint32_t captureClassOffset =
-            manager->GetOffset("SceneCaptureClass");
+        const uint32_t captureClassOffset = manager->GetOffset("SceneCaptureClass");
         if (captureClassOffset != UINT32_MAX)
         {
-            const UClass* captureClass =
-                GetFromOffset<UClass*>(manager, captureClassOffset);
+            const UClass* captureClass = GetFromOffset<UClass*>(manager, captureClassOffset);
             if (captureClass)
             {
                 captureClassOut = captureClass;
@@ -4148,12 +3120,10 @@ namespace SafeZoneMap
         if (!captureActor || !captureActor->Class)
             return 0.f;
 
-        const uint32_t componentOffset =
-            captureActor->GetOffset("CaptureComponent2D");
+        const uint32_t componentOffset = captureActor->GetOffset("CaptureComponent2D");
         if (componentOffset == UINT32_MAX)
             return 0.f;
-        const UObject* component =
-            GetFromOffset<UObject*>(captureActor, componentOffset);
+        const UObject* component = GetFromOffset<UObject*>(captureActor, componentOffset);
         if (!component || !component->Class)
             return 0.f;
         captureComponentOut = component;
@@ -4162,8 +3132,7 @@ namespace SafeZoneMap
         if (orthoWidthOffset == UINT32_MAX)
             return 0.f;
         const float width = GetFromOffset<float>(component, orthoWidthOffset);
-        return std::isfinite(width) && width >= 50000.f &&
-            width <= 1000000.f ? width : 0.f;
+        return std::isfinite(width) && width >= 50000.f && width <= 1000000.f ? width : 0.f;
     }
 
     static float ReadSceneCaptureWidthUnsafe(
@@ -4175,10 +3144,8 @@ namespace SafeZoneMap
         captureComponentOut = nullptr;
 
         const UObject* candidates[3]{
-            preferredManager,
-            FindObject<UObject>(
-                L"/Game/UI/IngameMap/UIMapManager.Default__UIMapManager_C"),
-            nullptr
+            preferredManager, FindObject<UObject>(
+                L"/Game/UI/IngameMap/UIMapManager.Default__UIMapManager_C"), nullptr
         };
         const UClass* managerClass = FindClass("FortInGameMapManager");
         if (managerClass)
@@ -4203,8 +3170,7 @@ namespace SafeZoneMap
         return 0.f;
     }
 
-    static bool ReadAthenaMapBrushSizeUnsafe(const UObject* settings,
-                                             float& width, float& height,
+    static bool ReadAthenaMapBrushSizeUnsafe(const UObject* settings, float& width, float& height,
                                              const UObject*& resource)
     {
         width = height = 0.f;
@@ -4213,8 +3179,7 @@ namespace SafeZoneMap
             return false;
 
         const uint32_t brushOffset = settings->GetOffset("AthenaMapImage");
-        const UStruct* brushStruct =
-            FindObject<UStruct>(L"/Script/SlateCore.SlateBrush");
+        const UStruct* brushStruct = FindObject<UStruct>(L"/Script/SlateCore.SlateBrush");
         if (brushOffset == UINT32_MAX || !brushStruct)
             return false;
 
@@ -4222,8 +3187,6 @@ namespace SafeZoneMap
         if (imageSizeOffset == UINT32_MAX)
             return false;
 
-        // Slate's image size remains a pair of floats even on UE5 versions
-        // where gameplay FVector2D changed to doubles.
         const uint8_t* brush = (const uint8_t*)settings + brushOffset;
         width = *(const float*)(brush + imageSizeOffset);
         height = *(const float*)(brush + imageSizeOffset + sizeof(float));
@@ -4232,15 +3195,12 @@ namespace SafeZoneMap
         if (resourceOffset != UINT32_MAX)
             resource = *(UObject* const*)(brush + resourceOffset);
 
-        return std::isfinite(width) && std::isfinite(height) &&
-            width >= 64.f && width <= 8192.f &&
+        return std::isfinite(width) && std::isfinite(height) && width >= 64.f && width <= 8192.f &&
             height >= 64.f && height <= 8192.f;
     }
 
-    static bool ReadWorldSettingsTransformUnsafe(UWorld* world,
-                                                  const UObject* preferredManager,
-                                                  MapTransform& out,
-                                                  const UObject*& settingsOut,
+    static bool ReadWorldSettingsTransformUnsafe(UWorld* world, const UObject* preferredManager,
+                                                  MapTransform& out, const UObject*& settingsOut,
                                                   bool& hasAuthoritativeExtents)
     {
         settingsOut = nullptr;
@@ -4280,12 +3240,8 @@ namespace SafeZoneMap
             return false;
 
         MapTransform result = DefaultTransformForVersion();
-        // A stock map's gameplay origin is not necessarily the center of its
-        // full minimap capture (Asteria, Rufus, and Helios are all offset).
-        // Custom maps are excluded from the stock registry above and continue
-        // to use their reflected center.
-        const bool hasKnownStockCapture =
-            UsesKnownCaptureCalibration();
+        // A stock map's gameplay origin is not its capture centre - Asteria, Rufus and Helios are all offset.
+        const bool hasKnownStockCapture = UsesKnownCaptureCalibration();
         if (!hasKnownStockCapture)
         {
             result.CenterX = (float)centerX;
@@ -4306,14 +3262,10 @@ namespace SafeZoneMap
             height = GetFromOffset<float>(settings, heightOffset);
         if (scaleOffset != UINT32_MAX)
             mapWorldScale = GetFromOffset<float>(settings, scaleOffset);
-        const bool validWidth =
-            std::isfinite(width) && width >= 50000.f && width <= 1000000.f;
-        const bool validHeight =
-            std::isfinite(height) && height >= 50000.f && height <= 1000000.f;
-        bool resolvedExtentU = validWidth ||
-            hasKnownStockCapture;
-        bool resolvedExtentV = validHeight ||
-            hasKnownStockCapture;
+        const bool validWidth = std::isfinite(width) && width >= 50000.f && width <= 1000000.f;
+        const bool validHeight = std::isfinite(height) && height >= 50000.f && height <= 1000000.f;
+        bool resolvedExtentU = validWidth || hasKnownStockCapture;
+        bool resolvedExtentV = validHeight || hasKnownStockCapture;
         if (validWidth && !hasKnownStockCapture)
             extentU = width * 0.5f;
         if (validHeight && !hasKnownStockCapture)
@@ -4331,27 +3283,15 @@ namespace SafeZoneMap
         const float sceneCaptureWidth = ReadSceneCaptureWidthUnsafe(
             preferredManager, captureManager, captureClass, captureComponent);
 
-        // MapWorldScale is centimeters per logical map-layer unit, not per
-        // source-texture pixel. Chapter 1 proves the distinction: its source
-        // image is 2048 px, while Fortnite converts locations on an 896-unit
-        // layer at 290 cm/unit (about 259.8 km total). Multiplying by 2048 made
-        // the editor's world span 2.285x too large and sent Season 7/8 zones
-        // into the ocean.
+        // MapWorldScale is cm per map-layer unit, not per texture pixel: Chapter 1 is an 896-unit layer at 290 cm/unit.
         const float absoluteScale = fabsf(mapWorldScale);
-        // This scale/layer product is frequently not the full capture. FN14.40
-        // can report a 143,360 cm layer for Apollo's 269,698 cm capture, and
-        // FN24.20 reports 137,600 cm for Asteria's 299,926 cm capture. Never
-        // replace a measured stock-family transform with that gameplay layer.
         bool usedFullCaptureScale = hasKnownStockCapture;
-        if (std::isfinite(absoluteScale) &&
-            !hasKnownStockCapture &&
+        if (std::isfinite(absoluteScale) && !hasKnownStockCapture &&
             absoluteScale >= 0.01f && absoluteScale <= 10000.f)
         {
-            const float logicalWidth = mapLayerSize
-                ? (float)mapLayerSize
+            const float logicalWidth = mapLayerSize ? (float)mapLayerSize
                 : (haveBrushSize ? brushWidth : 0.f);
-            const float logicalHeight = mapLayerSize
-                ? (float)mapLayerSize
+            const float logicalHeight = mapLayerSize ? (float)mapLayerSize
                 : (haveBrushSize ? brushHeight : 0.f);
             const float scaledExtentU = absoluteScale * logicalWidth * 0.5f;
             const float scaledExtentV = absoluteScale * logicalHeight * 0.5f;
@@ -4366,9 +3306,7 @@ namespace SafeZoneMap
             }
         }
 
-        // Later managers may store the already-normalized world-to-map scale.
-        if (!usedFullCaptureScale &&
-            std::isfinite(mapWorldScale) && absoluteScale > 1e-9f)
+        if (!usedFullCaptureScale && std::isfinite(mapWorldScale) && absoluteScale > 1e-9f)
         {
             const float scaleExtent = 0.5f / absoluteScale;
             if (scaleExtent >= 25000.f && scaleExtent <= 500000.f)
@@ -4386,13 +3324,7 @@ namespace SafeZoneMap
             }
         }
 
-        // The orthographic capture width is useful only when the logical
-        // scale/layer pair is unavailable. A class-default capture can target a
-        // different render layer, so it must not override Fortnite's own
-        // MapWorldScale * MapLayerSize conversion.
-        if (!usedFullCaptureScale &&
-            sceneCaptureWidth >= 50000.f &&
-            sceneCaptureWidth <= 1000000.f)
+        if (!usedFullCaptureScale && sceneCaptureWidth >= 50000.f && sceneCaptureWidth <= 1000000.f)
         {
             extentU = sceneCaptureWidth * 0.5f;
             extentV = sceneCaptureWidth * 0.5f;
@@ -4400,27 +3332,20 @@ namespace SafeZoneMap
             resolvedExtentV = true;
         }
 
-        // Read the capture orientation supplied by this map. At zero yaw the
-        // legacy Athena basis is image-right=world +Y, image-bottom=world -X.
         float reportedMapYaw = 0.f;
         const uint32_t rotationOffset = settings->GetOffset("MapRotation");
         if (!hasKnownStockCapture && rotationOffset != UINT32_MAX)
         {
             const uint8_t* rotationBytes = (const uint8_t*)settings + rotationOffset;
             const double candidateYaw = VersionInfo.FortniteVersion >= 20.00f
-                ? *(const double*)(rotationBytes + 8)
-                : *(const float*)(rotationBytes + 4);
+                ? *(const double*)(rotationBytes + 8) : *(const float*)(rotationBytes + 4);
             if (std::isfinite(candidateYaw) && fabs(candidateYaw) <= 36000.0)
                 reportedMapYaw = (float)candidateYaw;
         }
 
-        // Rotate the legacy Athena image basis in the world plane. Newer
-        // versions that expose BPWorldLocationToMapLocation are sampled
-        // natively below, so this is only their safe fallback.
         if (!hasKnownStockCapture)
         {
-            const float yawRadians =
-                reportedMapYaw * 0.01745329251994329577f;
+            const float yawRadians = reportedMapYaw * 0.01745329251994329577f;
             const float cosYaw = cosf(yawRadians);
             const float sinYaw = sinf(yawRadians);
             result.AxisUX = -sinYaw * extentU;
@@ -4451,21 +3376,17 @@ namespace SafeZoneMap
         }
         out = result;
         settingsOut = settings;
-        hasAuthoritativeExtents =
-            resolvedExtentU && resolvedExtentV;
+        hasAuthoritativeExtents = resolvedExtentU && resolvedExtentV;
         return true;
     }
 
-    static bool ReadWorldSettingsTransform(UWorld* world,
-                                           const UObject* preferredManager,
-                                           MapTransform& out,
-                                           const UObject*& settingsOut,
+    static bool ReadWorldSettingsTransform(UWorld* world, const UObject* preferredManager,
+                                           MapTransform& out, const UObject*& settingsOut,
                                            bool& hasAuthoritativeExtents)
     {
         __try
         {
-            return ReadWorldSettingsTransformUnsafe(
-                world, preferredManager, out, settingsOut,
+            return ReadWorldSettingsTransformUnsafe(world, preferredManager, out, settingsOut,
                 hasAuthoritativeExtents);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
@@ -4520,8 +3441,7 @@ namespace SafeZoneMap
         return result;
     }
 
-    static bool GameplayTagArrayContains(const TArray<FGameplayTag>& tags,
-                                         const FName& wanted)
+    static bool GameplayTagArrayContains(const TArray<FGameplayTag>& tags, const FName& wanted)
     {
         const int count = tags.Num();
         const int maximum = tags.Max();
@@ -4532,16 +3452,14 @@ namespace SafeZoneMap
 
         for (int i = 0; i < count; ++i)
         {
-            const uint8_t* tagBytes =
-                (const uint8_t*)tags.Data + (size_t)i * tagSize;
+            const uint8_t* tagBytes = (const uint8_t*)tags.Data + (size_t)i * tagSize;
             if (ReadGameplayTagName(tagBytes) == wanted)
                 return true;
         }
         return false;
     }
 
-    static bool GameplayTagContainerContains(const FGameplayTagContainer* tags,
-                                             const FName& wanted)
+    static bool GameplayTagContainerContains(const FGameplayTagContainer* tags, const FName& wanted)
     {
         if (!tags || !SDK::MemReadable(tags, sizeof(FGameplayTagContainer)))
             return false;
@@ -4552,10 +3470,7 @@ namespace SafeZoneMap
     static bool IsUsablePoiLocation(const FVector& location)
     {
         return std::isfinite(location.X) && std::isfinite(location.Y) &&
-            fabs(location.X) <= 1000000.0 &&
-            fabs(location.Y) <= 1000000.0 &&
-            // A retained NullRHI POI actor can have an uninitialized root at
-            // the world origin. No named Athena POI is actually centered there.
+            fabs(location.X) <= 1000000.0 && fabs(location.Y) <= 1000000.0 &&
             fabs(location.X) + fabs(location.Y) > 100.0;
     }
 
@@ -4564,19 +3479,13 @@ namespace SafeZoneMap
         if (!volume || !volume->Class)
             return false;
 
-        // FortPoiVolume's actor/root transform is commonly zero on old
-        // dedicated NullRHI builds. The collision component still retains the
-        // cooked level transform used to define the POI footprint.
-        const uint32_t collisionOffset =
-            volume->GetOffset("PoiCollisionComp");
+        const uint32_t collisionOffset = volume->GetOffset("PoiCollisionComp");
         if (collisionOffset != UINT32_MAX)
         {
-            UActorComponent* collision =
-                GetFromOffset<UActorComponent*>(volume, collisionOffset);
+            UActorComponent* collision = GetFromOffset<UActorComponent*>(volume, collisionOffset);
             if (collision && collision->Class)
             {
-                const FVector location =
-                    collision->K2_GetComponentToWorld().GetTranslation();
+                const FVector location = collision->K2_GetComponentToWorld().GetTranslation();
                 if (IsUsablePoiLocation(location))
                 {
                     out = FVector(location.X, location.Y, location.Z);
@@ -4588,8 +3497,7 @@ namespace SafeZoneMap
         UActorComponent* root = volume->RootComponent;
         if (root && root->Class)
         {
-            const FVector location =
-                root->K2_GetComponentToWorld().GetTranslation();
+            const FVector location = root->K2_GetComponentToWorld().GetTranslation();
             if (IsUsablePoiLocation(location))
             {
                 out = FVector(location.X, location.Y, location.Z);
@@ -4600,15 +3508,13 @@ namespace SafeZoneMap
         const FVector actorLocation = volume->K2_GetActorLocation();
         if (IsUsablePoiLocation(actorLocation))
         {
-            out = FVector(
-                actorLocation.X, actorLocation.Y, actorLocation.Z);
+            out = FVector(actorLocation.X, actorLocation.Y, actorLocation.Z);
             return true;
         }
         return false;
     }
 
-    static bool SolvePoi3x3(double matrix[3][3], const double rhs[3],
-                            double result[3])
+    static bool SolvePoi3x3(double matrix[3][3], const double rhs[3], double result[3])
     {
         double augmented[3][4]{
             { matrix[0][0], matrix[0][1], matrix[0][2], rhs[0] },
@@ -4620,15 +3526,13 @@ namespace SafeZoneMap
         {
             int pivot = column;
             for (int row = column + 1; row < 3; ++row)
-                if (fabs(augmented[row][column]) >
-                    fabs(augmented[pivot][column]))
+                if (fabs(augmented[row][column]) > fabs(augmented[pivot][column]))
                     pivot = row;
             if (fabs(augmented[pivot][column]) < 1e-12)
                 return false;
             if (pivot != column)
                 for (int cell = column; cell < 4; ++cell)
-                    std::swap(augmented[pivot][cell],
-                              augmented[column][cell]);
+                    std::swap(augmented[pivot][cell], augmented[column][cell]);
 
             const double divisor = augmented[column][column];
             for (int cell = column; cell < 4; ++cell)
@@ -4639,21 +3543,18 @@ namespace SafeZoneMap
                     continue;
                 const double factor = augmented[row][column];
                 for (int cell = column; cell < 4; ++cell)
-                    augmented[row][cell] -= factor *
-                        augmented[column][cell];
+                    augmented[row][cell] -= factor * augmented[column][cell];
             }
         }
 
         result[0] = augmented[0][3];
         result[1] = augmented[1][3];
         result[2] = augmented[2][3];
-        return std::isfinite(result[0]) && std::isfinite(result[1]) &&
-            std::isfinite(result[2]);
+        return std::isfinite(result[0]) && std::isfinite(result[1]) && std::isfinite(result[2]);
     }
 
     static bool FitPoiAffine(const std::vector<PoiCalibrationPoint>& points,
-                             const std::vector<int>& indices,
-                             PoiAffineFit& out)
+                             const std::vector<int>& indices, PoiAffineFit& out)
     {
         if (indices.size() < 3)
             return false;
@@ -4678,18 +3579,15 @@ namespace SafeZoneMap
 
         double normalCopy[3][3];
         memcpy(normalCopy, normal, sizeof(normal));
-        if (!SolvePoi3x3(normal, rhsX, out.X) ||
-            !SolvePoi3x3(normalCopy, rhsY, out.Y))
+        if (!SolvePoi3x3(normal, rhsX, out.X) || !SolvePoi3x3(normalCopy, rhsY, out.Y))
             return false;
 
         double squaredError = 0.0;
         for (int index : indices)
         {
             const PoiCalibrationPoint& point = points[index];
-            const double predictedX =
-                out.X[0] + out.X[1] * point.U + out.X[2] * point.V;
-            const double predictedY =
-                out.Y[0] + out.Y[1] * point.U + out.Y[2] * point.V;
+            const double predictedX = out.X[0] + out.X[1] * point.U + out.X[2] * point.V;
+            const double predictedY = out.Y[0] + out.Y[1] * point.U + out.Y[2] * point.V;
             const double dx = predictedX - point.WorldX;
             const double dy = predictedY - point.WorldY;
             squaredError += dx * dx + dy * dy;
@@ -4707,14 +3605,10 @@ namespace SafeZoneMap
             return false;
 
         constexpr double kInlierDistance = 15000.0;
-        constexpr double kInlierDistanceSquared =
-            kInlierDistance * kInlierDistance;
+        constexpr double kInlierDistanceSquared = kInlierDistance * kInlierDistance;
         std::vector<int> bestInliers;
         double bestSquaredError = DBL_MAX;
 
-        // A few old maps contain nested POI volumes whose actor origin is not
-        // the label center. Testing every three-anchor model prevents those
-        // volumes from pulling the complete map projection off target.
         for (int first = 0; first < count - 2; ++first)
         {
             for (int second = first + 1; second < count - 1; ++second)
@@ -4731,11 +3625,9 @@ namespace SafeZoneMap
                     for (int index = 0; index < count; ++index)
                     {
                         const PoiCalibrationPoint& point = points[index];
-                        const double dx =
-                            candidate.X[0] + candidate.X[1] * point.U +
+                        const double dx = candidate.X[0] + candidate.X[1] * point.U +
                             candidate.X[2] * point.V - point.WorldX;
-                        const double dy =
-                            candidate.Y[0] + candidate.Y[1] * point.U +
+                        const double dy = candidate.Y[0] + candidate.Y[1] * point.U +
                             candidate.Y[2] * point.V - point.WorldY;
                         const double error = dx * dx + dy * dy;
                         if (error <= kInlierDistanceSquared)
@@ -4746,8 +3638,7 @@ namespace SafeZoneMap
                     }
 
                     if (inliers.size() > bestInliers.size() ||
-                        (inliers.size() == bestInliers.size() &&
-                         squaredError < bestSquaredError))
+                        (inliers.size() == bestInliers.size() && squaredError < bestSquaredError))
                     {
                         bestInliers = std::move(inliers);
                         bestSquaredError = squaredError;
@@ -4762,11 +3653,9 @@ namespace SafeZoneMap
         return FitPoiAffine(points, bestInliers, out);
     }
 
-    static bool BuildPoiTransformForNormalization(
-        const std::vector<PoiCalibrationAnchor>& anchors,
+    static bool BuildPoiTransformForNormalization(const std::vector<PoiCalibrationAnchor>& anchors,
         const PoiPositionNormalization& normalization,
-        MapTransform& transformOut, PoiAffineFit& fitOut,
-        double& coverageOut)
+        MapTransform& transformOut, PoiAffineFit& fitOut, double& coverageOut)
     {
         if (normalization.ScaleU <= 0.0 || normalization.ScaleV <= 0.0)
             return false;
@@ -4779,16 +3668,13 @@ namespace SafeZoneMap
         for (const PoiCalibrationAnchor& anchor : anchors)
         {
             PoiCalibrationPoint point;
-            point.U = normalization.OffsetU +
-                anchor.RawU / normalization.ScaleU;
-            point.V = normalization.OffsetV +
-                anchor.RawV / normalization.ScaleV;
+            point.U = normalization.OffsetU + anchor.RawU / normalization.ScaleU;
+            point.V = normalization.OffsetV + anchor.RawV / normalization.ScaleV;
             point.WorldX = anchor.WorldX;
             point.WorldY = anchor.WorldY;
             if (!std::isfinite(point.U) || !std::isfinite(point.V))
                 return false;
-            if (point.U >= -0.10 && point.U <= 1.10 &&
-                point.V >= -0.10 && point.V <= 1.10)
+            if (point.U >= -0.10 && point.U <= 1.10 && point.V >= -0.10 && point.V <= 1.10)
                 ++inside;
             minU = (std::min)(minU, point.U);
             minV = (std::min)(minV, point.V);
@@ -4811,32 +3697,23 @@ namespace SafeZoneMap
 
         MapTransform transform{
             (float)(fit.X[0] + fit.X[1] * 0.5 + fit.X[2] * 0.5),
-            (float)(fit.Y[0] + fit.Y[1] * 0.5 + fit.Y[2] * 0.5),
-            (float)(fit.X[1] * 0.5),
-            (float)(fit.Y[1] * 0.5),
-            (float)(fit.X[2] * 0.5),
-            (float)(fit.Y[2] * 0.5)
+            (float)(fit.Y[0] + fit.Y[1] * 0.5 + fit.Y[2] * 0.5), (float)(fit.X[1] * 0.5),
+            (float)(fit.Y[1] * 0.5), (float)(fit.X[2] * 0.5), (float)(fit.Y[2] * 0.5)
         };
         const double extentU = AxisULength(transform);
         const double extentV = AxisVLength(transform);
-        if (!std::isfinite(transform.CenterX) ||
-            !std::isfinite(transform.CenterY) ||
-            fabs(transform.CenterX) > 1000000.0 ||
-            fabs(transform.CenterY) > 1000000.0 ||
+        if (!std::isfinite(transform.CenterX) || !std::isfinite(transform.CenterY) ||
+            fabs(transform.CenterX) > 1000000.0 || fabs(transform.CenterY) > 1000000.0 ||
             !std::isfinite(extentU) || !std::isfinite(extentV) ||
-            extentU < 25000.0 || extentU > 500000.0 ||
-            extentV < 25000.0 || extentV > 500000.0)
+            extentU < 25000.0 || extentU > 500000.0 || extentV < 25000.0 || extentV > 500000.0)
             return false;
 
         const double aspect = extentU / extentV;
-        const double orthogonality = fabs(
-            transform.AxisUX * transform.AxisVX +
+        const double orthogonality = fabs(transform.AxisUX * transform.AxisVX +
             transform.AxisUY * transform.AxisVY) / (extentU * extentV);
-        const double maximumRms =
-            (std::max)(5000.0, (std::min)(18000.0,
+        const double maximumRms = (std::max)(5000.0, (std::min)(18000.0,
                 (std::min)(extentU, extentV) * 0.12));
-        if (aspect < 0.5 || aspect > 2.0 || orthogonality > 0.35 ||
-            fit.Rms > maximumRms)
+        if (aspect < 0.5 || aspect > 2.0 || orthogonality > 0.35 || fit.Rms > maximumRms)
             return false;
 
         transformOut = transform;
@@ -4844,33 +3721,25 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool BuildPoiCalibrationUnsafe(UWorld* world,
-                                          const UObject* settings,
-                                          const UObject* preferredManager,
-                                          MapTransform& out,
+    static bool BuildPoiCalibrationUnsafe(UWorld* world, const UObject* settings,
+                                          const UObject* preferredManager, MapTransform& out,
                                           bool& stableFailure)
     {
         stableFailure = false;
         if (!world || !settings || !settings->Class)
             return false;
 
-        const UStruct* mapLocationStruct =
-            FindObject<UStruct>(L"/Script/FortniteGame.MapLocation");
+        const UStruct* mapLocationStruct = FindObject<UStruct>(L"/Script/FortniteGame.MapLocation");
         const uint32_t mapLocationsOffset = settings->GetOffset("MapLocations");
         if (!mapLocationStruct || mapLocationsOffset == UINT32_MAX)
             return false;
 
         const int elementSize = mapLocationStruct->GetPropertiesSize();
-        const uint32_t positionOffset =
-            mapLocationStruct->GetOffset("Position");
-        const uint32_t locationTagOffset =
-            mapLocationStruct->GetOffset("LocationTag");
-        const int vector2DSize =
-            VersionInfo.FortniteVersion >= 20.00f ? 16 : 8;
-        if (elementSize < 16 || elementSize > 4096 ||
-            positionOffset == UINT32_MAX ||
-            locationTagOffset == UINT32_MAX ||
-            (int)positionOffset + vector2DSize > elementSize ||
+        const uint32_t positionOffset = mapLocationStruct->GetOffset("Position");
+        const uint32_t locationTagOffset = mapLocationStruct->GetOffset("LocationTag");
+        const int vector2DSize = VersionInfo.FortniteVersion >= 20.00f ? 16 : 8;
+        if (elementSize < 16 || elementSize > 4096 || positionOffset == UINT32_MAX ||
+            locationTagOffset == UINT32_MAX || (int)positionOffset + vector2DSize > elementSize ||
             (int)locationTagOffset + FGameplayTag::Size() > elementSize)
         {
             static const UObject* loggedInvalidLayout = nullptr;
@@ -4884,37 +3753,30 @@ namespace SafeZoneMap
             return false;
         }
 
-        const TArray<uint8_t>* mapLocations =
-            (const TArray<uint8_t>*)((const uint8_t*)settings +
+        const TArray<uint8_t>* mapLocations = (const TArray<uint8_t>*)((const uint8_t*)settings +
                                     mapLocationsOffset);
         const int mapLocationCount = mapLocations->Num();
         static const UObject* loggedMapArraySettings = nullptr;
         static int loggedMapArrayCount = -1;
-        if (loggedMapArraySettings != settings ||
-            loggedMapArrayCount != mapLocationCount)
+        if (loggedMapArraySettings != settings || loggedMapArrayCount != mapLocationCount)
         {
-            SDK::DbgLog(
-                "[SafeZoneMap] POI calibration MapLocations count=%d max=%d data=%p\n",
-                mapLocationCount, mapLocations->Max(),
-                (const void*)mapLocations->Data);
+            SDK::DbgLog("[SafeZoneMap] POI calibration MapLocations count=%d max=%d data=%p\n",
+                mapLocationCount, mapLocations->Max(), (const void*)mapLocations->Data);
             loggedMapArraySettings = settings;
             loggedMapArrayCount = mapLocationCount;
         }
         if (mapLocationCount < 4 || mapLocationCount > 512 ||
             mapLocations->Max() < mapLocationCount ||
             mapLocations->Max() > 4096 || !mapLocations->Data ||
-            !SDK::MemReadable(mapLocations->Data,
-                (size_t)mapLocationCount * elementSize))
+            !SDK::MemReadable(mapLocations->Data, (size_t)mapLocationCount * elementSize))
             return false;
 
         const UClass* poiVolumeClass = FindClass("FortPoiVolume");
         if (!poiVolumeClass)
             return false;
         std::vector<AActor*> volumes;
-        TArray<AActor*> worldVolumes =
-            UGameplayStatics::GetAllActorsOfClass(world, poiVolumeClass);
-        if (worldVolumes.Num() > 0 && worldVolumes.Num() <= 2048 &&
-            worldVolumes.Data)
+        TArray<AActor*> worldVolumes = UGameplayStatics::GetAllActorsOfClass(world, poiVolumeClass);
+        if (worldVolumes.Num() > 0 && worldVolumes.Num() <= 2048 && worldVolumes.Data)
         {
             volumes.reserve(worldVolumes.Num());
             for (int index = 0; index < worldVolumes.Num(); ++index)
@@ -4923,44 +3785,32 @@ namespace SafeZoneMap
         }
         worldVolumes.Free();
 
-        // NullRHI can omit FortPoiVolume actors from the world's actor lists
-        // even though FortPoiManager retains the authoritative POI pointers.
-        // Those tagged volume centers let old versions recover the exact
-        // texture-to-world affine transform without any season constants.
         int managerVolumeCount = 0;
         const UObject* poiManager = nullptr;
         if (world->GameState && world->GameState->Class)
         {
-            const uint32_t poiManagerOffset =
-                world->GameState->GetOffset("PoiManager");
+            const uint32_t poiManagerOffset = world->GameState->GetOffset("PoiManager");
             if (poiManagerOffset != UINT32_MAX)
-                poiManager =
-                    GetFromOffset<UObject*>(world->GameState, poiManagerOffset);
+                poiManager = GetFromOffset<UObject*>(world->GameState, poiManagerOffset);
         }
         if (poiManager && poiManager->Class)
         {
-            const uint32_t allVolumesOffset =
-                poiManager->GetOffset("AllPoiVolumes");
+            const uint32_t allVolumesOffset = poiManager->GetOffset("AllPoiVolumes");
             if (allVolumesOffset != UINT32_MAX)
             {
                 const TArray<AActor*>* managerVolumes =
-                    (const TArray<AActor*>*)((const uint8_t*)poiManager +
-                                             allVolumesOffset);
+                    (const TArray<AActor*>*)((const uint8_t*)poiManager + allVolumesOffset);
                 const int count = managerVolumes->Num();
-                if (count > 0 && count <= 2048 &&
-                    managerVolumes->Max() >= count &&
-                    managerVolumes->Max() <= 4096 &&
-                    managerVolumes->Data &&
-                    SDK::MemReadable(managerVolumes->Data,
-                        (size_t)count * sizeof(AActor*)))
+                if (count > 0 && count <= 2048 && managerVolumes->Max() >= count &&
+                    managerVolumes->Max() <= 4096 && managerVolumes->Data &&
+                    SDK::MemReadable(managerVolumes->Data, (size_t)count * sizeof(AActor*)))
                 {
                     managerVolumeCount = count;
                     volumes.reserve(volumes.size() + count);
                     for (int index = 0; index < count; ++index)
                     {
                         AActor* volume = (*managerVolumes)[index];
-                        if (volume &&
-                            std::find(volumes.begin(), volumes.end(), volume) ==
+                        if (volume && std::find(volumes.begin(), volumes.end(), volume) ==
                                 volumes.end())
                             volumes.push_back(volume);
                     }
@@ -4987,15 +3837,12 @@ namespace SafeZoneMap
              mapIndex < mapLocationCount && anchors.size() < 64;
              ++mapIndex)
         {
-            const uint8_t* entry =
-                (const uint8_t*)mapLocations->Data +
+            const uint8_t* entry = (const uint8_t*)mapLocations->Data +
                 (size_t)mapIndex * elementSize;
             MapPoint rawPosition;
-            if (!ReadMapPoint(entry, elementSize, positionOffset,
-                              rawPosition))
+            if (!ReadMapPoint(entry, elementSize, positionOffset, rawPosition))
                 continue;
-            const FName locationTag =
-                ReadGameplayTagName(entry + locationTagOffset);
+            const FName locationTag = ReadGameplayTagName(entry + locationTagOffset);
             if (!locationTag.IsValid())
                 continue;
 
@@ -5009,13 +3856,11 @@ namespace SafeZoneMap
                 AActor* volume = volumes[volumeIndex];
                 if (!volume || !volume->Class)
                     continue;
-                const uint32_t tagsOffset =
-                    volume->GetOffset("LocationTags");
+                const uint32_t tagsOffset = volume->GetOffset("LocationTags");
                 if (tagsOffset == UINT32_MAX)
                     continue;
                 const FGameplayTagContainer* tags =
-                    (const FGameplayTagContainer*)((const uint8_t*)volume +
-                                                   tagsOffset);
+                    (const FGameplayTagContainer*)((const uint8_t*)volume + tagsOffset);
                 if (!GameplayTagContainerContains(tags, locationTag))
                     continue;
 
@@ -5040,8 +3885,7 @@ namespace SafeZoneMap
         }
         static const UObject* loggedSettings = nullptr;
         static int loggedAnchorCount = -1;
-        if (loggedSettings != settings ||
-            loggedAnchorCount != (int)anchors.size())
+        if (loggedSettings != settings || loggedAnchorCount != (int)anchors.size())
         {
             SDK::DbgLog(
                 "[SafeZoneMap] POI calibration metadata mapLocations=%d volumes=%d matched=%zu element=0x%x position=0x%x tag=0x%x\n",
@@ -5050,8 +3894,7 @@ namespace SafeZoneMap
             for (size_t i = 0; i < anchors.size() && i < 32; ++i)
             {
                 const UEAllocatedString tag = anchors[i].Tag.ToString();
-                SDK::DbgLog(
-                    "[SafeZoneMap]   POI %s raw=(%.4f, %.4f) world=(%.1f, %.1f)\n",
+                SDK::DbgLog("[SafeZoneMap]   POI %s raw=(%.4f, %.4f) world=(%.1f, %.1f)\n",
                     tag.c_str(), anchors[i].RawU, anchors[i].RawV,
                     anchors[i].WorldX, anchors[i].WorldY);
             }
@@ -5060,9 +3903,6 @@ namespace SafeZoneMap
         }
         if (anchors.size() < 4)
         {
-            // At this point both the map metadata and the world's POI volumes
-            // are populated. A missing tag intersection is a version/layout
-            // incompatibility, not streaming that can become ready later.
             stableFailure = true;
             return false;
         }
@@ -5070,10 +3910,8 @@ namespace SafeZoneMap
         float brushWidth = 0.f;
         float brushHeight = 0.f;
         const UObject* brushResource = nullptr;
-        ReadAthenaMapBrushSizeUnsafe(settings, brushWidth, brushHeight,
-                                     brushResource);
-        const int mapLayerSize =
-            ReadMapLayerSizeUnsafe(preferredManager);
+        ReadAthenaMapBrushSizeUnsafe(settings, brushWidth, brushHeight, brushResource);
+        const int mapLayerSize = ReadMapLayerSizeUnsafe(preferredManager);
 
         std::vector<PoiPositionNormalization> normalizations;
         normalizations.push_back(
@@ -5083,23 +3921,17 @@ namespace SafeZoneMap
         if (mapLayerSize > 0)
         {
             normalizations.push_back(
-                { "map-layer", 0.0, 0.0,
-                  (double)mapLayerSize, (double)mapLayerSize });
+                { "map-layer", 0.0, 0.0, (double)mapLayerSize, (double)mapLayerSize });
             normalizations.push_back(
-                { "map-layer-centered", 0.5, 0.5,
-                  (double)mapLayerSize, (double)mapLayerSize });
+                { "map-layer-centered", 0.5, 0.5, (double)mapLayerSize, (double)mapLayerSize });
         }
-        if (brushWidth >= 64.f && brushHeight >= 64.f &&
-            (!mapLayerSize ||
-             fabsf(brushWidth - mapLayerSize) > 1.f ||
-             fabsf(brushHeight - mapLayerSize) > 1.f))
+        if (brushWidth >= 64.f && brushHeight >= 64.f && (!mapLayerSize ||
+             fabsf(brushWidth - mapLayerSize) > 1.f || fabsf(brushHeight - mapLayerSize) > 1.f))
         {
             normalizations.push_back(
-                { "brush-pixels", 0.0, 0.0,
-                  brushWidth, brushHeight });
+                { "brush-pixels", 0.0, 0.0, brushWidth, brushHeight });
             normalizations.push_back(
-                { "brush-pixels-centered", 0.5, 0.5,
-                  brushWidth, brushHeight });
+                { "brush-pixels-centered", 0.5, 0.5, brushWidth, brushHeight });
         }
 
         bool found = false;
@@ -5107,27 +3939,19 @@ namespace SafeZoneMap
         PoiAffineFit bestFit;
         const char* bestName = nullptr;
         double bestCoverage = -1.0;
-        for (const PoiPositionNormalization& normalization :
-             normalizations)
+        for (const PoiPositionNormalization& normalization : normalizations)
         {
             MapTransform candidateTransform;
             PoiAffineFit candidateFit;
             double candidateCoverage = 0.0;
-            if (!BuildPoiTransformForNormalization(
-                    anchors, normalization, candidateTransform,
+            if (!BuildPoiTransformForNormalization(anchors, normalization, candidateTransform,
                     candidateFit, candidateCoverage))
                 continue;
 
-            // Equivalent unit systems have the same residual. The one whose
-            // POIs cover more of [0,1] is the texture coordinate system, while
-            // dividing an already-logical coordinate by a larger source
-            // texture clusters every label near the middle.
             if (!found || candidateFit.Inliers > bestFit.Inliers ||
+                (candidateFit.Inliers == bestFit.Inliers && candidateFit.Rms < bestFit.Rms - 1.0) ||
                 (candidateFit.Inliers == bestFit.Inliers &&
-                 candidateFit.Rms < bestFit.Rms - 1.0) ||
-                (candidateFit.Inliers == bestFit.Inliers &&
-                 fabs(candidateFit.Rms - bestFit.Rms) <= 1.0 &&
-                 candidateCoverage > bestCoverage))
+                 fabs(candidateFit.Rms - bestFit.Rms) <= 1.0 && candidateCoverage > bestCoverage))
             {
                 found = true;
                 bestTransform = candidateTransform;
@@ -5143,16 +3967,13 @@ namespace SafeZoneMap
             "[SafeZoneMap] POI-calibrated projection units=%s anchors=%d rms=%.1f coverage=%.3f center=(%.1f, %.1f) axisU=(%.1f, %.1f) axisV=(%.1f, %.1f)\n",
             bestName ? bestName : "unknown", bestFit.Inliers, bestFit.Rms,
             bestCoverage, bestTransform.CenterX, bestTransform.CenterY,
-            bestTransform.AxisUX, bestTransform.AxisUY,
-            bestTransform.AxisVX, bestTransform.AxisVY);
+            bestTransform.AxisUX, bestTransform.AxisUY, bestTransform.AxisVX, bestTransform.AxisVY);
         out = bestTransform;
         return true;
     }
 
-    static bool BuildPoiCalibration(UWorld* world,
-                                    const UObject* settings,
-                                    const UObject* preferredManager,
-                                    MapTransform& out)
+    static bool BuildPoiCalibration(UWorld* world, const UObject* settings,
+                                    const UObject* preferredManager, MapTransform& out)
     {
         static const UWorld* cachedWorld = nullptr;
         static const UObject* cachedSettings = nullptr;
@@ -5160,8 +3981,7 @@ namespace SafeZoneMap
         static bool haveCachedTransform = false;
         static const UWorld* unsupportedWorld = nullptr;
         static const UObject* unsupportedSettings = nullptr;
-        if (haveCachedTransform && cachedWorld == world &&
-            cachedSettings == settings)
+        if (haveCachedTransform && cachedWorld == world && cachedSettings == settings)
         {
             out = cachedTransform;
             return true;
@@ -5172,8 +3992,7 @@ namespace SafeZoneMap
         bool stableFailure = false;
         __try
         {
-            if (!BuildPoiCalibrationUnsafe(
-                    world, settings, preferredManager, out, stableFailure))
+            if (!BuildPoiCalibrationUnsafe(world, settings, preferredManager, out, stableFailure))
             {
                 if (stableFailure)
                 {
@@ -5201,9 +4020,6 @@ namespace SafeZoneMap
     static MapTransform TransformFromMapInfoCenter(const FVector& center)
     {
         MapTransform out = DefaultTransformForVersion();
-        // GetMapCenter() is a gameplay origin, not a full-capture center, on
-        // multiple stock islands. Custom maps are not in the calibration table
-        // and therefore retain their reflected center here.
         if (!UsesKnownCaptureCalibration())
         {
             out.CenterX = (float)center.X;
@@ -5233,9 +4049,7 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool ReadRuntimeTransform(
-        MapTransform& out,
-        const UObject*& managerOut,
+    static bool ReadRuntimeTransform(MapTransform& out, const UObject*& managerOut,
         EMapTransformProvenance* provenanceOut = nullptr,
         AFortAthenaMapInfo* expectedMapInfo = nullptr)
     {
@@ -5246,9 +4060,7 @@ namespace SafeZoneMap
         if (!world || !world->HasGameState() || !world->GameState)
             return false;
 
-        // Do not query Athena-only reflected properties on the frontend/base
-        // GameState. DEFINE_PROP caches a missing property as offset -1 globally;
-        // doing that here before Athena_Terrain loads poisons later MapInfo reads.
+        // DEFINE_PROP caches a missing property as -1 globally, which would poison later MapInfo reads.
         AActor* gameStateObject = world->GameState;
         const UClass* athenaGameStateClass = AFortGameStateAthena::StaticClass();
         if (!athenaGameStateClass || !gameStateObject->Class ||
@@ -5272,36 +4084,24 @@ namespace SafeZoneMap
 
         MapTransform fallbackTransform = TransformFromMapInfoCenter(center);
         const UObject* fallbackSource = mapInfo;
-        EMapTransformProvenance fallbackProvenance =
-            UsesLegacyAthenaCapture()
-                ? EMapTransformProvenance::LegacyAthenaCapture
-                : (UsesKnownCaptureCalibration()
-                    ? EMapTransformProvenance::
-                        KnownCaptureCalibration
-                    : EMapTransformProvenance::
+        EMapTransformProvenance fallbackProvenance = UsesLegacyAthenaCapture()
+                ? EMapTransformProvenance::LegacyAthenaCapture : (UsesKnownCaptureCalibration()
+                    ? EMapTransformProvenance::KnownCaptureCalibration : EMapTransformProvenance::
                         ProvisionalMapInfo);
 
-        // FortGameStateZone owns the map manager used by this match when one is
-        // created. Dedicated/NullRHI servers commonly leave it null, but reading
-        // this reflected pointer is more exact than a global object search.
         const UObject* manager = nullptr;
         const uint32_t uiMapManagerOffset = gameState->GetOffset("UIMapManager");
         if (uiMapManagerOffset != UINT32_MAX)
         {
-            const UObject* candidate =
-                GetFromOffset<UObject*>(gameState, uiMapManagerOffset);
+            const UObject* candidate = GetFromOffset<UObject*>(gameState, uiMapManagerOffset);
             if (candidate && candidate->Class && !candidate->IsDefaultObject())
                 manager = candidate;
         }
 
-        // Some old clients do not publish UIMapManager on GameState. Prefer the
-        // current world's actor before reading map dimensions so MapLayerSize
-        // comes from the live version-specific manager whenever it exists.
         const UClass* managerClass = FindClass("FortInGameMapManager");
         if (managerClass && !manager)
         {
-            TArray<AActor*> managers =
-                UGameplayStatics::GetAllActorsOfClass(world, managerClass);
+            TArray<AActor*> managers = UGameplayStatics::GetAllActorsOfClass(world, managerClass);
             manager = managers.Num() > 0 ? managers[0] : nullptr;
             managers.Free();
         }
@@ -5309,13 +4109,9 @@ namespace SafeZoneMap
         MapTransform worldSettingsTransform;
         const UObject* worldSettings = nullptr;
         bool hasAuthoritativeWorldSettingsExtents = false;
-        if (ReadWorldSettingsTransform(
-                world, manager, worldSettingsTransform, worldSettings,
+        if (ReadWorldSettingsTransform(world, manager, worldSettingsTransform, worldSettings,
                 hasAuthoritativeWorldSettingsExtents))
         {
-            // Custom maps use their live island origin. A stock map keeps the
-            // measured full-capture center even when MapInfo exposes a different
-            // gameplay center.
             if (!UsesKnownCaptureCalibration())
             {
                 worldSettingsTransform.CenterX = (float)center.X;
@@ -5325,28 +4121,20 @@ namespace SafeZoneMap
             fallbackSource = worldSettings;
             if (UsesKnownCaptureCalibration())
             {
-                fallbackProvenance = EMapTransformProvenance::
-                    KnownCaptureCalibration;
+                fallbackProvenance = EMapTransformProvenance::KnownCaptureCalibration;
             }
             else if (hasAuthoritativeWorldSettingsExtents)
             {
-                fallbackProvenance =
-                    EMapTransformProvenance::WorldSettingsExtents;
+                fallbackProvenance = EMapTransformProvenance::WorldSettingsExtents;
             }
 
-            // Builds before BPWorldLocationToMapLocation exposed no callable
-            // world-to-map helper. Their WorldSettings map labels and POI
-            // volumes still share gameplay tags, though, so use those native
-            // anchor pairs to recover this season's exact texture projection.
             MapTransform poiCalibratedTransform;
-            if (!UsesKnownCaptureCalibration() &&
-                BuildPoiCalibration(
+            if (!UsesKnownCaptureCalibration() && BuildPoiCalibration(
                     world, worldSettings, manager, poiCalibratedTransform))
             {
                 fallbackTransform = poiCalibratedTransform;
                 fallbackSource = worldSettings;
-                fallbackProvenance =
-                    EMapTransformProvenance::PoiCalibration;
+                fallbackProvenance = EMapTransformProvenance::PoiCalibration;
             }
         }
         auto useFallbackTransform = [&]() -> bool
@@ -5358,11 +4146,6 @@ namespace SafeZoneMap
             return true;
         };
 
-        // Ask the current world's map manager for the same conversion its own
-        // widgets use. A global first-object lookup can return a frontend/CDO
-        // or a manager retained from the previous match, causing an otherwise
-        // correct selection to move later. GetAllActorsOfClass scopes the
-        // optional high-confidence sample to this UWorld.
         if (!managerClass)
             return useFallbackTransform();
         if (!manager || !manager->Class)
@@ -5386,11 +4169,9 @@ namespace SafeZoneMap
 
         constexpr double step = 10000.0;
         MapPoint p0, px, py;
-        if (!CallWorldToMap(manager, function, center, p0) ||
-            !CallWorldToMap(manager, function,
+        if (!CallWorldToMap(manager, function, center, p0) || !CallWorldToMap(manager, function,
                 FVector(center.X + step, center.Y, center.Z), px) ||
-            !CallWorldToMap(manager, function,
-                FVector(center.X, center.Y + step, center.Z), py))
+            !CallWorldToMap(manager, function, FVector(center.X, center.Y + step, center.Z), py))
         {
             static const UObject* loggedSampleFailure = nullptr;
             if (loggedSampleFailure != manager)
@@ -5423,23 +4204,19 @@ namespace SafeZoneMap
             fabs(captureCenterX) > 1000000.0 || fabs(captureCenterY) > 1000000.0)
             return useFallbackTransform();
 
-        // Invert the complete sampled world->map derivative. This preserves
-        // rotation, axis signs, non-square scale, and any season-specific map
-        // orientation. AxisU/V reach from center to an image edge, hence 0.5.
+        // AxisU and AxisV reach from the centre to an image edge, hence the 0.5.
         const double inv00 = dvDy / det;
         const double inv01 = -duDy / det;
         const double inv10 = -dvDx / det;
         const double inv11 = duDx / det;
         MapTransform candidate{
             (float)captureCenterX, (float)captureCenterY,
-            (float)(0.5 * inv00), (float)(0.5 * inv10),
-            (float)(0.5 * inv01), (float)(0.5 * inv11)
+            (float)(0.5 * inv00), (float)(0.5 * inv10), (float)(0.5 * inv01), (float)(0.5 * inv11)
         };
         const float extentU = AxisULength(candidate);
         const float extentV = AxisVLength(candidate);
         if (!std::isfinite(extentU) || !std::isfinite(extentV) ||
-            extentU < 25000.f || extentU > 500000.f ||
-            extentV < 25000.f || extentV > 500000.f)
+            extentU < 25000.f || extentU > 500000.f || extentV < 25000.f || extentV > 500000.f)
             return useFallbackTransform();
         const float aspect = extentU / extentV;
         if (aspect < 0.4f || aspect > 2.5f)
@@ -5449,15 +4226,12 @@ namespace SafeZoneMap
         managerOut = manager;
         if (provenanceOut)
         {
-            *provenanceOut =
-                EMapTransformProvenance::NativeMapSampling;
+            *provenanceOut = EMapTransformProvenance::NativeMapSampling;
         }
         return true;
     }
 
-    static bool TryGetVerifiedRuntimeTransform(
-        AFortAthenaMapInfo* mapInfo,
-        MapTransform& out,
+    static bool TryGetVerifiedRuntimeTransform(AFortAthenaMapInfo* mapInfo, MapTransform& out,
         bool throttleUnavailableProbe)
     {
         if (!mapInfo)
@@ -5478,8 +4252,7 @@ namespace SafeZoneMap
         }
 
         const ULONGLONG now = GetTickCount64();
-        if (throttleUnavailableProbe && cache.NextProbeMs != 0 &&
-            now < cache.NextProbeMs)
+        if (throttleUnavailableProbe && cache.NextProbeMs != 0 && now < cache.NextProbeMs)
         {
             return false;
         }
@@ -5487,18 +4260,15 @@ namespace SafeZoneMap
 
         MapTransform candidate;
         const UObject* source = nullptr;
-        EMapTransformProvenance provenance =
-            EMapTransformProvenance::None;
-        bool resolved = ReadRuntimeTransform(
-            candidate, source, &provenance, mapInfo);
+        EMapTransformProvenance provenance = EMapTransformProvenance::None;
+        bool resolved = ReadRuntimeTransform(candidate, source, &provenance, mapInfo);
         if (!resolved && UsesLegacyAthenaCapture())
         {
             FVector mapCenter;
             if (ReadMapCenter(mapInfo, mapCenter))
             {
                 candidate = TransformFromMapInfoCenter(mapCenter);
-                provenance =
-                    EMapTransformProvenance::LegacyAthenaCapture;
+                provenance = EMapTransformProvenance::LegacyAthenaCapture;
                 resolved = true;
             }
         }
@@ -5515,10 +4285,8 @@ namespace SafeZoneMap
         return true;
     }
 
-    static bool ProjectSafeZoneNodes(
-        const MapTransform& map,
-        const std::vector<FCustomSafeZoneNode>& nodes,
-        std::vector<FVector>& outCenters)
+    static bool ProjectSafeZoneNodes(const MapTransform& map,
+        const std::vector<FCustomSafeZoneNode>& nodes, std::vector<FVector>& outCenters)
     {
         std::vector<FVector> projected;
         projected.reserve(nodes.size());
@@ -5527,17 +4295,14 @@ namespace SafeZoneMap
             FVector center(node.Center);
             if (node.bHasNormalizedCenter)
             {
-                if (!std::isfinite(node.NormalizedU) ||
-                    !std::isfinite(node.NormalizedV))
+                if (!std::isfinite(node.NormalizedU) || !std::isfinite(node.NormalizedV))
                 {
                     return false;
                 }
 
                 float worldX = 0.f;
                 float worldY = 0.f;
-                PixelToWorld(
-                    Clamp(node.NormalizedU, 0.f, 1.f),
-                    Clamp(node.NormalizedV, 0.f, 1.f),
+                PixelToWorld(Clamp(node.NormalizedU, 0.f, 1.f), Clamp(node.NormalizedV, 0.f, 1.f),
                     1.f, map, worldX, worldY);
                 if (!std::isfinite(worldX) || !std::isfinite(worldY))
                     return false;
@@ -5553,9 +4318,6 @@ namespace SafeZoneMap
 
     static void RefreshRuntimeTransform()
     {
-        // Once gameplay starts the map projection is immutable and the chosen
-        // safe-zone location has already been applied. Continuing to probe it
-        // from the server tick only risks game-thread hitches on old builds.
         if (GUI::gsStatus >= StartedMatch)
             return;
 
@@ -5570,10 +4332,8 @@ namespace SafeZoneMap
 
         MapTransform current;
         const UObject* manager = nullptr;
-        EMapTransformProvenance provenance =
-            EMapTransformProvenance::None;
-        if (!ReadRuntimeTransform(
-                current, manager, &provenance) ||
+        EMapTransformProvenance provenance = EMapTransformProvenance::None;
+        if (!ReadRuntimeTransform(current, manager, &provenance) ||
             !IsAuthoritativeProjection(provenance))
         {
             return;
@@ -5583,32 +4343,25 @@ namespace SafeZoneMap
             fabsf(current.CenterY - last.CenterY) > 1.f ||
             fabsf(current.AxisUX - last.AxisUX) > 1.f ||
             fabsf(current.AxisUY - last.AxisUY) > 1.f ||
-            fabsf(current.AxisVX - last.AxisVX) > 1.f ||
-            fabsf(current.AxisVY - last.AxisVY) > 1.f;
+            fabsf(current.AxisVX - last.AxisVX) > 1.f || fabsf(current.AxisVY - last.AxisVY) > 1.f;
         if (!changed) return;
 
-        const bool fromMapInfo = manager &&
-            manager->IsA(AFortAthenaMapInfo::StaticClass());
+        const bool fromMapInfo = manager && manager->IsA(AFortAthenaMapInfo::StaticClass());
         PublishTransform(current);
         ReprojectRememberedSelection(current);
         last = current;
         lastManager = manager;
         haveLast = true;
         SDK::DbgLog("[SafeZoneMap] %s map transform center=(%.1f, %.1f) axes=(%.1f, %.1f)\n",
-            fromMapInfo ? "MapInfo" : "authoritative",
-            current.CenterX, current.CenterY,
+            fromMapInfo ? "MapInfo" : "authoritative", current.CenterX, current.CenterY,
             AxisULength(current), AxisVLength(current));
     }
 
-    // Called from the pre-Start GetMaxTickRate pump and server tick hooks; a
-    // single atomic read unless a request is actually pending.
     static void GameThreadTick()
     {
         const bool bLoadRequested =
             g_LoadState.load(std::memory_order_acquire) == (int)LoadState::Requested;
 
-        // Before Start, only service an explicit GUI load. Runtime transform
-        // discovery needs an Athena GameState and cannot succeed yet.
         if (!FConfiguration::bReadyToStart)
         {
             if (!bLoadRequested)
@@ -5629,9 +4382,10 @@ namespace SafeZoneMap
             for (int i = 0; i < np && !tex; ++i)
             {
                 tex = StaticLoadMinimapSEH(paths[i], texClass);
-                SDK::DbgLog("[SafeZoneMap] game-thread StaticLoadObject(%ls) = %p\n", paths[i], (const void*)tex);
+                SDK::DbgLog("[SafeZoneMap] game-thread StaticLoadObject(%ls) = %p\n", paths[i],
+                    (const void*)tex);
             }
-        if (!tex) // the load may have registered it under a different outer/mount
+        if (!tex)
             tex = FindLoadedMinimapTexture(paths, np);
 
         int w = 0, h = 0;
@@ -5660,13 +4414,10 @@ namespace SafeZoneMap
             g_LoadAttempts.load(std::memory_order_relaxed) < 3;
     }
 
-    // Candidate minimap object paths for the current engine version (find-only,
-    // first hit wins). Paths are the full Package.ObjectName form. Some versions
-    // ship the asset under more than one mount, so we list fallbacks.
+    // Find-only, first hit wins. Paths are the full Package.ObjectName form.
     static int MinimapPathsForVersion(const wchar_t** out, int cap)
     {
-        const float v = static_cast<float>(
-            VersionInfo.FortniteVersion);
+        const float v = static_cast<float>(VersionInfo.FortniteVersion);
         int n = 0;
         auto add = [&](const wchar_t* p) { if (n < cap) out[n++] = p; };
 
@@ -5675,15 +4426,11 @@ namespace SafeZoneMap
         else if (v >= 13.00f && v < 14.00f) // C2S3 uses a season-specific texture
         {
             add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap_S13_7.Apollo_Terrain_Minimap_S13_7");
-            // Base asset fallback. NOTE: on some C2 builds the base texture is a
-            // blanked placeholder (season art superseded it), so this mainly serves
-            // to make Maps\Apollo_Terrain_Minimap.png a usable bundled fallback.
             add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap.Apollo_Terrain_Minimap");
         }
         else if (v >= 27.00f && v < 28.00f)
         {
-            // Chapter 1 OG shipped several weekly captures. Loaded-object lookup
-            // also accepts any Rufus index, so hotfix versions work too.
+            // Chapter 1 OG shipped several weekly captures, so any Rufus index is accepted.
             add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_03.Capture_Iteration_Discovered_Rufus_03");
             add(L"/Rufus/Game/UI/Capture_Iteration_Discovered_Rufus_03.Capture_Iteration_Discovered_Rufus_03");
             add(L"/Game/Athena/UI/Rufus/Capture_Iteration_Discovered_Rufus_01.Capture_Iteration_Discovered_Rufus_01");
@@ -5693,8 +4440,6 @@ namespace SafeZoneMap
         }
         else
         {
-            // Apollo is intentionally retained as the broad fallback: many later
-            // island releases reuse this cooked UI asset path with updated art.
             add(L"/Game/Athena/Apollo/Maps/UI/Apollo_Terrain_Minimap.Apollo_Terrain_Minimap");
             add(L"/Game/Athena/Artemis/Maps/UI/Artemis_Terrain_Minimap.Artemis_Terrain_Minimap");
             add(L"/Game/Athena/Asteria/Maps/UI/Asteria_Terrain_Minimap.Asteria_Terrain_Minimap");
@@ -5705,7 +4450,6 @@ namespace SafeZoneMap
         return n;
     }
 
-    // Directory containing Magnesium.dll (not the host exe).
     static std::wstring ModuleDirW()
     {
         wchar_t buf[MAX_PATH] = {};
@@ -5722,14 +4466,12 @@ namespace SafeZoneMap
             wchar_t localAppData[MAX_PATH] = {};
             std::wstring result;
             if (SUCCEEDED(SHGetFolderPathW(
-                    nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT,
-                    localAppData)))
+                    nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localAppData)))
             {
                 result = std::wstring(localAppData) + L"\\Magnesium\\Maps";
             }
             else
             {
-                // Keep map support functional if the shell folder lookup fails.
                 result = ModuleDirW() + L"\\Maps";
             }
 
@@ -5742,13 +4484,10 @@ namespace SafeZoneMap
         return directory;
     }
 
-    // Cache PNG keyed by the EXACT version: Apollo seasons reuse one object path
-    // but ship different art, so a coarser key would serve the wrong season.
     static std::wstring CacheFileNameW()
     {
         wchar_t name[64];
-        // v3 invalidates Chapter 2+ caches created from the similarly named
-        // discoverability/fog mask. Keep Chapter 1's known-good cache intact.
+        // v3 invalidates Chapter 2+ caches built from the similarly named discoverability mask.
         if (VersionInfo.FortniteVersion >= 11.00f)
             swprintf(name, 64, L"Magnesium_SafeZoneMap_v3_%.2f.png",
                 (double)VersionInfo.FortniteVersion);
@@ -5763,8 +4502,6 @@ namespace SafeZoneMap
         return MapStorageDirW() + L"\\" + CacheFileNameW();
     }
 
-    // Read caches made by older Magnesium builds once, then copy them into the
-    // AppData folder. The original file is left untouched for safe migration.
     static std::wstring LegacyCachePathW()
     {
         return ModuleDirW() + L"\\" + CacheFileNameW();
@@ -5779,13 +4516,6 @@ namespace SafeZoneMap
         return s;
     }
 
-    // Scan the global object array for a loaded UTexture2D whose leaf name matches
-    // one of the candidate paths' object names. Finds the texture regardless of its
-    // outer/mount path (StaticFindObject needs the exact path, which varies), so it
-    // succeeds where the hard-coded paths miss - as long as the texture is resident.
-    // Rufus (ch1 remix) weekly map textures are matched by PREFIX: the resident
-    // weekly index rarely matches the hard-coded one (e.g. 27.11 keeps Rufus_03
-    // loaded, not Rufus_04), and any week's art is close enough for zone placement.
     static const UTexture2D* FindLoadedMinimapTexture(const wchar_t** paths, int np)
     {
         const UClass* texClass = UTexture2D::StaticClass();
@@ -5800,7 +4530,6 @@ namespace SafeZoneMap
             std::wstring wleaf(dot ? dot + 1 : paths[i]);
             std::string nleaf(wleaf.begin(), wleaf.end()); // leaf names are ASCII
 
-            // "..._Rufus_04" -> prefix "Capture_Iteration_Discovered_Rufus_"
             const std::string rufusTag = "_Rufus_";
             size_t rp = nleaf.rfind(rufusTag);
             if (rp != std::string::npos && npre < kMaxMinimapPaths)
@@ -5860,24 +4589,20 @@ namespace SafeZoneMap
                 for (int k = 0; k < npre; ++k)
                 {
                     if (nm.compare(0, prefixes[k].size(), prefixes[k]) != 0) continue;
-                    SDK::DbgLog("[SafeZoneMap] object-array scan prefix-matched '%s' @%p\n", nm.c_str(), (const void*)obj);
+                    SDK::DbgLog("[SafeZoneMap] object-array scan prefix-matched '%s' @%p\n",
+                        nm.c_str(), (const void*)obj);
                     prefixHit = (const UTexture2D*)obj;
                     break;
                 }
             }
 
-            // Unknown versions still get a best-effort candidate. Score strong,
-            // full-island capture names and reject masks/icons/device textures.
             int score = 0;
             if (nm.find("Terrain_Minimap") != std::string::npos) score += 100;
             if (nm.find("MiniMapAthena") != std::string::npos) score += 100;
             if (nm.find("Capture_Iteration_Discovered") != std::string::npos) score += 90;
             if (nm.find("Minimap") != std::string::npos || nm.find("MiniMap") != std::string::npos) score += 35;
             if (nm.find("Terrain") != std::string::npos) score += 20;
-            // Auxiliary fog/discovery textures often retain the full
-            // "Terrain_Minimap" prefix. 17.30 even misspells its mask as
-            // "Discoverabilty", so reject the whole discover* family instead
-            // of matching one exact suffix.
+            // 17.30 misspells its mask as "Discoverabilty", so reject the whole discover* family.
             if (lowerName.find("mask") != std::string::npos ||
                 lowerName.find("icon") != std::string::npos ||
                 lowerName.find("device") != std::string::npos ||
@@ -5900,16 +4625,13 @@ namespace SafeZoneMap
         if (genericHit && genericScore >= 70)
         {
             const std::string name = genericHit->Name.ToString().c_str();
-            SDK::DbgLog(
-                "[SafeZoneMap] object-array scan generic minimap '%s' score=%d @%p\n",
+            SDK::DbgLog("[SafeZoneMap] object-array scan generic minimap '%s' score=%d @%p\n",
                 name.c_str(), genericScore, (const void*)genericHit);
             return genericHit;
         }
         return nullptr;
     }
 
-    // One-shot diagnostic: report how many textures are resident and any with a
-    // map-like name, so we can tell "wrong path" from "texture simply not loaded".
     static void DiagnosticLogTextures()
     {
         const UClass* texClass = UTexture2D::StaticClass();
@@ -5935,8 +4657,8 @@ namespace SafeZoneMap
         SDK::DbgLog("[SafeZoneMap] diag: %d UTexture2D resident, %d map-like\n", texCount, logged);
     }
 
-    // Read a PNG file from disk and upload it to a texture.
-    static bool LoadPngFile(const std::wstring& file, ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
+    static bool LoadPngFile(const std::wstring& file, ID3D11Device* dev,
+        ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
     {
         std::ifstream f(file.c_str(), std::ios::binary);
         if (!f) return false;
@@ -5950,23 +4672,18 @@ namespace SafeZoneMap
         return false;
     }
 
-    // User-supplied minimap PNGs (e.g. exported from FModel). AppData is checked
-    // first, while the old DLL-adjacent Maps folder remains a compatible fallback.
-    // Checked most-specific first:
-    //   <Maps>\<version>.png   (e.g. 17.30.png) - exact per-version override
-    //   <Maps>\<leaf>.png      (e.g. Apollo_Terrain_Minimap.png) - asset default
-    static bool LoadBundledMinimap(const wchar_t** paths, int np, ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
+    // <Maps>\<version>.png overrides <Maps>\<leaf>.png. AppData first, the DLL-adjacent folder second.
+    static bool LoadBundledMinimap(const wchar_t** paths, int np, ID3D11Device* dev,
+        ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
     {
         const std::wstring directories[2]{
-            MapStorageDirW(),
-            ModuleDirW() + L"\\Maps"
+            MapStorageDirW(), ModuleDirW() + L"\\Maps"
         };
 
         for (const std::wstring& dir : directories)
         {
             wchar_t vname[64];
-            swprintf(vname, 64, L"\\%.2f.png",
-                (double)VersionInfo.FortniteVersion);
+            swprintf(vname, 64, L"\\%.2f.png", (double)VersionInfo.FortniteVersion);
             if (LoadPngFile(dir + vname, dev, outSrv, outW, outH))
                 return true;
 
@@ -5982,17 +4699,13 @@ namespace SafeZoneMap
         return false;
     }
 
-    // Try live extraction (and dump a PNG), else user-bundled PNGs, else cache.
     static bool Acquire(ID3D11Device* dev, ID3D11ShaderResourceView** outSrv, int* outW, int* outH)
     {
         const wchar_t* paths[kMaxMinimapPaths];
         const int np = MinimapPathsForVersion(paths, kMaxMinimapPaths);
         const std::wstring cacheW = CachePathW();
 
-        // 1) Live extraction from the loaded UTexture2D. Use StaticFindObject
-        // (find-only): FindObject<>() falls back to StaticLoadObject when the asset
-        // isn't already loaded, and that native loader faults on some versions
-        // (e.g. 17.30 / 27.x). If the minimap isn't resident we just skip the image.
+        // FindObject<>() falls back to StaticLoadObject, which faults on 17.30 and 27.x, so find only.
         const UClass* texClass = UTexture2D::StaticClass();
         const UTexture2D* tex = nullptr;
         if (texClass)
@@ -6001,7 +4714,7 @@ namespace SafeZoneMap
                 tex = (const UTexture2D*)SDK::StaticFindObject(paths[i], texClass);
                 SDK::DbgLog("[SafeZoneMap] StaticFindObject(%ls) = %p\n", paths[i], (const void*)tex);
             }
-        if (!tex) // exact path missed; scan the object array by leaf name
+        if (!tex)
         {
             tex = FindLoadedMinimapTexture(paths, np);
             static bool s_Diag = false;
@@ -6010,7 +4723,8 @@ namespace SafeZoneMap
         if (tex)
         {
             std::vector<unsigned char> rgba; int w = 0, h = 0;
-            if (ExtractToRGBA_Guarded(tex, rgba, w, h) && CreateTextureFromRGBA8(rgba.data(), w, h, dev, outSrv))
+            if (ExtractToRGBA_Guarded(tex, rgba, w,
+                h) && CreateTextureFromRGBA8(rgba.data(), w, h, dev, outSrv))
             {
                 *outW = w; *outH = h;
                 const std::string cacheU8 = WideToUtf8(cacheW);
@@ -6024,9 +4738,6 @@ namespace SafeZoneMap
             SDK::DbgLog("[SafeZoneMap] FindObject(minimap) returned null\n");
         }
 
-        // 2) Pixels produced by the game-thread load bridge (see GameThreadTick):
-        // a previous Acquire posted a request and the pre-Start/server pump
-        // loaded and extracted it.
         if (g_LoadState.load(std::memory_order_acquire) == (int)LoadState::Ready)
         {
             const bool ok = CreateTextureFromRGBA8(g_LoadedRGBA.data(), g_LoadedW, g_LoadedH, dev, outSrv);
@@ -6034,7 +4745,8 @@ namespace SafeZoneMap
             {
                 *outW = g_LoadedW; *outH = g_LoadedH;
                 const std::string cacheU8 = WideToUtf8(cacheW);
-                if (stbi_write_png(cacheU8.c_str(), g_LoadedW, g_LoadedH, 4, g_LoadedRGBA.data(), g_LoadedW * 4))
+                if (stbi_write_png(cacheU8.c_str(), g_LoadedW, g_LoadedH, 4, g_LoadedRGBA.data(),
+                    g_LoadedW * 4))
                     SDK::DbgLog("[SafeZoneMap] dumped cache PNG -> %s\n", cacheU8.c_str());
             }
             g_LoadedRGBA.clear(); g_LoadedRGBA.shrink_to_fit();
@@ -6042,33 +4754,23 @@ namespace SafeZoneMap
             if (ok) return true;
         }
 
-        // 3) User-provided PNGs in Maps\ (FModel exports) - optional per-version
-        // overrides for art the live path can't produce.
         if (LoadBundledMinimap(paths, np, dev, outSrv, outW, outH))
             return true;
 
-        // 4) A PNG previously dumped by a successful live extraction.
         if (LoadPngFile(cacheW, dev, outSrv, outW, outH))
             return true;
 
-        // 5) Migrate a cache made by an older DLL-adjacent build.
         const std::wstring legacyCacheW = LegacyCachePathW();
-        if (legacyCacheW != cacheW &&
-            LoadPngFile(legacyCacheW, dev, outSrv, outW, outH))
+        if (legacyCacheW != cacheW && LoadPngFile(legacyCacheW, dev, outSrv, outW, outH))
         {
             std::error_code error;
-            std::filesystem::copy_file(
-                legacyCacheW, cacheW,
+            std::filesystem::copy_file(legacyCacheW, cacheW,
                 std::filesystem::copy_options::skip_existing, error);
             SDK::DbgLog("[SafeZoneMap] legacy cache migration -> %ls%s\n",
                 cacheW.c_str(), error ? " (copy failed)" : "");
             return true;
         }
 
-        // 6) Nothing resident and no PNG on disk: ask the game thread to load the
-        // asset properly (loading is game-thread-only; doing it here faulted on
-        // 17.30/27.x). Retry a few times because MapInfo and streamed UI assets can
-        // become available after the editor's first frame.
         int state = g_LoadState.load(std::memory_order_acquire);
         if (g_LoadAttempts.load(std::memory_order_relaxed) < 3 &&
             (state == (int)LoadState::Idle || state == (int)LoadState::Failed) &&
@@ -6093,44 +4795,26 @@ void GUI::SafeZoneMapGameTick()
     AFortPlayerPawnAthena::TickPendingPlayerMapIcons();
 }
 
-bool GameTextureBridge::ExtractToRGBA(
-    const UTexture2D* Texture,
-    std::vector<unsigned char>& RGBA,
-    int& Width,
-    int& Height)
+bool GameTextureBridge::ExtractToRGBA(const UTexture2D* Texture, std::vector<unsigned char>& RGBA,
+    int& Width, int& Height)
 {
     if (!Texture)
         return false;
 
-    // Item cards render below 128 px. Use only a structurally validated,
-    // already-resident CPU mip no larger than 512 px; never request streaming
-    // or decode the full preview merely to shrink it for this admin UI.
-    const bool PreviousSuppress =
-        SafeZoneMap::g_SuppressTextureExtractionLogs;
-    const int32 PreviousMaximum =
-        SafeZoneMap::g_MaxTextureExtractionDimension;
+    const bool PreviousSuppress = SafeZoneMap::g_SuppressTextureExtractionLogs;
+    const int32 PreviousMaximum = SafeZoneMap::g_MaxTextureExtractionDimension;
     SafeZoneMap::g_SuppressTextureExtractionLogs = true;
-    bool Result =
-        SafeZoneMap::ExtractResidentIconToRGBA_Guarded(
-        Texture, RGBA, Width, Height);
+    bool Result = SafeZoneMap::ExtractResidentIconToRGBA_Guarded(Texture, RGBA, Width, Height);
     if (!Result)
     {
-        // The strict extractor requires a uniquely identifiable cooked mip
-        // layout. Its older guarded decoder recognizes additional UE4 inline
-        // and indirect-array layouts; keep the same hard 512px ceiling so a
-        // menu icon can never decode a full map-sized texture.
+        // Keep the 512px ceiling so a menu icon can never decode as a full map texture.
         RGBA.clear();
         Width = Height = 0;
-        SafeZoneMap::g_MaxTextureExtractionDimension =
-            SafeZoneMap::kMaximumResidentIconDimension;
-        Result =
-            SafeZoneMap::ExtractToRGBA_Guarded(
-                Texture, RGBA, Width, Height);
+        SafeZoneMap::g_MaxTextureExtractionDimension = SafeZoneMap::kMaximumResidentIconDimension;
+        Result = SafeZoneMap::ExtractToRGBA_Guarded(Texture, RGBA, Width, Height);
     }
-    SafeZoneMap::g_MaxTextureExtractionDimension =
-        PreviousMaximum;
-    SafeZoneMap::g_SuppressTextureExtractionLogs =
-        PreviousSuppress;
+    SafeZoneMap::g_MaxTextureExtractionDimension = PreviousMaximum;
+    SafeZoneMap::g_SuppressTextureExtractionLogs = PreviousSuppress;
     return Result;
 }
 
@@ -6147,8 +4831,7 @@ void GUI::ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo)
         SafeZoneMap::ReprojectRememberedSelection(map);
         SDK::DbgLog(
             "[SafeZoneMap] finalized custom zone from %s center=(%.1f, %.1f) axes=(%.1f, %.1f)\n",
-            manager == MapInfo ? "MapInfo" : "runtime map data",
-            map.CenterX, map.CenterY,
+            manager == MapInfo ? "MapInfo" : "runtime map data", map.CenterX, map.CenterY,
             SafeZoneMap::AxisULength(map), SafeZoneMap::AxisVLength(map));
         return;
     }
@@ -6156,74 +4839,54 @@ void GUI::ResolveCustomSafeZoneForMap(AFortAthenaMapInfo* MapInfo)
     SafeZoneMap::FinalizeSelectionForMapInfo(MapInfo);
 }
 
-bool GUI::IsCustomSafeZoneMapProjectionReady(
-    AFortAthenaMapInfo* MapInfo)
+bool GUI::IsCustomSafeZoneMapProjectionReady(AFortAthenaMapInfo* MapInfo)
 {
     if (!MapInfo)
         return false;
 
-    // ReadyToStartMatch can query this every frame while native map objects
-    // are still appearing. The shared verified cache throttles misses and
-    // accepts only this exact MapInfo plus known legacy, reflected extents,
-    // POI calibration, or native map sampling.
     SafeZoneMap::MapTransform map;
-    return SafeZoneMap::TryGetVerifiedRuntimeTransform(
-        MapInfo, map, true);
+    return SafeZoneMap::TryGetVerifiedRuntimeTransform(MapInfo, map, true);
 }
 
-bool GUI::TryResolveSafeZoneMapPoint(
-    AFortAthenaMapInfo* MapInfo,
-    float U,
-    float V,
+bool GUI::TryResolveSafeZoneMapPoint(AFortAthenaMapInfo* MapInfo, float U, float V,
     FVector& OutCenter)
 {
     if (!MapInfo || !std::isfinite(U) || !std::isfinite(V))
         return false;
 
     SafeZoneMap::MapTransform map;
-    if (!SafeZoneMap::TryGetVerifiedRuntimeTransform(
-            MapInfo, map, false))
+    if (!SafeZoneMap::TryGetVerifiedRuntimeTransform(MapInfo, map, false))
         return false;
 
     float worldX = 0.f;
     float worldY = 0.f;
-    SafeZoneMap::PixelToWorld(
-        SafeZoneMap::Clamp(U, 0.f, 1.f),
-        SafeZoneMap::Clamp(V, 0.f, 1.f),
+    SafeZoneMap::PixelToWorld(SafeZoneMap::Clamp(U, 0.f, 1.f), SafeZoneMap::Clamp(V, 0.f, 1.f),
         1.f, map, worldX, worldY);
     if (!std::isfinite(worldX) || !std::isfinite(worldY))
         return false;
 
-    // Z is intentionally caller-owned. The map projection is a 2D affine
-    // transform and phase/runtime code may already hold a meaningful height.
     OutCenter.X = worldX;
     OutCenter.Y = worldY;
     return true;
 }
 
-bool GUI::TryResolveSafeZoneMapPoints(
-    AFortAthenaMapInfo* MapInfo,
-    const std::vector<FCustomSafeZoneNode>& Nodes,
-    std::vector<FVector>& OutCenters)
+bool GUI::TryResolveSafeZoneMapPoints(AFortAthenaMapInfo* MapInfo,
+    const std::vector<FCustomSafeZoneNode>& Nodes, std::vector<FVector>& OutCenters)
 {
-    const bool needsProjection = std::any_of(
-        Nodes.begin(), Nodes.end(),
+    const bool needsProjection = std::any_of(Nodes.begin(), Nodes.end(),
         [](const FCustomSafeZoneNode& Node)
         {
             return Node.bHasNormalizedCenter;
         });
 
     SafeZoneMap::MapTransform map{};
-    if (needsProjection &&
-        (!MapInfo ||
-         !SafeZoneMap::TryGetVerifiedRuntimeTransform(
+    if (needsProjection && (!MapInfo || !SafeZoneMap::TryGetVerifiedRuntimeTransform(
              MapInfo, map, false)))
     {
         return false;
     }
 
-    return SafeZoneMap::ProjectSafeZoneNodes(
-        map, Nodes, OutCenters);
+    return SafeZoneMap::ProjectSafeZoneNodes(map, Nodes, OutCenters);
 }
 
 #if defined(_DEBUG)
@@ -6239,69 +4902,45 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
         return fabsf(left - right) <= 0.01f;
     };
 
-    // Every supported stock island has a deterministic full-capture transform.
-    // The boundaries are intentionally tested because Asteria changed scale at
-    // FN24 while keeping the same non-zero center.
     SafeZoneMap::MapTransform calibrated;
-    SafeZoneMap::EStockCaptureFamily family =
-        SafeZoneMap::EStockCaptureFamily::None;
-    assert(SafeZoneMap::TryGetStockCaptureCalibration(
-        10.40f, false, calibrated, &family));
+    SafeZoneMap::EStockCaptureFamily family = SafeZoneMap::EStockCaptureFamily::None;
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(10.40f, false, calibrated, &family));
     assert(family == SafeZoneMap::EStockCaptureFamily::Athena);
     assert(nearlyEqual(calibrated.CenterX, 32000.f));
-    assert(nearlyEqual(
-        SafeZoneMap::AxisULength(calibrated), 129760.4f));
-    assert(SafeZoneMap::TryGetStockCaptureCalibration(
-        18.40f, false, calibrated, &family));
+    assert(nearlyEqual(SafeZoneMap::AxisULength(calibrated), 129760.4f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(18.40f, false, calibrated, &family));
     assert(family == SafeZoneMap::EStockCaptureFamily::Apollo);
-    assert(nearlyEqual(
-        SafeZoneMap::AxisULength(calibrated), 134849.f));
-    assert(SafeZoneMap::TryGetStockCaptureCalibration(
-        22.40f, false, calibrated, &family));
+    assert(nearlyEqual(SafeZoneMap::AxisULength(calibrated), 134849.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(22.40f, false, calibrated, &family));
     assert(family == SafeZoneMap::EStockCaptureFamily::Artemis);
-    assert(nearlyEqual(
-        SafeZoneMap::AxisULength(calibrated), 131213.f));
-    assert(SafeZoneMap::TryGetStockCaptureCalibration(
-        23.10f, false, calibrated, &family));
+    assert(nearlyEqual(SafeZoneMap::AxisULength(calibrated), 131213.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(23.10f, false, calibrated, &family));
     assert(family == SafeZoneMap::EStockCaptureFamily::AsteriaEarly);
     assert(nearlyEqual(calibrated.CenterX, 9524.f));
     assert(nearlyEqual(calibrated.CenterY, -9732.f));
-    assert(nearlyEqual(
-        SafeZoneMap::AxisULength(calibrated), 131213.f));
-    assert(SafeZoneMap::TryGetStockCaptureCalibration(
-        24.20f, false, calibrated, &family));
+    assert(nearlyEqual(SafeZoneMap::AxisULength(calibrated), 131213.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(24.20f, false, calibrated, &family));
     assert(family == SafeZoneMap::EStockCaptureFamily::Asteria);
     assert(nearlyEqual(calibrated.CenterX, 9524.f));
     assert(nearlyEqual(calibrated.CenterY, -9732.f));
-    assert(nearlyEqual(
-        SafeZoneMap::AxisULength(calibrated), 149963.f));
-    assert(SafeZoneMap::TryGetStockCaptureCalibration(
-        27.11f, false, calibrated, &family));
+    assert(nearlyEqual(SafeZoneMap::AxisULength(calibrated), 149963.f));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(27.11f, false, calibrated, &family));
     assert(family == SafeZoneMap::EStockCaptureFamily::Rufus);
     assert(nearlyEqual(calibrated.CenterX, 28321.8f));
     assert(nearlyEqual(calibrated.CenterY, -21131.f));
-    assert(nearlyEqual(
-        SafeZoneMap::AxisULength(calibrated), 131213.f));
+    assert(nearlyEqual(SafeZoneMap::AxisULength(calibrated), 131213.f));
     SafeZoneMap::MapTransform helios;
-    assert(SafeZoneMap::TryGetStockCaptureCalibration(
-        30.00f, false, helios, &family));
+    assert(SafeZoneMap::TryGetStockCaptureCalibration(30.00f, false, helios, &family));
     assert(family == SafeZoneMap::EStockCaptureFamily::Helios);
     assert(nearlyEqual(helios.CenterX, 8500.f));
     assert(nearlyEqual(helios.CenterY, 508.f));
-    assert(nearlyEqual(
-        SafeZoneMap::AxisULength(helios), 149963.f));
-    assert(nearlyEqual(
-        SafeZoneMap::AxisVLength(helios), 149963.f));
-    assert(!SafeZoneMap::TryGetStockCaptureCalibration(
-        24.20f, true, calibrated, &family));
-    assert(!SafeZoneMap::TryGetStockCaptureCalibration(
-        31.00f, false, calibrated, &family));
-    assert(SafeZoneMap::IsAuthoritativeProjection(
-        SafeZoneMap::EMapTransformProvenance::
+    assert(nearlyEqual(SafeZoneMap::AxisULength(helios), 149963.f));
+    assert(nearlyEqual(SafeZoneMap::AxisVLength(helios), 149963.f));
+    assert(!SafeZoneMap::TryGetStockCaptureCalibration(24.20f, true, calibrated, &family));
+    assert(!SafeZoneMap::TryGetStockCaptureCalibration(31.00f, false, calibrated, &family));
+    assert(SafeZoneMap::IsAuthoritativeProjection(SafeZoneMap::EMapTransformProvenance::
             KnownCaptureCalibration));
 
-    // A normalized edit must render at its authored image point even while its
-    // compatibility world center still belongs to the preceding transform.
     FCustomSafeZoneNode normalizedDisplay;
     normalizedDisplay.Center.X = -999999.f;
     normalizedDisplay.Center.Y = 999999.f;
@@ -6310,46 +4949,32 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
     normalizedDisplay.NormalizedV = 0.75f;
     float normalizedPixelX = 0.f;
     float normalizedPixelY = 0.f;
-    SafeZoneMap::NodeToPixel(
-        normalizedDisplay, 400.f, helios,
-        normalizedPixelX, normalizedPixelY);
+    SafeZoneMap::NodeToPixel(normalizedDisplay, 400.f, helios, normalizedPixelX, normalizedPixelY);
     assert(nearlyEqual(normalizedPixelX, 100.f));
     assert(nearlyEqual(normalizedPixelY, 300.f));
 
-    // A rotated, non-square capture must round-trip points and project a world
-    // circle to independent pixel radii. Doubling the canvas models zoom and
-    // must double both radii without changing their aspect ratio.
     const SafeZoneMap::MapTransform nonSquare{
-        100.f, -50.f,
-        0.f, 200.f,
-        -100.f, 0.f
+        100.f, -50.f, 0.f, 200.f, -100.f, 0.f
     };
     float worldX = 0.f;
     float worldY = 0.f;
-    SafeZoneMap::PixelToWorld(
-        0.75f, 0.25f, 1.f, nonSquare, worldX, worldY);
+    SafeZoneMap::PixelToWorld(0.75f, 0.25f, 1.f, nonSquare, worldX, worldY);
     assert(nearlyEqual(worldX, 150.f));
     assert(nearlyEqual(worldY, 50.f));
     float pixelX = 0.f;
     float pixelY = 0.f;
-    SafeZoneMap::WorldToPixel(
-        worldX, worldY, 400.f, nonSquare, pixelX, pixelY);
+    SafeZoneMap::WorldToPixel(worldX, worldY, 400.f, nonSquare, pixelX, pixelY);
     assert(nearlyEqual(pixelX, 300.f));
     assert(nearlyEqual(pixelY, 100.f));
-    const ImVec2 ordinaryRadius =
-        SafeZoneMap::RadiusToPixelAxes(50.f, 400.f, nonSquare);
-    const ImVec2 zoomedRadius =
-        SafeZoneMap::RadiusToPixelAxes(50.f, 800.f, nonSquare);
+    const ImVec2 ordinaryRadius = SafeZoneMap::RadiusToPixelAxes(50.f, 400.f, nonSquare);
+    const ImVec2 zoomedRadius = SafeZoneMap::RadiusToPixelAxes(50.f, 800.f, nonSquare);
     assert(nearlyEqual(ordinaryRadius.x, 50.f));
     assert(nearlyEqual(ordinaryRadius.y, 100.f));
     assert(nearlyEqual(zoomedRadius.x, ordinaryRadius.x * 2.f));
     assert(nearlyEqual(zoomedRadius.y, ordinaryRadius.y * 2.f));
 
-    SafeZoneMap::WorldToPixel(
-        100000.f, 100000.f, 400.f,
-        nonSquare, pixelX, pixelY);
-    assert(pixelX < 0.f || pixelX > 400.f ||
-           pixelY < 0.f || pixelY > 400.f);
+    SafeZoneMap::WorldToPixel(100000.f, 100000.f, 400.f, nonSquare, pixelX, pixelY);
+    assert(pixelX < 0.f || pixelX > 400.f || pixelY < 0.f || pixelY > 400.f);
 
     FCustomSafeZoneNode normalized;
     normalized.Center.X = 1.f;
@@ -6366,8 +4991,7 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
         normalized, numeric
     };
     std::vector<FVector> centers;
-    assert(SafeZoneMap::ProjectSafeZoneNodes(
-        nonSquare, nodes, centers));
+    assert(SafeZoneMap::ProjectSafeZoneNodes(nonSquare, nodes, centers));
     assert(centers.size() == 2);
     assert(nearlyEqual((float)centers[0].X, 150.f));
     assert(nearlyEqual((float)centers[0].Y, 50.f));
@@ -6391,20 +5015,15 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
         1, ImVec2(55.f, 50.f), ImVec2(6.f, 6.f)
     };
 
-    const auto HeadCenter = [](
-        const SafeZoneMap::StraightTransitionArrow& arrow)
+    const auto HeadCenter = [](const SafeZoneMap::StraightTransitionArrow& arrow)
     {
-        return ImVec2(
-            arrow.Tip.x - arrow.Direction.x *
-                (SafeZoneMap::TransitionArrowHeadLength * 0.5f),
-            arrow.Tip.y - arrow.Direction.y *
+        return ImVec2(arrow.Tip.x - arrow.Direction.x *
+                (SafeZoneMap::TransitionArrowHeadLength * 0.5f), arrow.Tip.y - arrow.Direction.y *
                 (SafeZoneMap::TransitionArrowHeadLength * 0.5f));
     };
 
-    const auto farArrow = SafeZoneMap::BuildStraightTransitionArrow(
-        from, farCircle);
-    assert(!SafeZoneMap::ProjectedCirclesOverlapOrTouch(
-        from, farCircle));
+    const auto farArrow = SafeZoneMap::BuildStraightTransitionArrow(from, farCircle);
+    assert(!SafeZoneMap::ProjectedCirclesOverlapOrTouch(from, farCircle));
     assert(farArrow.bVisible);
     assert(farArrow.bDrawShaft);
     assert(nearlyEqual(farArrow.Direction.x, 1.f));
@@ -6416,30 +5035,21 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
     const SafeZoneMap::ProjectedCircle tinyGap{
         1, ImVec2(92.f, 50.f), ImVec2(20.f, 20.f)
     };
-    const auto tinyGapArrow =
-        SafeZoneMap::BuildStraightTransitionArrow(
-            from, tinyGap);
-    assert(!SafeZoneMap::ProjectedCirclesOverlapOrTouch(
-        from, tinyGap));
+    const auto tinyGapArrow = SafeZoneMap::BuildStraightTransitionArrow(from, tinyGap);
+    assert(!SafeZoneMap::ProjectedCirclesOverlapOrTouch(from, tinyGap));
     assert(tinyGapArrow.bVisible);
     assert(!tinyGapArrow.bDrawShaft);
     const ImVec2 tinyGapHeadCenter = HeadCenter(tinyGapArrow);
     assert(nearlyEqual(tinyGapHeadCenter.x, 71.f));
     assert(nearlyEqual(tinyGapHeadCenter.y, 50.f));
 
-    const auto overlapArrow =
-        SafeZoneMap::BuildStraightTransitionArrow(
-            from, overlapping);
-    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
-        from, overlapping));
+    const auto overlapArrow = SafeZoneMap::BuildStraightTransitionArrow(from, overlapping);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(from, overlapping));
     assert(!overlapArrow.bVisible);
     assert(!overlapArrow.bDrawShaft);
 
-    const auto containedArrow =
-        SafeZoneMap::BuildStraightTransitionArrow(
-            from, nearContained);
-    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
-        from, nearContained));
+    const auto containedArrow = SafeZoneMap::BuildStraightTransitionArrow(from, nearContained);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(from, nearContained));
     assert(!containedArrow.bVisible);
     assert(!containedArrow.bDrawShaft);
 
@@ -6449,17 +5059,13 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
     const SafeZoneMap::ProjectedCircle concentricInner{
         1, ImVec2(50.f, 50.f), ImVec2(20.f, 20.f)
     };
-    const auto concentricArrow =
-        SafeZoneMap::BuildStraightTransitionArrow(
+    const auto concentricArrow = SafeZoneMap::BuildStraightTransitionArrow(
             concentricOuter, concentricInner);
-    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
-        concentricOuter, concentricInner));
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(concentricOuter, concentricInner));
     assert(!concentricArrow.bVisible);
     assert(!concentricArrow.bDrawShaft);
 
-    const auto equalConcentricArrow =
-        SafeZoneMap::BuildStraightTransitionArrow(
-            from, from);
+    const auto equalConcentricArrow = SafeZoneMap::BuildStraightTransitionArrow(from, from);
     assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(from, from));
     assert(!equalConcentricArrow.bVisible);
     assert(!equalConcentricArrow.bDrawShaft);
@@ -6467,10 +5073,8 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
     const SafeZoneMap::ProjectedCircle touching{
         1, ImVec2(90.f, 50.f), ImVec2(20.f, 20.f)
     };
-    const auto touchingArrow =
-        SafeZoneMap::BuildStraightTransitionArrow(from, touching);
-    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(
-        from, touching));
+    const auto touchingArrow = SafeZoneMap::BuildStraightTransitionArrow(from, touching);
+    assert(SafeZoneMap::ProjectedCirclesOverlapOrTouch(from, touching));
     assert(!touchingArrow.bVisible);
     assert(!touchingArrow.bDrawShaft);
 
@@ -6480,28 +5084,20 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
     const SafeZoneMap::ProjectedCircle diagonalTo{
         1, ImVec2(180.f, 130.f), ImVec2(18.f, 28.f)
     };
-    const auto diagonalArrow =
-        SafeZoneMap::BuildStraightTransitionArrow(
-            diagonalFrom, diagonalTo);
+    const auto diagonalArrow = SafeZoneMap::BuildStraightTransitionArrow(diagonalFrom, diagonalTo);
     assert(diagonalArrow.bVisible);
     assert(diagonalArrow.bDrawShaft);
-    const ImVec2 diagonalShaft(
-        diagonalArrow.Tip.x - diagonalArrow.ShaftStart.x,
+    const ImVec2 diagonalShaft(diagonalArrow.Tip.x - diagonalArrow.ShaftStart.x,
         diagonalArrow.Tip.y - diagonalArrow.ShaftStart.y);
-    assert(fabsf(
-        diagonalShaft.x * diagonalArrow.Direction.y -
+    assert(fabsf(diagonalShaft.x * diagonalArrow.Direction.y -
         diagonalShaft.y * diagonalArrow.Direction.x) < 0.01f);
     assert(diagonalShaft.x * diagonalArrow.Direction.x +
         diagonalShaft.y * diagonalArrow.Direction.y > 0.f);
 
-    // The fill and stripe clippers operate on the same merged union. Verify
-    // separation, overlap lenses, containment, off-screen clipping, and a
-    // non-square projected circle without requiring a live ImDrawList.
     std::vector<SafeZoneMap::StormInterval> intervals;
     intervals.reserve(4);
     SafeZoneMap::CollectHorizontalCircleUnionIntervals(
-        { from, farCircle }, 50.f, 50.f,
-        0.f, 200.f, intervals);
+        { from, farCircle }, 50.f, 50.f, 0.f, 200.f, intervals);
     assert(intervals.size() == 2);
     assert(nearlyEqual(intervals[0].Begin, 30.f));
     assert(nearlyEqual(intervals[0].End, 70.f));
@@ -6509,15 +5105,13 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
     assert(nearlyEqual(intervals[1].End, 170.f));
 
     SafeZoneMap::CollectHorizontalCircleUnionIntervals(
-        { from, overlapping }, 50.f, 50.f,
-        0.f, 200.f, intervals);
+        { from, overlapping }, 50.f, 50.f, 0.f, 200.f, intervals);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 30.f));
     assert(nearlyEqual(intervals[0].End, 105.f));
 
     SafeZoneMap::CollectHorizontalCircleUnionIntervals(
-        { from, concentric }, 50.f, 50.f,
-        0.f, 200.f, intervals);
+        { from, concentric }, 50.f, 50.f, 0.f, 200.f, intervals);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 5.f));
     assert(nearlyEqual(intervals[0].End, 95.f));
@@ -6526,8 +5120,7 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
         2, ImVec2(-5.f, 50.f), ImVec2(20.f, 20.f)
     };
     SafeZoneMap::CollectHorizontalCircleUnionIntervals(
-        { partlyOffscreen }, 50.f, 50.f,
-        0.f, 200.f, intervals);
+        { partlyOffscreen }, 50.f, 50.f, 0.f, 200.f, intervals);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 0.f));
     assert(nearlyEqual(intervals[0].End, 15.f));
@@ -6536,34 +5129,28 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
         3, ImVec2(50.f, 50.f), ImVec2(20.f, 10.f)
     };
     SafeZoneMap::CollectHorizontalCircleUnionIntervals(
-        { projectedEllipse }, 55.f, 55.f,
-        0.f, 200.f, intervals);
+        { projectedEllipse }, 55.f, 55.f, 0.f, 200.f, intervals);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 32.6795f));
     assert(nearlyEqual(intervals[0].End, 67.3205f));
 
-    // A row approaching an ellipse must reserve the widest endpoint, not its
-    // midpoint, so the filled rectangle cannot nick the clear boundary.
     SafeZoneMap::CollectHorizontalCircleUnionIntervals(
         { from }, 30.f, 31.f, 0.f, 200.f, intervals);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 43.755f));
     assert(nearlyEqual(intervals[0].End, 56.245f));
 
-    SafeZoneMap::CollectLineCircleUnionIntervals(
-        ImVec2(0.f, 50.f), ImVec2(200.f, 50.f),
+    SafeZoneMap::CollectLineCircleUnionIntervals(ImVec2(0.f, 50.f), ImVec2(200.f, 50.f),
         { from, overlapping }, intervals);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 0.15f));
     assert(nearlyEqual(intervals[0].End, 0.525f));
-    SafeZoneMap::CollectLineCircleUnionIntervals(
-        ImVec2(0.f, 50.f), ImVec2(200.f, 50.f),
+    SafeZoneMap::CollectLineCircleUnionIntervals(ImVec2(0.f, 50.f), ImVec2(200.f, 50.f),
         { from, overlapping }, intervals, 3.f);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 0.135f));
     assert(nearlyEqual(intervals[0].End, 0.54f));
-    SafeZoneMap::CollectLineCircleUnionIntervals(
-        ImVec2(40.f, 50.f), ImVec2(60.f, 50.f),
+    SafeZoneMap::CollectLineCircleUnionIntervals(ImVec2(40.f, 50.f), ImVec2(60.f, 50.f),
         { from }, intervals);
     assert(intervals.size() == 1);
     assert(nearlyEqual(intervals[0].Begin, 0.f));
@@ -6594,31 +5181,18 @@ void GUI::RunCustomSafeZoneRenderSelfTests()
 }
 #endif
 
-bool GUI::GetNormalizedSafeZoneSelection(
-    float& U,
-    float& V)
+bool GUI::GetNormalizedSafeZoneSelection(float& U, float& V)
 {
-    U = SafeZoneMap::g_SelectedU.load(
-        std::memory_order_relaxed);
-    V = SafeZoneMap::g_SelectedV.load(
-        std::memory_order_relaxed);
-    return SafeZoneMap::g_HasNormalizedSelection.load(
-        std::memory_order_acquire);
+    U = SafeZoneMap::g_SelectedU.load(std::memory_order_relaxed);
+    V = SafeZoneMap::g_SelectedV.load(std::memory_order_relaxed);
+    return SafeZoneMap::g_HasNormalizedSelection.load(std::memory_order_acquire);
 }
 
-void GUI::RestoreNormalizedSafeZoneSelection(
-    bool bHasSelection,
-    float U,
-    float V)
+void GUI::RestoreNormalizedSafeZoneSelection(bool bHasSelection, float U, float V)
 {
-    SafeZoneMap::g_SelectedU.store(
-        SafeZoneMap::Clamp(U, 0.f, 1.f),
-        std::memory_order_relaxed);
-    SafeZoneMap::g_SelectedV.store(
-        SafeZoneMap::Clamp(V, 0.f, 1.f),
-        std::memory_order_relaxed);
-    SafeZoneMap::g_HasNormalizedSelection.store(
-        bHasSelection, std::memory_order_release);
+    SafeZoneMap::g_SelectedU.store(SafeZoneMap::Clamp(U, 0.f, 1.f), std::memory_order_relaxed);
+    SafeZoneMap::g_SelectedV.store(SafeZoneMap::Clamp(V, 0.f, 1.f), std::memory_order_relaxed);
+    SafeZoneMap::g_HasNormalizedSelection.store(bHasSelection, std::memory_order_release);
 }
 
 void Hyperlink(const char* label, const char* url)
@@ -6649,11 +5223,9 @@ void SmallSeparator(float Width, float Thickness = 1.0f)
     ImGui::Dummy(ImVec2(Width, Thickness + 4));
 }
 
-static float ContentSectionWidth(
-    float FallbackWidth, float RightInset = 0.f)
+static float ContentSectionWidth(float FallbackWidth, float RightInset = 0.f)
 {
-    float Width =
-        ImGui::GetContentRegionAvail().x - RightInset;
+    float Width = ImGui::GetContentRegionAvail().x - RightInset;
     if (Width < FallbackWidth)
         Width = FallbackWidth;
 
@@ -6692,34 +5264,23 @@ static void EndSectionBody()
     ImGui::Unindent(10.f);
 }
 
-static bool LabeledSliderInt(
-    const char* Label,
-    const char* Id,
-    int* Value,
-    int Min,
-    int Max,
-    float Width,
-    const char* Format = "%d")
+static bool LabeledSliderInt(const char* Label, const char* Id, int* Value, int Min, int Max,
+    float Width, const char* Format = "%d")
 {
     ImGui::TextUnformatted(Label);
     ImGui::SetNextItemWidth(Width);
-    return ImGui::SliderInt(
-        Id, Value, Min, Max, Format,
-        ImGuiSliderFlags_AlwaysClamp);
+    return ImGui::SliderInt(Id, Value, Min, Max, Format, ImGuiSliderFlags_AlwaysClamp);
 }
 
-static bool LabeledSliderFloat(const char* Label, const char* Id, float* Value, float Min, float Max, const char* Format, float Width)
+static bool LabeledSliderFloat(const char* Label, const char* Id, float* Value, float Min,
+    float Max, const char* Format, float Width)
 {
     ImGui::TextUnformatted(Label);
     ImGui::SetNextItemWidth(Width);
-    return ImGui::SliderFloat(
-        Id, Value, Min, Max, Format,
-        ImGuiSliderFlags_AlwaysClamp);
+    return ImGui::SliderFloat(Id, Value, Min, Max, Format, ImGuiSliderFlags_AlwaysClamp);
 }
 
-static bool AtomicCheckbox(
-    const char* Label,
-    std::atomic_bool& Setting)
+static bool AtomicCheckbox(const char* Label, std::atomic_bool& Setting)
 {
     bool Value = Setting.load(std::memory_order_acquire);
     const bool bChanged = ImGui::Checkbox(Label, &Value);
@@ -6730,22 +5291,15 @@ static bool AtomicCheckbox(
     return bChanged;
 }
 
-static bool OptionalSafeZoneDurationEditor(
-    const char* Label,
-    const char* ModeId,
-    const char* ValueId,
-    std::optional<float>& Duration,
-    float Width,
-    float CustomDefault)
+static bool OptionalSafeZoneDurationEditor(const char* Label, const char* ModeId,
+    const char* ValueId, std::optional<float>& Duration, float Width, float CustomDefault)
 {
     bool changed = false;
     ImGui::TextUnformatted(Label);
 
     int source = Duration.has_value() ? 1 : 0;
     ImGui::SetNextItemWidth(Width);
-    if (ImGui::Combo(
-            ModeId, &source,
-            "Native timing\0Custom timing\0"))
+    if (ImGui::Combo(ModeId, &source, "Native timing\0Custom timing\0"))
     {
         if (source == 0)
             Duration.reset();
@@ -6759,21 +5313,14 @@ static bool OptionalSafeZoneDurationEditor(
         float value = *Duration;
         if (!std::isfinite(value))
             value = CustomDefault;
-        value = SafeZoneMap::Clamp(
-            value,
-            FCustomSafeZoneSequence::MinimumDurationSeconds,
+        value = SafeZoneMap::Clamp(value, FCustomSafeZoneSequence::MinimumDurationSeconds,
             FCustomSafeZoneSequence::MaximumDurationSeconds);
         ImGui::SetNextItemWidth(Width);
-        if (ImGui::SliderFloat(
-                ValueId, &value,
-                FCustomSafeZoneSequence::MinimumDurationSeconds,
-                FCustomSafeZoneSequence::MaximumDurationSeconds,
-                "%.0f sec",
+        if (ImGui::SliderFloat(ValueId, &value, FCustomSafeZoneSequence::MinimumDurationSeconds,
+                FCustomSafeZoneSequence::MaximumDurationSeconds, "%.0f sec",
                 ImGuiSliderFlags_AlwaysClamp))
         {
-            *Duration = SafeZoneMap::Clamp(
-                value,
-                FCustomSafeZoneSequence::MinimumDurationSeconds,
+            *Duration = SafeZoneMap::Clamp(value, FCustomSafeZoneSequence::MinimumDurationSeconds,
                 FCustomSafeZoneSequence::MaximumDurationSeconds);
             changed = true;
         }
@@ -6787,15 +5334,12 @@ static bool IsCustomMovingZoneVersionSupported()
     return std::isfinite(version) && version >= 0.f && version < 31.f;
 }
 
-static bool HasCustomMovingZoneTransition(
-    const FCustomSafeZoneSequence& Sequence)
+static bool HasCustomMovingZoneTransition(const FCustomSafeZoneSequence& Sequence)
 {
-    return Sequence.Nodes.size() > 1 ||
-        Sequence.bCloseFinalCircle;
+    return Sequence.Nodes.size() > 1 || Sequence.bCloseFinalCircle;
 }
 
-static bool IsCorrectableCustomMovingZoneRuntimeFailure(
-    ECustomSafeZoneRuntimeFailure Failure)
+static bool IsCorrectableCustomMovingZoneRuntimeFailure(ECustomSafeZoneRuntimeFailure Failure)
 {
     switch (Failure)
     {
@@ -6803,9 +5347,6 @@ static bool IsCorrectableCustomMovingZoneRuntimeFailure(
     case ECustomSafeZoneRuntimeFailure::NotRequested:
         return false;
     default:
-        // Every hard runtime rejection can at least be recovered by turning
-        // Moving Zone off. Geometry, radius, timing, and capacity failures
-        // can also be corrected in-place without reopening other launch data.
         return true;
     }
 }
@@ -6814,17 +5355,12 @@ static bool IsMatchingCustomMovingZoneRuntimeFailure(
     const std::shared_ptr<const FCustomSafeZoneSequence>& Snapshot,
     const FCustomSafeZoneRuntimeStatus& Status)
 {
-    return FConfiguration::bReadyToStart.load(
-            std::memory_order_acquire) &&
-        FConfiguration::bLateGame.load(
-            std::memory_order_acquire) &&
-        FConfiguration::bCustomSafeZone.load(
-            std::memory_order_acquire) &&
-        Snapshot && Snapshot->bMovingZoneEnabled &&
-        HasCustomMovingZoneTransition(*Snapshot) &&
+    return FConfiguration::bReadyToStart.load(std::memory_order_acquire) &&
+        FConfiguration::bLateGame.load(std::memory_order_acquire) &&
+        FConfiguration::bCustomSafeZone.load(std::memory_order_acquire) &&
+        Snapshot && Snapshot->bMovingZoneEnabled && HasCustomMovingZoneTransition(*Snapshot) &&
         Status.bCanCorrectBeforeListen &&
-        IsCorrectableCustomMovingZoneRuntimeFailure(Status.Failure) &&
-        Status.RuntimeStartPhase ==
+        IsCorrectableCustomMovingZoneRuntimeFailure(Status.Failure) && Status.RuntimeStartPhase ==
             CustomSafeZoneRuntime::ResolveRuntimeStartPhase() &&
         Status.NodeCount == (int32)Snapshot->Nodes.size() &&
         Status.bCloseFinalCircle == Snapshot->bCloseFinalCircle;
@@ -6832,22 +5368,16 @@ static bool IsMatchingCustomMovingZoneRuntimeFailure(
 
 static bool IsCustomMovingZoneRuntimeCorrectionAllowed()
 {
-    const auto Snapshot =
-        FConfiguration::GetCustomSafeZoneSequenceSnapshot();
-    return IsMatchingCustomMovingZoneRuntimeFailure(
-        Snapshot, CustomSafeZoneRuntime::GetStatus());
+    const auto Snapshot = FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+    return IsMatchingCustomMovingZoneRuntimeFailure(Snapshot, CustomSafeZoneRuntime::GetStatus());
 }
 
-static bool ValidateCustomMovingZoneForStart(
-    std::string& Error)
+static bool ValidateCustomMovingZoneForStart(std::string& Error)
 {
     Error.clear();
-    const auto snapshot =
-        FConfiguration::GetCustomSafeZoneSequenceSnapshot();
-    if (!FConfiguration::bLateGame.load(
-            std::memory_order_acquire) ||
-        !FConfiguration::bCustomSafeZone.load(
-            std::memory_order_acquire) ||
+    const auto snapshot = FConfiguration::GetCustomSafeZoneSequenceSnapshot();
+    if (!FConfiguration::bLateGame.load(std::memory_order_acquire) ||
+        !FConfiguration::bCustomSafeZone.load(std::memory_order_acquire) ||
         !snapshot || !snapshot->bMovingZoneEnabled)
     {
         return true;
@@ -6857,20 +5387,15 @@ static bool ValidateCustomMovingZoneForStart(
     const double version = VersionInfo.FortniteVersion;
     if (!IsCustomMovingZoneVersionSupported())
     {
-        snprintf(
-            message, sizeof(message),
-            "Custom Moving Zone is unavailable in Fortnite %.2f. "
-            "Use a version from Fortnite 0 through 30, or turn it off.",
-            (double)version);
+        snprintf(message, sizeof(message), "Custom Moving Zone is unavailable in Fortnite %.2f. "
+            "Use a version from Fortnite 0 through 30, or turn it off.", (double)version);
         Error = message;
         return false;
     }
 
-    if (FConfiguration::bLateGameLongZone.load(
-            std::memory_order_acquire))
+    if (FConfiguration::bLateGameLongZone.load(std::memory_order_acquire))
     {
-        Error =
-            "Custom Moving Zone and Long Zone cannot be enabled together.";
+        Error = "Custom Moving Zone and Long Zone cannot be enabled together.";
         return false;
     }
 
@@ -6878,81 +5403,58 @@ static bool ValidateCustomMovingZoneForStart(
     if (count < FCustomSafeZoneSequence::MinimumNodeCount ||
         count > FCustomSafeZoneSequence::MaximumNodeCount)
     {
-        snprintf(
-            message, sizeof(message),
-            "Unable to use %zu zone steps. Add between %zu and %zu steps.",
-            count,
-            FCustomSafeZoneSequence::MinimumNodeCount,
-            FCustomSafeZoneSequence::MaximumNodeCount);
+        snprintf(message, sizeof(message),
+            "Unable to use %zu zone steps. Add between %zu and %zu steps.", count,
+            FCustomSafeZoneSequence::MinimumNodeCount, FCustomSafeZoneSequence::MaximumNodeCount);
         Error = message;
         return false;
     }
 
-	const bool publisherAvailable =
-		CustomSafeZoneRuntime::
-			IsAuthoritativePhasePublisherCapabilityKnown()
-			? CustomSafeZoneRuntime::
-				IsAuthoritativePhasePublisherAvailable()
-			: AFortGameMode::ProbeMovingSafeZonePhasePublisher();
-	if (HasCustomMovingZoneTransition(*snapshot) &&
-        !publisherAvailable)
-	{
-		snprintf(
-			message, sizeof(message),
-			"Moving zones are unavailable in Fortnite %.2f because its "
+    const bool publisherAvailable = CustomSafeZoneRuntime::
+            IsAuthoritativePhasePublisherCapabilityKnown() ? CustomSafeZoneRuntime::
+                IsAuthoritativePhasePublisherAvailable()
+            : AFortGameMode::ProbeMovingSafeZonePhasePublisher();
+    if (HasCustomMovingZoneTransition(*snapshot) && !publisherAvailable)
+    {
+        snprintf(message, sizeof(message),
+            "Moving zones are unavailable in Fortnite %.2f because its "
             "storm controller could not be initialized. Turn Custom "
-            "Moving Zone off to start normally.",
-			version);
-		Error = message;
-		return false;
-	}
+            "Moving Zone off to start normally.", version);
+        Error = message;
+        return false;
+    }
 
     const auto DurationIsValid = [](const std::optional<float>& value)
     {
-        return !value.has_value() ||
-            (std::isfinite(*value) &&
-             *value >=
-                 FCustomSafeZoneSequence::MinimumDurationSeconds &&
-             *value <=
+        return !value.has_value() || (std::isfinite(*value) && *value >=
+                 FCustomSafeZoneSequence::MinimumDurationSeconds && *value <=
                  FCustomSafeZoneSequence::MaximumDurationSeconds);
     };
 
     for (size_t index = 0; index < count; ++index)
     {
         const auto& node = snapshot->Nodes[index];
-        const bool validCenter =
-            std::isfinite(node.Center.X) &&
-            std::isfinite(node.Center.Y) &&
+        const bool validCenter = std::isfinite(node.Center.X) && std::isfinite(node.Center.Y) &&
             std::isfinite(node.Center.Z);
-        const bool validNormalized =
-            std::isfinite(node.NormalizedU) &&
-            std::isfinite(node.NormalizedV) &&
-            (!node.bHasNormalizedCenter ||
+        const bool validNormalized = std::isfinite(node.NormalizedU) &&
+            std::isfinite(node.NormalizedV) && (!node.bHasNormalizedCenter ||
              (node.NormalizedU >= 0.f && node.NormalizedU <= 1.f &&
               node.NormalizedV >= 0.f && node.NormalizedV <= 1.f));
-        const bool validRadius =
-            std::isfinite(node.RadiusCm) &&
-            node.RadiusCm >=
-                FCustomSafeZoneSequence::MinimumRadiusCm &&
-            node.RadiusCm <=
+        const bool validRadius = std::isfinite(node.RadiusCm) && node.RadiusCm >=
+                FCustomSafeZoneSequence::MinimumRadiusCm && node.RadiusCm <=
                 FCustomSafeZoneSequence::MaximumRadiusCm;
         if (!validCenter || !validNormalized || !validRadius)
         {
-            snprintf(
-                message, sizeof(message),
+            snprintf(message, sizeof(message),
                 "Zone step %zu has an invalid position or radius. Redraw "
-                "that step, or enter valid coordinates below.",
-                index + 1);
+                "that step, or enter valid coordinates below.", index + 1);
             Error = message;
             return false;
         }
 
-        if (index > 0 &&
-            node.RadiusCm > snapshot->Nodes[index - 1].RadiusCm)
+        if (index > 0 && node.RadiusCm > snapshot->Nodes[index - 1].RadiusCm)
         {
-            snprintf(
-                message, sizeof(message),
-                "Step %zu cannot be larger than step %zu.",
+            snprintf(message, sizeof(message), "Step %zu cannot be larger than step %zu.",
                 index + 1, index);
             Error = message;
             return false;
@@ -6961,41 +5463,33 @@ static bool ValidateCustomMovingZoneForStart(
         if (!DurationIsValid(node.HoldBeforeNextSeconds) ||
             !DurationIsValid(node.MoveToNextSeconds))
         {
-            snprintf(
-                message, sizeof(message),
+            snprintf(message, sizeof(message),
                 "Zone step %zu has invalid timing. Enter a value from 0 "
-                "through 3600 seconds, or select Native timing.",
-                index + 1);
+                "through 3600 seconds, or select Native timing.", index + 1);
             Error = message;
             return false;
         }
     }
 
-    if (FConfiguration::bReadyToStart.load(
-            std::memory_order_acquire))
+    if (FConfiguration::bReadyToStart.load(std::memory_order_acquire))
     {
         const auto status = CustomSafeZoneRuntime::GetStatus();
-        if (IsMatchingCustomMovingZoneRuntimeFailure(
-                snapshot, status))
+        if (IsMatchingCustomMovingZoneRuntimeFailure(snapshot, status))
         {
             switch (status.Failure)
             {
             case ECustomSafeZoneRuntimeFailure::RadiusIncreaseNotAllowed:
             {
                 const int32 offendingEdge = status.OffendingEdge;
-                if (offendingEdge >= 0 &&
-                    offendingEdge + 1 < status.NodeCount &&
+                if (offendingEdge >= 0 && offendingEdge + 1 < status.NodeCount &&
                     (size_t)(offendingEdge + 1) < count)
                 {
-                    snprintf(
-                        message, sizeof(message),
-                        "Step %d cannot be larger than step %d.",
+                    snprintf(message, sizeof(message), "Step %d cannot be larger than step %d.",
                         offendingEdge + 2, offendingEdge + 1);
                 }
                 else
                 {
-                    snprintf(
-                        message, sizeof(message),
+                    snprintf(message, sizeof(message),
                         "Moving-zone steps cannot increase in size.");
                 }
                 break;
@@ -7003,98 +5497,71 @@ static bool ValidateCustomMovingZoneForStart(
             case ECustomSafeZoneRuntimeFailure::
                 InsufficientPhaseCapacity:
             {
-                const int effectiveCapacity = (std::max)(
-                    0,
-                    status.PhaseCapacity -
+                const int effectiveCapacity = (std::max)(0, status.PhaseCapacity -
                         status.RuntimeStartPhase + 1);
-                const int maximumAuthoredSteps = (std::max)(
-                    0,
-                    effectiveCapacity -
+                const int maximumAuthoredSteps = (std::max)(0, effectiveCapacity -
                         (snapshot->bCloseFinalCircle ? 1 : 0));
-                const int visibleStartingZone =
-                    FConfiguration::LateGameZone.load(
+                const int visibleStartingZone = FConfiguration::LateGameZone.load(
                         std::memory_order_acquire);
                 if (maximumAuthoredSteps > 0)
                 {
-                    const int stepsToRemove = (std::max)(
-                        1, (int)count - maximumAuthoredSteps);
-                    snprintf(
-                        message, sizeof(message),
+                    const int stepsToRemove = (std::max)(1, (int)count - maximumAuthoredSteps);
+                    snprintf(message, sizeof(message),
                         "Unable to use this many zones. This map supports up "
                         "to %d zone step%s from Starting Zone %d%s, but you "
                         "added %zu. Remove %d step%s or choose an earlier "
-                        "Starting Zone%s.",
-                        maximumAuthoredSteps,
-                        maximumAuthoredSteps == 1 ? "" : "s",
-                        visibleStartingZone,
-                        snapshot->bCloseFinalCircle
-                            ? " when Fully Close is enabled"
-                            : "",
-                        count,
-                        stepsToRemove,
-                        stepsToRemove == 1 ? "" : "s",
-                        snapshot->bCloseFinalCircle
+                        "Starting Zone%s.", maximumAuthoredSteps,
+                        maximumAuthoredSteps == 1 ? "" : "s", visibleStartingZone,
+                        snapshot->bCloseFinalCircle ? " when Fully Close is enabled" : "", count,
+                        stepsToRemove, stepsToRemove == 1 ? "" : "s", snapshot->bCloseFinalCircle
                             ? ", or select the final step and turn off "
-                                "Fully Close Final Zone"
-                            : "");
+                                "Fully Close Final Zone" : "");
                 }
                 else if (snapshot->bCloseFinalCircle)
                 {
-                    snprintf(
-                        message, sizeof(message),
+                    snprintf(message, sizeof(message),
                         "Unable to fully close the final zone from Starting "
                         "Zone %d because this map has no storm phase left for "
                         "the close. Choose an earlier Starting Zone, or select "
-                        "the final step and turn off Fully Close Final Zone.",
-                        visibleStartingZone);
+                        "the final step and turn off Fully Close Final Zone.", visibleStartingZone);
                 }
                 else
                 {
-                    snprintf(
-                        message, sizeof(message),
+                    snprintf(message, sizeof(message),
                         "Unable to create a moving zone from Starting Zone %d "
                         "because this map has no storm phase left for another "
                         "step. Choose an earlier Starting Zone or turn Custom "
-                        "Moving Zone off.",
-                        visibleStartingZone);
+                        "Moving Zone off.", visibleStartingZone);
                 }
                 break;
             }
             case ECustomSafeZoneRuntimeFailure::MissingMapInfo:
-                snprintf(
-                    message, sizeof(message),
+                snprintf(message, sizeof(message),
                     "Unable to load this map's storm data in time. Turn Custom "
                     "Moving Zone off to start normally, then try it again on "
                     "another map or playlist.");
                 break;
             case ECustomSafeZoneRuntimeFailure::MissingPhasePublisher:
-                snprintf(
-                    message, sizeof(message),
+                snprintf(message, sizeof(message),
                     "Moving zones could not connect to Fortnite %.2f's storm "
-                    "controller. Turn Custom Moving Zone off to start normally.",
-                    version);
+                    "controller. Turn Custom Moving Zone off to start normally.", version);
                 break;
             case ECustomSafeZoneRuntimeFailure::MissingPhaseFields:
             case ECustomSafeZoneRuntimeFailure::MissingIndicatorFields:
-                snprintf(
-                    message, sizeof(message),
+                snprintf(message, sizeof(message),
                     "This Fortnite %.2f build does not provide the storm data "
                     "needed for custom movement. Turn Custom Moving Zone off "
-                    "to start normally.",
-                    version);
+                    "to start normally.", version);
                 break;
             case ECustomSafeZoneRuntimeFailure::MapProjectionUnavailable:
-                Error =
-                    "A zone step could not be placed on this map. Redraw it, "
+                Error = "A zone step could not be placed on this map. Redraw it, "
                     "enter valid coordinates, or turn Custom Moving Zone off.";
                 return false;
             default:
-                snprintf(
-                    message, sizeof(message),
+                snprintf(message, sizeof(message),
                     "The custom zones could not be set up for Fortnite %.2f. "
                     "Adjust the zone steps or turn Custom Moving Zone off; "
-                    "setup will retry automatically.",
-                    version);
+                    "setup will retry automatically.", version);
                 break;
             }
             Error = message;
@@ -7102,8 +5569,6 @@ static bool ValidateCustomMovingZoneForStart(
         }
     }
 
-    // A one-node sequence stays stationary unless the final-close option adds
-    // one implicit outgoing transition.
     return true;
 }
 
@@ -7111,50 +5576,34 @@ static void ApplyInitialTrickshotDefaults()
 {
     FConfiguration::ResetTrickshotSettings();
 
-    FConfiguration::bUseWinLines.store(
-        true, std::memory_order_release);
-    FConfiguration::bCrownSlomo.store(
-        true, std::memory_order_release);
+    FConfiguration::bUseWinLines.store(true, std::memory_order_release);
+    FConfiguration::bCrownSlomo.store(true, std::memory_order_release);
 
-    if (FConfiguration::bLateGame.load(
-        std::memory_order_acquire))
+    if (FConfiguration::bLateGame.load(std::memory_order_acquire))
     {
-        FConfiguration::RandomizeKills.store(
-            true, std::memory_order_release);
+        FConfiguration::RandomizeKills.store(true, std::memory_order_release);
     }
 
-    FConfiguration::RandomizeLevels.store(
-        true, std::memory_order_release);
-    FConfiguration::bDisableJumpFatigue.store(
-        true, std::memory_order_release);
-    FConfiguration::bDisableSupplyDrops.store(
-        true, std::memory_order_release);
-    FConfiguration::bVehicleBumpLaunch.store(
-        VersionInfo.FortniteVersion >= 4.30,
+    FConfiguration::RandomizeLevels.store(true, std::memory_order_release);
+    FConfiguration::bDisableJumpFatigue.store(true, std::memory_order_release);
+    FConfiguration::bDisableSupplyDrops.store(true, std::memory_order_release);
+    FConfiguration::bVehicleBumpLaunch.store(VersionInfo.FortniteVersion >= 4.30,
         std::memory_order_release);
-    FConfiguration::bAutoGodMode.store(
-        true, std::memory_order_release);
-    FConfiguration::bAutoReloadOnWaypointTP.store(
-        true, std::memory_order_release);
-    FConfiguration::bRemoveIceOnWaypointTP.store(
-        VersionInfo.FortniteVersion >= 6.01,
+    FConfiguration::bAutoGodMode.store(true, std::memory_order_release);
+    FConfiguration::bAutoReloadOnWaypointTP.store(true, std::memory_order_release);
+    FConfiguration::bRemoveIceOnWaypointTP.store(VersionInfo.FortniteVersion >= 6.01,
         std::memory_order_release);
-    FConfiguration::bAutoPauseTODM.store(
-        false, std::memory_order_release);
+    FConfiguration::bAutoPauseTODM.store(false, std::memory_order_release);
 
-    if (GUI::IsArenaPlaylist() ||
-        GUI::IsTournamentPlaylist())
+    if (GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist())
     {
-        FConfiguration::RandomizeArenaPoints.store(
-            true, std::memory_order_release);
+        FConfiguration::RandomizeArenaPoints.store(true, std::memory_order_release);
     }
 }
 
 static bool TrickshotTabCheckbox(const char* Label)
 {
-    bool bEnabled =
-        FConfiguration::bEnableTrickshotTab.load(
-            std::memory_order_acquire);
+    bool bEnabled = FConfiguration::bEnableTrickshotTab.load(std::memory_order_acquire);
 
     if (!ImGui::Checkbox(Label, &bEnabled))
         return false;
@@ -7166,20 +5615,11 @@ static bool TrickshotTabCheckbox(const char* Label)
     return true;
 }
 
-static bool AtomicLabeledSliderInt(
-    const char* Label,
-    const char* Id,
-    std::atomic_int& Setting,
-    int Min,
-    int Max,
-    float Width,
-    const char* Format = "%d")
+static bool AtomicLabeledSliderInt(const char* Label, const char* Id, std::atomic_int& Setting,
+    int Min, int Max, float Width, const char* Format = "%d")
 {
     int Value = Setting.load(std::memory_order_acquire);
-    const bool bChanged =
-        LabeledSliderInt(
-            Label, Id, &Value, Min, Max, Width,
-            Format);
+    const bool bChanged = LabeledSliderInt(Label, Id, &Value, Min, Max, Width, Format);
     if (bChanged)
     {
         Setting.store(Value, std::memory_order_release);
@@ -7187,20 +5627,11 @@ static bool AtomicLabeledSliderInt(
     return bChanged;
 }
 
-static bool AtomicLabeledSliderFloat(
-    const char* Label,
-    const char* Id,
-    std::atomic<float>& Setting,
-    float Min,
-    float Max,
-    const char* Format,
-    float Width)
+static bool AtomicLabeledSliderFloat(const char* Label, const char* Id, std::atomic<float>& Setting,
+    float Min, float Max, const char* Format, float Width)
 {
     float Value = Setting.load(std::memory_order_acquire);
-    const bool bChanged =
-        LabeledSliderFloat(
-            Label, Id, &Value, Min, Max, Format,
-            Width);
+    const bool bChanged = LabeledSliderFloat(Label, Id, &Value, Min, Max, Format, Width);
     if (bChanged)
     {
         Setting.store(Value, std::memory_order_release);
@@ -7208,9 +5639,7 @@ static bool AtomicLabeledSliderFloat(
     return bChanged;
 }
 
-static bool AtomicInputInt(
-    const char* Label,
-    std::atomic_int& Setting)
+static bool AtomicInputInt(const char* Label, std::atomic_int& Setting)
 {
     int Value = Setting.load(std::memory_order_acquire);
     const bool bChanged = ImGui::InputInt(Label, &Value);
@@ -7221,16 +5650,11 @@ static bool AtomicInputInt(
     return bChanged;
 }
 
-static bool AtomicCombo(
-    const char* Label,
-    std::atomic_int& Setting,
-    const char* const Items[],
+static bool AtomicCombo(const char* Label, std::atomic_int& Setting, const char* const Items[],
     int ItemCount)
 {
     int Value = Setting.load(std::memory_order_acquire);
-    const bool bChanged =
-        ImGui::Combo(
-            Label, &Value, Items, ItemCount);
+    const bool bChanged = ImGui::Combo(Label, &Value, Items, ItemCount);
     if (bChanged)
     {
         Setting.store(Value, std::memory_order_release);
@@ -7280,7 +5704,6 @@ static std::string FormatDurationSeconds(double Seconds)
     return Result;
 }
 
-// One full-width vertical tab in the left sidebar. Sets *activeUI to uiValue on click.
 static void SidebarTab(const char* label, int uiValue, float yPos, float tabH, int* activeUI)
 {
     ImGui::PushID(uiValue);
@@ -7506,33 +5929,22 @@ static bool LocksLateGameForSelection(int SelectedPlaylist)
 static bool EventUsesSpawnIslandBusControl()
 {
     const double Version = VersionInfo.FortniteVersion;
-    return Version <= 4.50 ||
-        Version == 6.21 ||
-        Version == 7.20 ||
-        Version == 7.30 ||
-        Version == 8.51 ||
-        Version == 9.40 ||
-        Version == 9.41 ||
-        Version == 10.40;
+    return Version <= 4.50 || Version == 6.21 || Version == 7.20 || Version == 7.30 ||
+        Version == 8.51 || Version == 9.40 || Version == 9.41 || Version == 10.40;
 }
 
 static bool IsNativeLTMSelection(int SelectedPlaylist)
 {
-    if (IsScoreRoyalePlaylistBuild() &&
-        (SelectedPlaylist ==
-             static_cast<int>(Playlist::ScoreRoyaleSolo) ||
-         SelectedPlaylist ==
-             static_cast<int>(Playlist::ScoreRoyaleDuos) ||
-         SelectedPlaylist ==
+    if (IsScoreRoyalePlaylistBuild() && (SelectedPlaylist ==
+             static_cast<int>(Playlist::ScoreRoyaleSolo) || SelectedPlaylist ==
+             static_cast<int>(Playlist::ScoreRoyaleDuos) || SelectedPlaylist ==
              static_cast<int>(Playlist::ScoreRoyaleSquads)))
     {
         return true;
     }
 
-    if (SelectedPlaylist ==
-            static_cast<int>(Playlist::FoodFight) &&
-        FFortAthenaNativeLTMCompatibility::
-            IsOriginalFoodFightSupportedBuild())
+    if (SelectedPlaylist == static_cast<int>(Playlist::FoodFight) &&
+        FFortAthenaNativeLTMCompatibility::IsOriginalFoodFightSupportedBuild())
     {
         return true;
     }
@@ -7605,91 +6017,56 @@ void GUI::ResetPreferenceEditorState()
     ++GPreferenceEditorGeneration;
 }
 
-static bool AreRespawnPointsEqual(
-    const FVector& Left,
-    const FVector& Right)
+static bool AreRespawnPointsEqual(const FVector& Left, const FVector& Right)
 {
-    return Left.X == Right.X &&
-        Left.Y == Right.Y &&
-        Left.Z == Right.Z;
+    return Left.X == Right.X && Left.Y == Right.Y && Left.Z == Right.Z;
 }
 
-static void RestoreOutgoingCustomMapLifecyclePreset(
-    int OutgoingPlaylist)
+static void RestoreOutgoingCustomMapLifecyclePreset(int OutgoingPlaylist)
 {
     auto& State = GCustomMapLifecyclePresetState;
     if (State.SelectedPlaylist != OutgoingPlaylist)
         return;
 
-    // Restore only fields that still contain the value applied by the
-    // outgoing preset. A setting changed after selecting that preset is a
-    // user choice and must survive the transition.
-    if (State.bOwnsJoinInProgress &&
-        FConfiguration::bJoinInProgress ==
+    if (State.bOwnsJoinInProgress && FConfiguration::bJoinInProgress ==
             State.bAppliedJoinInProgress)
     {
-        FConfiguration::bJoinInProgress =
-            State.bOriginalJoinInProgress;
+        FConfiguration::bJoinInProgress = State.bOriginalJoinInProgress;
     }
-    if (State.bOwnsKeepInventory &&
-        FConfiguration::bKeepInventory ==
-            State.bAppliedKeepInventory)
+    if (State.bOwnsKeepInventory && FConfiguration::bKeepInventory == State.bAppliedKeepInventory)
     {
-        FConfiguration::bKeepInventory =
-            State.bOriginalKeepInventory;
+        FConfiguration::bKeepInventory = State.bOriginalKeepInventory;
     }
-    if (State.bOwnsForceRespawns &&
-        FConfiguration::bForceRespawns ==
-            State.bAppliedForceRespawns)
+    if (State.bOwnsForceRespawns && FConfiguration::bForceRespawns == State.bAppliedForceRespawns)
     {
-        FConfiguration::bForceRespawns =
-            State.bOriginalForceRespawns;
+        FConfiguration::bForceRespawns = State.bOriginalForceRespawns;
     }
-    if (State.bOwnsPermanentRespawn &&
-        FConfiguration::PermanentRespawn ==
+    if (State.bOwnsPermanentRespawn && FConfiguration::PermanentRespawn ==
             State.bAppliedPermanentRespawn)
     {
-        FConfiguration::PermanentRespawn =
-            State.bOriginalPermanentRespawn;
+        FConfiguration::PermanentRespawn = State.bOriginalPermanentRespawn;
     }
-    if (State.bOwnsCustomRespawnPoint &&
-        FConfiguration::HasCustomRespawnPoint ==
-            State.bAppliedHasCustomRespawnPoint &&
-        AreRespawnPointsEqual(
-            FConfiguration::CustomRespawnPoint,
-            State.AppliedCustomRespawnPoint))
+    if (State.bOwnsCustomRespawnPoint && FConfiguration::HasCustomRespawnPoint ==
+            State.bAppliedHasCustomRespawnPoint && AreRespawnPointsEqual(
+            FConfiguration::CustomRespawnPoint, State.AppliedCustomRespawnPoint))
     {
-        FConfiguration::HasCustomRespawnPoint =
-            State.bOriginalHasCustomRespawnPoint;
-        FConfiguration::CustomRespawnPoint =
-            State.OriginalCustomRespawnPoint;
+        FConfiguration::HasCustomRespawnPoint = State.bOriginalHasCustomRespawnPoint;
+        FConfiguration::CustomRespawnPoint = State.OriginalCustomRespawnPoint;
     }
-    if (State.bOwnsAutoBusStart &&
-        FConfiguration::bAutoBusStart.load(
-            std::memory_order_acquire) ==
+    if (State.bOwnsAutoBusStart && FConfiguration::bAutoBusStart.load(std::memory_order_acquire) ==
             State.bAppliedAutoBusStart)
     {
-        FConfiguration::bAutoBusStart.store(
-            State.bOriginalAutoBusStart,
-            std::memory_order_release);
+        FConfiguration::bAutoBusStart.store(State.bOriginalAutoBusStart, std::memory_order_release);
     }
-    if (State.bOwnsInfiniteAmmo &&
-        FConfiguration::bInfiniteAmmo.load(
-            std::memory_order_acquire) ==
+    if (State.bOwnsInfiniteAmmo && FConfiguration::bInfiniteAmmo.load(std::memory_order_acquire) ==
             State.bAppliedInfiniteAmmo)
     {
-        FConfiguration::bInfiniteAmmo.store(
-            State.bOriginalInfiniteAmmo,
-            std::memory_order_release);
+        FConfiguration::bInfiniteAmmo.store(State.bOriginalInfiniteAmmo, std::memory_order_release);
     }
-    if (State.bOwnsInfiniteMats &&
-        FConfiguration::bInfiniteMats.load(
-            std::memory_order_acquire) ==
+    if (State.bOwnsInfiniteMats && FConfiguration::bInfiniteMats.load(std::memory_order_acquire) ==
             State.bAppliedInfiniteMats)
     {
-        FConfiguration::bInfiniteMats.store(
-            State.bOriginalInfiniteMats,
-            std::memory_order_release);
+        FConfiguration::bInfiniteMats.store(State.bOriginalInfiniteMats, std::memory_order_release);
     }
 
     State = {};
@@ -7697,119 +6074,79 @@ static void RestoreOutgoingCustomMapLifecyclePreset(
 
 static void SanitizeNativeLTMSelection(int SelectedPlaylist)
 {
-    // Publish the render-thread selection through an atomic handoff before
-    // the game thread evaluates early mode ownership or lifecycle policy.
     GUI::PublishSelectedPlaylist(SelectedPlaylist);
 
-    // These modes own their map/objective phase flow. Enforce the lock every
-    // frame so restored preferences and later tab visits cannot re-enable Late
-    // Game after the one-time selection preset has run.
     if (LocksLateGameForSelection(SelectedPlaylist))
         FConfiguration::SetLateGameEnabled(false);
 
-    // Apply the native-mode defaults only when the selected mode changes.
-    // This function is intentionally called from the render loop, so without
-    // this transition guard every checkbox click is overwritten next frame.
     if (SelectedPlaylist == GLastSelectedPlaylist)
         return;
 
-    // Auto Hosting restores the resolved playlist and the user's explicit
-    // overrides before the first GUI frame. Reapplying selection defaults here
-    // would silently replace that saved profile.
-    if (GLastSelectedPlaylist == -1 &&
-        AutoHosting::HasRestoredPreferences())
+    if (GLastSelectedPlaylist == -1 && AutoHosting::HasRestoredPreferences())
     {
         GLastSelectedPlaylist = SelectedPlaylist;
         return;
     }
 
-    RestoreOutgoingCustomMapLifecyclePreset(
-        GLastSelectedPlaylist);
+    RestoreOutgoingCustomMapLifecyclePreset(GLastSelectedPlaylist);
     GLastSelectedPlaylist = SelectedPlaylist;
 
     if (IsNativeLTMSelection(SelectedPlaylist))
     {
-        // These playlists provide their own phase flow, inventory, and
-        // objective mechanics. Clear only settings that would replace those
-        // foundations. Ordinary gameplay options remain user-owned and must
-        // survive both selecting an LTM and its subsequent native setup.
         FConfiguration::SetLateGameEnabled(false);
         FConfiguration::bIsCustomMap = false;
         FConfiguration::SetCustomSafeZoneEnabled(false);
         FConfiguration::HasCustomRespawnPoint = false;
-        if (SelectedPlaylist ==
-            static_cast<int>(
-                Playlist::AvengersEndgame))
+        if (SelectedPlaylist == static_cast<int>(Playlist::AvengersEndgame))
         {
-            // Endgame's Chitauri weapons and building resources are finite.
-            // Own these two selection defaults so the player can still turn
-            // either option back on after selecting the mode, and restore the
-            // prior values when they leave it.
-            auto& EndgamePreset =
-                GCustomMapLifecyclePresetState;
-            EndgamePreset.SelectedPlaylist =
-                SelectedPlaylist;
+            auto& EndgamePreset = GCustomMapLifecyclePresetState;
+            EndgamePreset.SelectedPlaylist = SelectedPlaylist;
             EndgamePreset.bOwnsInfiniteAmmo = true;
-            EndgamePreset.bOriginalInfiniteAmmo =
-                FConfiguration::bInfiniteAmmo.load(
+            EndgamePreset.bOriginalInfiniteAmmo = FConfiguration::bInfiniteAmmo.load(
                     std::memory_order_acquire);
             EndgamePreset.bAppliedInfiniteAmmo = false;
-            FConfiguration::bInfiniteAmmo.store(
-                false, std::memory_order_release);
+            FConfiguration::bInfiniteAmmo.store(false, std::memory_order_release);
             EndgamePreset.bOwnsInfiniteMats = true;
-            EndgamePreset.bOriginalInfiniteMats =
-                FConfiguration::bInfiniteMats.load(
+            EndgamePreset.bOriginalInfiniteMats = FConfiguration::bInfiniteMats.load(
                     std::memory_order_acquire);
             EndgamePreset.bAppliedInfiniteMats = false;
-            FConfiguration::bInfiniteMats.store(
-                false, std::memory_order_release);
+            FConfiguration::bInfiniteMats.store(false, std::memory_order_release);
         }
         return;
     }
 
-    auto& CustomPreset =
-        GCustomMapLifecyclePresetState;
-    CustomPreset.SelectedPlaylist =
-        SelectedPlaylist;
+    auto& CustomPreset = GCustomMapLifecyclePresetState;
+    CustomPreset.SelectedPlaylist = SelectedPlaylist;
 
-    auto ApplyJoinInProgressPreset =
-        [&]()
+    auto ApplyJoinInProgressPreset = [&]()
         {
             CustomPreset.bOwnsJoinInProgress = true;
-            CustomPreset.bOriginalJoinInProgress =
-                FConfiguration::bJoinInProgress;
+            CustomPreset.bOriginalJoinInProgress = FConfiguration::bJoinInProgress;
             CustomPreset.bAppliedJoinInProgress = true;
             FConfiguration::bJoinInProgress = true;
         };
 
-    auto ApplyKeepInventoryPreset =
-        [&]()
+    auto ApplyKeepInventoryPreset = [&]()
         {
             CustomPreset.bOwnsKeepInventory = true;
-            CustomPreset.bOriginalKeepInventory =
-                FConfiguration::bKeepInventory;
+            CustomPreset.bOriginalKeepInventory = FConfiguration::bKeepInventory;
             CustomPreset.bAppliedKeepInventory = true;
             FConfiguration::bKeepInventory = true;
         };
 
-    auto ApplyAutoBusStartPreset =
-        [&](bool Value)
+    auto ApplyAutoBusStartPreset = [&](bool Value)
         {
             CustomPreset.bOwnsAutoBusStart = true;
-            CustomPreset.bOriginalAutoBusStart =
-                FConfiguration::bAutoBusStart.load(
+            CustomPreset.bOriginalAutoBusStart = FConfiguration::bAutoBusStart.load(
                     std::memory_order_acquire);
             CustomPreset.bAppliedAutoBusStart = Value;
-            FConfiguration::bAutoBusStart.store(
-                Value, std::memory_order_release);
+            FConfiguration::bAutoBusStart.store(Value, std::memory_order_release);
         };
 
-    auto ApplyArenaMapDefaults =
-        [&](int SiphonAmount)
+    auto ApplyArenaMapDefaults = [&](int SiphonAmount)
         {
             FConfiguration::bSiphon = true;
-            FConfiguration::SiphonAmount =
-                SiphonAmount;
+            FConfiguration::SiphonAmount = SiphonAmount;
             FConfiguration::bInfiniteAmmo = true;
             FConfiguration::bInfiniteMats = true;
             ApplyJoinInProgressPreset();
@@ -7845,30 +6182,22 @@ static void SanitizeNativeLTMSelection(int SelectedPlaylist)
         {
             ApplyJoinInProgressPreset();
             CustomPreset.bOwnsForceRespawns = true;
-            CustomPreset.bOriginalForceRespawns =
-                FConfiguration::bForceRespawns;
+            CustomPreset.bOriginalForceRespawns = FConfiguration::bForceRespawns;
             CustomPreset.bAppliedForceRespawns = true;
             FConfiguration::bForceRespawns = true;
 
             CustomPreset.bOwnsPermanentRespawn = true;
-            CustomPreset.bOriginalPermanentRespawn =
-                FConfiguration::PermanentRespawn;
+            CustomPreset.bOriginalPermanentRespawn = FConfiguration::PermanentRespawn;
             CustomPreset.bAppliedPermanentRespawn = true;
             FConfiguration::PermanentRespawn = true;
 
             CustomPreset.bOwnsCustomRespawnPoint = true;
-            CustomPreset.bOriginalHasCustomRespawnPoint =
-                FConfiguration::HasCustomRespawnPoint;
-            CustomPreset.OriginalCustomRespawnPoint =
-                FConfiguration::CustomRespawnPoint;
-            CustomPreset.bAppliedHasCustomRespawnPoint =
-                true;
-            CustomPreset.AppliedCustomRespawnPoint =
-                FVector(0.f, 0.f, 85.275009f);
-            FConfiguration::HasCustomRespawnPoint =
-                true;
-            FConfiguration::CustomRespawnPoint =
-                CustomPreset.AppliedCustomRespawnPoint;
+            CustomPreset.bOriginalHasCustomRespawnPoint = FConfiguration::HasCustomRespawnPoint;
+            CustomPreset.OriginalCustomRespawnPoint = FConfiguration::CustomRespawnPoint;
+            CustomPreset.bAppliedHasCustomRespawnPoint = true;
+            CustomPreset.AppliedCustomRespawnPoint = FVector(0.f, 0.f, 85.275009f);
+            FConfiguration::HasCustomRespawnPoint = true;
+            FConfiguration::CustomRespawnPoint = CustomPreset.AppliedCustomRespawnPoint;
         }
         break;
     case Playlist::Playground:
@@ -7897,10 +6226,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_DPICHANGED:
     {
-        // Dragging onto a monitor with a different DPI. Take the position
-        // Windows suggests so the window keeps following the cursor, but not
-        // its size: the layout is authored in fixed pixels, so re-asserting our
-        // own client size is what makes the move a no-op instead of a reflow.
+        // Take the position Windows suggests but not its size; the layout is authored in fixed pixels.
         const RECT* Suggested = (const RECT*)lParam;
         const POINT MoveTo{ Suggested->left, Suggested->top };
         ApplyFixedClientSize(hWnd, HIWORD(wParam), &MoveTo);
@@ -7923,13 +6249,10 @@ auto WindowHeight = 600;
 
 inline std::vector<std::pair<AFortPlayerControllerAthena*, UNetConnection*>> AllControllers;
 
-void GUI::RegisterTrickshotSpawnedActor(
-    AActor* Actor,
-    AFortPlayerControllerAthena* Controller,
+void GUI::RegisterTrickshotSpawnedActor(AActor* Actor, AFortPlayerControllerAthena* Controller,
     const std::string& CanonicalClassPath)
 {
-    TrickshotManager::RegisterSpawnedActor(
-        Actor, Controller, CanonicalClassPath);
+    TrickshotManager::RegisterSpawnedActor(Actor, Controller, CanonicalClassPath);
 }
 
 namespace TrickshotManager
@@ -7950,9 +6273,7 @@ namespace TrickshotManager
     {
         if (!Actor)
             return;
-        std::erase_if(
-            GTrackedSpawnedActors,
-            [&](const FTrackedSpawnedActor& Entry)
+        std::erase_if(GTrackedSpawnedActors, [&](const FTrackedSpawnedActor& Entry)
             {
                 return Entry.Actor.Get() == Actor;
             });
@@ -7960,24 +6281,19 @@ namespace TrickshotManager
 
     enum class EAsyncOperation : uint8
     {
-        None,
-        Save,
-        Load
+        None, Save, Load
     };
 
     enum class EAsyncState : int
     {
-        Idle,
-        Publishing,
-        Pending,
-        Running,
-        Completed
+        Idle, Publishing, Pending, Running, Completed
     };
 
     constexpr size_t kAsyncNameCapacity = 256;
     constexpr size_t kAsyncMessageCapacity = 1024;
     std::atomic<int> GAsyncState{
-        static_cast<int>(EAsyncState::Idle) };
+        static_cast<int>(EAsyncState::Idle)
+    };
     EAsyncOperation GAsyncOperation = EAsyncOperation::None;
     EAsyncOperation GAsyncResultOperation = EAsyncOperation::None;
     bool GAsyncResultSucceeded = false;
@@ -7995,8 +6311,7 @@ namespace TrickshotManager
 
     constexpr FBuiltInPresetDefinition kBuiltInPresets[]{
         {
-            "builtin:block-winner-8-24-26-15bandit",
-            "Block Winner 8-24-26 (15Bandit)",
+            "builtin:block-winner-8-24-26-15bandit", "Block Winner 8-24-26 (15Bandit)",
             "Block Winner 8-24-26 (15Bandit) (Built-in, FN 10.40)",
             IDR_TRICKSHOT_BLOCK_WINNER_15BANDIT
         }
@@ -8012,23 +6327,17 @@ namespace TrickshotManager
         bool operator==(const FPresetEntry&) const = default;
     };
 
-    const FBuiltInPresetDefinition* FindBuiltInPreset(
-        const std::string& Id)
+    const FBuiltInPresetDefinition* FindBuiltInPreset(const std::string& Id)
     {
-        const auto Found = std::find_if(
-            std::begin(kBuiltInPresets),
-            std::end(kBuiltInPresets),
+        const auto Found = std::find_if(std::begin(kBuiltInPresets), std::end(kBuiltInPresets),
             [&](const FBuiltInPresetDefinition& Preset)
             {
                 return Id == Preset.Id;
             });
-        return Found == std::end(kBuiltInPresets)
-            ? nullptr
-            : &*Found;
+        return Found == std::end(kBuiltInPresets) ? nullptr : &*Found;
     }
 
-    constexpr const char* kTrickshotTireClassPath =
-        "/Game/Athena/Items/Consumables/TowerGrenade/"
+    constexpr const char* kTrickshotTireClassPath = "/Game/Athena/Items/Consumables/TowerGrenade/"
         "Prop_TirePile_Tower.Prop_TirePile_Tower_C";
     constexpr const wchar_t* kTrickshotTireClassPathWide =
         L"/Game/Athena/Items/Consumables/TowerGrenade/"
@@ -8078,18 +6387,12 @@ namespace TrickshotManager
 
     enum class ELoadPhase : uint8
     {
-        Cleanup,
-        Structures,
-        ReleaseStructuralSupport,
-        StructureSettle,
-        TrapPlacement
+        Cleanup, Structures, ReleaseStructuralSupport, StructureSettle, TrapPlacement
     };
 
     enum class ELoadPumpResult : uint8
     {
-        Running,
-        Succeeded,
-        Failed
+        Running, Succeeded, Failed
     };
 
     struct FTrickshotLoadJob
@@ -8104,16 +6407,8 @@ namespace TrickshotManager
         std::vector<TWeakObjectPtr<ABuildingSMActor>> SpawnedBuilds;
         std::vector<TWeakObjectPtr<AActor>> SpawnedProps;
         std::vector<TWeakObjectPtr<UClass>> TrackedPropClasses;
-        // Exact command-spawned actor instances belonging to the current
-        // shared trickshot session, regardless of which player spawned them.
-        // Arbitrary class-wide cleanup would destroy natural map actors and
-        // unrelated runtime gameplay actors of the same class.
         std::vector<TWeakObjectPtr<AActor>> ExistingTrackedProps;
-        // Exact pre-load building identities. Deferred legacy trap recovery
-        // must never adopt, mutate, or destroy natural/foreign actors that
-        // already occupied an external support before this transaction.
-        std::vector<TWeakObjectPtr<ABuildingSMActor>>
-            BaselineBuildingActors;
+        std::vector<TWeakObjectPtr<ABuildingSMActor>> BaselineBuildingActors;
         bool LegacyTireProps = false;
         std::vector<TWeakObjectPtr<UObject>> TemporaryRootedAssets;
         bool RestoreWaypoints = false;
@@ -8157,11 +6452,10 @@ namespace TrickshotManager
         auto Item = TUObjectArray::GetItemByIndex(Object->Index);
         if (!Item || Item->GetObject() != Object)
             return;
-		Item->Flags &= ~kTrickshotRootSetFlag;
+        Item->Flags &= ~kTrickshotRootSetFlag;
     }
 
-    void ReleaseTrickshotAssetRoots(
-        std::vector<TWeakObjectPtr<UObject>>& Assets)
+    void ReleaseTrickshotAssetRoots(std::vector<TWeakObjectPtr<UObject>>& Assets)
     {
         for (auto It = Assets.rbegin(); It != Assets.rend(); ++It)
         {
@@ -8176,10 +6470,8 @@ namespace TrickshotManager
         std::vector<TWeakObjectPtr<UObject>> Assets;
 
         FScopedTrickshotAssetRoots() = default;
-        FScopedTrickshotAssetRoots(
-            const FScopedTrickshotAssetRoots&) = delete;
-        FScopedTrickshotAssetRoots& operator=(
-            const FScopedTrickshotAssetRoots&) = delete;
+        FScopedTrickshotAssetRoots(const FScopedTrickshotAssetRoots&) = delete;
+        FScopedTrickshotAssetRoots& operator=(const FScopedTrickshotAssetRoots&) = delete;
 
         ~FScopedTrickshotAssetRoots()
         {
@@ -8236,31 +6528,23 @@ namespace TrickshotManager
         }
     };
 
-    bool IsTrickshotSessionPlayerBuild(
-        const ABuildingSMActor* Build)
+    bool IsTrickshotSessionPlayerBuild(const ABuildingSMActor* Build)
     {
         if (!Build || !Build->bPlayerPlaced || Build->bDestroyed ||
-            (Build->HasbActorIsBeingDestroyed() &&
-             Build->bActorIsBeingDestroyed) ||
+            (Build->HasbActorIsBeingDestroyed() && Build->bActorIsBeingDestroyed) ||
             (Build->HasbNetStartup() && Build->bNetStartup))
         {
             return false;
         }
-        // Trickshot presets represent the shared setup in this world, not one
-        // player's ownership slice. bPlayerPlaced is the cross-version boundary
-        // that includes every participant's builds while excluding natural and
-        // map-startup structures.
         return true;
     }
 
-    bool TryGetStructuralCellKey(
-        const ABuildingSMActor* Build, FStructuralCellKey& OutKey)
+    bool TryGetStructuralCellKey(const ABuildingSMActor* Build, FStructuralCellKey& OutKey)
     {
         if (!Build || !Build->HasBuildingType())
             return false;
         const FVector Location = Build->K2_GetActorLocation();
-        if (!std::isfinite(Location.X) || !std::isfinite(Location.Y) ||
-            !std::isfinite(Location.Z))
+        if (!std::isfinite(Location.X) || !std::isfinite(Location.Y) || !std::isfinite(Location.Z))
         {
             return false;
         }
@@ -8271,17 +6555,14 @@ namespace TrickshotManager
         return true;
     }
 
-    bool TryGetStructuralCellKey(
-        const FPendingTrickshotBuild& SavedBuild,
+    bool TryGetStructuralCellKey(const FPendingTrickshotBuild& SavedBuild,
         FStructuralCellKey& OutKey)
     {
         auto SavedClass = SavedBuild.Class.Get();
-        auto DefaultBuild = SavedClass
-            ? static_cast<ABuildingSMActor*>(SavedClass->GetDefaultObj())
+        auto DefaultBuild = SavedClass ? static_cast<ABuildingSMActor*>(SavedClass->GetDefaultObj())
             : nullptr;
         if (!DefaultBuild || !DefaultBuild->HasBuildingType() ||
-            !std::isfinite(SavedBuild.Location.X) ||
-            !std::isfinite(SavedBuild.Location.Y) ||
+            !std::isfinite(SavedBuild.Location.X) || !std::isfinite(SavedBuild.Location.Y) ||
             !std::isfinite(SavedBuild.Location.Z))
         {
             return false;
@@ -8298,19 +6579,15 @@ namespace TrickshotManager
         if (!Build)
             return false;
         if ((Build->HasbSupportedDirectly() && Build->bSupportedDirectly) ||
-            (Build->HasbForciblyStructurallySupported() &&
-             Build->bForciblyStructurallySupported) ||
-            (Build->HasSavedDirectlySupportedStatus() &&
-             Build->SavedDirectlySupportedStatus == 1))
+            (Build->HasbForciblyStructurallySupported() && Build->bForciblyStructurallySupported) ||
+            (Build->HasSavedDirectlySupportedStatus() && Build->SavedDirectlySupportedStatus == 1))
         {
             return true;
         }
-        return Build->GetFunction("IsSupportedByWorld") &&
-            Build->IsSupportedByWorld();
+        return Build->GetFunction("IsSupportedByWorld") && Build->IsSupportedByWorld();
     }
 
-    int CanonicalizePendingStructuralCells(
-        std::vector<FPendingTrickshotBuild>& Pending)
+    int CanonicalizePendingStructuralCells(std::vector<FPendingTrickshotBuild>& Pending)
     {
         const int Count = static_cast<int>(Pending.size());
         std::vector<int> Alias(Count);
@@ -8318,8 +6595,7 @@ namespace TrickshotManager
         for (int Index = 0; Index < Count; ++Index)
             Alias[Index] = Index;
 
-        std::unordered_map<FStructuralCellKey, int,
-            FStructuralCellKeyHash> LatestByCell;
+        std::unordered_map<FStructuralCellKey, int, FStructuralCellKeyHash> LatestByCell;
         int Removed = 0;
         for (int Index = 0; Index < Count; ++Index)
         {
@@ -8352,8 +6628,7 @@ namespace TrickshotManager
         auto ResolveAlias = [&](int Index)
         {
             int Guard = 0;
-            while (Index >= 0 && Index < Count && Alias[Index] != Index &&
-                Guard++ < Count)
+            while (Index >= 0 && Index < Count && Alias[Index] != Index && Guard++ < Count)
             {
                 Index = Alias[Index];
             }
@@ -8379,8 +6654,7 @@ namespace TrickshotManager
                 SavedBuild.Parent >= 0 && SavedBuild.Parent < Count)
             {
                 const int CanonicalParent = ResolveAlias(SavedBuild.Parent);
-                SavedBuild.Parent = CanonicalParent >= 0 &&
-                    CanonicalParent < Count
+                SavedBuild.Parent = CanonicalParent >= 0 && CanonicalParent < Count
                     ? OldToNew[CanonicalParent] : SavedBuild.Parent;
             }
             Canonical.push_back(std::move(SavedBuild));
@@ -8389,18 +6663,14 @@ namespace TrickshotManager
         return Removed;
     }
 
-    void EnsurePortableSupportAnchors(
-        std::vector<FPendingTrickshotBuild>& Pending)
+    void EnsurePortableSupportAnchors(std::vector<FPendingTrickshotBuild>& Pending)
     {
         std::unordered_map<uint64, double> MinimumZByColumn;
         auto ColumnKey = [](const FVector& Location)
         {
-            const auto X = static_cast<uint32>(
-                static_cast<int32>(std::llround(Location.X)));
-            const auto Y = static_cast<uint32>(
-                static_cast<int32>(std::llround(Location.Y)));
-            return (static_cast<uint64>(X) << 32) |
-                static_cast<uint64>(Y);
+            const auto X = static_cast<uint32>(static_cast<int32>(std::llround(Location.X)));
+            const auto Y = static_cast<uint32>(static_cast<int32>(std::llround(Location.Y)));
+            return (static_cast<uint64>(X) << 32) | static_cast<uint64>(Y);
         };
         for (const auto& SavedBuild : Pending)
         {
@@ -8417,10 +6687,8 @@ namespace TrickshotManager
         {
             if (SavedBuild.IsTrap || SavedBuild.HasSavedSupportAnchor)
                 continue;
-            const auto It = MinimumZByColumn.find(
-                ColumnKey(SavedBuild.Location));
-            if (It != MinimumZByColumn.end() &&
-                std::abs(SavedBuild.Location.Z - It->second) <= 1.0)
+            const auto It = MinimumZByColumn.find(ColumnKey(SavedBuild.Location));
+            if (It != MinimumZByColumn.end() && std::abs(SavedBuild.Location.Z - It->second) <= 1.0)
             {
                 SavedBuild.SupportAnchor = true;
                 ++AddedAnchors;
@@ -8440,8 +6708,7 @@ namespace TrickshotManager
         return Delta > 180.0 ? 360.0 - Delta : Delta;
     }
 
-    ABuildingSMActor* ResolveExternalTrickshotParent(
-        const FPendingTrickshotBuild& SavedBuild,
+    ABuildingSMActor* ResolveExternalTrickshotParent(const FPendingTrickshotBuild& SavedBuild,
         const std::vector<ABuildingSMActor*>& Candidates)
     {
         ABuildingSMActor* ExactMatch = nullptr;
@@ -8449,22 +6716,16 @@ namespace TrickshotManager
         int FallbackMatches = 0;
         for (auto Candidate : Candidates)
         {
-            if (!Candidate ||
-                (Candidate->bPlayerPlaced &&
-                 !(Candidate->HasbNetStartup() &&
-                   Candidate->bNetStartup)) ||
-                Candidate->bDestroyed ||
-                (Candidate->HasbActorIsBeingDestroyed() &&
-                 Candidate->bActorIsBeingDestroyed) ||
+            if (!Candidate || (Candidate->bPlayerPlaced && !(Candidate->HasbNetStartup() &&
+                   Candidate->bNetStartup)) || Candidate->bDestroyed ||
+                (Candidate->HasbActorIsBeingDestroyed() && Candidate->bActorIsBeingDestroyed) ||
                 Candidate->Cast<ABuildingTrap>())
             {
                 continue;
             }
 
-            if (SavedBuild.ExternalParentBuildingType >= 0 &&
-                (!Candidate->HasBuildingType() ||
-                 Candidate->BuildingType !=
-                    static_cast<uint8>(
+            if (SavedBuild.ExternalParentBuildingType >= 0 && (!Candidate->HasBuildingType() ||
+                 Candidate->BuildingType != static_cast<uint8>(
                         SavedBuild.ExternalParentBuildingType)))
             {
                 continue;
@@ -8478,12 +6739,9 @@ namespace TrickshotManager
                 continue;
 
             const FRotator Rotation = Candidate->K2_GetActorRotation();
-            if (RotationDelta(Rotation.Pitch,
-                    SavedBuild.ExternalParentRotation.Pitch) > 1.0 ||
-                RotationDelta(Rotation.Yaw,
-                    SavedBuild.ExternalParentRotation.Yaw) > 1.0 ||
-                RotationDelta(Rotation.Roll,
-                    SavedBuild.ExternalParentRotation.Roll) > 1.0)
+            if (RotationDelta(Rotation.Pitch, SavedBuild.ExternalParentRotation.Pitch) > 1.0 ||
+                RotationDelta(Rotation.Yaw, SavedBuild.ExternalParentRotation.Yaw) > 1.0 ||
+                RotationDelta(Rotation.Roll, SavedBuild.ExternalParentRotation.Roll) > 1.0)
             {
                 continue;
             }
@@ -8515,11 +6773,9 @@ namespace TrickshotManager
         return FallbackMatches == 1 ? FallbackMatch : nullptr;
     }
 
-    bool IsLiveTrickshotAsset(
-        const UObject* Object, const UClass* ExpectedClass)
+    bool IsLiveTrickshotAsset(const UObject* Object, const UClass* ExpectedClass)
     {
-        if (!Object || !ExpectedClass ||
-            !SDK::MemReadable(Object, 0x40))
+        if (!Object || !ExpectedClass || !SDK::MemReadable(Object, 0x40))
         {
             return false;
         }
@@ -8532,13 +6788,10 @@ namespace TrickshotManager
         return Object->IsA(ExpectedClass);
     }
 
-    bool IsLiveTrackedSpawnedActor(
-        AActor* Actor, UWorld* ExpectedWorld)
+    bool IsLiveTrackedSpawnedActor(AActor* Actor, UWorld* ExpectedWorld)
     {
-        if (!ExpectedWorld ||
-            !IsLiveTrickshotAsset(Actor, AActor::StaticClass()) ||
-            (Actor->HasbActorIsBeingDestroyed() &&
-             Actor->bActorIsBeingDestroyed))
+        if (!ExpectedWorld || !IsLiveTrickshotAsset(Actor, AActor::StaticClass()) ||
+            (Actor->HasbActorIsBeingDestroyed() && Actor->bActorIsBeingDestroyed))
         {
             return false;
         }
@@ -8554,21 +6807,15 @@ namespace TrickshotManager
     {
         if (!Class)
             return {};
-		return FStringToStdString(
-			UKismetSystemLibrary::GetPathName(Class));
+        return FStringToStdString(UKismetSystemLibrary::GetPathName(Class));
     }
 
     bool IsUnsafeTrickshotLifecycleClass(UClass* Class)
     {
-        auto DefaultActor = Class
-            ? static_cast<AActor*>(Class->GetDefaultObj()) : nullptr;
-        return !DefaultActor ||
-            !DefaultActor->IsA(AActor::StaticClass()) ||
-            DefaultActor->IsA(
-                AFortPlayerControllerAthena::StaticClass()) ||
-            DefaultActor->IsA(
-                AFortPlayerPawnAthena::StaticClass()) ||
-            DefaultActor->IsA(
+        auto DefaultActor = Class ? static_cast<AActor*>(Class->GetDefaultObj()) : nullptr;
+        return !DefaultActor || !DefaultActor->IsA(AActor::StaticClass()) || DefaultActor->IsA(
+                AFortPlayerControllerAthena::StaticClass()) || DefaultActor->IsA(
+                AFortPlayerPawnAthena::StaticClass()) || DefaultActor->IsA(
                 AFortPlayerStateAthena::StaticClass()) ||
             DefaultActor->IsA(AFortGameMode::StaticClass()) ||
             DefaultActor->IsA(AFortGameStateAthena::StaticClass());
@@ -8576,57 +6823,40 @@ namespace TrickshotManager
 
     void PruneTrackedSpawnedActors(UWorld* CurrentWorld)
     {
-        std::erase_if(
-            GTrackedSpawnedActors,
-            [&](const FTrackedSpawnedActor& Entry)
+        std::erase_if(GTrackedSpawnedActors, [&](const FTrackedSpawnedActor& Entry)
             {
-                return Entry.World.Get() != CurrentWorld ||
-                    !IsLiveTrackedSpawnedActor(
-                        Entry.Actor.Get(), CurrentWorld) ||
-                    Entry.ClassPath.empty();
+                return Entry.World.Get() != CurrentWorld || !IsLiveTrackedSpawnedActor(
+                        Entry.Actor.Get(), CurrentWorld) || Entry.ClassPath.empty();
             });
     }
 
-    bool RegisterSpawnedActorInternal(
-        AActor* Actor,
-        AFortPlayerControllerAthena* Controller,
-        const std::string& CanonicalClassPath,
-        bool RequireEnabledTab)
+    bool RegisterSpawnedActorInternal(AActor* Actor, AFortPlayerControllerAthena* Controller,
+        const std::string& CanonicalClassPath, bool RequireEnabledTab)
     {
-        // Both UI switches are sampled at successful command-spawn time.
-        // Turning either off later does not silently forget an existing setup.
-        if ((RequireEnabledTab &&
-             !FConfiguration::bEnableTrickshotTab.load(
-                 std::memory_order_acquire)) ||
-            (RequireEnabledTab &&
-             !FConfiguration::bSaveAndTrackSpawnedObjects.load(
-                 std::memory_order_acquire)) ||
+        if ((RequireEnabledTab && !FConfiguration::bEnableTrickshotTab.load(
+                 std::memory_order_acquire)) || (RequireEnabledTab &&
+             !FConfiguration::bSaveAndTrackSpawnedObjects.load(std::memory_order_acquire)) ||
             !Actor || !Controller || CanonicalClassPath.empty())
         {
             return false;
         }
 
         auto World = UWorld::GetWorld();
-        if (!IsLiveTrackedSpawnedActor(Actor, World) ||
-            !IsLiveTrickshotAsset(
-                Controller,
+        if (!IsLiveTrackedSpawnedActor(Actor, World) || !IsLiveTrickshotAsset(Controller,
                 AFortPlayerControllerAthena::StaticClass()))
         {
             return false;
         }
         if (IsUnsafeTrickshotLifecycleClass(Actor->Class))
         {
-            SDK::DbgLog(
-                "[TrickshotSpawn] rejected lifecycle actor=%p class=%s\n",
+            SDK::DbgLog("[TrickshotSpawn] rejected lifecycle actor=%p class=%s\n",
                 Actor, CanonicalClassPath.c_str());
             return false;
         }
         if (CanonicalClassPath.find('\0') != std::string::npos ||
-            GetCanonicalTrackedClassPath(Actor->Class) !=
-                CanonicalClassPath)
+            GetCanonicalTrackedClassPath(Actor->Class) != CanonicalClassPath)
         {
-            SDK::DbgLog(
-                "[TrickshotSpawn] rejected noncanonical class actor=%p class=%s\n",
+            SDK::DbgLog("[TrickshotSpawn] rejected noncanonical class actor=%p class=%s\n",
                 Actor, CanonicalClassPath.c_str());
             return false;
         }
@@ -8637,8 +6867,7 @@ namespace TrickshotManager
             if (Entry.Actor.Get() == Actor)
             {
                 Entry.World = TWeakObjectPtr<UWorld>(World);
-                Entry.Controller =
-                    TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
+                Entry.Controller = TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
                 Entry.ClassPath = CanonicalClassPath;
                 return true;
             }
@@ -8653,32 +6882,24 @@ namespace TrickshotManager
         {
             SDK::DbgLog(
                 "[TrickshotSpawn] session tracking limit reached controller=%p limit=%zu class=%s\n",
-                Controller, kMaximumTrickshotSpawnedObjects,
-                CanonicalClassPath.c_str());
+                Controller, kMaximumTrickshotSpawnedObjects, CanonicalClassPath.c_str());
             return false;
         }
         GTrackedSpawnedActors.push_back({
-            TWeakObjectPtr<UWorld>(World),
-            TWeakObjectPtr<AActor>(Actor),
-            TWeakObjectPtr<AFortPlayerControllerAthena>(Controller),
-            CanonicalClassPath });
-        SDK::DbgLog(
-            "[TrickshotSpawn] registered actor=%p controller=%p class=%s\n",
+            TWeakObjectPtr<UWorld>(World), TWeakObjectPtr<AActor>(Actor),
+            TWeakObjectPtr<AFortPlayerControllerAthena>(Controller), CanonicalClassPath });
+        SDK::DbgLog("[TrickshotSpawn] registered actor=%p controller=%p class=%s\n",
             Actor, Controller, CanonicalClassPath.c_str());
         return true;
     }
 
-    void RegisterSpawnedActor(
-        AActor* Actor,
-        AFortPlayerControllerAthena* Controller,
+    void RegisterSpawnedActor(AActor* Actor, AFortPlayerControllerAthena* Controller,
         const std::string& CanonicalClassPath)
     {
-        (void)RegisterSpawnedActorInternal(
-            Actor, Controller, CanonicalClassPath, true);
+        (void)RegisterSpawnedActorInternal(Actor, Controller, CanonicalClassPath, true);
     }
 
-    const UObject* FindTrickshotAssetGuarded(
-        const wchar_t* Path, const UClass* ExpectedClass)
+    const UObject* FindTrickshotAssetGuarded(const wchar_t* Path, const UClass* ExpectedClass)
     {
         if (GTrickshotPackageFindDisabled || !Path || !*Path ||
             !ExpectedClass || !SDK::Offsets::StaticFindObject)
@@ -8702,16 +6923,13 @@ namespace TrickshotManager
         if (bFaulted)
         {
             GTrickshotPackageFindDisabled = true;
-            SDK::DbgLog(
-                "[TrickshotLoad] StaticFindObject(%ls) faulted; resident lookup disabled\n",
+            SDK::DbgLog("[TrickshotLoad] StaticFindObject(%ls) faulted; resident lookup disabled\n",
                 Path);
         }
-        return IsLiveTrickshotAsset(Result, ExpectedClass)
-            ? Result : nullptr;
+        return IsLiveTrickshotAsset(Result, ExpectedClass) ? Result : nullptr;
     }
 
-    const UObject* LoadTrickshotAssetGuarded(
-        const wchar_t* Path, const UClass* ExpectedClass)
+    const UObject* LoadTrickshotAssetGuarded(const wchar_t* Path, const UClass* ExpectedClass)
     {
         if (GTrickshotPackageLoadDisabled || !Path || !*Path ||
             !ExpectedClass || !SDK::Offsets::StaticLoadObject)
@@ -8736,8 +6954,7 @@ namespace TrickshotManager
         {
             GTrickshotPackageLoadDisabled = true;
             SDK::DbgLog(
-                "[TrickshotLoad] StaticLoadObject(%ls) faulted; package fallback disabled\n",
-                Path);
+                "[TrickshotLoad] StaticLoadObject(%ls) faulted; package fallback disabled\n", Path);
         }
         else if (!IsLiveTrickshotAsset(Result, ExpectedClass))
         {
@@ -8745,34 +6962,25 @@ namespace TrickshotManager
                 "[TrickshotLoad] StaticLoadObject returned no valid asset path=%ls expected=%p\n",
                 Path, ExpectedClass);
         }
-        return IsLiveTrickshotAsset(Result, ExpectedClass)
-            ? Result : nullptr;
+        return IsLiveTrickshotAsset(Result, ExpectedClass) ? Result : nullptr;
     }
 
     UClass* ResolveTrickshotTireClass(bool bAllowPackageLoad)
     {
-        auto ClassObject = const_cast<UObject*>(
-            FindTrickshotAssetGuarded(
-                kTrickshotTireClassPathWide,
-                UClass::StaticClass()));
+        auto ClassObject = const_cast<UObject*>(FindTrickshotAssetGuarded(
+                kTrickshotTireClassPathWide, UClass::StaticClass()));
         if (!ClassObject && bAllowPackageLoad)
         {
-            ClassObject = const_cast<UObject*>(
-                LoadTrickshotAssetGuarded(
-                    kTrickshotTireClassPathWide,
-                    UClass::StaticClass()));
+            ClassObject = const_cast<UObject*>(LoadTrickshotAssetGuarded(
+                    kTrickshotTireClassPathWide, UClass::StaticClass()));
         }
-        auto Class = IsLiveTrickshotAsset(
-            ClassObject, UClass::StaticClass())
+        auto Class = IsLiveTrickshotAsset(ClassObject, UClass::StaticClass())
             ? static_cast<UClass*>(ClassObject) : nullptr;
-        auto DefaultActor = Class
-            ? static_cast<AActor*>(Class->GetDefaultObj()) : nullptr;
-        return DefaultActor && DefaultActor->IsA(AActor::StaticClass())
-            ? Class : nullptr;
+        auto DefaultActor = Class ? static_cast<AActor*>(Class->GetDefaultObj()) : nullptr;
+        return DefaultActor && DefaultActor->IsA(AActor::StaticClass()) ? Class : nullptr;
     }
 
-    bool IsTrackedTrickshotPropClass(
-        UClass* Class,
+    bool IsTrackedTrickshotPropClass(UClass* Class,
         const std::vector<TWeakObjectPtr<UClass>>& TrackedClasses)
     {
         if (!Class)
@@ -8785,14 +6993,10 @@ namespace TrickshotManager
         return false;
     }
 
-    bool IsSessionTrickshotTire(
-        AActor* Actor,
-        UClass* TireClass)
+    bool IsSessionTrickshotTire(AActor* Actor, UClass* TireClass)
     {
-        if (!Actor || Actor->Class != TireClass ||
-            (Actor->HasbActorIsBeingDestroyed() &&
-             Actor->bActorIsBeingDestroyed) ||
-            (Actor->HasbNetStartup() && Actor->bNetStartup))
+        if (!Actor || Actor->Class != TireClass || (Actor->HasbActorIsBeingDestroyed() &&
+             Actor->bActorIsBeingDestroyed) || (Actor->HasbNetStartup() && Actor->bNetStartup))
         {
             return false;
         }
@@ -8802,46 +7006,34 @@ namespace TrickshotManager
                 return false;
         }
 
-        // This exact functional class is the only legacy prop adopted by a
-        // world scan. Net-startup instances were rejected above, so every
-        // remaining instance belongs to the active player-created session,
-        // regardless of which participant deployed it or whether they left.
         return true;
     }
 
     void CleanupPartialLoad()
     {
-        if (!GLoadJob.Active ||
-            GLoadJob.World.Get() != UWorld::GetWorld())
+        if (!GLoadJob.Active || GLoadJob.World.Get() != UWorld::GetWorld())
         {
             return;
         }
 
-        // Free-standing spawned objects may overlap or depend on the restored
-        // structure, so remove them before attached children and supports.
         for (auto It = GLoadJob.SpawnedProps.rbegin();
             It != GLoadJob.SpawnedProps.rend(); ++It)
         {
             auto Actor = It->Get();
-            if (Actor &&
-                !(Actor->HasbActorIsBeingDestroyed() &&
-                  Actor->bActorIsBeingDestroyed))
+            if (Actor && !(Actor->HasbActorIsBeingDestroyed() && Actor->bActorIsBeingDestroyed))
             {
                 ForgetTrackedSpawnedActor(Actor);
                 Actor->K2_DestroyActor();
             }
         }
 
-        // Traps and other attached children must die before their supports so
-        // a native parent cascade cannot make this snapshot revisit a child.
         for (int Index = 0;
             Index < static_cast<int>(GLoadJob.Pending.size()); ++Index)
         {
             if (!GLoadJob.Pending[Index].IsTrap)
                 continue;
             auto Actor = GLoadJob.SpawnedBuilds[Index].Get();
-            if (Actor && !Actor->bDestroyed &&
-                !(Actor->HasbActorIsBeingDestroyed() &&
+            if (Actor && !Actor->bDestroyed && !(Actor->HasbActorIsBeingDestroyed() &&
                   Actor->bActorIsBeingDestroyed))
                 Actor->SilentDie(true);
         }
@@ -8850,28 +7042,20 @@ namespace TrickshotManager
         {
             const int Index = *It;
             auto Actor = GLoadJob.SpawnedBuilds[Index].Get();
-            if (Actor && !Actor->bDestroyed &&
-                !(Actor->HasbActorIsBeingDestroyed() &&
+            if (Actor && !Actor->bDestroyed && !(Actor->HasbActorIsBeingDestroyed() &&
                   Actor->bActorIsBeingDestroyed))
                 Actor->SilentDie(true);
         }
     }
 
-    void PublishResult(
-        EAsyncOperation Operation,
-        bool Succeeded,
-        const std::string& Name,
+    void PublishResult(EAsyncOperation Operation, bool Succeeded, const std::string& Name,
         const std::string& Message)
     {
         GAsyncResultOperation = Operation;
         GAsyncResultSucceeded = Succeeded;
-        strncpy_s(
-            GAsyncResultName, Name.c_str(), _TRUNCATE);
-        strncpy_s(
-            GAsyncResultMessage, Message.c_str(), _TRUNCATE);
-        GAsyncState.store(
-            static_cast<int>(EAsyncState::Completed),
-            std::memory_order_release);
+        strncpy_s(GAsyncResultName, Name.c_str(), _TRUNCATE);
+        strncpy_s(GAsyncResultMessage, Message.c_str(), _TRUNCATE);
+        GAsyncState.store(static_cast<int>(EAsyncState::Completed), std::memory_order_release);
     }
 
     void PumpActiveLoad()
@@ -8885,9 +7069,7 @@ namespace TrickshotManager
         }
         catch (const std::exception& Error)
         {
-            ResultMessage =
-                std::string("Failed to load trickshot: ") +
-                Error.what();
+            ResultMessage = std::string("Failed to load trickshot: ") + Error.what();
         }
         catch (...)
         {
@@ -8897,75 +7079,53 @@ namespace TrickshotManager
         if (Result == ELoadPumpResult::Running)
             return;
 
-        const bool Succeeded =
-            Result == ELoadPumpResult::Succeeded;
+        const bool Succeeded = Result == ELoadPumpResult::Succeeded;
         if (!Succeeded)
             CleanupPartialLoad();
         ReleaseTrickshotAssetRoots(GLoadJob.TemporaryRootedAssets);
         GLoadJob = FTrickshotLoadJob{};
-        PublishResult(
-            EAsyncOperation::Load, Succeeded,
-            Name, ResultMessage);
+        PublishResult(EAsyncOperation::Load, Succeeded, Name, ResultMessage);
     }
 
-    bool RequestOperation(
-        EAsyncOperation Operation,
-        const char* Name,
+    bool RequestOperation(EAsyncOperation Operation, const char* Name,
         std::string& ImmediateMessage)
     {
         int Expected = static_cast<int>(EAsyncState::Idle);
-        if (!GAsyncState.compare_exchange_strong(
-                Expected,
-                static_cast<int>(EAsyncState::Publishing),
-                std::memory_order_acq_rel,
+        if (!GAsyncState.compare_exchange_strong(Expected,
+                static_cast<int>(EAsyncState::Publishing), std::memory_order_acq_rel,
                 std::memory_order_acquire))
         {
-            ImmediateMessage =
-                "A trickshot save or load is already in progress.";
+            ImmediateMessage = "A trickshot save or load is already in progress.";
             return false;
         }
 
         GAsyncOperation = Operation;
         strncpy_s(GAsyncName, Name ? Name : "", _TRUNCATE);
-        GAsyncState.store(
-            static_cast<int>(EAsyncState::Pending),
-            std::memory_order_release);
-        ImmediateMessage = Operation == EAsyncOperation::Save
-            ? "Saving trickshot..."
+        GAsyncState.store(static_cast<int>(EAsyncState::Pending), std::memory_order_release);
+        ImmediateMessage = Operation == EAsyncOperation::Save ? "Saving trickshot..."
             : "Loading trickshot...";
         return true;
     }
 
-    bool RequestSave(
-        const char* Name,
-        std::string& ImmediateMessage)
+    bool RequestSave(const char* Name, std::string& ImmediateMessage)
     {
-        return RequestOperation(
-            EAsyncOperation::Save, Name, ImmediateMessage);
+        return RequestOperation(EAsyncOperation::Save, Name, ImmediateMessage);
     }
 
-    bool RequestLoad(
-        const std::string& Name,
-        std::string& ImmediateMessage)
+    bool RequestLoad(const std::string& Name, std::string& ImmediateMessage)
     {
-        return RequestOperation(
-            EAsyncOperation::Load, Name.c_str(), ImmediateMessage);
+        return RequestOperation(EAsyncOperation::Load, Name.c_str(), ImmediateMessage);
     }
 
     bool IsBusy()
     {
-        return GAsyncState.load(std::memory_order_acquire) !=
-            static_cast<int>(EAsyncState::Idle);
+        return GAsyncState.load(std::memory_order_acquire) != static_cast<int>(EAsyncState::Idle);
     }
 
-    bool ConsumeResult(
-        EAsyncOperation& Operation,
-        bool& Succeeded,
-        std::string& Name,
+    bool ConsumeResult(EAsyncOperation& Operation, bool& Succeeded, std::string& Name,
         std::string& Message)
     {
-        if (GAsyncState.load(std::memory_order_acquire) !=
-            static_cast<int>(EAsyncState::Completed))
+        if (GAsyncState.load(std::memory_order_acquire) != static_cast<int>(EAsyncState::Completed))
         {
             return false;
         }
@@ -8974,20 +7134,16 @@ namespace TrickshotManager
         Succeeded = GAsyncResultSucceeded;
         Name = GAsyncResultName;
         Message = GAsyncResultMessage;
-        GAsyncState.store(
-            static_cast<int>(EAsyncState::Idle),
-            std::memory_order_release);
+        GAsyncState.store(static_cast<int>(EAsyncState::Idle), std::memory_order_release);
         return true;
     }
 
     void GameThreadTick()
     {
-        const int CurrentState =
-            GAsyncState.load(std::memory_order_acquire);
+        const int CurrentState = GAsyncState.load(std::memory_order_acquire);
         if (CurrentState == static_cast<int>(EAsyncState::Running))
         {
-            if (GAsyncOperation == EAsyncOperation::Load &&
-                GLoadJob.Active)
+            if (GAsyncOperation == EAsyncOperation::Load && GLoadJob.Active)
             {
                 PumpActiveLoad();
             }
@@ -8995,11 +7151,8 @@ namespace TrickshotManager
         }
 
         int Expected = static_cast<int>(EAsyncState::Pending);
-        if (!GAsyncState.compare_exchange_strong(
-                Expected,
-                static_cast<int>(EAsyncState::Running),
-                std::memory_order_acq_rel,
-                std::memory_order_acquire))
+        if (!GAsyncState.compare_exchange_strong(Expected, static_cast<int>(EAsyncState::Running),
+                std::memory_order_acq_rel, std::memory_order_acquire))
         {
             return;
         }
@@ -9017,9 +7170,6 @@ namespace TrickshotManager
                 Succeeded = Load(Name, ResultMessage);
                 if (Succeeded && GLoadJob.Active)
                 {
-                    // Cleanup is the first staged phase. Keeping the state at
-                    // Running prevents the render thread from publishing a
-                    // result or accepting another operation between layers.
                     PumpActiveLoad();
                     return;
                 }
@@ -9029,17 +7179,14 @@ namespace TrickshotManager
         }
         catch (const std::exception& Error)
         {
-            ResultMessage =
-                std::string("Trickshot operation failed: ") +
-                Error.what();
+            ResultMessage = std::string("Trickshot operation failed: ") + Error.what();
         }
         catch (...)
         {
             ResultMessage = "Trickshot operation failed.";
         }
 
-        PublishResult(
-            Operation, Succeeded, Name, ResultMessage);
+        PublishResult(Operation, Succeeded, Name, ResultMessage);
     }
 
     inline fs::path GetDirectory()
@@ -9057,12 +7204,15 @@ namespace TrickshotManager
     inline std::string SanitizeName(const char* Name)
     {
         std::string Result = Name ? Name : "";
-        Result.erase(Result.begin(), std::find_if(Result.begin(), Result.end(), [](unsigned char Character) { return !std::isspace(Character); }));
-        Result.erase(std::find_if(Result.rbegin(), Result.rend(), [](unsigned char Character) { return !std::isspace(Character); }).base(), Result.end());
+        Result.erase(Result.begin(), std::find_if(Result.begin(), Result.end(),
+            [](unsigned char Character) { return !std::isspace(Character); }));
+        Result.erase(std::find_if(Result.rbegin(), Result.rend(),
+            [](unsigned char Character) { return !std::isspace(Character); }).base(), Result.end());
 
         for (auto& Character : Result)
         {
-            if (Character == '<' || Character == '>' || Character == ':' || Character == '"' || Character == '/' ||
+            if (Character == '<' || Character == '>' || Character == ':' || Character == '"' ||
+                Character == '/' ||
                 Character == '\\' || Character == '|' || Character == '?' || Character == '*')
                 Character = '_';
         }
@@ -9093,22 +7243,16 @@ namespace TrickshotManager
 
     bool IsValidSavedWaypointLocation(const FVector& Location)
     {
-        return std::isfinite(Location.X) &&
-            std::isfinite(Location.Y) &&
-            std::isfinite(Location.Z) &&
-            std::abs(Location.X) <= kMaximumTrickshotCoordinate &&
+        return std::isfinite(Location.X) && std::isfinite(Location.Y) &&
+            std::isfinite(Location.Z) && std::abs(Location.X) <= kMaximumTrickshotCoordinate &&
             std::abs(Location.Y) <= kMaximumTrickshotCoordinate &&
             std::abs(Location.Z) <= kMaximumTrickshotCoordinate;
     }
 
-    bool SerializeWaypoints(
-        nlohmann::json& Root,
-        size_t& SavedWaypointCount,
-        std::string& Error)
+    bool SerializeWaypoints(nlohmann::json& Root, size_t& SavedWaypointCount, std::string& Error)
     {
         SavedWaypointCount = 0;
-        auto Snapshot =
-            AFortPlayerControllerAthena::SnapshotWaypoints();
+        auto Snapshot = AFortPlayerControllerAthena::SnapshotWaypoints();
         if (Snapshot.size() > kMaximumTrickshotWaypoints)
         {
             Error = "There are too many saved waypoints (maximum 256).";
@@ -9128,10 +7272,8 @@ namespace TrickshotManager
             if (Existing == Snapshot.end())
                 continue;
             const auto& History = Existing->second;
-            if (Phrase.empty() ||
-                Phrase.size() > kMaximumTrickshotWaypointPhraseBytes ||
-                Phrase.find('\0') != std::string::npos ||
-                History.empty() ||
+            if (Phrase.empty() || Phrase.size() > kMaximumTrickshotWaypointPhraseBytes ||
+                Phrase.find('\0') != std::string::npos || History.empty() ||
                 History.size() > kMaximumTrickshotWaypointHistory)
             {
                 Error = "A saved waypoint name or history is invalid.";
@@ -9159,11 +7301,9 @@ namespace TrickshotManager
         return true;
     }
 
-    AFortPlayerControllerAthena::FWaypointMap ParseSavedWaypoints(
-        const nlohmann::json& Saved)
+    AFortPlayerControllerAthena::FWaypointMap ParseSavedWaypoints(const nlohmann::json& Saved)
     {
-        if (!Saved.is_array() ||
-            Saved.size() > kMaximumTrickshotWaypoints)
+        if (!Saved.is_array() || Saved.size() > kMaximumTrickshotWaypoints)
         {
             throw std::runtime_error("invalid trickshot waypoints");
         }
@@ -9172,23 +7312,17 @@ namespace TrickshotManager
         Result.reserve(Saved.size());
         for (const auto& Record : Saved)
         {
-            if (!Record.is_object() ||
-                !Record.contains("phrase") ||
-                !Record["phrase"].is_string() ||
-                !Record.contains("locations") ||
+            if (!Record.is_object() || !Record.contains("phrase") ||
+                !Record["phrase"].is_string() || !Record.contains("locations") ||
                 !Record["locations"].is_array())
             {
                 throw std::runtime_error("invalid trickshot waypoint");
             }
-            const std::string Phrase =
-                Record["phrase"].get<std::string>();
+            const std::string Phrase = Record["phrase"].get<std::string>();
             const auto& Locations = Record["locations"];
-            if (Phrase.empty() ||
-                Phrase.size() > kMaximumTrickshotWaypointPhraseBytes ||
-                Phrase.find('\0') != std::string::npos ||
-                Locations.empty() ||
-                Locations.size() > kMaximumTrickshotWaypointHistory ||
-                Result.contains(Phrase))
+            if (Phrase.empty() || Phrase.size() > kMaximumTrickshotWaypointPhraseBytes ||
+                Phrase.find('\0') != std::string::npos || Locations.empty() ||
+                Locations.size() > kMaximumTrickshotWaypointHistory || Result.contains(Phrase))
             {
                 throw std::runtime_error("invalid trickshot waypoint");
             }
@@ -9197,20 +7331,15 @@ namespace TrickshotManager
             History.reserve(Locations.size());
             for (const auto& SavedLocation : Locations)
             {
-                if (!SavedLocation.is_array() ||
-                    SavedLocation.size() != 3)
+                if (!SavedLocation.is_array() || SavedLocation.size() != 3)
                 {
-                    throw std::runtime_error(
-                        "invalid trickshot waypoint location");
+                    throw std::runtime_error("invalid trickshot waypoint location");
                 }
-                FVector Location(
-                    SavedLocation[0].get<double>(),
-                    SavedLocation[1].get<double>(),
+                FVector Location(SavedLocation[0].get<double>(), SavedLocation[1].get<double>(),
                     SavedLocation[2].get<double>());
                 if (!IsValidSavedWaypointLocation(Location))
                 {
-                    throw std::runtime_error(
-                        "invalid trickshot waypoint location");
+                    throw std::runtime_error("invalid trickshot waypoint location");
                 }
                 History.push_back(Location);
             }
@@ -9222,7 +7351,8 @@ namespace TrickshotManager
     inline uint8 GuessAttachmentType(const std::string& ClassPath)
     {
         std::string Lower = ClassPath;
-        std::transform(Lower.begin(), Lower.end(), Lower.begin(), [](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
+        std::transform(Lower.begin(), Lower.end(), Lower.begin(),
+            [](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
         if (Lower.find("wall") != std::string::npos)
             return 1;
         if (Lower.find("ceiling") != std::string::npos)
@@ -9237,17 +7367,12 @@ namespace TrickshotManager
         HANDLE Handle = INVALID_HANDLE_VALUE;
         DWORD Error = ERROR_SUCCESS;
 
-        explicit FScopedPresetReadGuard(
-            const fs::path& Path,
-            bool bAllowAtomicReplacement = false)
+        explicit FScopedPresetReadGuard(const fs::path& Path, bool bAllowAtomicReplacement = false)
         {
-            const DWORD ShareMode = bAllowAtomicReplacement
-                ? FILE_SHARE_READ | FILE_SHARE_DELETE
+            const DWORD ShareMode = bAllowAtomicReplacement ? FILE_SHARE_READ | FILE_SHARE_DELETE
                 : FILE_SHARE_READ;
-            Handle = CreateFileW(
-                Path.c_str(), GENERIC_READ, ShareMode,
-                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-                nullptr);
+            Handle = CreateFileW(Path.c_str(), GENERIC_READ, ShareMode,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (Handle == INVALID_HANDLE_VALUE)
                 Error = GetLastError();
         }
@@ -9259,8 +7384,7 @@ namespace TrickshotManager
         }
 
         FScopedPresetReadGuard(const FScopedPresetReadGuard&) = delete;
-        FScopedPresetReadGuard& operator=(
-            const FScopedPresetReadGuard&) = delete;
+        FScopedPresetReadGuard& operator=(const FScopedPresetReadGuard&) = delete;
 
         explicit operator bool() const
         {
@@ -9269,15 +7393,12 @@ namespace TrickshotManager
 
         bool ShouldRetryScan() const
         {
-            return Error == ERROR_SHARING_VIOLATION ||
-                Error == ERROR_LOCK_VIOLATION ||
-                Error == ERROR_FILE_NOT_FOUND ||
-                Error == ERROR_PATH_NOT_FOUND;
+            return Error == ERROR_SHARING_VIOLATION || Error == ERROR_LOCK_VIOLATION ||
+                Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND;
         }
     };
 
-    inline std::vector<std::string> GetSavedNames(
-        bool* bScanSucceeded = nullptr)
+    inline std::vector<std::string> GetSavedNames(bool* bScanSucceeded = nullptr)
     {
         if (bScanSucceeded)
             *bScanSucceeded = false;
@@ -9296,8 +7417,7 @@ namespace TrickshotManager
             {
                 const auto& Entry = *Iterator;
                 std::error_code EntryError;
-                const bool bRegularFile =
-                    Entry.is_regular_file(EntryError);
+                const bool bRegularFile = Entry.is_regular_file(EntryError);
                 if (EntryError)
                 {
                     Error = EntryError;
@@ -9306,28 +7426,19 @@ namespace TrickshotManager
 
                 const auto Path = Entry.path();
                 auto Extension = Path.extension().string();
-                std::transform(
-                    Extension.begin(), Extension.end(),
-                    Extension.begin(),
+                std::transform(Extension.begin(), Extension.end(), Extension.begin(),
                     [](unsigned char Character)
                     {
-                        return static_cast<char>(
-                            std::tolower(Character));
+                        return static_cast<char>(std::tolower(Character));
                     });
                 if (bRegularFile && Extension == ".json")
                 {
-                    // A drag/copy can publish the destination filename before
-                    // its writer closes. Opening with read-only sharing fails
-                    // while any writer is still active, so the last good GUI
-                    // list is retained until the copy is actually loadable.
-                    FScopedPresetReadGuard ReadGuard(
-                        Path, true);
+                    FScopedPresetReadGuard ReadGuard(Path, true);
                     if (!ReadGuard)
                     {
                         if (ReadGuard.ShouldRetryScan())
                         {
-                            Error = std::error_code(
-                                static_cast<int>(ReadGuard.Error),
+                            Error = std::error_code(static_cast<int>(ReadGuard.Error),
                                 std::system_category());
                             break;
                         }
@@ -9348,21 +7459,17 @@ namespace TrickshotManager
         }
 
         std::sort(Names.begin(), Names.end());
-        Names.erase(
-            std::unique(Names.begin(), Names.end()), Names.end());
+        Names.erase(std::unique(Names.begin(), Names.end()), Names.end());
         if (bScanSucceeded)
             *bScanSucceeded = true;
         return Names;
     }
 
-    inline FPresetEntry MakeSavedPresetEntry(
-        const std::string& SavedName)
+    inline FPresetEntry MakeSavedPresetEntry(const std::string& SavedName)
     {
         std::string DisplayName = SavedName;
-        const bool CollidesWithBuiltIn = std::any_of(
-            std::begin(kBuiltInPresets),
-            std::end(kBuiltInPresets),
-            [&](const FBuiltInPresetDefinition& BuiltIn)
+        const bool CollidesWithBuiltIn = std::any_of(std::begin(kBuiltInPresets),
+            std::end(kBuiltInPresets), [&](const FBuiltInPresetDefinition& BuiltIn)
             {
                 return SavedName == BuiltIn.Name;
             });
@@ -9370,15 +7477,11 @@ namespace TrickshotManager
             DisplayName += " (Saved)";
 
         return {
-            "saved:" + SavedName,
-            SavedName,
-            std::move(DisplayName),
-            false
+            "saved:" + SavedName, SavedName, std::move(DisplayName), false
         };
     }
 
-    inline std::vector<FPresetEntry> GetAvailablePresets(
-        bool* bSavedPresetScanSucceeded = nullptr)
+    inline std::vector<FPresetEntry> GetAvailablePresets(bool* bSavedPresetScanSucceeded = nullptr)
     {
         bool bScanSucceeded = false;
         const auto SavedNames = GetSavedNames(&bScanSucceeded);
@@ -9386,15 +7489,11 @@ namespace TrickshotManager
             *bSavedPresetScanSucceeded = bScanSucceeded;
 
         std::vector<FPresetEntry> Presets;
-        Presets.reserve(
-            std::size(kBuiltInPresets) + SavedNames.size());
+        Presets.reserve(std::size(kBuiltInPresets) + SavedNames.size());
         for (const auto& BuiltIn : kBuiltInPresets)
         {
             Presets.push_back({
-                BuiltIn.Id,
-                BuiltIn.Name,
-                BuiltIn.DisplayName,
-                true
+                BuiltIn.Id, BuiltIn.Name, BuiltIn.DisplayName, true
             });
         }
 
@@ -9427,7 +7526,8 @@ namespace TrickshotManager
             return false;
         }
 
-        const auto Result = ShellExecuteA(nullptr, "open", Directory.string().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        const auto Result = ShellExecuteA(nullptr, "open", Directory.string().c_str(), nullptr,
+            nullptr, SW_SHOWNORMAL);
         const bool Opened = reinterpret_cast<INT_PTR>(Result) > 32;
         if (!Opened)
             Message = "Could not open the trickshot folder.";
@@ -9439,8 +7539,7 @@ namespace TrickshotManager
         const std::string SafeName = SanitizeName(Name);
         const auto Directory = GetDirectory();
         auto Controller = GetHostController();
-        if (SafeName.empty() || Directory.empty() || !UWorld::GetWorld() ||
-            !Controller)
+        if (SafeName.empty() || Directory.empty() || !UWorld::GetWorld() || !Controller)
         {
             Message = SafeName.empty() ? "Enter a trickshot name." :
                 !Controller ? "A connected player is required to save builds." :
@@ -9456,27 +7555,15 @@ namespace TrickshotManager
         Root["builds"] = nlohmann::json::array();
         Root["props"] = nlohmann::json::array();
 
-        // The functional Tower tire is a free-standing gameplay prop. Keep it
-        // out of the structural/trap graph and persist its world transform in
-        // a dedicated allowlisted collection.
         auto TireClass = ResolveTrickshotTireClass(false);
 
         auto CurrentWorld = UWorld::GetWorld();
         PruneTrackedSpawnedActors(CurrentWorld);
-        const bool bSaveSpawnedObjects =
-            FConfiguration::bSaveAndTrackSpawnedObjects.load(
+        const bool bSaveSpawnedObjects = FConfiguration::bSaveAndTrackSpawnedObjects.load(
                 std::memory_order_acquire);
 
-        // A Tower/Port-a-Fort deployment creates its functional tire from
-        // Blueprint rather than through the cheat summon command, so it never
-        // reaches RegisterTrickshotSpawnedActor. Adopt only this exact,
-        // allowlisted runtime class at save time. Net-startup checks keep map
-        // tires out while including tires deployed by every participant (even
-        // one who has since disconnected). Later cleanup remains instance-based.
-        if (bSaveSpawnedObjects &&
-            FConfiguration::bEnableTrickshotTab.load(
-                std::memory_order_acquire) &&
-            TireClass)
+        if (bSaveSpawnedObjects && FConfiguration::bEnableTrickshotTab.load(
+                std::memory_order_acquire) && TireClass)
         {
             TArray<AActor*> DeployedTires;
             Utils::GetAll<AActor>(TireClass, DeployedTires);
@@ -9512,10 +7599,10 @@ namespace TrickshotManager
         std::vector<ABuildingSMActor*> SavedBuilds;
         std::unordered_map<ABuildingSMActor*, ABuildingSMActor*> AttachedParents;
 
-        auto RememberAttachment = [&](ABuildingSMActor* Parent, ABuildingSMActor* Child, bool bAuthoritative = false)
+        auto RememberAttachment = [&](ABuildingSMActor* Parent, ABuildingSMActor* Child,
+            bool bAuthoritative = false)
         {
-            if (!Child || Child->bDestroyed ||
-                (Child->HasbActorIsBeingDestroyed() &&
+            if (!Child || Child->bDestroyed || (Child->HasbActorIsBeingDestroyed() &&
                  Child->bActorIsBeingDestroyed))
                 return;
 
@@ -9530,8 +7617,6 @@ namespace TrickshotManager
                 AttachedParents.try_emplace(Child, Parent);
         };
 
-        // Capture parent-side arrays as a compatibility fallback. They can retain
-        // stale children on some versions, so child-side links override them below.
         for (auto Build : Builds)
         {
             if (!Build)
@@ -9544,8 +7629,6 @@ namespace TrickshotManager
             }
         }
 
-        // ParentActorToAttachTo is the child-side structural relationship, while
-        // ABuildingTrap::AttachedTo is the trap's authoritative supporting build.
         for (auto Build : Builds)
         {
             if (!Build)
@@ -9565,17 +7648,11 @@ namespace TrickshotManager
             FStructuralCellKeyHash> CanonicalBuildByCell;
         for (auto Build : Builds)
         {
-            if (!IsTrickshotSessionPlayerBuild(Build) ||
-                Build->Cast<ABuildingTrap>() ||
-                (TireClass && Build->Class == TireClass) ||
-                TrackedPropActors.contains(Build))
+            if (!IsTrickshotSessionPlayerBuild(Build) || Build->Cast<ABuildingTrap>() ||
+                (TireClass && Build->Class == TireClass) || TrackedPropActors.contains(Build))
                 continue;
 
-            // ParentActorToAttachTo is also used by some edited structural
-            // pieces. Only exclude a child from the root list when it is an
-            // actual deco/trap; otherwise the save silently drops that build.
-            if (AttachedParents.contains(Build) &&
-                ABuildingSMActor::GetTrapDefinition(Build))
+            if (AttachedParents.contains(Build) && ABuildingSMActor::GetTrapDefinition(Build))
                 continue;
 
             CandidateBuilds.push_back(Build);
@@ -9589,8 +7666,7 @@ namespace TrickshotManager
             if (TryGetStructuralCellKey(Build, Key))
             {
                 auto Canonical = CanonicalBuildByCell.find(Key);
-                if (Canonical != CanonicalBuildByCell.end() &&
-                    Canonical->second != Build)
+                if (Canonical != CanonicalBuildByCell.end() && Canonical->second != Build)
                 {
                     SDK::DbgLog(
                         "[TrickshotSave] skipped stale duplicate actor=%p canonical=%p cell=(%lld,%lld,%lld) type=%u\n",
@@ -9628,21 +7704,16 @@ namespace TrickshotManager
         std::unordered_set<ABuildingSMActor*> SerializedAttachments;
         auto SerializeTrap = [&](ABuildingSMActor* Trap, ABuildingSMActor* Parent)
         {
-            if (!Trap || !Parent ||
-                !IsTrickshotSessionPlayerBuild(Trap) ||
-                (TireClass && Trap->Class == TireClass) ||
-                TrackedPropActors.contains(Trap) ||
-                Trap->bDestroyed ||
-                (Trap->HasbActorIsBeingDestroyed() &&
-                 Trap->bActorIsBeingDestroyed) ||
-                SerializedAttachments.contains(Trap))
+            if (!Trap || !Parent || !IsTrickshotSessionPlayerBuild(Trap) ||
+                (TireClass && Trap->Class == TireClass) || TrackedPropActors.contains(Trap) ||
+                Trap->bDestroyed || (Trap->HasbActorIsBeingDestroyed() &&
+                 Trap->bActorIsBeingDestroyed) || SerializedAttachments.contains(Trap))
             {
                 return;
             }
 
             auto ParentIndex = SavedIndices.find(Parent);
-            if (ParentIndex == SavedIndices.end() &&
-                IsTrickshotSessionPlayerBuild(Parent))
+            if (ParentIndex == SavedIndices.end() && IsTrickshotSessionPlayerBuild(Parent))
             {
                 FStructuralCellKey ParentKey;
                 if (TryGetStructuralCellKey(Parent, ParentKey))
@@ -9652,38 +7723,28 @@ namespace TrickshotManager
                         ParentIndex = SavedIndices.find(Canonical->second);
                 }
             }
-            if (ParentIndex == SavedIndices.end() &&
-                TrackedPropActors.contains(Parent))
+            if (ParentIndex == SavedIndices.end() && TrackedPropActors.contains(Parent))
             {
                 bUnsupportedTrapParent = true;
-                SDK::DbgLog(
-                    "[TrickshotSave] trap=%p has unsupported tracked-object parent=%p\n",
+                SDK::DbgLog("[TrickshotSave] trap=%p has unsupported tracked-object parent=%p\n",
                     Trap, Parent);
                 return;
             }
-            const bool bExternalParent =
-                ParentIndex == SavedIndices.end() &&
-                (!Parent->bPlayerPlaced ||
-                 (Parent->HasbNetStartup() && Parent->bNetStartup)) &&
-                !Parent->bDestroyed &&
-                !(Parent->HasbActorIsBeingDestroyed() &&
+            const bool bExternalParent = ParentIndex == SavedIndices.end() &&
+                (!Parent->bPlayerPlaced || (Parent->HasbNetStartup() && Parent->bNetStartup)) &&
+                !Parent->bDestroyed && !(Parent->HasbActorIsBeingDestroyed() &&
                   Parent->bActorIsBeingDestroyed);
             if (ParentIndex == SavedIndices.end() && !bExternalParent)
             {
                 bUnsupportedTrapParent = true;
-                SDK::DbgLog(
-                    "[TrickshotSave] trap=%p has unsupported parent=%p\n",
-                    Trap, Parent);
+                SDK::DbgLog("[TrickshotSave] trap=%p has unsupported parent=%p\n", Trap, Parent);
                 return;
             }
 
             auto BuildingTrap = Trap->Cast<ABuildingTrap>();
-            auto ItemDefinition =
-                ABuildingSMActor::GetTrapDefinition(Trap);
+            auto ItemDefinition = ABuildingSMActor::GetTrapDefinition(Trap);
             if (!BuildingTrap && !ItemDefinition)
                 return;
-            // Native trap placement needs the concrete definition, and its path
-            // is also what lets a later process recover a non-resident class.
             if (!ItemDefinition)
             {
                 bUnresolvedTrapDefinition = true;
@@ -9694,18 +7755,15 @@ namespace TrickshotManager
             const FRotator Rotation = Trap->K2_GetActorRotation();
             const std::string ClassPath = FStringToStdString(
                 UKismetSystemLibrary::GetPathName(Trap->Class));
-            const std::string ItemDefinitionPath = ItemDefinition
-                ? FStringToStdString(
-                    UKismetSystemLibrary::GetPathName(ItemDefinition))
-                : std::string{};
+            const std::string ItemDefinitionPath = ItemDefinition ? FStringToStdString(
+                    UKismetSystemLibrary::GetPathName(ItemDefinition)) : std::string{};
             if (ItemDefinitionPath.empty())
             {
                 bUnresolvedTrapDefinition = true;
                 return;
             }
             const uint8 AttachmentType = Trap->HasBuildingAttachmentType()
-                ? Trap->BuildingAttachmentType
-                : GuessAttachmentType(ClassPath);
+                ? Trap->BuildingAttachmentType : GuessAttachmentType(ClassPath);
             const int AttachmentSlot = Trap->HasBuildingAttachmentSlot()
                 ? static_cast<int>(Trap->BuildingAttachmentSlot) : -1;
             int TrapLevel = -1;
@@ -9733,23 +7791,19 @@ namespace TrickshotManager
             };
             if (bExternalParent)
             {
-                const FVector ParentLocation =
-                    Parent->K2_GetActorLocation();
-                const FRotator ParentRotation =
-                    Parent->K2_GetActorRotation();
+                const FVector ParentLocation = Parent->K2_GetActorLocation();
+                const FRotator ParentRotation = Parent->K2_GetActorRotation();
                 SavedTrap["externalParent"] = {
-                    { "actorPath", FStringToStdString(
-                        UKismetSystemLibrary::GetPathName(Parent)) },
+                    { "actorPath", FStringToStdString(UKismetSystemLibrary::GetPathName(Parent)) },
                     { "class", FStringToStdString(
                         UKismetSystemLibrary::GetPathName(Parent->Class)) },
                     { "location", {
-                        ParentLocation.X, ParentLocation.Y,
-                        ParentLocation.Z } },
+                        ParentLocation.X, ParentLocation.Y, ParentLocation.Z } },
                     { "rotation", {
-                        ParentRotation.Pitch, ParentRotation.Yaw,
-                        ParentRotation.Roll } },
+                        ParentRotation.Pitch, ParentRotation.Yaw, ParentRotation.Roll } },
                     { "buildingType", Parent->HasBuildingType()
-                        ? static_cast<int>(Parent->BuildingType) : -1 }
+                        ? static_cast<int>(Parent->BuildingType) : -1
+                    }
                 };
             }
             if (TrapLevel >= 0)
@@ -9767,8 +7821,6 @@ namespace TrickshotManager
             if (Parent != AttachedParents.end())
                 SerializeTrap(Build, Parent->second);
         }
-        // A child can be present in the parent's array before it appears in the
-        // global actor snapshot. Include that valid relationship as well.
         for (auto Parent : SavedBuilds)
         {
             if (!Parent->HasAttachedBuildingActors())
@@ -9776,8 +7828,7 @@ namespace TrickshotManager
             for (auto Attached : Parent->AttachedBuildingActors)
             {
                 auto KnownParent = AttachedParents.find(Attached);
-                if (KnownParent != AttachedParents.end() &&
-                    KnownParent->second != Parent)
+                if (KnownParent != AttachedParents.end() && KnownParent->second != Parent)
                 {
                     continue;
                 }
@@ -9788,11 +7839,9 @@ namespace TrickshotManager
 
         int SavedProps = 0;
         std::unordered_set<AActor*> SerializedProps;
-        auto SerializeSpawnedObject = [&](
-            AActor* Actor, const std::string& ClassPath)
+        auto SerializeSpawnedObject = [&](AActor* Actor, const std::string& ClassPath)
         {
-            if (!Actor || ClassPath.empty() ||
-                !SerializedProps.insert(Actor).second ||
+            if (!Actor || ClassPath.empty() || !SerializedProps.insert(Actor).second ||
                 !IsLiveTrackedSpawnedActor(Actor, CurrentWorld))
             {
                 return;
@@ -9802,15 +7851,10 @@ namespace TrickshotManager
             const FVector Location = Transform.Translation;
             const FRotator Rotation = Transform.Rotation.Rotator();
             const FVector Scale = Transform.Scale3D;
-            if (!std::isfinite(Location.X) ||
-                !std::isfinite(Location.Y) ||
-                !std::isfinite(Location.Z) ||
-                !std::isfinite(Rotation.Pitch) ||
-                !std::isfinite(Rotation.Yaw) ||
-                !std::isfinite(Rotation.Roll) ||
-                !std::isfinite(Scale.X) ||
-                !std::isfinite(Scale.Y) ||
-                !std::isfinite(Scale.Z))
+            if (!std::isfinite(Location.X) || !std::isfinite(Location.Y) ||
+                !std::isfinite(Location.Z) || !std::isfinite(Rotation.Pitch) ||
+                !std::isfinite(Rotation.Yaw) || !std::isfinite(Rotation.Roll) ||
+                !std::isfinite(Scale.X) || !std::isfinite(Scale.Y) || !std::isfinite(Scale.Z))
             {
                 return;
             }
@@ -9834,15 +7878,12 @@ namespace TrickshotManager
 
         if (SavedBuilds.empty() && SavedProps == 0)
         {
-            Message =
-                "There are no player-built structures or spawned objects to save.";
+            Message = "There are no player-built structures or spawned objects to save.";
             return false;
         }
-        if (SavedProps >
-            static_cast<int>(kMaximumTrickshotSpawnedObjects))
+        if (SavedProps > static_cast<int>(kMaximumTrickshotSpawnedObjects))
         {
-            Message =
-                "There are too many spawned objects to save (maximum 2048).";
+            Message = "There are too many spawned objects to save (maximum 2048).";
             return false;
         }
 
@@ -9858,31 +7899,23 @@ namespace TrickshotManager
         }
 
         size_t SavedWaypointCount = 0;
-        if (FConfiguration::bSaveWaypoints.load(
-                std::memory_order_acquire) &&
-            !SerializeWaypoints(
+        if (FConfiguration::bSaveWaypoints.load(std::memory_order_acquire) && !SerializeWaypoints(
                 Root, SavedWaypointCount, Message))
         {
             return false;
         }
 
         const fs::path FinalPath = Directory / (SafeName + ".json");
-        const fs::path TemporaryPath = Directory /
-            (SafeName + ".json.tmp." +
-             std::to_string(GetCurrentProcessId()) + "." +
-             std::to_string(GetTickCount64()));
+        const fs::path TemporaryPath = Directory / (SafeName + ".json.tmp." +
+             std::to_string(GetCurrentProcessId()) + "." + std::to_string(GetTickCount64()));
         const std::string SerializedPreset = Root.dump(4);
-        std::ofstream File(
-            TemporaryPath,
-            std::ios::binary | std::ios::trunc);
+        std::ofstream File(TemporaryPath, std::ios::binary | std::ios::trunc);
         if (!File)
         {
             Message = "Could not create the trickshot file.";
             return false;
         }
-        File.write(
-            SerializedPreset.data(),
-            static_cast<std::streamsize>(SerializedPreset.size()));
+        File.write(SerializedPreset.data(), static_cast<std::streamsize>(SerializedPreset.size()));
         File.flush();
         const bool WriteSucceeded = File.good();
         File.close();
@@ -9890,53 +7923,41 @@ namespace TrickshotManager
         {
             std::error_code RemoveError;
             fs::remove(TemporaryPath, RemoveError);
-            Message =
-                "Could not finish writing the trickshot file; the previous save was kept.";
+            Message = "Could not finish writing the trickshot file; the previous save was kept.";
             return false;
         }
-        if (!MoveFileExW(
-                TemporaryPath.c_str(),
-                FinalPath.c_str(),
+        if (!MoveFileExW(TemporaryPath.c_str(), FinalPath.c_str(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         {
             std::error_code RemoveError;
             fs::remove(TemporaryPath, RemoveError);
-            Message =
-                "Could not publish the trickshot file; the previous save was kept.";
+            Message = "Could not publish the trickshot file; the previous save was kept.";
             return false;
         }
         Message = "Saved " + std::to_string(SavedBuilds.size()) +
             " player builds, " + std::to_string(SavedTraps) +
-            " traps, and " + std::to_string(SavedProps) +
-            " spawned objects";
+            " traps, and " + std::to_string(SavedProps) + " spawned objects";
         if (Root.contains("waypoints"))
         {
-            Message += ", plus " +
-                std::to_string(SavedWaypointCount) + " waypoints";
+            Message += ", plus " + std::to_string(SavedWaypointCount) + " waypoints";
         }
         Message += ".";
         return true;
     }
 
-    inline bool ReadBuiltInPreset(
-        const FBuiltInPresetDefinition& Preset,
-        nlohmann::json& Root,
+    inline bool ReadBuiltInPreset(const FBuiltInPresetDefinition& Preset, nlohmann::json& Root,
         std::string& Message)
     {
         HMODULE Module = nullptr;
-        if (!GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(&GAsyncState),
-                &Module))
+                reinterpret_cast<LPCWSTR>(&GAsyncState), &Module))
         {
             Message = "Could not access the built-in trickshot data.";
             return false;
         }
 
-        const HRSRC Resource = FindResourceW(
-            Module,
-            MAKEINTRESOURCEW(Preset.ResourceId),
+        const HRSRC Resource = FindResourceW(Module, MAKEINTRESOURCEW(Preset.ResourceId),
             RT_RCDATA);
         if (!Resource)
         {
@@ -9954,15 +7975,11 @@ namespace TrickshotManager
             return false;
         }
 
-        Root = nlohmann::json::parse(
-            Data, Data + ResourceSize);
+        Root = nlohmann::json::parse(Data, Data + ResourceSize);
         return true;
     }
 
-    inline bool ReadSavedPreset(
-        const std::string& Name,
-        nlohmann::json& Root,
-        std::string& Message)
+    inline bool ReadSavedPreset(const std::string& Name, nlohmann::json& Root, std::string& Message)
     {
         const auto Directory = GetDirectory();
         if (Directory.empty())
@@ -9981,8 +7998,6 @@ namespace TrickshotManager
             return false;
         }
 
-        // Keep ReadGuard alive while parsing so an external writer cannot
-        // replace or modify the file between the readiness check and read.
         std::ifstream File(PresetPath);
         if (!File || !(File >> Root))
         {
@@ -9992,9 +8007,7 @@ namespace TrickshotManager
         return true;
     }
 
-    inline bool Load(
-        const std::string& PresetId,
-        std::string& Message)
+    inline bool Load(const std::string& PresetId, std::string& Message)
     {
         if (PresetId.empty())
         {
@@ -10022,19 +8035,15 @@ namespace TrickshotManager
             else
             {
                 constexpr std::string_view SavedPrefix = "saved:";
-                PresetName = PresetId.rfind(
-                    SavedPrefix.data(), 0) == 0
-                    ? PresetId.substr(SavedPrefix.size())
-                    : PresetId;
-                if (PresetName.empty() ||
-                    !ReadSavedPreset(PresetName, Root, Message))
+                PresetName = PresetId.rfind(SavedPrefix.data(), 0) == 0
+                    ? PresetId.substr(SavedPrefix.size()) : PresetId;
+                if (PresetName.empty() || !ReadSavedPreset(PresetName, Root, Message))
                 {
                     return false;
                 }
             }
 
-            if (!Root.contains("builds") ||
-                !Root["builds"].is_array())
+            if (!Root.contains("builds") || !Root["builds"].is_array())
             {
                 Message = "The selected trickshot file is invalid.";
                 return false;
@@ -10047,22 +8056,16 @@ namespace TrickshotManager
             }
             if (Root.contains("props") && !Root["props"].is_array())
                 throw std::runtime_error("invalid trickshot props");
-            if (Root.contains("waypoints") &&
-                !Root["waypoints"].is_array())
+            if (Root.contains("waypoints") && !Root["waypoints"].is_array())
                 throw std::runtime_error("invalid trickshot waypoints");
             const int SchemaVersion = Root.value("version", 1);
             if (SchemaVersion < 1 || SchemaVersion > 7)
                 throw std::runtime_error("unsupported trickshot schema");
-            if (SchemaVersion < 7 &&
-                Root.contains("waypoints"))
+            if (SchemaVersion < 7 && Root.contains("waypoints"))
             {
-                throw std::runtime_error(
-                    "waypoint state requires trickshot schema 7");
+                throw std::runtime_error("waypoint state requires trickshot schema 7");
             }
 
-            // Attachment enums have changed between Fortnite releases. New
-            // presets record their source version so a raw attachment value is
-            // never reinterpreted by a different build of the game.
             if (SchemaVersion >= 3 && !Root.contains("fortnite"))
                 throw std::runtime_error("missing Fortnite version");
             if (Root.contains("fortnite"))
@@ -10071,17 +8074,14 @@ namespace TrickshotManager
                 if (Root["fortnite"].is_number())
                     SavedFortniteVersion = Root["fortnite"].get<double>();
                 else if (Root["fortnite"].is_string())
-                    SavedFortniteVersion = std::stod(
-                        Root["fortnite"].get<std::string>());
+                    SavedFortniteVersion = std::stod(Root["fortnite"].get<std::string>());
                 else
                     throw std::runtime_error("invalid Fortnite version");
 
                 if (!std::isfinite(SavedFortniteVersion))
                     throw std::runtime_error("invalid Fortnite version");
 
-                if (std::abs(
-                        SavedFortniteVersion -
-                        VersionInfo.FortniteVersion) > 0.001)
+                if (std::abs(SavedFortniteVersion - VersionInfo.FortniteVersion) > 0.001)
                 {
                     Message = "This trickshot was saved on a different Fortnite version.";
                     return false;
@@ -10092,13 +8092,10 @@ namespace TrickshotManager
             std::vector<FPendingTrickshotProp> PendingProps;
             bool RestoreWaypoints = false;
             AFortPlayerControllerAthena::FWaypointMap PendingWaypoints;
-            if (SchemaVersion >= 7 &&
-                FConfiguration::bSaveWaypoints.load(
-                    std::memory_order_acquire) &&
-                Root.contains("waypoints"))
+            if (SchemaVersion >= 7 && FConfiguration::bSaveWaypoints.load(
+                    std::memory_order_acquire) && Root.contains("waypoints"))
             {
-                PendingWaypoints =
-                    ParseSavedWaypoints(Root["waypoints"]);
+                PendingWaypoints = ParseSavedWaypoints(Root["waypoints"]);
                 RestoreWaypoints = true;
             }
             std::vector<TWeakObjectPtr<UClass>> TrackedPropClasses;
@@ -10118,10 +8115,8 @@ namespace TrickshotManager
             if (SavedProps != Root.end() && !SavedProps->empty())
             {
                 constexpr size_t kMaximumClassPathLength = 2048;
-                if (SavedProps->size() >
-                    kMaximumTrickshotSpawnedObjects)
-                    throw std::runtime_error(
-                        "too many trickshot spawned objects");
+                if (SavedProps->size() > kMaximumTrickshotSpawnedObjects)
+                    throw std::runtime_error("too many trickshot spawned objects");
 
                 if (LegacyTireProps)
                 {
@@ -10130,115 +8125,81 @@ namespace TrickshotManager
                 }
                 if (LegacyTireProps && !TireClass)
                 {
-                    Message = std::string(
-                        "Required tire asset is unavailable: ") +
-                        kTrickshotTireClassPath +
-                        ". The current trickshot was left unchanged.";
+                    Message = std::string("Required tire asset is unavailable: ") +
+                        kTrickshotTireClassPath + ". The current trickshot was left unchanged.";
                     return false;
                 }
 
                 PendingProps.reserve(SavedProps->size());
                 for (const auto& SavedProp : *SavedProps)
                 {
-                    if (!SavedProp.is_object() ||
-                        !SavedProp.contains("class") ||
+                    if (!SavedProp.is_object() || !SavedProp.contains("class") ||
                         !SavedProp["class"].is_string())
                     {
                         throw std::runtime_error("invalid trickshot prop");
                     }
-                    const std::string ClassPath =
-                        SavedProp["class"].get<std::string>();
-                    if (ClassPath.empty() ||
-                        ClassPath.size() > kMaximumClassPathLength ||
+                    const std::string ClassPath = SavedProp["class"].get<std::string>();
+                    if (ClassPath.empty() || ClassPath.size() > kMaximumClassPathLength ||
                         ClassPath.find('\0') != std::string::npos)
-                        throw std::runtime_error(
-                            "invalid trickshot prop class path");
-                    if (LegacyTireProps &&
-                        ClassPath != kTrickshotTireClassPath)
-                        throw std::runtime_error(
-                            "unsupported legacy trickshot prop class");
-                    if (!LegacyTireProps &&
-                        SavedProp.value("kind", "") != "spawnedActor")
-                        throw std::runtime_error(
-                            "invalid trickshot prop kind");
+                        throw std::runtime_error("invalid trickshot prop class path");
+                    if (LegacyTireProps && ClassPath != kTrickshotTireClassPath)
+                        throw std::runtime_error("unsupported legacy trickshot prop class");
+                    if (!LegacyTireProps && SavedProp.value("kind", "") != "spawnedActor")
+                        throw std::runtime_error("invalid trickshot prop kind");
 
                     UClass* PropClass = TireClass;
                     if (!LegacyTireProps)
                     {
-                        UEAllocatedWString WideClassPath(
-                            ClassPath.begin(), ClassPath.end());
-                        auto ClassObject = const_cast<UObject*>(
-                            FindTrickshotAssetGuarded(
-                                WideClassPath.c_str(),
-                                UClass::StaticClass()));
-                        if (!IsLiveTrickshotAsset(
-                                ClassObject, UClass::StaticClass()))
+                        UEAllocatedWString WideClassPath(ClassPath.begin(), ClassPath.end());
+                        auto ClassObject = const_cast<UObject*>(FindTrickshotAssetGuarded(
+                                WideClassPath.c_str(), UClass::StaticClass()));
+                        if (!IsLiveTrickshotAsset(ClassObject, UClass::StaticClass()))
                         {
-                            ClassObject = const_cast<UObject*>(
-                                LoadTrickshotAssetGuarded(
-                                    WideClassPath.c_str(),
-                                    UClass::StaticClass()));
+                            ClassObject = const_cast<UObject*>(LoadTrickshotAssetGuarded(
+                                    WideClassPath.c_str(), UClass::StaticClass()));
                         }
-                        PropClass = IsLiveTrickshotAsset(
-                            ClassObject, UClass::StaticClass())
+                        PropClass = IsLiveTrickshotAsset(ClassObject, UClass::StaticClass())
                             ? static_cast<UClass*>(ClassObject) : nullptr;
                         if (IsUnsafeTrickshotLifecycleClass(PropClass))
                         {
                             PropClass = nullptr;
                         }
-                        if (PropClass &&
-                            GetCanonicalTrackedClassPath(PropClass) !=
-                                ClassPath)
+                        if (PropClass && GetCanonicalTrackedClassPath(PropClass) != ClassPath)
                         {
                             PropClass = nullptr;
                         }
                     }
                     if (!PropClass)
                     {
-                        Message = "Required spawned object class is unavailable: " +
-                            ClassPath +
+                        Message = "Required spawned object class is unavailable: " + ClassPath +
                             ". The current trickshot was left unchanged.";
                         return false;
                     }
                     AssetRoots.Root(PropClass);
                     const auto& L = SavedProp.at("location");
                     const auto& R = SavedProp.at("rotation");
-                    if (!L.is_array() || L.size() != 3 ||
-                        !R.is_array() || R.size() != 3)
+                    if (!L.is_array() || L.size() != 3 || !R.is_array() || R.size() != 3)
                     {
-                        throw std::runtime_error(
-                            "invalid trickshot prop data");
+                        throw std::runtime_error("invalid trickshot prop data");
                     }
                     FVector Scale(1.0, 1.0, 1.0);
                     if (SavedProp.contains("scale"))
                     {
                         const auto& S = SavedProp["scale"];
                         if (!S.is_array() || S.size() != 3)
-                            throw std::runtime_error(
-                                "invalid trickshot prop scale");
-                        Scale = FVector(
-                            S[0].get<double>(), S[1].get<double>(),
-                            S[2].get<double>());
+                            throw std::runtime_error("invalid trickshot prop scale");
+                        Scale = FVector(S[0].get<double>(), S[1].get<double>(), S[2].get<double>());
                     }
-                    FVector Location(
-                        L[0].get<double>(), L[1].get<double>(),
-                        L[2].get<double>());
-                    FRotator Rotation(
-                        R[0].get<double>(), R[1].get<double>(),
-                        R[2].get<double>());
+                    FVector Location(L[0].get<double>(), L[1].get<double>(), L[2].get<double>());
+                    FRotator Rotation(R[0].get<double>(), R[1].get<double>(), R[2].get<double>());
                     constexpr double kMaximumPropCoordinate = 10000000.0;
                     constexpr double kMaximumPropRotation = 1000000.0;
                     constexpr double kMaximumPropScale = 1000.0;
-                    if (!std::isfinite(Location.X) ||
-                        !std::isfinite(Location.Y) ||
-                        !std::isfinite(Location.Z) ||
-                        !std::isfinite(Rotation.Pitch) ||
-                        !std::isfinite(Rotation.Yaw) ||
-                        !std::isfinite(Rotation.Roll) ||
-                        !std::isfinite(Scale.X) ||
-                        !std::isfinite(Scale.Y) ||
-                        !std::isfinite(Scale.Z) ||
-                        std::abs(Location.X) > kMaximumPropCoordinate ||
+                    if (!std::isfinite(Location.X) || !std::isfinite(Location.Y) ||
+                        !std::isfinite(Location.Z) || !std::isfinite(Rotation.Pitch) ||
+                        !std::isfinite(Rotation.Yaw) || !std::isfinite(Rotation.Roll) ||
+                        !std::isfinite(Scale.X) || !std::isfinite(Scale.Y) ||
+                        !std::isfinite(Scale.Z) || std::abs(Location.X) > kMaximumPropCoordinate ||
                         std::abs(Location.Y) > kMaximumPropCoordinate ||
                         std::abs(Location.Z) > kMaximumPropCoordinate ||
                         std::abs(Rotation.Pitch) > kMaximumPropRotation ||
@@ -10248,17 +8209,13 @@ namespace TrickshotManager
                         std::abs(Scale.Y) > kMaximumPropScale ||
                         std::abs(Scale.Z) > kMaximumPropScale)
                     {
-                        throw std::runtime_error(
-                            "invalid trickshot prop transform");
+                        throw std::runtime_error("invalid trickshot prop transform");
                     }
                     PendingProps.push_back({
-                        TWeakObjectPtr<UClass>(PropClass),
-                        Location, Rotation, Scale,
-                        ClassPath });
+                        TWeakObjectPtr<UClass>(PropClass), Location, Rotation, Scale, ClassPath });
                 }
             }
-            if (LegacyTireProps && TireClass &&
-                TrackedPropClasses.empty())
+            if (LegacyTireProps && TireClass && TrackedPropClasses.empty())
             {
                 AssetRoots.Root(TireClass);
                 TrackedPropClasses.emplace_back(TireClass);
@@ -10279,88 +8236,62 @@ namespace TrickshotManager
                 const int Parent = SavedBuild.value("parent", -1);
                 if (Parent < -1)
                     throw std::runtime_error("invalid building parent");
-                const std::string ItemDefinitionPath =
-                    SavedBuild.value("itemDefinition", "");
-                const bool HasExternalParent =
-                    SchemaVersion >= 4 &&
+                const std::string ItemDefinitionPath = SavedBuild.value("itemDefinition", "");
+                const bool HasExternalParent = SchemaVersion >= 4 &&
                     SavedBuild.contains("externalParent");
                 std::string Kind;
                 if (SchemaVersion >= 3)
                 {
-                    if (!SavedBuild.contains("kind") ||
-                        !SavedBuild["kind"].is_string())
+                    if (!SavedBuild.contains("kind") || !SavedBuild["kind"].is_string())
                     {
-                        throw std::runtime_error(
-                            "missing trickshot record kind");
+                        throw std::runtime_error("missing trickshot record kind");
                     }
                     Kind = SavedBuild["kind"].get<std::string>();
-                    const bool ValidInternalTrap =
-                        Kind == "trap" && Parent >= 0 &&
+                    const bool ValidInternalTrap = Kind == "trap" && Parent >= 0 &&
                         !HasExternalParent;
-                    const bool ValidExternalTrap =
-                        Kind == "trap" && Parent == -1 &&
+                    const bool ValidExternalTrap = Kind == "trap" && Parent == -1 &&
                         HasExternalParent;
-                    if ((Kind == "build" &&
-                         (Parent != -1 || HasExternalParent)) ||
-                        (Kind == "trap" &&
-                         (ItemDefinitionPath.empty() ||
+                    if ((Kind == "build" && (Parent != -1 || HasExternalParent)) ||
+                        (Kind == "trap" && (ItemDefinitionPath.empty() ||
                           (!ValidInternalTrap && !ValidExternalTrap))) ||
                         (Kind != "build" && Kind != "trap"))
                     {
-                        throw std::runtime_error(
-                            "invalid trickshot record kind");
+                        throw std::runtime_error("invalid trickshot record kind");
                     }
                 }
-                const bool IsTrap = SchemaVersion >= 3
-                    ? Kind == "trap" : Parent >= 0;
+                const bool IsTrap = SchemaVersion >= 3 ? Kind == "trap" : Parent >= 0;
                 UEAllocatedWString WideClassPath(ClassPath.begin(), ClassPath.end());
-                auto ClassObject = const_cast<UObject*>(
-                    FindTrickshotAssetGuarded(
+                auto ClassObject = const_cast<UObject*>(FindTrickshotAssetGuarded(
                         WideClassPath.c_str(), UClass::StaticClass()));
-                const bool bLoadedClassPackage =
-                    !IsLiveTrickshotAsset(
+                const bool bLoadedClassPackage = !IsLiveTrickshotAsset(
                         ClassObject, UClass::StaticClass());
                 if (bLoadedClassPackage)
                 {
-                    // An edited subclass may not be resident in a fresh match.
-                    // Load only from this explicit user-triggered, game-thread
-                    // operation and keep the guarded fallback out of tick-time
-                    // placement and attachment repair.
-                    ClassObject = const_cast<UObject*>(
-                        LoadTrickshotAssetGuarded(
+                    ClassObject = const_cast<UObject*>(LoadTrickshotAssetGuarded(
                             WideClassPath.c_str(), UClass::StaticClass()));
                 }
-                UClass* Class = IsLiveTrickshotAsset(
-                    ClassObject, UClass::StaticClass())
+                UClass* Class = IsLiveTrickshotAsset(ClassObject, UClass::StaticClass())
                     ? static_cast<UClass*>(ClassObject) : nullptr;
                 if (Class && bLoadedClassPackage)
                     AssetRoots.Root(Class);
                 UFortDecoItemDefinition* ItemDefinition = nullptr;
                 if (IsTrap && !ItemDefinitionPath.empty())
                 {
-                    UEAllocatedWString WideItemDefinitionPath(
-                        ItemDefinitionPath.begin(),
+                    UEAllocatedWString WideItemDefinitionPath(ItemDefinitionPath.begin(),
                         ItemDefinitionPath.end());
-                    auto ItemObject = const_cast<UObject*>(
-                        FindTrickshotAssetGuarded(
-                        WideItemDefinitionPath.c_str(),
-                        UFortDecoItemDefinition::StaticClass()));
-                    const bool bLoadedItemPackage =
-                        !IsLiveTrickshotAsset(
-                            ItemObject,
+                    auto ItemObject = const_cast<UObject*>(FindTrickshotAssetGuarded(
+                        WideItemDefinitionPath.c_str(), UFortDecoItemDefinition::StaticClass()));
+                    const bool bLoadedItemPackage = !IsLiveTrickshotAsset(ItemObject,
                             UFortDecoItemDefinition::StaticClass());
                     if (bLoadedItemPackage)
                     {
-                        ItemObject = const_cast<UObject*>(
-                            LoadTrickshotAssetGuarded(
+                        ItemObject = const_cast<UObject*>(LoadTrickshotAssetGuarded(
                                 WideItemDefinitionPath.c_str(),
                                 UFortDecoItemDefinition::StaticClass()));
                     }
-                    ItemDefinition = IsLiveTrickshotAsset(
-                        ItemObject,
+                    ItemDefinition = IsLiveTrickshotAsset(ItemObject,
                         UFortDecoItemDefinition::StaticClass())
-                        ? static_cast<UFortDecoItemDefinition*>(ItemObject)
-                        : nullptr;
+                        ? static_cast<UFortDecoItemDefinition*>(ItemObject) : nullptr;
                     if (ItemDefinition)
                         AssetRoots.Root(ItemDefinition);
                 }
@@ -10368,20 +8299,13 @@ namespace TrickshotManager
                 const auto& R = SavedBuild.at("rotation");
                 if (L.size() != 3 || R.size() != 3)
                     throw std::runtime_error("invalid building data");
-                FVector ParsedLocation(
-                    L[0].get<double>(), L[1].get<double>(),
-                    L[2].get<double>());
-                FRotator ParsedRotation(
-                    R[0].get<double>(), R[1].get<double>(),
-                    R[2].get<double>());
+                FVector ParsedLocation(L[0].get<double>(), L[1].get<double>(), L[2].get<double>());
+                FRotator ParsedRotation(R[0].get<double>(), R[1].get<double>(), R[2].get<double>());
                 constexpr double kMaximumSavedCoordinate = 10000000.0;
                 constexpr double kMaximumSavedRotation = 1000000.0;
-                if (!std::isfinite(ParsedLocation.X) ||
-                    !std::isfinite(ParsedLocation.Y) ||
-                    !std::isfinite(ParsedLocation.Z) ||
-                    !std::isfinite(ParsedRotation.Pitch) ||
-                    !std::isfinite(ParsedRotation.Yaw) ||
-                    !std::isfinite(ParsedRotation.Roll) ||
+                if (!std::isfinite(ParsedLocation.X) || !std::isfinite(ParsedLocation.Y) ||
+                    !std::isfinite(ParsedLocation.Z) || !std::isfinite(ParsedRotation.Pitch) ||
+                    !std::isfinite(ParsedRotation.Yaw) || !std::isfinite(ParsedRotation.Roll) ||
                     std::abs(ParsedLocation.X) > kMaximumSavedCoordinate ||
                     std::abs(ParsedLocation.Y) > kMaximumSavedCoordinate ||
                     std::abs(ParsedLocation.Z) > kMaximumSavedCoordinate ||
@@ -10389,18 +8313,13 @@ namespace TrickshotManager
                     std::abs(ParsedRotation.Yaw) > kMaximumSavedRotation ||
                     std::abs(ParsedRotation.Roll) > kMaximumSavedRotation)
                 {
-                    throw std::runtime_error(
-                        "invalid building transform");
+                    throw std::runtime_error("invalid building transform");
                 }
-                const int RawAttachmentType = SavedBuild.value(
-                    "attachmentType",
+                const int RawAttachmentType = SavedBuild.value("attachmentType",
                     static_cast<int>(GuessAttachmentType(ClassPath)));
-                const int AttachmentSlot =
-                    SavedBuild.value("attachmentSlot", -1);
-                const int TrapLevel =
-                    SavedBuild.value("trapLevel", -1);
-                const int OriginalTrapLevel =
-                    SavedBuild.value("originalTrapLevel", -1);
+                const int AttachmentSlot = SavedBuild.value("attachmentSlot", -1);
+                const int TrapLevel = SavedBuild.value("trapLevel", -1);
+                const int OriginalTrapLevel = SavedBuild.value("originalTrapLevel", -1);
                 if (RawAttachmentType < 0 || RawAttachmentType > UINT8_MAX ||
                     AttachmentSlot < -1 || AttachmentSlot > UINT8_MAX ||
                     TrapLevel < -1 || OriginalTrapLevel < -1)
@@ -10408,47 +8327,37 @@ namespace TrickshotManager
                     throw std::runtime_error("invalid trap attachment data");
                 }
                 auto ConcreteItemDefinition = IsTrap && ItemDefinition
-                    ? ABuildingSMActor::ResolveTrapDefinitionForAttachment(
-                        ItemDefinition,
-                        static_cast<uint8>(RawAttachmentType), Class)
-                    : ItemDefinition;
+                    ? ABuildingSMActor::ResolveTrapDefinitionForAttachment(ItemDefinition,
+                        static_cast<uint8>(RawAttachmentType), Class) : ItemDefinition;
                 if (ConcreteItemDefinition)
                     AssetRoots.Root(ConcreteItemDefinition);
                 if (!Class && ConcreteItemDefinition)
                 {
-                    Class = static_cast<UClass*>(
-                        const_cast<UObject*>(
+                    Class = static_cast<UClass*>(const_cast<UObject*>(
                             ConcreteItemDefinition->BlueprintClass.WeakPtr.Get()));
                 }
                 auto DefaultBuilding = Class
-                    ? static_cast<ABuildingSMActor*>(Class->GetDefaultObj())
-                    : nullptr;
-                if (!DefaultBuilding ||
-                    !DefaultBuilding->IsA(
-                        ABuildingSMActor::StaticClass()))
+                    ? static_cast<ABuildingSMActor*>(Class->GetDefaultObj()) : nullptr;
+                if (!DefaultBuilding || !DefaultBuilding->IsA(ABuildingSMActor::StaticClass()))
                 {
                     Class = nullptr;
                 }
                 else if (!IsTrap && DefaultBuilding->Cast<ABuildingTrap>())
                 {
-                    throw std::runtime_error(
-                        "trap class cannot be restored as a structure");
+                    throw std::runtime_error("trap class cannot be restored as a structure");
                 }
                 if (Class)
                     AssetRoots.Root(Class);
                 if (!Class)
                 {
-                    SDK::DbgLog(
-                        "[TrickshotLoad] unavailable class record=%zu path=%s item=%s\n",
-                        RecordIndex, ClassPath.c_str(),
-                        ItemDefinitionPath.c_str());
+                    SDK::DbgLog("[TrickshotLoad] unavailable class record=%zu path=%s item=%s\n",
+                        RecordIndex, ClassPath.c_str(), ItemDefinitionPath.c_str());
                 }
                 if (IsTrap && !ItemDefinition)
                 {
                     SDK::DbgLog(
                         "[TrickshotLoad] unavailable trap definition record=%zu class=%s item=%s\n",
-                        RecordIndex, ClassPath.c_str(),
-                        ItemDefinitionPath.c_str());
+                        RecordIndex, ClassPath.c_str(), ItemDefinitionPath.c_str());
                 }
                 FPendingTrickshotBuild PendingBuild;
                 PendingBuild.Class = TWeakObjectPtr<UClass>(Class);
@@ -10456,60 +8365,44 @@ namespace TrickshotManager
                 PendingBuild.Rotation = ParsedRotation;
                 PendingBuild.Level = SavedBuild.value("level", 0);
                 PendingBuild.Parent = Parent;
-                PendingBuild.AttachmentType =
-                    static_cast<uint8>(RawAttachmentType);
+                PendingBuild.AttachmentType = static_cast<uint8>(RawAttachmentType);
                 PendingBuild.AttachmentSlot = AttachmentSlot;
                 PendingBuild.Mirrored = SavedBuild.value("mirrored", false);
                 PendingBuild.TrapLevel = TrapLevel;
                 PendingBuild.OriginalTrapLevel = OriginalTrapLevel;
                 PendingBuild.IsTrap = IsTrap;
-                PendingBuild.SupportAnchor =
-                    SavedBuild.value("supportAnchor", false);
-                PendingBuild.HasSavedSupportAnchor =
-                    SavedBuild.contains("supportAnchor");
+                PendingBuild.SupportAnchor = SavedBuild.value("supportAnchor", false);
+                PendingBuild.HasSavedSupportAnchor = SavedBuild.contains("supportAnchor");
                 PendingBuild.ClassPath = ClassPath;
                 PendingBuild.ItemDefinition = ItemDefinitionPath;
                 PendingBuild.ResolvedItemDefinition =
                     TWeakObjectPtr<UFortDecoItemDefinition>(ItemDefinition);
-                PendingBuild.ResolvedConcreteDefinition =
-                    TWeakObjectPtr<UFortDecoItemDefinition>(
+                PendingBuild.ResolvedConcreteDefinition = TWeakObjectPtr<UFortDecoItemDefinition>(
                         ConcreteItemDefinition);
                 if (HasExternalParent)
                 {
                     const auto& External = SavedBuild["externalParent"];
-                    if (!External.is_object() ||
-                        !External.contains("class") ||
-                        !External.contains("location") ||
-                        !External.contains("rotation"))
+                    if (!External.is_object() || !External.contains("class") ||
+                        !External.contains("location") || !External.contains("rotation"))
                     {
-                        throw std::runtime_error(
-                            "invalid external trap parent");
+                        throw std::runtime_error("invalid external trap parent");
                     }
                     const auto& ExternalLocation = External["location"];
                     const auto& ExternalRotation = External["rotation"];
-                    if (!ExternalLocation.is_array() ||
-                        ExternalLocation.size() != 3 ||
-                        !ExternalRotation.is_array() ||
-                        ExternalRotation.size() != 3)
+                    if (!ExternalLocation.is_array() || ExternalLocation.size() != 3 ||
+                        !ExternalRotation.is_array() || ExternalRotation.size() != 3)
                     {
-                        throw std::runtime_error(
-                            "invalid external trap parent transform");
+                        throw std::runtime_error("invalid external trap parent transform");
                     }
                     PendingBuild.HasExternalParent = true;
-                    PendingBuild.ExternalParentClassPath =
-                        External.at("class").get<std::string>();
-                    PendingBuild.ExternalParentActorPath =
-                        External.value("actorPath", "");
-                    PendingBuild.ExternalParentLocation = FVector(
-                        ExternalLocation[0].get<double>(),
-                        ExternalLocation[1].get<double>(),
-                        ExternalLocation[2].get<double>());
+                    PendingBuild.ExternalParentClassPath = External.at("class").get<std::string>();
+                    PendingBuild.ExternalParentActorPath = External.value("actorPath", "");
+                    PendingBuild.ExternalParentLocation = FVector(ExternalLocation[0].get<double>(),
+                        ExternalLocation[1].get<double>(), ExternalLocation[2].get<double>());
                     PendingBuild.ExternalParentRotation = FRotator(
-                        ExternalRotation[0].get<double>(),
-                        ExternalRotation[1].get<double>(),
+                        ExternalRotation[0].get<double>(), ExternalRotation[1].get<double>(),
                         ExternalRotation[2].get<double>());
-                    PendingBuild.ExternalParentBuildingType =
-                        External.value("buildingType", -1);
+                    PendingBuild.ExternalParentBuildingType = External.value("buildingType", -1);
                     if (PendingBuild.ExternalParentClassPath.empty() ||
                         PendingBuild.ExternalParentBuildingType < -1 ||
                         PendingBuild.ExternalParentBuildingType > UINT8_MAX ||
@@ -10520,8 +8413,7 @@ namespace TrickshotManager
                         !std::isfinite(PendingBuild.ExternalParentRotation.Yaw) ||
                         !std::isfinite(PendingBuild.ExternalParentRotation.Roll))
                     {
-                        throw std::runtime_error(
-                            "invalid external trap parent data");
+                        throw std::runtime_error("invalid external trap parent data");
                     }
                 }
                 Pending.push_back(std::move(PendingBuild));
@@ -10533,17 +8425,14 @@ namespace TrickshotManager
                     SavedBuild.Parent >= static_cast<int>(Pending.size()))
                     throw std::runtime_error("invalid trap parent");
             }
-            const int Canonicalized =
-                CanonicalizePendingStructuralCells(Pending);
+            const int Canonicalized = CanonicalizePendingStructuralCells(Pending);
             if (Canonicalized > 0)
             {
-                SDK::DbgLog(
-                    "[TrickshotLoad] canonicalized %d stale structural records\n",
+                SDK::DbgLog("[TrickshotLoad] canonicalized %d stale structural records\n",
                     Canonicalized);
             }
 
-            const bool HasStructuralRoot = std::any_of(
-                Pending.begin(), Pending.end(),
+            const bool HasStructuralRoot = std::any_of(Pending.begin(), Pending.end(),
                 [](const FPendingTrickshotBuild& SavedBuild)
                 {
                     return !SavedBuild.IsTrap;
@@ -10555,8 +8444,7 @@ namespace TrickshotManager
                 return false;
             }
 
-            if (std::any_of(
-                    Pending.begin(), Pending.end(),
+            if (std::any_of(Pending.begin(), Pending.end(),
                     [](const FPendingTrickshotBuild& SavedBuild)
                     {
                         return SavedBuild.HasExternalParent;
@@ -10587,9 +8475,6 @@ namespace TrickshotManager
                 WorldBuildings.Free();
             }
 
-            // Validate the complete graph and all resident assets before the
-            // destructive replacement step. A failed preflight leaves the
-            // player's current trickshot untouched.
             for (int Index = 0; Index < static_cast<int>(Pending.size()); ++Index)
             {
                 auto& SavedBuild = Pending[Index];
@@ -10597,8 +8482,7 @@ namespace TrickshotManager
                 if (!SavedClass)
                 {
                     Message = "Required build or trap class is unavailable: " +
-                        SavedBuild.ClassPath +
-                        ". The current trickshot was left unchanged.";
+                        SavedBuild.ClassPath + ". The current trickshot was left unchanged.";
                     return false;
                 }
                 if (!SavedBuild.IsTrap)
@@ -10606,69 +8490,52 @@ namespace TrickshotManager
                 if (SavedBuild.HasExternalParent)
                 {
                     if (!SavedBuild.ResolvedExternalParent.Get())
-                        throw std::runtime_error(
-                            "external trap parent became unavailable");
+                        throw std::runtime_error("external trap parent became unavailable");
                 }
-                else if (
-                    (SavedBuild.Parent >= static_cast<int>(Pending.size()) ||
-                     SavedBuild.Parent == Index ||
-                     Pending[SavedBuild.Parent].IsTrap))
+                else if ((SavedBuild.Parent >= static_cast<int>(Pending.size()) ||
+                     SavedBuild.Parent == Index || Pending[SavedBuild.Parent].IsTrap))
                 {
                     throw std::runtime_error("invalid trap parent");
                 }
-                auto ResolvedItemDefinition =
-                    SavedBuild.ResolvedItemDefinition.Get();
+                auto ResolvedItemDefinition = SavedBuild.ResolvedItemDefinition.Get();
                 if (!ResolvedItemDefinition)
                 {
-                    ResolvedItemDefinition =
-                        ABuildingSMActor::GetTrapDefinition(SavedClass);
-                    SavedBuild.ResolvedItemDefinition =
-                        TWeakObjectPtr<UFortDecoItemDefinition>(
+                    ResolvedItemDefinition = ABuildingSMActor::GetTrapDefinition(SavedClass);
+                    SavedBuild.ResolvedItemDefinition = TWeakObjectPtr<UFortDecoItemDefinition>(
                             ResolvedItemDefinition);
                 }
                 if (!ResolvedItemDefinition)
                 {
                     Message = "Required trap definition is unavailable: " +
-                        SavedBuild.ItemDefinition +
-                        ". The current trickshot was left unchanged.";
+                        SavedBuild.ItemDefinition + ". The current trickshot was left unchanged.";
                     return false;
                 }
 
                 auto ResolvedConcreteDefinition =
-                    ABuildingSMActor::ResolveTrapDefinitionForAttachment(
-                        ResolvedItemDefinition,
-                        SavedBuild.AttachmentType,
-                        SavedClass);
-                SavedBuild.ResolvedConcreteDefinition =
-                    TWeakObjectPtr<UFortDecoItemDefinition>(
+                    ABuildingSMActor::ResolveTrapDefinitionForAttachment(ResolvedItemDefinition,
+                        SavedBuild.AttachmentType, SavedClass);
+                SavedBuild.ResolvedConcreteDefinition = TWeakObjectPtr<UFortDecoItemDefinition>(
                         ResolvedConcreteDefinition);
                 if (!ResolvedConcreteDefinition)
                 {
                     Message = "The saved trap definition does not support its attachment type; the current trickshot was left unchanged.";
                     return false;
                 }
-                auto DefinitionClass = static_cast<UClass*>(
-                    const_cast<UObject*>(
-                        ResolvedConcreteDefinition->
-                            BlueprintClass.WeakPtr.Get()));
+                auto DefinitionClass = static_cast<UClass*>(const_cast<UObject*>(
+                        ResolvedConcreteDefinition->BlueprintClass.WeakPtr.Get()));
                 if (DefinitionClass && DefinitionClass != SavedClass)
                     throw std::runtime_error("concrete trap definition does not match its saved class");
             }
 
-            // The staged transaction deliberately destroys the existing setup
-            // before later layers spawn. Root every dependency now so an asset
-            // referenced only by the old actors cannot be collected mid-load.
             for (auto& SavedBuild : Pending)
             {
                 if (auto Class = SavedBuild.Class.Get())
                     AssetRoots.Root(Class);
-                if (auto Definition =
-                    SavedBuild.ResolvedItemDefinition.Get())
+                if (auto Definition = SavedBuild.ResolvedItemDefinition.Get())
                 {
                     AssetRoots.Root(Definition);
                 }
-                if (auto Concrete =
-                    SavedBuild.ResolvedConcreteDefinition.Get())
+                if (auto Concrete = SavedBuild.ResolvedConcreteDefinition.Get())
                 {
                     AssetRoots.Root(Concrete);
                 }
@@ -10683,20 +8550,17 @@ namespace TrickshotManager
                 if (!Pending[Index].IsTrap)
                     StructuralOrder.push_back(Index);
             }
-            std::stable_sort(
-                StructuralOrder.begin(), StructuralOrder.end(),
+            std::stable_sort(StructuralOrder.begin(), StructuralOrder.end(),
                 [&](int Left, int Right)
                 {
-                    return Pending[Left].Location.Z <
-                        Pending[Right].Location.Z;
+                    return Pending[Left].Location.Z <Pending[Right].Location.Z;
                 });
 
             FTrickshotLoadJob Job;
             Job.Active = true;
             Job.Name = PresetId;
             Job.World = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
-            Job.Controller =
-                TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
+            Job.Controller = TWeakObjectPtr<AFortPlayerControllerAthena>(Controller);
             Job.Pending = std::move(Pending);
             Job.PendingProps = std::move(PendingProps);
             Job.RestoreWaypoints = RestoreWaypoints;
@@ -10710,14 +8574,12 @@ namespace TrickshotManager
             {
                 TArray<ABuildingSMActor*> BaselineBuildings;
                 Utils::GetAll<ABuildingSMActor>(BaselineBuildings);
-                Job.BaselineBuildingActors.reserve(
-                    BaselineBuildings.Num());
+                Job.BaselineBuildingActors.reserve(BaselineBuildings.Num());
                 for (auto Building : BaselineBuildings)
                 {
                     if (Building)
                     {
-                        Job.BaselineBuildingActors.emplace_back(
-                            Building);
+                        Job.BaselineBuildingActors.emplace_back(Building);
                     }
                 }
                 BaselineBuildings.Free();
@@ -10744,8 +8606,7 @@ namespace TrickshotManager
         }
     }
 
-    inline void ApplyLoadedBuildOwnership(
-        ABuildingSMActor* Build,
+    inline void ApplyLoadedBuildOwnership(ABuildingSMActor* Build,
         AFortPlayerControllerAthena* Controller)
     {
         if (!Build || !Controller)
@@ -10754,14 +8615,12 @@ namespace TrickshotManager
         Build->bPlayerPlaced = true;
         if (Controller->PlayerState)
         {
-            auto PlayerState = static_cast<AFortPlayerStateAthena*>(
-                Controller->PlayerState);
+            auto PlayerState = static_cast<AFortPlayerStateAthena*>(Controller->PlayerState);
             if (Build->HasTeam() && PlayerState->HasTeamIndex())
                 Build->Team = PlayerState->TeamIndex;
             if (Build->HasTeamIndex() && PlayerState->HasTeamIndex())
                 Build->TeamIndex = PlayerState->TeamIndex;
-            if (Build->HasOwnerPersistentID() &&
-                PlayerState->HasWorldPlayerId())
+            if (Build->HasOwnerPersistentID() && PlayerState->HasWorldPlayerId())
             {
                 Build->OwnerPersistentID = PlayerState->WorldPlayerId;
             }
@@ -10771,22 +8630,18 @@ namespace TrickshotManager
         Build->ForceNetUpdate();
     }
 
-    inline bool ValidateLoadContext(
-        AFortPlayerControllerAthena*& Controller,
-        std::string& Message)
+    inline bool ValidateLoadContext(AFortPlayerControllerAthena*& Controller, std::string& Message)
     {
         auto World = GLoadJob.World.Get();
         Controller = GLoadJob.Controller.Get();
         if (!World || World != UWorld::GetWorld())
         {
-            Message =
-                "The world changed while the trickshot was loading.";
+            Message = "The world changed while the trickshot was loading.";
             return false;
         }
         if (!Controller || Controller != GetHostController())
         {
-            Message =
-                "The host disconnected while the trickshot was loading.";
+            Message = "The host disconnected while the trickshot was loading.";
             return false;
         }
         return true;
@@ -10794,40 +8649,28 @@ namespace TrickshotManager
 
     std::string BuildLoadCompletionMessage()
     {
-        std::string Message = "Loaded " +
-            std::to_string(GLoadJob.LoadedBuilds) +
-            " player builds, " +
-            std::to_string(GLoadJob.LoadedTraps) + " traps, and " +
+        std::string Message = "Loaded " + std::to_string(GLoadJob.LoadedBuilds) +
+            " player builds, " + std::to_string(GLoadJob.LoadedTraps) + " traps, and " +
             std::to_string(GLoadJob.LoadedProps) + " spawned objects.";
         if (GLoadJob.RestoreWaypoints)
         {
-            Message += " Restored " +
-                std::to_string(
-                    AFortPlayerControllerAthena::
-                        SnapshotWaypoints().size()) +
-                " waypoints.";
+            Message += " Restored " + std::to_string(AFortPlayerControllerAthena::
+                        SnapshotWaypoints().size()) + " waypoints.";
         }
         if (GLoadJob.FailedTrapPlacements > 0)
         {
-            Message += " Failed " +
-                std::to_string(GLoadJob.FailedTrapPlacements) +
+            Message += " Failed " + std::to_string(GLoadJob.FailedTrapPlacements) +
                 " trap restorations.";
         }
         if (GLoadJob.FailedPropPlacements > 0)
         {
-            Message += " Failed " +
-                std::to_string(GLoadJob.FailedPropPlacements) +
+            Message += " Failed " + std::to_string(GLoadJob.FailedPropPlacements) +
                 " spawned-object restorations.";
         }
-        if (GLoadJob.Skipped >
-            GLoadJob.FailedTrapPlacements +
-                GLoadJob.FailedPropPlacements)
+        if (GLoadJob.Skipped > GLoadJob.FailedTrapPlacements + GLoadJob.FailedPropPlacements)
         {
-            Message += " Skipped " +
-                std::to_string(
-                    GLoadJob.Skipped -
-                    GLoadJob.FailedTrapPlacements -
-                    GLoadJob.FailedPropPlacements) +
+            Message += " Skipped " + std::to_string(GLoadJob.Skipped -
+                    GLoadJob.FailedTrapPlacements - GLoadJob.FailedPropPlacements) +
                 " other actor placements.";
         }
         return Message;
@@ -10858,38 +8701,28 @@ namespace TrickshotManager
             {
                 if (!Candidate)
                     return false;
-                for (const auto& Existing :
-                    GLoadJob.ExistingTrackedProps)
+                for (const auto& Existing : GLoadJob.ExistingTrackedProps)
                 {
                     if (Existing.Get() == Candidate)
                         return true;
                 }
-                return GLoadJob.LegacyTireProps &&
-                    IsTrackedTrickshotPropClass(
-                        Candidate->Class,
+                return GLoadJob.LegacyTireProps && IsTrackedTrickshotPropClass(Candidate->Class,
                         GLoadJob.TrackedPropClasses);
             };
 
-            // Modern presets own exact registry instances. Never destroy every
-            // actor of an arbitrary saved class: the map or another player may
-            // legitimately own actors of that same class.
             for (const auto& Existing : GLoadJob.ExistingTrackedProps)
             {
                 auto Prop = Existing.Get();
-                if (IsLiveTrackedSpawnedActor(
-                        Prop, GLoadJob.World.Get()))
+                if (IsLiveTrackedSpawnedActor(Prop, GLoadJob.World.Get()))
                 {
                     ForgetTrackedSpawnedActor(Prop);
                     Prop->K2_DestroyActor();
                 }
             }
 
-            // Schemas 1-5 predate the instance registry and only allowed the
-            // Tower tire. Retain their narrow session-scoped migration cleanup.
             if (GLoadJob.LegacyTireProps)
             {
-                for (const auto& TrackedClass :
-                    GLoadJob.TrackedPropClasses)
+                for (const auto& TrackedClass : GLoadJob.TrackedPropClasses)
                 {
                     auto PropClass = TrackedClass.Get();
                     if (!PropClass)
@@ -10910,8 +8743,7 @@ namespace TrickshotManager
 
             TArray<ABuildingSMActor*> ExistingBuilds;
             Utils::GetAll<ABuildingSMActor>(ExistingBuilds);
-            std::unordered_set<ABuildingSMActor*>
-                ExistingAttachments;
+            std::unordered_set<ABuildingSMActor*> ExistingAttachments;
             for (auto Build : ExistingBuilds)
             {
                 if (!Build || IsExistingTrackedProp(Build))
@@ -10924,8 +8756,7 @@ namespace TrickshotManager
                             ExistingAttachments.insert(Attached);
                     }
                 }
-                if (Build->HasParentActorToAttachTo() &&
-                    Build->ParentActorToAttachTo)
+                if (Build->HasParentActorToAttachTo() && Build->ParentActorToAttachTo)
                 {
                     ExistingAttachments.insert(Build);
                 }
@@ -10936,13 +8767,9 @@ namespace TrickshotManager
                 }
             }
 
-            // Destroy attachment children before their supports. The delay
-            // after this phase gives Fortnite's structural grid a full tick to
-            // remove the old setup before the first replacement layer arrives.
             for (auto Build : ExistingBuilds)
             {
-                if (ExistingAttachments.contains(Build) &&
-                    !IsExistingTrackedProp(Build) &&
+                if (ExistingAttachments.contains(Build) && !IsExistingTrackedProp(Build) &&
                     IsTrickshotSessionPlayerBuild(Build))
                 {
                     Build->SilentDie(true);
@@ -10950,8 +8777,7 @@ namespace TrickshotManager
             }
             for (auto Build : ExistingBuilds)
             {
-                if (!ExistingAttachments.contains(Build) &&
-                    !IsExistingTrackedProp(Build) &&
+                if (!ExistingAttachments.contains(Build) && !IsExistingTrackedProp(Build) &&
                     IsTrickshotSessionPlayerBuild(Build))
                 {
                     Build->SilentDie(true);
@@ -10960,41 +8786,29 @@ namespace TrickshotManager
             ExistingBuilds.Free();
 
             GLoadJob.Phase = ELoadPhase::Structures;
-            GLoadJob.NextAdvanceMs =
-                GetTickCount64() + kLoadPhaseDelayMs;
-            SDK::DbgLog(
-                "[TrickshotLoad] cleanup complete; waiting for structural grid\n");
+            GLoadJob.NextAdvanceMs = GetTickCount64() + kLoadPhaseDelayMs;
+            SDK::DbgLog("[TrickshotLoad] cleanup complete; waiting for structural grid\n");
             return ELoadPumpResult::Running;
         }
 
         if (GLoadJob.Phase == ELoadPhase::Structures)
         {
-            if (GLoadJob.NextStructural >=
-                GLoadJob.StructuralOrder.size())
+            if (GLoadJob.NextStructural >= GLoadJob.StructuralOrder.size())
             {
                 GLoadJob.Phase = ELoadPhase::ReleaseStructuralSupport;
-                GLoadJob.NextAdvanceMs =
-                    GetTickCount64() + kLoadPhaseDelayMs;
+                GLoadJob.NextAdvanceMs = GetTickCount64() + kLoadPhaseDelayMs;
                 return ELoadPumpResult::Running;
             }
 
-            const int FirstIndex = GLoadJob.StructuralOrder[
-                GLoadJob.NextStructural];
-            const double LayerZ =
-                GLoadJob.Pending[FirstIndex].Location.Z;
+            const int FirstIndex = GLoadJob.StructuralOrder[GLoadJob.NextStructural];
+            const double LayerZ = GLoadJob.Pending[FirstIndex].Location.Z;
             int LayerBuilds = 0;
 
-            // Spawn one complete height band per timed pump. Scheduling the
-            // next deadline after this work also prevents GetMaxTickRate and
-            // TickFlush from advancing two bands in the same engine frame.
-            while (GLoadJob.NextStructural <
-                GLoadJob.StructuralOrder.size())
+            while (GLoadJob.NextStructural <GLoadJob.StructuralOrder.size())
             {
-                const int Index = GLoadJob.StructuralOrder[
-                    GLoadJob.NextStructural];
+                const int Index = GLoadJob.StructuralOrder[GLoadJob.NextStructural];
                 const auto& SavedBuild = GLoadJob.Pending[Index];
-                if (std::abs(SavedBuild.Location.Z - LayerZ) >
-                    kStructuralLayerTolerance)
+                if (std::abs(SavedBuild.Location.Z - LayerZ) > kStructuralLayerTolerance)
                 {
                     break;
                 }
@@ -11007,27 +8821,19 @@ namespace TrickshotManager
                     GLoadJob.FailureMessage =
                         "A structural build asset became unavailable; later layers were not loaded.";
                     GLoadJob.Phase = ELoadPhase::StructureSettle;
-                    GLoadJob.NextStructural =
-                        GLoadJob.StructuralOrder.size();
+                    GLoadJob.NextStructural = GLoadJob.StructuralOrder.size();
                     break;
                 }
 
-                auto Build =
-                    UWorld::SpawnActorUnfinished<ABuildingSMActor>(
-                        SavedClass, SavedBuild.Location,
-                        SavedBuild.Rotation, Controller);
+                auto Build = UWorld::SpawnActorUnfinished<ABuildingSMActor>(
+                        SavedClass, SavedBuild.Location, SavedBuild.Rotation, Controller);
                 if (Build)
                 {
-                    // Hold incomplete height bands in the grid until every
-                    // saved neighbor exists. This is instance state only; it
-                    // does not mutate the shared building class asset.
                     if (Build->HasbForciblyStructurallySupported())
                         Build->bForciblyStructurallySupported = true;
                     Build->InitializeKismetSpawnedBuildingActor(
                         Build, Controller, true, nullptr, false);
-                    UWorld::FinishSpawnActor(
-                        Build, SavedBuild.Location,
-                        SavedBuild.Rotation);
+                    UWorld::FinishSpawnActor(Build, SavedBuild.Location, SavedBuild.Rotation);
                 }
                 if (!Build)
                 {
@@ -11035,8 +8841,7 @@ namespace TrickshotManager
                     GLoadJob.FailureMessage =
                         "A structural build failed to spawn; later layers were not loaded.";
                     GLoadJob.Phase = ELoadPhase::StructureSettle;
-                    GLoadJob.NextStructural =
-                        GLoadJob.StructuralOrder.size();
+                    GLoadJob.NextStructural = GLoadJob.StructuralOrder.size();
                     break;
                 }
 
@@ -11045,78 +8850,60 @@ namespace TrickshotManager
                 Build->OnRep_CurrentBuildingLevel();
                 Build->SetMirrored(SavedBuild.Mirrored);
                 ApplyLoadedBuildOwnership(Build, Controller);
-                GLoadJob.SpawnedBuilds[Index] =
-                    TWeakObjectPtr<ABuildingSMActor>(Build);
+                GLoadJob.SpawnedBuilds[Index] = TWeakObjectPtr<ABuildingSMActor>(Build);
                 ++GLoadJob.LoadedBuilds;
                 ++LayerBuilds;
             }
 
-            if (GLoadJob.NextStructural >=
-                GLoadJob.StructuralOrder.size())
+            if (GLoadJob.NextStructural >= GLoadJob.StructuralOrder.size())
             {
                 GLoadJob.Phase = ELoadPhase::ReleaseStructuralSupport;
             }
-            GLoadJob.NextAdvanceMs =
-                GetTickCount64() + kLoadPhaseDelayMs;
-            SDK::DbgLog(
-                "[TrickshotLoad] spawned structural layer z=%.2f actors=%d\n",
+            GLoadJob.NextAdvanceMs = GetTickCount64() + kLoadPhaseDelayMs;
+            SDK::DbgLog("[TrickshotLoad] spawned structural layer z=%.2f actors=%d\n",
                 LayerZ, LayerBuilds);
             return ELoadPumpResult::Running;
         }
 
         if (GLoadJob.Phase == ELoadPhase::ReleaseStructuralSupport)
         {
-            // Restore normal structural behavior after the complete graph is
-            // present. Pieces that were directly world-supported when saved
-            // remain portable anchors; every other piece is checked through
-            // Fortnite's own finished structural graph.
             for (int Index : GLoadJob.StructuralOrder)
             {
                 auto Build = GLoadJob.SpawnedBuilds[Index].Get();
-                if (!Build || Build->bDestroyed ||
-                    (Build->HasbActorIsBeingDestroyed() &&
+                if (!Build || Build->bDestroyed || (Build->HasbActorIsBeingDestroyed() &&
                      Build->bActorIsBeingDestroyed))
                 {
                     const auto& SavedBuild = GLoadJob.Pending[Index];
                     SDK::DbgLog(
                         "[TrickshotLoad] structure vanished before support release index=%d class=%s loc=(%.2f,%.2f,%.2f)\n",
                         Index, SavedBuild.ClassPath.c_str(),
-                        SavedBuild.Location.X, SavedBuild.Location.Y,
-                        SavedBuild.Location.Z);
-                    Message =
-                        "A restored structural layer did not remain connected.";
+                        SavedBuild.Location.X, SavedBuild.Location.Y, SavedBuild.Location.Z);
+                    Message = "A restored structural layer did not remain connected.";
                     return ELoadPumpResult::Failed;
                 }
                 const auto& SavedBuild = GLoadJob.Pending[Index];
                 if (Build->HasbForciblyStructurallySupported())
                 {
-                    Build->bForciblyStructurallySupported =
-                        SavedBuild.SupportAnchor;
+                    Build->bForciblyStructurallySupported = SavedBuild.SupportAnchor;
                 }
             }
 
-            // Clear every temporary hold before asking native integrity code
-            // to traverse the graph. An early traversal must not see a later
-            // non-anchor piece as still forcibly supported.
             for (int Index : GLoadJob.StructuralOrder)
             {
                 auto Build = GLoadJob.SpawnedBuilds[Index].Get();
-                if (!Build || Build->bDestroyed ||
-                    (Build->HasbActorIsBeingDestroyed() &&
+                if (!Build || Build->bDestroyed || (Build->HasbActorIsBeingDestroyed() &&
                      Build->bActorIsBeingDestroyed))
                 {
                     continue;
                 }
-                if (Build->GetFunction(
-                        "MarkConnectedBuildingsForStructuralIntegrityCheck"))
+                if (Build->GetFunction("MarkConnectedBuildingsForStructuralIntegrityCheck"))
                 {
                     Build->MarkConnectedBuildingsForStructuralIntegrityCheck();
                 }
                 Build->ForceNetUpdate();
             }
             GLoadJob.Phase = ELoadPhase::StructureSettle;
-            GLoadJob.NextAdvanceMs =
-                GetTickCount64() + kLoadPhaseDelayMs;
+            GLoadJob.NextAdvanceMs = GetTickCount64() + kLoadPhaseDelayMs;
             SDK::DbgLog(
                 "[TrickshotLoad] released temporary support; waiting for integrity check\n");
             return ELoadPumpResult::Running;
@@ -11124,23 +8911,18 @@ namespace TrickshotManager
 
         if (GLoadJob.Phase == ELoadPhase::StructureSettle)
         {
-            // The final support layer has now had a complete settle interval.
-            // Only after that may native trap placement see the final graph.
             for (int Index : GLoadJob.StructuralOrder)
             {
                 auto Build = GLoadJob.SpawnedBuilds[Index].Get();
-                if (!Build || Build->bDestroyed ||
-                    (Build->HasbActorIsBeingDestroyed() &&
+                if (!Build || Build->bDestroyed || (Build->HasbActorIsBeingDestroyed() &&
                      Build->bActorIsBeingDestroyed))
                 {
                     const auto& SavedBuild = GLoadJob.Pending[Index];
                     SDK::DbgLog(
                         "[TrickshotLoad] structure failed settle index=%d class=%s loc=(%.2f,%.2f,%.2f) anchor=%d actor=%p destroyed=%d destroying=%d\n",
                         Index, SavedBuild.ClassPath.c_str(),
-                        SavedBuild.Location.X, SavedBuild.Location.Y,
-                        SavedBuild.Location.Z,
-                        SavedBuild.SupportAnchor ? 1 : 0, Build,
-                        Build && Build->bDestroyed ? 1 : 0,
+                        SavedBuild.Location.X, SavedBuild.Location.Y, SavedBuild.Location.Z,
+                        SavedBuild.SupportAnchor ? 1 : 0, Build, Build && Build->bDestroyed ? 1 : 0,
                         Build && Build->HasbActorIsBeingDestroyed() &&
                             Build->bActorIsBeingDestroyed ? 1 : 0);
                     if (GLoadJob.FailureMessage.empty())
@@ -11168,17 +8950,11 @@ namespace TrickshotManager
             return ELoadPumpResult::Failed;
         }
 
-        // Legacy ServerSpawnDeco can finish on a later game tick. Retry only
-        // unresolved traps on wall-clock deadlines; this never blocks the game
-        // thread and lets deferred children be adopted before another native
-        // spawn is attempted. Four native passes are followed by one final
-        // observation/cleanup sweep; the bounded worst-case wait is 2 seconds.
         constexpr uint8 kNativeTrapPlacementPasses = 4;
-        constexpr uint8 kMaximumTrapPlacementPasses =
-            kNativeTrapPlacementPasses + 1;
-        constexpr ULONGLONG kTrapRetryDelaysMs[
-            kMaximumTrapPlacementPasses - 1] = {
-                250ULL, 500ULL, 1000ULL, 250ULL };
+        constexpr uint8 kMaximumTrapPlacementPasses = kNativeTrapPlacementPasses + 1;
+        constexpr ULONGLONG kTrapRetryDelaysMs[kMaximumTrapPlacementPasses - 1] = {
+                250ULL, 500ULL, 1000ULL, 250ULL
+            };
         int UnresolvedTraps = 0;
         for (int Index = 0;
             Index < static_cast<int>(GLoadJob.Pending.size());
@@ -11204,57 +8980,37 @@ namespace TrickshotManager
             else if (SavedBuild.Parent >= 0 && SavedBuild.Parent <
                 static_cast<int>(GLoadJob.SpawnedBuilds.size()))
             {
-                Parent =
-                    GLoadJob.SpawnedBuilds[SavedBuild.Parent].Get();
+                Parent = GLoadJob.SpawnedBuilds[SavedBuild.Parent].Get();
             }
-            // A support disappearing is structural corruption, not a
-            // transient placement failure. Keep this fatal on every pass.
             if (!SavedClass || !Parent || Parent->bDestroyed ||
-                (Parent->HasbActorIsBeingDestroyed() &&
-                 Parent->bActorIsBeingDestroyed))
+                (Parent->HasbActorIsBeingDestroyed() && Parent->bActorIsBeingDestroyed))
             {
                 SDK::DbgLog(
                     "[TrickshotLoad] trap parent unavailable index=%d pass=%u external=%d parent=%p\n",
-                    Index,
-                    static_cast<unsigned>(
-                        GLoadJob.TrapPlacementPass + 1),
-                    SavedBuild.HasExternalParent ? 1 : 0,
-                    Parent);
+                    Index, static_cast<unsigned>(GLoadJob.TrapPlacementPass + 1),
+                    SavedBuild.HasExternalParent ? 1 : 0, Parent);
                 Message = SavedBuild.HasExternalParent
                     ? "A required natural trap support became unavailable during loading."
                     : "A restored trap support became unavailable during loading.";
                 return ELoadPumpResult::Failed;
             }
 
-            UEAllocatedWString ItemDefinitionPath(
-                SavedBuild.ItemDefinition.begin(),
+            UEAllocatedWString ItemDefinitionPath(SavedBuild.ItemDefinition.begin(),
                 SavedBuild.ItemDefinition.end());
-            auto Trap = ABuildingSMActor::SpawnSavedTrap(
-                SavedClass, SavedBuild.Location,
-                SavedBuild.Rotation, Parent,
-                SavedBuild.AttachmentType, Controller,
-                SavedBuild.ItemDefinition.empty()
-                    ? nullptr : ItemDefinitionPath.c_str(),
-                SavedBuild.AttachmentSlot,
-                SavedBuild.TrapLevel,
-                SavedBuild.OriginalTrapLevel,
-                SavedBuild.ResolvedItemDefinition.Get(),
-                GLoadJob.TrapPlacementPass > 0,
-                GLoadJob.TrapPlacementPass >=
-                    kNativeTrapPlacementPasses,
-                &GLoadJob.SpawnedBuilds,
+            auto Trap = ABuildingSMActor::SpawnSavedTrap(SavedClass, SavedBuild.Location,
+                SavedBuild.Rotation, Parent, SavedBuild.AttachmentType, Controller,
+                SavedBuild.ItemDefinition.empty() ? nullptr : ItemDefinitionPath.c_str(),
+                SavedBuild.AttachmentSlot, SavedBuild.TrapLevel, SavedBuild.OriginalTrapLevel,
+                SavedBuild.ResolvedItemDefinition.Get(), GLoadJob.TrapPlacementPass > 0,
+                GLoadJob.TrapPlacementPass >= kNativeTrapPlacementPasses, &GLoadJob.SpawnedBuilds,
                 &GLoadJob.BaselineBuildingActors);
             if (!Trap)
             {
                 SDK::DbgLog(
                     "[TrickshotLoad] trap unresolved index=%d pass=%u class=%s parent=%p attachment=%u slot=%d\n",
-                    Index,
-                    static_cast<unsigned>(
-                        GLoadJob.TrapPlacementPass + 1),
-                    SavedBuild.ClassPath.c_str(), Parent,
-                    static_cast<unsigned>(
-                        SavedBuild.AttachmentType),
-                    SavedBuild.AttachmentSlot);
+                    Index, static_cast<unsigned>(GLoadJob.TrapPlacementPass + 1),
+                    SavedBuild.ClassPath.c_str(), Parent, static_cast<unsigned>(
+                        SavedBuild.AttachmentType), SavedBuild.AttachmentSlot);
                 ++UnresolvedTraps;
                 continue;
             }
@@ -11263,22 +9019,15 @@ namespace TrickshotManager
             Trap->CurrentBuildingLevel = TrapBuildingLevel;
             Trap->OnRep_CurrentBuildingLevel();
             ApplyLoadedBuildOwnership(Trap, Controller);
-            GLoadJob.SpawnedBuilds[Index] =
-                TWeakObjectPtr<ABuildingSMActor>(Trap);
+            GLoadJob.SpawnedBuilds[Index] = TWeakObjectPtr<ABuildingSMActor>(Trap);
         }
 
-        if (UnresolvedTraps > 0 &&
-            GLoadJob.TrapPlacementPass + 1 <
-                kMaximumTrapPlacementPasses)
+        if (UnresolvedTraps > 0 && GLoadJob.TrapPlacementPass + 1 <kMaximumTrapPlacementPasses)
         {
-            const ULONGLONG RetryDelay =
-                kTrapRetryDelaysMs[GLoadJob.TrapPlacementPass];
-            SDK::DbgLog(
-                "[TrickshotLoad] trap pass=%u/%u unresolved=%d retryInMs=%llu\n",
-                static_cast<unsigned>(
-                    GLoadJob.TrapPlacementPass + 1),
-                static_cast<unsigned>(kMaximumTrapPlacementPasses),
-                UnresolvedTraps,
+            const ULONGLONG RetryDelay = kTrapRetryDelaysMs[GLoadJob.TrapPlacementPass];
+            SDK::DbgLog("[TrickshotLoad] trap pass=%u/%u unresolved=%d retryInMs=%llu\n",
+                static_cast<unsigned>(GLoadJob.TrapPlacementPass + 1),
+                static_cast<unsigned>(kMaximumTrapPlacementPasses), UnresolvedTraps,
                 static_cast<unsigned long long>(RetryDelay));
             ++GLoadJob.TrapPlacementPass;
             GLoadJob.NextAdvanceMs = Now + RetryDelay;
@@ -11297,44 +9046,33 @@ namespace TrickshotManager
             if (!GLoadJob.Pending[Index].IsTrap)
                 continue;
             auto Trap = GLoadJob.SpawnedBuilds[Index].Get();
-            if (Trap && !Trap->bDestroyed &&
-                !(Trap->HasbActorIsBeingDestroyed() &&
+            if (Trap && !Trap->bDestroyed && !(Trap->HasbActorIsBeingDestroyed() &&
                   Trap->bActorIsBeingDestroyed))
             {
                 ++GLoadJob.LoadedTraps;
             }
         }
-        SDK::DbgLog(
-            "[TrickshotLoad] trap phase complete passes=%u loaded=%d unresolved=%d\n",
+        SDK::DbgLog("[TrickshotLoad] trap phase complete passes=%u loaded=%d unresolved=%d\n",
             static_cast<unsigned>(GLoadJob.TrapPlacementPass + 1),
             GLoadJob.LoadedTraps, UnresolvedTraps);
 
-        // Trap retries deliberately span real time. Revalidate the entire
-        // structural graph after that window—not just unresolved traps'
-        // parents—so a delayed second-layer collapse cannot be hidden by a
-        // successful prop spawn and scene commit.
         for (int Index : GLoadJob.StructuralOrder)
         {
             auto Build = GLoadJob.SpawnedBuilds[Index].Get();
-            if (!Build || Build->bDestroyed ||
-                (Build->HasbActorIsBeingDestroyed() &&
+            if (!Build || Build->bDestroyed || (Build->HasbActorIsBeingDestroyed() &&
                  Build->bActorIsBeingDestroyed))
             {
                 const auto& SavedBuild = GLoadJob.Pending[Index];
                 SDK::DbgLog(
                     "[TrickshotLoad] structure vanished during trap retries index=%d class=%s loc=(%.2f,%.2f,%.2f)\n",
                     Index, SavedBuild.ClassPath.c_str(),
-                    SavedBuild.Location.X, SavedBuild.Location.Y,
-                    SavedBuild.Location.Z);
+                    SavedBuild.Location.X, SavedBuild.Location.Y, SavedBuild.Location.Z);
                 Message =
                     "A restored structural layer collapsed while traps were settling; the partial load was removed.";
                 return ELoadPumpResult::Failed;
             }
         }
 
-        // Command-spawned objects go last so their construction and collision
-        // see the final structure/trap scene. AlwaysSpawn preserves the exact
-        // saved transform, including custom summon scale.
         for (size_t Index = 0;
             Index < GLoadJob.PendingProps.size(); ++Index)
         {
@@ -11347,27 +9085,20 @@ namespace TrickshotManager
                 continue;
             }
 
-            FTransform SpawnTransform(
-                SavedProp.Location,
-                SavedProp.Rotation.Quaternion(),
+            FTransform SpawnTransform(SavedProp.Location, SavedProp.Rotation.Quaternion(),
                 SavedProp.Scale);
-            AActor* SpawnOwner =
-                SavedProp.ClassPath == kTrickshotTireClassPath
+            AActor* SpawnOwner = SavedProp.ClassPath == kTrickshotTireClassPath
                 ? static_cast<AActor*>(Controller) : nullptr;
-            auto Prop = UWorld::SpawnActor(
-                SavedClass, SpawnTransform, SpawnOwner, 1);
+            auto Prop = UWorld::SpawnActor(SavedClass, SpawnTransform, SpawnOwner, 1);
             if (!Prop)
             {
                 ++GLoadJob.Skipped;
                 ++GLoadJob.FailedPropPlacements;
                 continue;
             }
-            if (Prop->Class != SavedClass ||
-                !IsLiveTrackedSpawnedActor(
-                    Prop, GLoadJob.World.Get()))
+            if (Prop->Class != SavedClass || !IsLiveTrackedSpawnedActor(Prop, GLoadJob.World.Get()))
             {
-                if (IsLiveTrackedSpawnedActor(
-                        Prop, GLoadJob.World.Get()))
+                if (IsLiveTrackedSpawnedActor(Prop, GLoadJob.World.Get()))
                     Prop->K2_DestroyActor();
                 ++GLoadJob.Skipped;
                 ++GLoadJob.FailedPropPlacements;
@@ -11380,20 +9111,16 @@ namespace TrickshotManager
                 Car->SetFuel(100.f);
             }
             Prop->ForceNetUpdate();
-            if (!IsLiveTrackedSpawnedActor(
-                    Prop, GLoadJob.World.Get()) ||
-                !RegisterSpawnedActorInternal(
-                    Prop, Controller, SavedProp.ClassPath, false))
+            if (!IsLiveTrackedSpawnedActor(Prop, GLoadJob.World.Get()) ||
+                !RegisterSpawnedActorInternal(Prop, Controller, SavedProp.ClassPath, false))
             {
-                if (IsLiveTrackedSpawnedActor(
-                        Prop, GLoadJob.World.Get()))
+                if (IsLiveTrackedSpawnedActor(Prop, GLoadJob.World.Get()))
                     Prop->K2_DestroyActor();
                 ++GLoadJob.Skipped;
                 ++GLoadJob.FailedPropPlacements;
                 continue;
             }
-            GLoadJob.SpawnedProps[Index] =
-                TWeakObjectPtr<AActor>(Prop);
+            GLoadJob.SpawnedProps[Index] = TWeakObjectPtr<AActor>(Prop);
             ++GLoadJob.LoadedProps;
         }
         if (GLoadJob.FailedPropPlacements > 0)
@@ -11402,21 +9129,15 @@ namespace TrickshotManager
             return ELoadPumpResult::Failed;
         }
 
-        // Waypoints are process-session state rather than actors. Publish the
-        // fully validated replacement only after every destructive scene phase
-        // has succeeded, so a failed preset never partially rewrites them.
         if (GLoadJob.RestoreWaypoints)
         {
-            AFortPlayerControllerAthena::ReplaceWaypoints(
-                std::move(GLoadJob.PendingWaypoints));
+            AFortPlayerControllerAthena::ReplaceWaypoints(std::move(GLoadJob.PendingWaypoints));
         }
         Message = BuildLoadCompletionMessage();
         SDK::DbgLog(
             "[TrickshotLoad] complete builds=%d traps=%d objects=%d skipped=%d failedTraps=%d failedObjects=%d\n",
-            GLoadJob.LoadedBuilds, GLoadJob.LoadedTraps,
-            GLoadJob.LoadedProps, GLoadJob.Skipped,
-            GLoadJob.FailedTrapPlacements,
-            GLoadJob.FailedPropPlacements);
+            GLoadJob.LoadedBuilds, GLoadJob.LoadedTraps, GLoadJob.LoadedProps, GLoadJob.Skipped,
+            GLoadJob.FailedTrapPlacements, GLoadJob.FailedPropPlacements);
         return ELoadPumpResult::Succeeded;
     }
 }
@@ -11424,7 +9145,8 @@ namespace TrickshotManager
 void GUI::Init()
 {
     ImGui_ImplWin32_EnableDpiAwareness();
-    float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
+    float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{ 0, 0 },
+        MONITOR_DEFAULTTOPRIMARY));
 
     WNDCLASS wc{};
     wc.lpszClassName = L"ErbiumWC";
@@ -11432,13 +9154,15 @@ void GUI::Init()
     RegisterClass(&wc);
 
     wchar_t buffer[67];
-    swprintf_s(buffer, VersionInfo.EngineVersion >= 5.0 ? L"Magnesium (FN %.2f, UE %.1f)" : (VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? L"Magnesium (FN %.2f, UE %.2f)" : L"Magnesium (FN %.1f, UE %.2f)"), VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
-    auto hWnd = CreateWindow(wc.lpszClassName, buffer, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME, 100, 100, (int)(WindowWidth * main_scale), (int)(WindowHeight * main_scale), nullptr, nullptr, nullptr, nullptr);
+    swprintf_s(buffer,
+        VersionInfo.EngineVersion >= 5.0 ? L"Magnesium (FN %.2f, UE %.1f)" : (VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? L"Magnesium (FN %.2f, UE %.2f)" : L"Magnesium (FN %.1f, UE %.2f)"),
+        VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
+    auto hWnd = CreateWindow(wc.lpszClassName, buffer,
+        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME, 100, 100,
+        (int)(WindowWidth * main_scale), (int)(WindowHeight * main_scale), nullptr, nullptr,
+        nullptr, nullptr);
 
-    // Those CreateWindow dimensions are the outer rect, so the client area came
-    // out a title bar and two borders short of what the layout is written
-    // against. Fix it before the swap chain sizes itself off this window, and
-    // record the result as the size to hold on to across monitor changes.
+    // CreateWindow's dimensions are the outer rect, so fix the client size before the swap chain reads it.
     g_ClientWidth = (int)(WindowWidth * main_scale);
     g_ClientHeight = (int)(WindowHeight * main_scale);
     ApplyFixedClientSize(hWnd);
@@ -11464,16 +9188,20 @@ void GUI::Init()
     sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
     UINT createDeviceFlags = 0;
-    //createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
     D3D_FEATURE_LEVEL featureLevel;
     const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0, };
-    HRESULT res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    HRESULT res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain,
+        &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
     if (res == DXGI_ERROR_UNSUPPORTED)
-        res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+        res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain,
+            &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
     if (res != S_OK)
         return;
 
-    LoadTextureFromMemory(embedded_image, sizeof(embedded_image), g_pd3dDevice, &g_EmbedTexture, &EmbedWidth, &EmbedHeight);
+    LoadTextureFromMemory(embedded_image, sizeof(embedded_image), g_pd3dDevice, &g_EmbedTexture,
+        &EmbedWidth, &EmbedHeight);
     LoadTextureFromMemory(Icon, sizeof(Icon), g_pd3dDevice, &g_LogoTexture, &g_LogoW, &g_LogoH);
 
     ID3D11RenderTargetView* g_mainRenderTargetView;
@@ -11499,14 +9227,12 @@ void GUI::Init()
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.IniFilename = NULL;
-    //io.DisplaySize = ImGui::GetMainViewport()->Size;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
     ImFontConfig FontConfig;
     FontConfig.FontDataOwnedByAtlas = false;
-    ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
-        (void*)font, sizeof(font), 17.f, &FontConfig);
+    ImGui::GetIO().Fonts->AddFontFromMemoryTTF((void*)font, sizeof(font), 17.f, &FontConfig);
 
     auto& mStyle = ImGui::GetStyle();
     mStyle.WindowRounding = 0.f;
@@ -11522,7 +9248,6 @@ void GUI::Init()
     auto C = [](float r, float g, float b, float a = 1.f) { return ImVec4(r, g, b, a); };
     ImVec4* col = style.Colors;
 
-    // Neutral graphite dark/grey theme (slight cool tint), ATLAS-style spread.
     col[ImGuiCol_WindowBg]             = C(0.090f, 0.094f, 0.106f, 1.00f); // graphite background
     col[ImGuiCol_ChildBg]              = C(0.090f, 0.094f, 0.106f, 1.00f);
     col[ImGuiCol_PopupBg]              = C(0.063f, 0.067f, 0.078f, 0.98f); // bar
@@ -11559,29 +9284,18 @@ void GUI::Init()
     col[ImGuiCol_TabSelected]          = C(0.090f, 0.094f, 0.106f, 1.00f);
     col[ImGuiCol_PlotLines]            = Accent();
     col[ImGuiCol_PlotHistogram]        = Accent();
-    //ImGui::StyleColorsDark();
 
-    //ImGuiStyle& style = ImGui::GetStyle();
     style.ScaleAllSizes(main_scale);
     style.FontScaleDpi = main_scale;
 
     ImGui_ImplWin32_Init(hWnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-    // Dear ImGui's example clear colour is a light blue. The launcher window
-    // covers the whole back buffer so it should never be visible, but matching
-    // it to ImGuiCol_WindowBg means a frame where it briefly is - during a
-    // resize, before the first frame - reads as the window rather than as a
-    // flash of blue.
     ImVec4 clear_color = col[ImGuiCol_WindowBg];
     bool done = false;
     bool g_SwapChainOccluded = false;
 
-    // Start a restored Auto Host countdown only after the launcher and its
-    // countdown control are ready to render. Auto Host does not require a
-    // saved preference snapshot; with Save Settings off it uses clean defaults.
-    if (FConfiguration::bAutoHost.load(
-            std::memory_order_acquire))
+    if (FConfiguration::bAutoHost.load(std::memory_order_acquire))
     {
         AutoHosting::ArmCountdown();
     }
@@ -11601,43 +9315,30 @@ void GUI::Init()
         if (done)
             break;
 
-        // Keep the countdown independent of rendering. Invalid authored storm
-        // data pauses Auto Hosting before it can cross the same Start boundary
-        // guarded by the manual CTA; fixing the sequence resumes a fresh
-        // countdown instead of starting with partially accepted data.
         std::string SafeZoneAutoHostError;
-        const bool bSafeZoneAutoHostValid =
-            ValidateCustomMovingZoneForStart(
-                SafeZoneAutoHostError);
+        const bool bSafeZoneAutoHostValid = ValidateCustomMovingZoneForStart(SafeZoneAutoHostError);
         if (!bSafeZoneAutoHostValid)
         {
             if (AutoHosting::IsCountdownActive())
                 AutoHosting::CancelCountdown();
-            GAutoHostPausedBySafeZoneValidation =
-                FConfiguration::bAutoHost.load(
+            GAutoHostPausedBySafeZoneValidation = FConfiguration::bAutoHost.load(
                     std::memory_order_acquire);
         }
         else if (GAutoHostPausedBySafeZoneValidation)
         {
-            if (FConfiguration::bAutoHost.load(
-                    std::memory_order_acquire) &&
-                !FConfiguration::bReadyToStart.load(
-                    std::memory_order_acquire))
+            if (FConfiguration::bAutoHost.load(std::memory_order_acquire) &&
+                !FConfiguration::bReadyToStart.load(std::memory_order_acquire))
             {
                 AutoHosting::ArmCountdown();
             }
             GAutoHostPausedBySafeZoneValidation = false;
         }
 
-        // A minimized or occluded launcher does not otherwise pause hosting.
         AutoHosting::TickCountdown();
         AutoHosting::TickPostMatchShutdown();
-        const bool bAutoHostCountdownThisFrame =
-            AutoHosting::IsCountdownActive();
-        const int AutoHostCountdownSecondsThisFrame =
-            bAutoHostCountdownThisFrame
-                ? AutoHosting::GetRemainingSeconds()
-                : 0;
+        const bool bAutoHostCountdownThisFrame = AutoHosting::IsCountdownActive();
+        const int AutoHostCountdownSecondsThisFrame = bAutoHostCountdownThisFrame
+                ? AutoHosting::GetRemainingSeconds() : 0;
 
         if (g_SwapChainOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
         {
@@ -11664,27 +9365,17 @@ void GUI::Init()
 
         SanitizeNativeLTMSelection(SelectedPlaylist);
 
-        // Match the original one-shot UI behavior: once requested, keep the
-        // button hidden for the rest of this joinable phase. A later server
-        // lifecycle resets it automatically before the next joinable phase.
         static bool bStartBusEarlyDismissed = false;
         if (gsStatus != Joinable)
             bStartBusEarlyDismissed = false;
 
-        // Fill exactly what is being presented. This used to size the window
-        // from WindowWidth * a DPI scale re-read every frame from the PRIMARY
-        // monitor - never the monitor the window was actually on - while the
-        // swap chain and io.DisplaySize followed the real client rect. Any
-        // disagreement between the two showed up directly: the layout clipped
-        // when the ImGui window was larger, and the swap chain's clear colour
-        // showed through as a blue border when it was smaller, which is what
-        // dragging to a monitor with a different DPI produced.
         const ImGuiViewport* Viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(Viewport->Pos, ImGuiCond_Always);
         ImGui::SetNextWindowSize(Viewport->Size, ImGuiCond_Always);
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
-        ImGui::Begin("Magnesium", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::Begin("Magnesium", nullptr,
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PopStyleVar();
 
         const float W = ImGui::GetWindowWidth();
@@ -11706,7 +9397,6 @@ void GUI::Init()
             }
         }
 
-        // ---- Top bar (#284a2c): logo + branding ----
         ImGui::GetWindowDrawList()->AddRectFilled(wp, ImVec2(wp.x + W, wp.y + TopBarH),
             ImGui::GetColorU32(ImVec4(0.063f, 0.067f, 0.078f, 1.f)));
         {
@@ -11737,7 +9427,8 @@ void GUI::Init()
 
             // FN / UE versions on the right.
             char ver[48];
-            snprintf(ver, sizeof(ver), "FN %.2f  \xC2\xB7  UE %.2f", VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
+            snprintf(ver, sizeof(ver), "FN %.2f  \xC2\xB7  UE %.2f", VersionInfo.FortniteVersion,
+                VersionInfo.EngineVersion);
             const float verW = ImGui::CalcTextSize(ver).x;
             ImGui::SetCursorPos(ImVec2(W - verW - 18.f, TitleY));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 0.92f));
@@ -11745,19 +9436,13 @@ void GUI::Init()
             ImGui::PopStyleColor();
         }
 
-        // Keep the top-bar rule in the Magnesium window layer. The old
-        // foreground draw-list placement rendered this chrome over modal
-        // windows, including the loadout picker.
         {
             ImDrawList* fdl = ImGui::GetWindowDrawList();
             const ImU32 lineCol = IM_COL32(50, 52, 58, 255);
-            fdl->AddLine(
-                ImVec2(wp.x, wp.y + TopBarH - 1.f),
-                ImVec2(wp.x + W, wp.y + TopBarH - 1.f),
+            fdl->AddLine(ImVec2(wp.x, wp.y + TopBarH - 1.f), ImVec2(wp.x + W, wp.y + TopBarH - 1.f),
                 lineCol, 1.f);
         }
 
-        // ---- Sidebar (#284a2c): vertical tabs replacing the old tab bar ----
         static int s_ActiveUI = 0;
         ImGui::SetCursorPos(ImVec2(0.f, TopBarH));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.063f, 0.067f, 0.078f, 1.f));
@@ -11769,11 +9454,8 @@ void GUI::Init()
             float yy = TabsTop;
             float activeY = -1.f;
             const bool inMatch = !FConfiguration::bReadyToStart;
-            const bool bShowLategameTab =
-                inMatch ||
-                (FConfiguration::bLateGame.load(
-                         std::memory_order_acquire) &&
-                 FConfiguration::bCustomSafeZone.load(
+            const bool bShowLategameTab = inMatch || (FConfiguration::bLateGame.load(
+                         std::memory_order_acquire) && FConfiguration::bCustomSafeZone.load(
                          std::memory_order_acquire));
 
             struct TabDef { const char* label; int ui; bool show; };
@@ -11809,34 +9491,24 @@ void GUI::Init()
                 ImVec2(sbPos.x, sbPos.y + s_IndY - 9.f), ImVec2(sbPos.x + 3.f, sbPos.y + s_IndY + 9.f),
                 ImGui::GetColorU32(Accent()), 2.f);
 
-            // Primary CTA pinned to the bottom of the sidebar: start the server.
             if (gsStatus == NotReady && !FConfiguration::bReadyToStart)
             {
                 const float bMargin = 12.f;
                 const float bH = 40.f;
                 const float bW = SidebarW - bMargin * 2.f;
-                const bool bAutoHostCountdown =
-                    bAutoHostCountdownThisFrame;
+                const bool bAutoHostCountdown = bAutoHostCountdownThisFrame;
                 std::string SafeZoneStartError;
-                const bool bSafeZoneStartValid =
-                    ValidateCustomMovingZoneForStart(
+                const bool bSafeZoneStartValid = ValidateCustomMovingZoneForStart(
                         SafeZoneStartError);
-                const float buttonY =
-                    (H - TopBarH) - bH - bMargin;
+                const float buttonY = (H - TopBarH) - bH - bMargin;
                 if (!bSafeZoneStartValid)
                 {
                     const ImVec2 errorSize = ImGui::CalcTextSize(
-                        SafeZoneStartError.c_str(), nullptr,
-                        false, bW);
-                    ImGui::SetCursorPos(ImVec2(
-                        bMargin,
-                        (std::max)(
-                            8.f,
+                        SafeZoneStartError.c_str(), nullptr, false, bW);
+                    ImGui::SetCursorPos(ImVec2(bMargin, (std::max)(8.f,
                             buttonY - errorSize.y - 10.f)));
-                    ImGui::PushTextWrapPos(
-                        ImGui::GetCursorPosX() + bW);
-                    ImGui::TextColored(
-                        ImVec4(1.f, 0.32f, 0.28f, 1.f),
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + bW);
+                    ImGui::TextColored(ImVec4(1.f, 0.32f, 0.28f, 1.f),
                         "%s", SafeZoneStartError.c_str());
                     ImGui::PopTextWrapPos();
                 }
@@ -11844,56 +9516,34 @@ void GUI::Init()
                 const ImVec2 bp = ImGui::GetCursorScreenPos();
                 if (bAutoHostCountdown)
                 {
-                    // The normal CTA becomes a display-only countdown while
-                    // Auto Hosting owns startup.
                     ImGui::Dummy(ImVec2(bW, bH));
                 }
                 else if (!bSafeZoneStartValid)
                 {
                     ImGui::Dummy(ImVec2(bW, bH));
                 }
-                else if (ImGui::InvisibleButton(
-                             "##startserver",
-                             ImVec2(bW, bH)))
+                else if (ImGui::InvisibleButton("##startserver", ImVec2(bW, bH)))
                 {
                     AutoHosting::CancelCountdown();
                     AutoHosting::SaveNow(true);
-                    FConfiguration::bReadyToStart.store(
-                        true, std::memory_order_release);
+                    FConfiguration::bReadyToStart.store(true, std::memory_order_release);
                 }
-                const bool bHov =
-                    !bAutoHostCountdown &&
-                    bSafeZoneStartValid &&
+                const bool bHov = !bAutoHostCountdown && bSafeZoneStartValid &&
                     ImGui::IsItemHovered();
-                const bool bAct =
-                    !bAutoHostCountdown &&
-                    bSafeZoneStartValid &&
+                const bool bAct = !bAutoHostCountdown && bSafeZoneStartValid &&
                     ImGui::IsItemActive();
                 ImDrawList* bdl = ImGui::GetWindowDrawList();
-                const ImVec4 fillC =
-                    bAutoHostCountdown
-                        ? ImVec4(0.28f, 0.31f, 0.38f, 1.f)
-                        : (!bSafeZoneStartValid
-                               ? ImVec4(0.34f, 0.16f, 0.18f, 1.f)
-                        : (bAct
-                               ? ImVec4(
-                                     0.62f, 0.66f,
-                                     0.78f, 1.f)
-                               : (bHov
-                                      ? ImVec4(
-                                            0.88f, 0.91f,
-                                            0.97f, 1.f)
-                                      : Accent())));
+                const ImVec4 fillC = bAutoHostCountdown ? ImVec4(0.28f, 0.31f, 0.38f, 1.f)
+                        : (!bSafeZoneStartValid ? ImVec4(0.34f, 0.16f, 0.18f, 1.f) : (bAct ? ImVec4(
+                                     0.62f, 0.66f, 0.78f, 1.f) : (bHov ? ImVec4(0.88f, 0.91f,
+                                            0.97f, 1.f) : Accent())));
                 bdl->AddRectFilled(bp, ImVec2(bp.x + bW, bp.y + bH), ImGui::GetColorU32(fillC), 6.f);
 
                 char CountdownLabel[48]{};
                 const char* bLbl = "START SERVER";
                 if (bAutoHostCountdown)
                 {
-                    snprintf(
-                        CountdownLabel,
-                        sizeof(CountdownLabel),
-                        "STARTING IN %ds",
+                    snprintf(CountdownLabel, sizeof(CountdownLabel), "STARTING IN %ds",
                         AutoHostCountdownSecondsThisFrame);
                     bLbl = CountdownLabel;
                 }
@@ -11903,68 +9553,45 @@ void GUI::Init()
                 }
                 const ImVec2 bts = ImGui::CalcTextSize(bLbl);
                 const ImVec2 tpos(bp.x + (bW - bts.x) * 0.5f, bp.y + (bH - bts.y) * 0.5f);
-                const ImU32 tcol =
-                    bAutoHostCountdown
-                        ? ImGui::GetColorU32(Accent())
-                        : (!bSafeZoneStartValid
-                               ? IM_COL32(255, 205, 205, 255)
+                const ImU32 tcol = bAutoHostCountdown ? ImGui::GetColorU32(Accent())
+                        : (!bSafeZoneStartValid ? IM_COL32(255, 205, 205, 255)
                                : IM_COL32(16, 18, 22, 255));
                 bdl->AddText(tpos, tcol, bLbl);
                 bdl->AddText(ImVec2(tpos.x + 1.f, tpos.y), tcol, bLbl); // faux-bold
             }
         }
         {
-            // Draw the sidebar edge in the sidebar's own draw list so it sits
-            // above sidebar contents but below later popup/modal windows.
             const ImVec2 SidebarPos = ImGui::GetWindowPos();
             const float SidebarWidth = ImGui::GetWindowWidth();
             const float SidebarHeight = ImGui::GetWindowHeight();
-            ImGui::GetWindowDrawList()->AddLine(
-                ImVec2(
-                    SidebarPos.x + SidebarWidth - 1.f,
-                    SidebarPos.y),
-                ImVec2(
-                    SidebarPos.x + SidebarWidth - 1.f,
-                    SidebarPos.y + SidebarHeight),
-                IM_COL32(50, 52, 58, 255),
-                1.f);
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(SidebarPos.x + SidebarWidth - 1.f,
+                    SidebarPos.y), ImVec2(SidebarPos.x + SidebarWidth - 1.f,
+                    SidebarPos.y + SidebarHeight), IM_COL32(50, 52, 58, 255), 1.f);
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
         SelectedUI = s_ActiveUI;
 
-        // ---- Content panel (inset; transparent so the #32703b background shows) ----
         const float ContentPadX = 22.f;
-        const float ContentChildW = (std::max)(
-            1.f,
-            (W - SidebarW) - ContentPadX);
-        const float ContentChildH = (std::max)(
-            1.f,
-            (H - TopBarH) - 26.f);
+        const float ContentChildW = (std::max)(1.f, (W - SidebarW) - ContentPadX);
+        const float ContentChildH = (std::max)(1.f, (H - TopBarH) - 26.f);
         ImGui::SetCursorPos(ImVec2(SidebarW + ContentPadX, TopBarH + 14.f));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.f, 0.f, 0.f, 0.f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
-        ImGui::BeginChild(
-            "##content",
-            ImVec2(ContentChildW, ContentChildH),
-            false,
+        ImGui::BeginChild("##content", ImVec2(ContentChildW, ContentChildH), false,
             ImGuiWindowFlags_AlwaysVerticalScrollbar);
         float Width = 260.0f;
         float Height = 0.0f;
-        const float SectionWidth =
-            ContentSectionWidth(Width, ContentPadX);
+        const float SectionWidth = ContentSectionWidth(Width, ContentPadX);
 
         static char commandBuffer[1024] = { 0 };
         static char playlistBuffer[1024] = { 0 };
-        static unsigned int PlaylistBufferResetGeneration =
-            GPreferenceEditorGeneration;
-        if (PlaylistBufferResetGeneration !=
-            GPreferenceEditorGeneration)
+        static unsigned int PlaylistBufferResetGeneration = GPreferenceEditorGeneration;
+        if (PlaylistBufferResetGeneration != GPreferenceEditorGeneration)
         {
             playlistBuffer[0] = '\0';
-            PlaylistBufferResetGeneration =
-                GPreferenceEditorGeneration;
+            PlaylistBufferResetGeneration = GPreferenceEditorGeneration;
         }
         switch (SelectedUI)
         {
@@ -12017,26 +9644,18 @@ void GUI::Init()
                 ImGui::SameLine(0.0f, 0.0f);
                 ImGui::TextUnformatted(" (only works on the last player to join!)");
             }
-            ImGui::Text(
-                "- Server Port: %d",
-                FConfiguration::Port.load(std::memory_order_relaxed));
-            ImGui::Text(
-                "- Server Tick Rate: %.0f",
-                FConfiguration::MaxTickRate.load(
+            ImGui::Text("- Server Port: %d", FConfiguration::Port.load(std::memory_order_relaxed));
+            ImGui::Text("- Server Tick Rate: %.0f", FConfiguration::MaxTickRate.load(
                     std::memory_order_relaxed));
 
-            const ULONGLONG JoinableAtMs =
-                GServerJoinableAtMs.load(std::memory_order_acquire);
+            const ULONGLONG JoinableAtMs = GServerJoinableAtMs.load(std::memory_order_acquire);
 
             if (gsStatus == Joinable && JoinableAtMs != 0)
             {
                 const ULONGLONG Now = GetTickCount64();
-                const double UptimeSeconds =
-                    Now >= JoinableAtMs
-                        ? static_cast<double>(Now - JoinableAtMs) / 1000.0
-                        : 0.0;
-                const std::string Uptime =
-                    FormatDurationSeconds(UptimeSeconds);
+                const double UptimeSeconds = Now >= JoinableAtMs
+                        ? static_cast<double>(Now - JoinableAtMs) / 1000.0 : 0.0;
+                const std::string Uptime = FormatDurationSeconds(UptimeSeconds);
                 ImGui::Text("- Uptime: %s", Uptime.c_str());
             }
 
@@ -12047,9 +9666,7 @@ void GUI::Init()
                 auto AuthorityGameMode = World ? World->AuthorityGameMode : nullptr;
                 auto AthenaGameModeClass = AFortGameModeAthena::StaticClass();
 
-                // The frontend game mode derives from the generic FortGameMode
-                // but does not expose Athena's AlivePlayers array. Resolve that
-                // reflected property only on an actual Athena game mode.
+                // The frontend game mode has no AlivePlayers array, so only resolve it on an Athena mode.
                 if (AuthorityGameMode && AthenaGameModeClass &&
                     AuthorityGameMode->IsA(AthenaGameModeClass))
                 {
@@ -12063,9 +9680,7 @@ void GUI::Init()
                 if (GameMode)
                     AliveCount = GameMode->AlivePlayers.Num();
 
-                AliveCount = (std::max)(
-                    AliveCount,
-                    CountConnectedPlayersForDisplay(World));
+                AliveCount = (std::max)(AliveCount, CountConnectedPlayersForDisplay(World));
 
                 ImGui::Text("- Players: %d", AliveCount);
 
@@ -12114,7 +9729,11 @@ void GUI::Init()
 
                     if (!bHasLogged)
                     {
-                        printf("- %s eliminated %s from %sm! (%s)\n", FConfiguration::ElimKillerName.c_str(), FConfiguration::ElimEliminatedName.c_str(), FConfiguration::ElimDistance.c_str(), FConfiguration::ElimWeaponName.c_str());
+                        printf("- %s eliminated %s from %sm! (%s)\n",
+                            FConfiguration::ElimKillerName.c_str(),
+                            FConfiguration::ElimEliminatedName.c_str(),
+                            FConfiguration::ElimDistance.c_str(),
+                            FConfiguration::ElimWeaponName.c_str());
                         bHasLogged = true;
                     }
                 }
@@ -12127,49 +9746,28 @@ void GUI::Init()
 
             EndSectionBody();
 
-            const bool bIsOnlyUp =
-                SelectedPlaylist ==
-                    static_cast<int>(Playlist::OnlyUp);
-            const bool bIsEventPlaylist =
-                SelectedPlaylist ==
-                    static_cast<int>(Playlist::Event);
-            const bool bShowsOnlyUpPreGameConfig =
-                bIsOnlyUp && gsStatus < Joinable;
-            const bool bShowsDefaultPreGameConfig =
-                UsesDefaultMatchSettings(SelectedPlaylist);
-            const bool bShowsEventBusControl =
-                bIsEventPlaylist &&
-                EventUsesSpawnIslandBusControl() &&
-                gsStatus == Joinable;
-            const bool bShowsDefaultMatchSettings =
-                bShowsDefaultPreGameConfig;
+            const bool bIsOnlyUp = SelectedPlaylist == static_cast<int>(Playlist::OnlyUp);
+            const bool bIsEventPlaylist = SelectedPlaylist == static_cast<int>(Playlist::Event);
+            const bool bShowsOnlyUpPreGameConfig = bIsOnlyUp && gsStatus < Joinable;
+            const bool bShowsDefaultPreGameConfig = UsesDefaultMatchSettings(SelectedPlaylist);
+            const bool bShowsEventBusControl = bIsEventPlaylist &&
+                EventUsesSpawnIslandBusControl() && gsStatus == Joinable;
+            const bool bShowsDefaultMatchSettings = bShowsDefaultPreGameConfig;
 
-            if (gsStatus <= Joinable &&
-                (bShowsOnlyUpPreGameConfig ||
-                 bShowsDefaultPreGameConfig ||
-                 bShowsEventBusControl) &&
-                !(gsStatus == Joinable &&
-                  bStartBusEarlyDismissed))
+            if (gsStatus <= Joinable && (bShowsOnlyUpPreGameConfig || bShowsDefaultPreGameConfig ||
+                 bShowsEventBusControl) && !(gsStatus == Joinable && bStartBusEarlyDismissed))
             {
-                SectionHeader(
-                    "Pre-Game Configuration", SectionWidth);
+                SectionHeader("Pre-Game Configuration", SectionWidth);
                 BeginSectionBody();
 
                 if (bShowsOnlyUpPreGameConfig)
                 {
-                    AtomicCheckbox(
-                        "Disable Jump Fatigue",
-                        FConfiguration::bDisableJumpFatigue);
-                    AtomicCheckbox(
-                        "Player Has Pickaxe",
-                        FConfiguration::bHasPickaxe);
+                    AtomicCheckbox("Disable Jump Fatigue", FConfiguration::bDisableJumpFatigue);
+                    AtomicCheckbox("Player Has Pickaxe", FConfiguration::bHasPickaxe);
                 }
-                else if (bShowsDefaultPreGameConfig &&
-                         gsStatus < Joinable)
+                else if (bShowsDefaultPreGameConfig && gsStatus < Joinable)
                 {
-                    if (AtomicCheckbox(
-                            "Auto Bus Start",
-                            FConfiguration::bAutoBusStart))
+                    if (AtomicCheckbox("Auto Bus Start", FConfiguration::bAutoBusStart))
                     {
                         FConfiguration::bBusSettingsUserOverride.store(
                             true, std::memory_order_release);
@@ -12179,69 +9777,47 @@ void GUI::Init()
 
                     if (!bInitializedZone)
                     {
-                        if (!AutoHosting::
-                                HasRestoredPreferences())
+                        if (!AutoHosting::HasRestoredPreferences())
                         {
-                            FConfiguration::LateGameZone =
-                                FConfiguration::IsS27()
-                                    ? 1
-                                    : 4;
+                            FConfiguration::LateGameZone = FConfiguration::IsS27() ? 1 : 4;
                         }
                         bInitializedZone = true;
                     }
 
-                    AtomicCheckbox(
-                        "Auto Dump Text",
-                        FConfiguration::bAutoDump);
-                    AtomicCheckbox(
-                        "Use Custom Map",
-                        FConfiguration::bIsCustomMap);
+                    AtomicCheckbox("Auto Dump Text", FConfiguration::bAutoDump);
+                    AtomicCheckbox("Use Custom Map", FConfiguration::bIsCustomMap);
 
                     if (!FConfiguration::bReadyToStart)
                     {
-                        TrickshotTabCheckbox(
-                            "Enable Trickshot Tab");
+                        TrickshotTabCheckbox("Enable Trickshot Tab");
                     }
 
-                    if (FConfiguration::bAutoBusStart &&
-                        AtomicLabeledSliderFloat(
-                            "Bus Start Delay",
-                            "##bus-start-delay",
-                            FConfiguration::BusStartDelay,
-                            0.0f, 300.0f,
+                    if (FConfiguration::bAutoBusStart && AtomicLabeledSliderFloat("Bus Start Delay",
+                            "##bus-start-delay", FConfiguration::BusStartDelay, 0.0f, 300.0f,
                             "%.0f sec", Width))
                     {
                         FConfiguration::bBusSettingsUserOverride.store(
                             true, std::memory_order_release);
                     }
 
-                    if (AtomicLabeledSliderFloat(
-                            "Max Tick Rate",
-                            "##max-tick-rate",
-                            FConfiguration::MaxTickRate,
-                            FConfiguration::MinimumMaxTickRate,
-                            FConfiguration::MaximumMaxTickRate,
-                            "%.0f Hz", Width))
+                    if (AtomicLabeledSliderFloat("Max Tick Rate", "##max-tick-rate",
+                            FConfiguration::MaxTickRate, FConfiguration::MinimumMaxTickRate,
+                            FConfiguration::MaximumMaxTickRate, "%.0f Hz", Width))
                     {
                         FConfiguration::bMaxTickRateUserOverride.store(
                             true, std::memory_order_release);
                     }
                 }
 
-                if (gsStatus == Joinable &&
-                    (bShowsDefaultPreGameConfig ||
-                     bShowsEventBusControl) &&
+                if (gsStatus == Joinable && (bShowsDefaultPreGameConfig || bShowsEventBusControl) &&
                     !bStartBusEarlyDismissed)
                 {
                     ImGui::Spacing();
 
-                    if (ImGui::Button(
-                            "Start Bus Early",
-                            ImVec2(Width, Height)))
+                    if (ImGui::Button("Start Bus Early", ImVec2(Width, Height)))
                     {
                         bStartBusEarlyDismissed = true;
-                        FConfiguration::bStartBusRequested.store(
-                            true, std::memory_order_release);
+                        FConfiguration::bStartBusRequested.store(true, std::memory_order_release);
                     }
                 }
 
@@ -12289,8 +9865,6 @@ void GUI::Init()
                             GamePhaseLogic->SafeZoneIndicator->SafeZoneFinishShrinkTime = GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime + 0.05f;
                         }
                     }
-
-                    // UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"skipsafezone"), nullptr);
                 }
 
                 if (ImGui::Button("Start Shrinking Safe Zone", ImVec2(Width, Height)))
@@ -12309,8 +9883,6 @@ void GUI::Init()
                         if (GamePhaseLogic->SafeZoneIndicator)
                             GamePhaseLogic->SafeZoneIndicator->SafeZoneStartShrinkTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
                     }
-
-                    // UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(L"startshrinksafezone"), nullptr);
                 }
 
                 EndSectionBody();
@@ -12379,80 +9951,45 @@ void GUI::Init()
                 }
             }
 
-            const bool bCanShowGliderRedeploy =
-                bShowsDefaultMatchSettings &&
-                gsStatus >= Joinable &&
-                gsStatus < Ended &&
-                FConfiguration::
-                    IsGliderRedeploySupportedBuild() &&
-                FConfiguration::
-                    GliderRedeployRuntimeSupport.load(
-                        std::memory_order_acquire) != 0;
-            const bool bPlaylistHidesRespawnSection =
-                !bShowsDefaultMatchSettings ||
-                SelectedPlaylist ==
-                    static_cast<int>(Playlist::FoodFight) ||
-                SelectedPlaylist ==
-                    static_cast<int>(Playlist::DeepFriedSquads) ||
-                SelectedPlaylist ==
+            const bool bCanShowGliderRedeploy = bShowsDefaultMatchSettings &&
+                gsStatus >= Joinable && gsStatus < Ended && FConfiguration::
+                    IsGliderRedeploySupportedBuild() && FConfiguration::
+                    GliderRedeployRuntimeSupport.load(std::memory_order_acquire) != 0;
+            const bool bPlaylistHidesRespawnSection = !bShowsDefaultMatchSettings ||
+                SelectedPlaylist == static_cast<int>(Playlist::FoodFight) || SelectedPlaylist ==
+                    static_cast<int>(Playlist::DeepFriedSquads) || SelectedPlaylist ==
                     static_cast<int>(Playlist::ArsenalSolos);
-            const bool bCanShowRespawns =
-                !bPlaylistHidesRespawnSection &&
-                (VersionInfo.FortniteVersion >= 8.00 ||
-                    gsStatus < Joinable);
+            const bool bCanShowRespawns = !bPlaylistHidesRespawnSection &&
+                (VersionInfo.FortniteVersion >= 8.00 || gsStatus < Joinable);
 
             if (bCanShowRespawns)
             {
                 SectionHeader("Respawns", SectionWidth);
                 BeginSectionBody();
 
-                // The render thread owns only the configuration value. The
-                // authoritative playlist/GameState policy is applied from the
-                // server tick so native LTM mutators cannot overwrite it after
-                // this click (and UObject state is never mutated from ImGui).
-                const bool bRespawnsWereEnabled =
-                    FConfiguration::bForceRespawns;
-                if (AtomicCheckbox(
-                        "Infinite Respawns",
-                        FConfiguration::bForceRespawns) &&
-                    bRespawnsWereEnabled &&
-                    !FConfiguration::bForceRespawns)
+                const bool bRespawnsWereEnabled = FConfiguration::bForceRespawns;
+                if (AtomicCheckbox("Infinite Respawns", FConfiguration::bForceRespawns) &&
+                    bRespawnsWereEnabled && !FConfiguration::bForceRespawns)
                 {
-                    // These controls are children of Infinite Respawns. Do
-                    // not leave an invisible stale child affecting later
-                    // permanent deaths after its parent is switched off.
-                    FConfiguration::PermanentRespawn =
-                        false;
-                    FConfiguration::bKeepInventory =
-                        false;
-                    FConfiguration::bMidZoneRespawning =
-                        false;
+                    FConfiguration::PermanentRespawn = false;
+                    FConfiguration::bKeepInventory = false;
+                    FConfiguration::bMidZoneRespawning = false;
                 }
 
                 if (FConfiguration::bForceRespawns)
                 {
                     ImGui::Indent(12.f);
 
-                    AtomicCheckbox(
-                        "Storm Respawns",
-                        FConfiguration::PermanentRespawn);
+                    AtomicCheckbox("Storm Respawns", FConfiguration::PermanentRespawn);
 
-                    AtomicCheckbox(
-                        "Keep Inventory on Respawn",
-                        FConfiguration::bKeepInventory);
-                    AtomicCheckbox(
-                        "Midzone Respawns",
-                        FConfiguration::bMidZoneRespawning);
+                    AtomicCheckbox("Keep Inventory on Respawn", FConfiguration::bKeepInventory);
+                    AtomicCheckbox("Midzone Respawns", FConfiguration::bMidZoneRespawning);
 
-                    AtomicLabeledSliderInt(
-                        "Respawn Time", "##respawn-time",
-                        FConfiguration::RespawnTime,
-                        1, 10, Width);
+                    AtomicLabeledSliderInt("Respawn Time", "##respawn-time",
+                        FConfiguration::RespawnTime, 1, 10, Width);
 
-                    AtomicLabeledSliderInt(
-                        "Respawn Height", "##respawn-height",
-                        FConfiguration::RespawnHeight,
-                        1000, 50000, Width);
+                    AtomicLabeledSliderInt("Respawn Height", "##respawn-height",
+                        FConfiguration::RespawnHeight, 1000, 50000, Width);
 
                     ImGui::Unindent(12.f);
                 }
@@ -12461,73 +9998,45 @@ void GUI::Init()
             }
 
             const int PublishedPlaylist = GetSelectedPlaylist();
-            const bool bConfiguredFoodFightPlaylist =
-                FConfiguration::Playlist &&
-                (wcscmp(
-                     FConfiguration::Playlist,
-                     L"/Game/Athena/Playlists/Barrier/"
-                     L"Playlist_Barrier.Playlist_Barrier") == 0 ||
-                 wcscmp(
-                     FConfiguration::Playlist,
+            const bool bConfiguredFoodFightPlaylist = FConfiguration::Playlist && (wcscmp(
+                     FConfiguration::Playlist, L"/Game/Athena/Playlists/Barrier/"
+                     L"Playlist_Barrier.Playlist_Barrier") == 0 || wcscmp(FConfiguration::Playlist,
                      L"/Game/Athena/Playlists/Barrier/"
                      L"Playlist_Barrier_16_B_Lava."
                      L"Playlist_Barrier_16_B_Lava") == 0);
-            const bool bFoodFightConfiguration =
-                SelectedPlaylist ==
-                    static_cast<int>(Playlist::FoodFight) ||
-                SelectedPlaylist ==
-                    static_cast<int>(Playlist::DeepFriedSquads) ||
-                PublishedPlaylist ==
-                    static_cast<int>(Playlist::FoodFight) ||
-                PublishedPlaylist ==
-                    static_cast<int>(Playlist::DeepFriedSquads) ||
-                bConfiguredFoodFightPlaylist;
+            const bool bFoodFightConfiguration = SelectedPlaylist ==
+                    static_cast<int>(Playlist::FoodFight) || SelectedPlaylist ==
+                    static_cast<int>(Playlist::DeepFriedSquads) || PublishedPlaylist ==
+                    static_cast<int>(Playlist::FoodFight) || PublishedPlaylist ==
+                    static_cast<int>(Playlist::DeepFriedSquads) || bConfiguredFoodFightPlaylist;
             if (bFoodFightConfiguration && gsStatus < Ended)
             {
                 SectionHeader("LTM Configuration", SectionWidth);
                 BeginSectionBody();
 
-                const int MaximumObjectiveHealth =
-                    FConfiguration::
+                const int MaximumObjectiveHealth = FConfiguration::
                         GetFoodFightObjectiveHealthMaximum();
-                const int StoredObjectiveHealth =
-                    FConfiguration::FoodFightObjectiveHealth.load(
+                const int StoredObjectiveHealth = FConfiguration::FoodFightObjectiveHealth.load(
                         std::memory_order_acquire);
-                int DisplayObjectiveHealth =
-                    StoredObjectiveHealth ==
-                            FConfiguration::
-                                FoodFightObjectiveHealthAuthored
-                        ? MaximumObjectiveHealth
-                        : std::clamp(
-                              StoredObjectiveHealth,
-                              FConfiguration::
-                                  FoodFightObjectiveHealthMinimum,
-                              MaximumObjectiveHealth);
+                int DisplayObjectiveHealth = StoredObjectiveHealth == FConfiguration::
+                                FoodFightObjectiveHealthAuthored ? MaximumObjectiveHealth
+                        : std::clamp(StoredObjectiveHealth, FConfiguration::
+                                  FoodFightObjectiveHealthMinimum, MaximumObjectiveHealth);
 
                 ImGui::BeginDisabled(gsStatus >= StartedMatch);
-                if (LabeledSliderInt(
-                        "Objective Health",
-                        "##food-fight-objective-health",
-                        &DisplayObjectiveHealth,
-                        FConfiguration::
-                            FoodFightObjectiveHealthMinimum,
-                        MaximumObjectiveHealth,
-                        Width,
-                        "%d HP"))
+                if (LabeledSliderInt("Objective Health", "##food-fight-objective-health",
+                        &DisplayObjectiveHealth, FConfiguration::FoodFightObjectiveHealthMinimum,
+                        MaximumObjectiveHealth, Width, "%d HP"))
                 {
-                    FConfiguration::FoodFightObjectiveHealth.store(
-                        DisplayObjectiveHealth,
+                    FConfiguration::FoodFightObjectiveHealth.store(DisplayObjectiveHealth,
                         std::memory_order_release);
                 }
                 ImGui::EndDisabled();
 
                 ImGui::BeginDisabled(gsStatus != StartedMatch);
-                if (ImGui::Button(
-                        "Drop Wall",
-                        ImVec2(Width, Height)))
+                if (ImGui::Button("Drop Wall", ImVec2(Width, Height)))
                 {
-                    FFortAthenaNativeLTMCompatibility::
-                        RequestFoodFightWallDrop();
+                    FFortAthenaNativeLTMCompatibility::RequestFoodFightWallDrop();
                 }
                 ImGui::EndDisabled();
 
@@ -12541,25 +10050,14 @@ void GUI::Init()
 
                 if (bCanShowGliderRedeploy)
                 {
-                    AtomicCheckbox(
-                        "Glider Redeploy",
-                        FConfiguration::bGliderRedeploy);
+                    AtomicCheckbox("Glider Redeploy", FConfiguration::bGliderRedeploy);
                 }
 
-                AtomicCheckbox(
-                    "Infinite Materials",
-                    FConfiguration::bInfiniteMats);
-                AtomicCheckbox(
-                    "Infinite Ammo",
-                    FConfiguration::bInfiniteAmmo);
-                AtomicCheckbox(
-                    "Toggle Cheat Commands",
-                    FConfiguration::bEnableCheats);
-                TrickshotTabCheckbox(
-                    "Show Trickshot Tab");
-                AtomicCheckbox(
-                    "Siphon",
-                    FConfiguration::bSiphon);
+                AtomicCheckbox("Infinite Materials", FConfiguration::bInfiniteMats);
+                AtomicCheckbox("Infinite Ammo", FConfiguration::bInfiniteAmmo);
+                AtomicCheckbox("Toggle Cheat Commands", FConfiguration::bEnableCheats);
+                TrickshotTabCheckbox("Show Trickshot Tab");
+                AtomicCheckbox("Siphon", FConfiguration::bSiphon);
 
                 if (FConfiguration::bSiphon)
                 {
@@ -12567,102 +10065,92 @@ void GUI::Init()
 
                     ImGui::TextUnformatted("Siphon Amount");
                     ImGui::SetNextItemWidth(Width);
-                    AtomicInputInt(
-                        "##siphon-amount",
-                        FConfiguration::SiphonAmount);
+                    AtomicInputInt("##siphon-amount", FConfiguration::SiphonAmount);
 
-					struct FSiphonAnimationOption
-					{
-						int Type;
-						const char* Label;
-					};
-					std::vector<FSiphonAnimationOption> SiphonAnimations = {
-						{ 0, "Default" }
-					};
+                    struct FSiphonAnimationOption
+                    {
+                        int Type;
+                        const char* Label;
+                    };
+                    std::vector<FSiphonAnimationOption> SiphonAnimations = {
+                        { 0, "Default" }
+                    };
 
-					if (VersionInfo.FortniteVersion >= 11.00)
-					{
-						SiphonAnimations.push_back({ 1, "Slurp" });
-						SiphonAnimations.push_back(
-							{ 2, "Bandage Bazooka" });
-					}
+                    if (VersionInfo.FortniteVersion >= 11.00)
+                    {
+                        SiphonAnimations.push_back({ 1, "Slurp" });
+                        SiphonAnimations.push_back(
+                            { 2, "Bandage Bazooka" });
+                    }
 
-					if (VersionInfo.FortniteVersion >= 12.50)
-					{
-						SiphonAnimations.push_back(
-							{ 3, "Orange Paint" });
-						SiphonAnimations.push_back(
-							{ 4, "Purple Paint" });
-					}
+                    if (VersionInfo.FortniteVersion >= 12.50)
+                    {
+                        SiphonAnimations.push_back(
+                            { 3, "Orange Paint" });
+                        SiphonAnimations.push_back(
+                            { 4, "Purple Paint" });
+                    }
 
-					SiphonAnimations.push_back({ 5, "Health Siphon" });
+                    SiphonAnimations.push_back({ 5, "Health Siphon" });
 
-					if (VersionInfo.FortniteVersion >= 19.00)
-					{
-						SiphonAnimations.push_back({ 6, "Med Mist" });
-					}
+                    if (VersionInfo.FortniteVersion >= 19.00)
+                    {
+                        SiphonAnimations.push_back({ 6, "Med Mist" });
+                    }
 
-					if (VersionInfo.FortniteVersion >= 11.40)
-					{
-						SiphonAnimations.push_back(
-							{ 7, "Upgrade Weapon" });
-					}
+                    if (VersionInfo.FortniteVersion >= 11.40)
+                    {
+                        SiphonAnimations.push_back(
+                            { 7, "Upgrade Weapon" });
+                    }
 
-					if (VersionInfo.FortniteVersion == 12.41)
-					{
-						SiphonAnimations.push_back(
-							{ 8, "Astronomical Event Glow" });
-					}
+                    if (VersionInfo.FortniteVersion == 12.41)
+                    {
+                        SiphonAnimations.push_back(
+                            { 8, "Astronomical Event Glow" });
+                    }
 
-					if (VersionInfo.FortniteVersion == 17.30)
-					{
-						SiphonAnimations.push_back(
-							{ 9, "Rift Tour Golden Glow" });
-						SiphonAnimations.push_back(
-							{ 10, "Rift Tour Rift" });
-						SiphonAnimations.push_back(
-							{ 11, "Rift Tour Paint Boost" });
-					}
+                    if (VersionInfo.FortniteVersion == 17.30)
+                    {
+                        SiphonAnimations.push_back(
+                            { 9, "Rift Tour Golden Glow" });
+                        SiphonAnimations.push_back(
+                            { 10, "Rift Tour Rift" });
+                        SiphonAnimations.push_back(
+                            { 11, "Rift Tour Paint Boost" });
+                    }
 
-					std::vector<const char*> SiphonAnimationLabels;
-					SiphonAnimationLabels.reserve(
-						SiphonAnimations.size());
-					int SelectedSiphonAnimation = 0;
-					const int ConfiguredSiphonAnimation =
-						FConfiguration::SiphonAnimType.load(
-							std::memory_order_acquire);
-					bool bFoundConfiguredSiphonAnimation = false;
-					for (int OptionIndex = 0;
-						 OptionIndex < (int)SiphonAnimations.size();
-						 ++OptionIndex)
-					{
-						const auto& Option = SiphonAnimations[OptionIndex];
-						SiphonAnimationLabels.push_back(Option.Label);
-						if (Option.Type == ConfiguredSiphonAnimation)
-						{
-							SelectedSiphonAnimation = OptionIndex;
-							bFoundConfiguredSiphonAnimation = true;
-						}
-					}
-					if (!bFoundConfiguredSiphonAnimation)
-					{
-						FConfiguration::SiphonAnimType.store(
-							0, std::memory_order_release);
-					}
+                    std::vector<const char*> SiphonAnimationLabels;
+                    SiphonAnimationLabels.reserve(SiphonAnimations.size());
+                    int SelectedSiphonAnimation = 0;
+                    const int ConfiguredSiphonAnimation = FConfiguration::SiphonAnimType.load(
+                            std::memory_order_acquire);
+                    bool bFoundConfiguredSiphonAnimation = false;
+                    for (int OptionIndex = 0;
+                         OptionIndex < (int)SiphonAnimations.size();
+                         ++OptionIndex)
+                    {
+                        const auto& Option = SiphonAnimations[OptionIndex];
+                        SiphonAnimationLabels.push_back(Option.Label);
+                        if (Option.Type == ConfiguredSiphonAnimation)
+                        {
+                            SelectedSiphonAnimation = OptionIndex;
+                            bFoundConfiguredSiphonAnimation = true;
+                        }
+                    }
+                    if (!bFoundConfiguredSiphonAnimation)
+                    {
+                        FConfiguration::SiphonAnimType.store(0, std::memory_order_release);
+                    }
 
-					ImGui::TextUnformatted("Siphon Animation");
-					ImGui::SetNextItemWidth(Width);
-					if (ImGui::Combo(
-						"##siphon-animation",
-						&SelectedSiphonAnimation,
-						SiphonAnimationLabels.data(),
-						(int)SiphonAnimationLabels.size()))
-					{
-						FConfiguration::SiphonAnimType.store(
-							SiphonAnimations[
-								SelectedSiphonAnimation].Type,
-							std::memory_order_release);
-					}
+                    ImGui::TextUnformatted("Siphon Animation");
+                    ImGui::SetNextItemWidth(Width);
+                    if (ImGui::Combo("##siphon-animation", &SelectedSiphonAnimation,
+                        SiphonAnimationLabels.data(), (int)SiphonAnimationLabels.size()))
+                    {
+                        FConfiguration::SiphonAnimType.store(SiphonAnimations[
+                                SelectedSiphonAnimation].Type, std::memory_order_release);
+                    }
 
                     ImGui::Unindent(12.f);
                 }
@@ -12683,34 +10171,26 @@ void GUI::Init()
                     std::string str = commandBuffer;
                     auto wstr = std::wstring(str.begin(), str.end());
 
-                    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(wstr.c_str()), nullptr);
+                    UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(),
+                        FString(wstr.c_str()), nullptr);
                 }
 
                 EndSectionBody();
             }
 
-            if (!FConfiguration::bReadyToStart.load(
-                    std::memory_order_acquire))
+            if (!FConfiguration::bReadyToStart.load(std::memory_order_acquire))
             {
                 SectionHeader("Auto Hosting", SectionWidth);
                 BeginSectionBody();
 
-                if (AtomicCheckbox(
-                        "Toggle Auto Host",
-                        FConfiguration::bAutoHost))
+                if (AtomicCheckbox("Toggle Auto Host", FConfiguration::bAutoHost))
                 {
-                    const bool bAutoHostEnabled =
-                        FConfiguration::bAutoHost.load(
+                    const bool bAutoHostEnabled = FConfiguration::bAutoHost.load(
                             std::memory_order_acquire);
-                    if (bAutoHostEnabled &&
-                        !FConfiguration::bReadyToStart.load(
+                    if (bAutoHostEnabled && !FConfiguration::bReadyToStart.load(
                             std::memory_order_acquire))
                     {
-                        // Auto-hosted servers default cheat commands closed to
-                        // guests. The verified host override remains available,
-                        // and the user can explicitly opt back in afterward.
-                        FConfiguration::bEnableCheats.store(
-                            false, std::memory_order_release);
+                        FConfiguration::bEnableCheats.store(false, std::memory_order_release);
                         AutoHosting::ArmCountdown();
                         AutoHosting::SaveNow(true);
                     }
@@ -12721,90 +10201,57 @@ void GUI::Init()
                     }
                 }
 
-                if (FConfiguration::bAutoHost.load(
-                        std::memory_order_acquire))
+                if (FConfiguration::bAutoHost.load(std::memory_order_acquire))
                 {
                     ImGui::Indent(12.f);
-                    if (AtomicCheckbox(
-                            "Save Settings",
-                            FConfiguration::bSaveAutoHostSettings))
+                    if (AtomicCheckbox("Save Settings", FConfiguration::bSaveAutoHostSettings))
                     {
-                        AutoHosting::SaveNow(
-                            FConfiguration::bSaveAutoHostSettings.load(
+                        AutoHosting::SaveNow(FConfiguration::bSaveAutoHostSettings.load(
                                 std::memory_order_acquire));
                     }
                     ImGui::Unindent(12.f);
                 }
 
-                bool bCountdownActive =
-                    AutoHosting::IsCountdownActive();
+                bool bCountdownActive = AutoHosting::IsCountdownActive();
                 if (bCountdownActive)
                 {
-                    int RemainingSeconds = (std::max)(
-                        1,
-                        (std::min)(
-                            bAutoHostCountdownThisFrame
-                                ? AutoHostCountdownSecondsThisFrame
-                                : AutoHosting::
-                                      GetRemainingSeconds(),
-                            60));
+                    int RemainingSeconds = (std::max)(1, (std::min)(bAutoHostCountdownThisFrame
+                                ? AutoHostCountdownSecondsThisFrame : AutoHosting::
+                                      GetRemainingSeconds(), 60));
                     ImGui::SetNextItemWidth(Width);
-                    const bool bDelayChanged =
-                        ImGui::SliderInt(
-                            "##auto-host-delay-countdown",
-                            &RemainingSeconds,
-                            1, 60,
-                            "%d sec",
-                            ImGuiSliderFlags_AlwaysClamp);
+                    const bool bDelayChanged = ImGui::SliderInt("##auto-host-delay-countdown",
+                            &RemainingSeconds, 1, 60, "%d sec", ImGuiSliderFlags_AlwaysClamp);
                     if (bDelayChanged)
                     {
-                        // Treat an edit as a new countdown duration. The display
-                        // continues ticking down, while the chosen value remains
-                        // the saved delay used on the next launcher start.
-                        FConfiguration::AutoHostDelaySeconds.store(
-                            RemainingSeconds,
+                        FConfiguration::AutoHostDelaySeconds.store(RemainingSeconds,
                             std::memory_order_release);
                         AutoHosting::ArmCountdown();
                     }
                     if (ImGui::IsItemDeactivatedAfterEdit())
                     {
-                        // Commit once the drag or text edit finishes instead of
-                        // performing synchronous disk writes on every mouse move.
                         AutoHosting::SaveNow(false);
                     }
                 }
                 else
                 {
-                    int DelaySeconds =
-                        FConfiguration::AutoHostDelaySeconds.load(
+                    int DelaySeconds = FConfiguration::AutoHostDelaySeconds.load(
                             std::memory_order_acquire);
                     ImGui::SetNextItemWidth(Width);
-                    if (ImGui::SliderInt(
-                            "##auto-host-delay",
-                            &DelaySeconds,
-                            1, 60,
-                            "%d sec",
+                    if (ImGui::SliderInt("##auto-host-delay", &DelaySeconds, 1, 60, "%d sec",
                             ImGuiSliderFlags_AlwaysClamp))
                     {
-                        FConfiguration::AutoHostDelaySeconds.store(
-                            DelaySeconds,
+                        FConfiguration::AutoHostDelaySeconds.store(DelaySeconds,
                             std::memory_order_release);
-                        if (FConfiguration::bAutoHost.load(
-                                std::memory_order_acquire) &&
-                            !FConfiguration::bReadyToStart.load(
-                                std::memory_order_acquire))
+                        if (FConfiguration::bAutoHost.load(std::memory_order_acquire) &&
+                            !FConfiguration::bReadyToStart.load(std::memory_order_acquire))
                         {
-                            // Restart from the newly selected duration so the
-                            // visible countdown never jumps to an unexpected start.
                             AutoHosting::ArmCountdown();
                         }
                         AutoHosting::SaveNow(false);
                     }
                 }
 
-                if (ImGui::Button(
-                        "Reset Preferences",
-                        ImVec2(Width, Height)))
+                if (ImGui::Button("Reset Preferences", ImVec2(Width, Height)))
                 {
                     AutoHosting::ResetPreferences();
                     bCountdownActive = false;
@@ -12812,26 +10259,22 @@ void GUI::Init()
 
                 if (bCountdownActive)
                 {
-                    ImGui::TextDisabled(
-                        "Adjust the timer, or disable Auto Host to cancel.");
+                    ImGui::TextDisabled("Adjust the timer, or disable Auto Host to cancel.");
                 }
-                else if (FConfiguration::bAutoHost.load(
-                             std::memory_order_acquire))
+                else if (FConfiguration::bAutoHost.load(std::memory_order_acquire))
                 {
-                    ImGui::TextDisabled(
-                        "Saved for the next launcher start.");
+                    ImGui::TextDisabled("Saved for the next launcher start.");
                 }
 
                 EndSectionBody();
             }
 
-            // "Start Server" button moved to the sidebar (bottom) for easy access.
-
             break;
         }
         case 1:
         {
-            if (VersionInfo.FortniteVersion == 7.40 || VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
+            if (VersionInfo.FortniteVersion == 7.40 || VersionInfo.FortniteVersion == 14.40 ||
+                VersionInfo.FortniteVersion == 27.11 || VersionInfo.FortniteVersion == 30.00)
             {
                 SectionHeader("Custom Playlists", SectionWidth);
                 BeginSectionBody();
@@ -12851,9 +10294,8 @@ void GUI::Init()
                 if (VersionInfo.FortniteVersion == 14.40)
                 {
                     ImGui::RadioButton("Retrac 1v1 Map", &SelectedPlaylist, (int)Playlist::Retrac1v1);
-                    ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist, (int)Playlist::RetracTurtle);
-                    //ImGui::RadioButton("Retrac Water Map", &SelectedPlaylist, (int)Playlist::RetracWater);
-                    //ImGui::RadioButton("Twine 1v1 Map", &SelectedPlaylist, (int)Playlist::Twine1v1);
+                    ImGui::RadioButton("Retrac Turtle Fights", &SelectedPlaylist,
+                        (int)Playlist::RetracTurtle);
                 }
 
                 if (VersionInfo.FortniteVersion == 30.00)
@@ -12877,25 +10319,16 @@ void GUI::Init()
 
             ImGui::RadioButton("Squads", &SelectedPlaylist, (int)Playlist::Squads);
 
-            const bool bGetawayAvailable =
-                VersionInfo.FortniteVersion == 10.40 ||
+            const bool bGetawayAvailable = VersionInfo.FortniteVersion == 10.40 ||
                 FFortAthenaHeistCompatibility::IsSupportedBuild();
-            const bool bNative1040LTMsAvailable =
-                VersionInfo.FortniteVersion == 10.40;
-            const bool bFoodFightAvailable =
-                bNative1040LTMsAvailable ||
-                FFortAthenaNativeLTMCompatibility::
-                    IsOriginalFoodFightSupportedBuild();
-            const bool bScoreRoyaleAvailable =
-                IsScoreRoyalePlaylistBuild();
+            const bool bNative1040LTMsAvailable = VersionInfo.FortniteVersion == 10.40;
+            const bool bFoodFightAvailable = bNative1040LTMsAvailable ||
+                FFortAthenaNativeLTMCompatibility::IsOriginalFoodFightSupportedBuild();
+            const bool bScoreRoyaleAvailable = IsScoreRoyalePlaylistBuild();
 
-            const bool bInfinityGauntletAvailable =
-                VersionInfo.FortniteVersion == 4.20;
-            if (bInfinityGauntletAvailable &&
-                ImGui::RadioButton(
-                    "Infinity Gauntlet Solos",
-                    &SelectedPlaylist,
-                    (int)Playlist::InfinityGauntletSolos))
+            const bool bInfinityGauntletAvailable = VersionInfo.FortniteVersion == 4.20;
+            if (bInfinityGauntletAvailable && ImGui::RadioButton("Infinity Gauntlet Solos",
+                    &SelectedPlaylist, (int)Playlist::InfinityGauntletSolos))
             {
                 FConfiguration::SetLateGameEnabled(false);
             }
@@ -12917,10 +10350,14 @@ void GUI::Init()
 
                 if (VersionInfo.FortniteVersion >= 20.00)
                 {
-                    ImGui::RadioButton("Arena Zero Build Solos", &SelectedPlaylist, (int)Playlist::ArenaZBSolos);
-                    ImGui::RadioButton("Arena Zero Build Duos", &SelectedPlaylist, (int)Playlist::ArenaZBDuos);
-                    ImGui::RadioButton("Arena Zero Build Trios", &SelectedPlaylist, (int)Playlist::ArenaZBTrios);
-                    ImGui::RadioButton("Arena Zero Build Squads", &SelectedPlaylist, (int)Playlist::ArenaZBSquads);
+                    ImGui::RadioButton("Arena Zero Build Solos", &SelectedPlaylist,
+                        (int)Playlist::ArenaZBSolos);
+                    ImGui::RadioButton("Arena Zero Build Duos", &SelectedPlaylist,
+                        (int)Playlist::ArenaZBDuos);
+                    ImGui::RadioButton("Arena Zero Build Trios", &SelectedPlaylist,
+                        (int)Playlist::ArenaZBTrios);
+                    ImGui::RadioButton("Arena Zero Build Squads", &SelectedPlaylist,
+                        (int)Playlist::ArenaZBSquads);
                 }
             }
 
@@ -12939,56 +10376,38 @@ void GUI::Init()
                 ImGui::RadioButton("One Shot Squads", &SelectedPlaylist, (int)Playlist::OneShotSquads);
             }
 
-            if (bGetawayAvailable &&
-                ImGui::RadioButton(
-                    "The Getaway Solos",
-                    &SelectedPlaylist,
+            if (bGetawayAvailable && ImGui::RadioButton("The Getaway Solos", &SelectedPlaylist,
                     (int)Playlist::GetawaySolos))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bGetawayAvailable &&
-                ImGui::RadioButton(
-                    "The Getaway Duos",
-                    &SelectedPlaylist,
+            if (bGetawayAvailable && ImGui::RadioButton("The Getaway Duos", &SelectedPlaylist,
                     (int)Playlist::GetawayDuos))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bGetawayAvailable &&
-                ImGui::RadioButton(
-                    "The Getaway Squads",
-                    &SelectedPlaylist,
+            if (bGetawayAvailable && ImGui::RadioButton("The Getaway Squads", &SelectedPlaylist,
                     (int)Playlist::GetawaySquads))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bScoreRoyaleAvailable &&
-                ImGui::RadioButton(
-                    "Score Royale Solos",
-                    &SelectedPlaylist,
+            if (bScoreRoyaleAvailable && ImGui::RadioButton("Score Royale Solos", &SelectedPlaylist,
                     (int)Playlist::ScoreRoyaleSolo))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bScoreRoyaleAvailable &&
-                ImGui::RadioButton(
-                    "Score Royale Duos",
-                    &SelectedPlaylist,
+            if (bScoreRoyaleAvailable && ImGui::RadioButton("Score Royale Duos", &SelectedPlaylist,
                     (int)Playlist::ScoreRoyaleDuos))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bScoreRoyaleAvailable &&
-                ImGui::RadioButton(
-                    "Score Royale Squads",
-                    &SelectedPlaylist,
-                    (int)Playlist::ScoreRoyaleSquads))
+            if (bScoreRoyaleAvailable && ImGui::RadioButton("Score Royale Squads",
+                    &SelectedPlaylist, (int)Playlist::ScoreRoyaleSquads))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
@@ -13013,101 +10432,68 @@ void GUI::Init()
                 ImGui::RadioButton("Floor Is Lava Squads", &SelectedPlaylist, (int)Playlist::FILSquads);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Food Fight: Deep Fried",
-                    &SelectedPlaylist,
-                    (int)Playlist::DeepFriedSquads))
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Food Fight: Deep Fried",
+                    &SelectedPlaylist, (int)Playlist::DeepFriedSquads))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bFoodFightAvailable &&
-                ImGui::RadioButton(
-                    "Food Fight",
-                    &SelectedPlaylist,
+            if (bFoodFightAvailable && ImGui::RadioButton("Food Fight", &SelectedPlaylist,
                     (int)Playlist::FoodFight))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Arsenal Solos",
-                    &SelectedPlaylist,
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Arsenal Solos", &SelectedPlaylist,
                     (int)Playlist::ArsenalSolos))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Wick's Bounty Solo",
-                    &SelectedPlaylist,
-                    (int)Playlist::WicksBountySolo))
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Wick's Bounty Solo",
+                    &SelectedPlaylist, (int)Playlist::WicksBountySolo))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Wick's Bounty Duo",
-                    &SelectedPlaylist,
-                    (int)Playlist::WicksBountyDuo))
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Wick's Bounty Duo",
+                    &SelectedPlaylist, (int)Playlist::WicksBountyDuo))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Wick's Bounty Squads",
-                    &SelectedPlaylist,
-                    (int)Playlist::WicksBountySquads))
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Wick's Bounty Squads",
+                    &SelectedPlaylist, (int)Playlist::WicksBountySquads))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Bounty Solo",
-                    &SelectedPlaylist,
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Bounty Solo", &SelectedPlaylist,
                     (int)Playlist::BountySolo))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Bounty Duo",
-                    &SelectedPlaylist,
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Bounty Duo", &SelectedPlaylist,
                     (int)Playlist::BountyDuo))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Bounty Squads",
-                    &SelectedPlaylist,
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Bounty Squads", &SelectedPlaylist,
                     (int)Playlist::BountySquads))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Avengers: Endgame",
-                    &SelectedPlaylist,
-                    (int)Playlist::AvengersEndgame))
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Avengers: Endgame",
+                    &SelectedPlaylist, (int)Playlist::AvengersEndgame))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
 
-            if (bNative1040LTMsAvailable &&
-                ImGui::RadioButton(
-                    "Disco Domination",
-                    &SelectedPlaylist,
-                    (int)Playlist::DiscoDomination))
+            if (bNative1040LTMsAvailable && ImGui::RadioButton("Disco Domination",
+                    &SelectedPlaylist, (int)Playlist::DiscoDomination))
             {
                 SanitizeNativeLTMSelection(SelectedPlaylist);
             }
@@ -13134,10 +10520,6 @@ void GUI::Init()
 
             EndSectionBody();
 
-            // Handle every radio-button transition in the frame it occurs.
-            // This is especially important when leaving a custom-map preset:
-            // its hidden respawn values must be restored before Start Server
-            // can consume the newly selected ordinary playlist.
             SanitizeNativeLTMSelection(SelectedPlaylist);
 
             switch (SelectedPlaylist)
@@ -13211,8 +10593,7 @@ void GUI::Init()
             {
                 if (bScoreRoyaleAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Score/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Score/"
                         L"Playlist_Score_Solo."
                         L"Playlist_Score_Solo";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13220,8 +10601,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Solos;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSolo."
                         L"Playlist_DefaultSolo";
                 }
@@ -13231,8 +10611,7 @@ void GUI::Init()
             {
                 if (bScoreRoyaleAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Score/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Score/"
                         L"Playlist_Score_Duos."
                         L"Playlist_Score_Duos";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13240,8 +10619,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Duos;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultDuo."
                         L"Playlist_DefaultDuo";
                 }
@@ -13251,8 +10629,7 @@ void GUI::Init()
             {
                 if (bScoreRoyaleAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Score/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Score/"
                         L"Playlist_Score_Squads."
                         L"Playlist_Score_Squads";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13260,8 +10637,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Squads;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSquad."
                         L"Playlist_DefaultSquad";
                 }
@@ -13271,16 +10647,14 @@ void GUI::Init()
             {
                 if (bFoodFightAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Barrier/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Barrier/"
                         L"Playlist_Barrier.Playlist_Barrier";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
                 }
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Squads;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSquad."
                         L"Playlist_DefaultSquad";
                 }
@@ -13322,16 +10696,14 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Wax/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Wax/"
                         L"Playlist_Wax_Solo.Playlist_Wax_Solo";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
                 }
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Solos;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSolo."
                         L"Playlist_DefaultSolo";
                 }
@@ -13341,8 +10713,7 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Wax/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Wax/"
                         L"Playlist_Wax_Duos."
                         L"Playlist_Wax_Duos";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13350,8 +10721,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Duos;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultDuo."
                         L"Playlist_DefaultDuo";
                 }
@@ -13361,8 +10731,7 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Wax/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Wax/"
                         L"Playlist_Wax_Squads."
                         L"Playlist_Wax_Squads";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13370,8 +10739,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Squads;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSquad."
                         L"Playlist_DefaultSquad";
                 }
@@ -13381,8 +10749,7 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Wax/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Wax/"
                         L"Playlist_Bounty_Solo."
                         L"Playlist_Bounty_Solo";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13390,8 +10757,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Solos;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSolo."
                         L"Playlist_DefaultSolo";
                 }
@@ -13401,8 +10767,7 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Wax/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Wax/"
                         L"Playlist_Bounty_Duos."
                         L"Playlist_Bounty_Duos";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13410,8 +10775,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Duos;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultDuo."
                         L"Playlist_DefaultDuo";
                 }
@@ -13421,8 +10785,7 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Wax/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Wax/"
                         L"Playlist_Bounty_Squads."
                         L"Playlist_Bounty_Squads";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
@@ -13430,8 +10793,7 @@ void GUI::Init()
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Squads;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSquad."
                         L"Playlist_DefaultSquad";
                 }
@@ -13441,16 +10803,14 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/Ashton/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/Ashton/"
                         L"Playlist_Ashton_Lg.Playlist_Ashton_Lg";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
                 }
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Squads;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSquad."
                         L"Playlist_DefaultSquad";
                 }
@@ -13460,16 +10820,14 @@ void GUI::Init()
             {
                 if (bNative1040LTMsAvailable)
                 {
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/50v50/Disco/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/50v50/Disco/"
                         L"Playlist_Disco_32.Playlist_Disco_32";
                     SanitizeNativeLTMSelection(SelectedPlaylist);
                 }
                 else
                 {
                     SelectedPlaylist = (int)Playlist::Squads;
-                    FConfiguration::Playlist =
-                        L"/Game/Athena/Playlists/"
+                    FConfiguration::Playlist = L"/Game/Athena/Playlists/"
                         L"Playlist_DefaultSquad."
                         L"Playlist_DefaultSquad";
                 }
@@ -13671,39 +11029,39 @@ void GUI::Init()
             }
             case (int)Playlist::Retrac1v1:
             {
-				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1";
+                FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_1v1.Playlist_Retrac_1v1";
                 break;
             }
             case (int)Playlist::RetracTurtle:
             {
-				FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_Turtle.Playlist_Retrac_Turtle";
+                FConfiguration::Playlist = L"/Buddy/Playlist/Playlist_Retrac_Turtle.Playlist_Retrac_Turtle";
                 break;
             }
             case (int)Playlist::RetracWater:
             {
-				FConfiguration::Playlist = L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac";
+                FConfiguration::Playlist = L"/Game/Retrac/Playlists/Playlist_ShowdownAlt_Solo_Retrac.Playlist_ShowdownAlt_Solo_Retrac";
                 break;
             }
             case (int)Playlist::TiltedZW:
             {
                 FConfiguration::Playlist = L"/Game/Jett/TiltedZW/Playlist_TiltedZW_Jett.Playlist_TiltedZW_Jett";
                 break;
-			}
+            }
             case (int)Playlist::OnlyUp:
             {
                 FConfiguration::Playlist = L"/Game/Jett/Playlist_OnlyUp_Jett.Playlist_OnlyUp_Jett";
                 break;
-			}
+            }
             case (int)Playlist::Twine1v1:
             {
                 FConfiguration::Playlist = L"/Buddy/Playlists/Playlist_1v1Twine.Playlist_1v1Twine";
                 break;
-			}
+            }
             case (int)Playlist::Boxfight:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Respawn/Playlist_Respawn_Solo.Playlist_Respawn_Solo";
                 break;
-			}
+            }
             case (int)Playlist::Backrooms:
             {
                 FConfiguration::Playlist = L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo";
@@ -13733,11 +11091,7 @@ void GUI::Init()
             }
             }
 
-            // The mapping switch can fall back to a normal playlist when a
-            // selected mode is unavailable on this version. Publish that
-            // corrected value in the same frame.
-            GUI::PublishSelectedPlaylist(
-                SelectedPlaylist);
+            GUI::PublishSelectedPlaylist(SelectedPlaylist);
 
             if (SelectedPlaylist == (int)Playlist::Custom)
             {
@@ -13764,18 +11118,12 @@ void GUI::Init()
                 SectionHeader("Event Settings", SectionWidth);
                 BeginSectionBody();
 
-                AtomicCheckbox(
-                    "Auto Start Event",
-                    FConfiguration::bAutoStartEvent);
+                AtomicCheckbox("Auto Start Event", FConfiguration::bAutoStartEvent);
 
                 if (FConfiguration::bAutoStartEvent)
                 {
-                    AtomicLabeledSliderFloat(
-                        "Event Start Time",
-                        "##event-start-time",
-                        FConfiguration::EventStartTime,
-                        30.0f, 300.0f,
-                        "%.1f seconds", Width);
+                    AtomicLabeledSliderFloat("Event Start Time", "##event-start-time",
+                        FConfiguration::EventStartTime, 30.0f, 300.0f, "%.1f seconds", Width);
                 }
 
                 EndSectionBody();
@@ -13787,31 +11135,29 @@ void GUI::Init()
         {
             auto World = UWorld::GetWorld();
 
-            if (!World) 
+            if (!World)
                 break;
 
             static int InspectedPlayerIdx = -1;
             static bool bIsInspecting = false;
-			static AFortPlayerControllerAthena*
-				InspectedPlayerController = nullptr;
-			static UNetConnection*
-				InspectedPlayerConnection = nullptr;
-			static uint64_t InspectedControllerIdentity = 0;
-			static uint64_t InspectedConnectionIdentity = 0;
+            static AFortPlayerControllerAthena* InspectedPlayerController = nullptr;
+            static UNetConnection* InspectedPlayerConnection = nullptr;
+            static uint64_t InspectedControllerIdentity = 0;
+            static uint64_t InspectedConnectionIdentity = 0;
 
-			const auto ClearInspectedPlayer = [&]()
-			{
-				InspectedPlayerIdx = -1;
-				bIsInspecting = false;
-				InspectedPlayerController = nullptr;
-				InspectedPlayerConnection = nullptr;
-				InspectedControllerIdentity = 0;
-				InspectedConnectionIdentity = 0;
-			};
+            const auto ClearInspectedPlayer = [&]()
+            {
+                InspectedPlayerIdx = -1;
+                bIsInspecting = false;
+                InspectedPlayerController = nullptr;
+                InspectedPlayerConnection = nullptr;
+                InspectedControllerIdentity = 0;
+                InspectedConnectionIdentity = 0;
+            };
 
             UObject* NetDriver = World->NetDriver;
 
-            if (!NetDriver) 
+            if (!NetDriver)
                 break;
 
             UNetDriver* Driver = static_cast<UNetDriver*>(NetDriver);
@@ -13823,7 +11169,7 @@ void GUI::Init()
             {
                 auto Connection = ClientConnections[i];
 
-                if (!Connection || !Connection->PlayerController) 
+                if (!Connection || !Connection->PlayerController)
                     continue;
 
                 AllControllers.push_back(std::make_pair((AFortPlayerControllerAthena*)Connection->PlayerController, Connection));
@@ -13853,32 +11199,24 @@ void GUI::Init()
                     if (ButtonLabel.empty())
                         ButtonLabel = std::string("Player ") + std::to_string(i + 1);
 
-                    // Names are display text, not stable widget identifiers;
-                    // two players may legitimately share one.  Key the row to
-                    // its connection so each button remains independently usable.
                     ImGui::PushID(Connection);
                     const bool InspectClicked = ImGui::Button(
                         ButtonLabel.c_str(), ImVec2(Width, Height));
                     ImGui::PopID();
                     if (InspectClicked)
                     {
-						const uint64_t ControllerIdentity =
-							GetGuiObjectIdentityGuarded(
-								CurrentPair.first);
-						const uint64_t ConnectionIdentity =
-							GetGuiObjectIdentityGuarded(Connection);
-						if (ControllerIdentity && ConnectionIdentity)
-						{
-							InspectedPlayerIdx = i;
-							bIsInspecting = true;
-							InspectedPlayerController =
-								CurrentPair.first;
-							InspectedPlayerConnection = Connection;
-							InspectedControllerIdentity =
-								ControllerIdentity;
-							InspectedConnectionIdentity =
-								ConnectionIdentity;
-						}
+                        const uint64_t ControllerIdentity = GetGuiObjectIdentityGuarded(
+                                CurrentPair.first);
+                        const uint64_t ConnectionIdentity = GetGuiObjectIdentityGuarded(Connection);
+                        if (ControllerIdentity && ConnectionIdentity)
+                        {
+                            InspectedPlayerIdx = i;
+                            bIsInspecting = true;
+                            InspectedPlayerController = CurrentPair.first;
+                            InspectedPlayerConnection = Connection;
+                            InspectedControllerIdentity = ControllerIdentity;
+                            InspectedConnectionIdentity = ConnectionIdentity;
+                        }
                     }
                 }
 
@@ -13886,57 +11224,46 @@ void GUI::Init()
             }
             else
             {
-				// Connections can reorder or disappear between frames.  Re-find the
-				// exact UObject generations selected by the user; never let a stale
-				// numeric row silently retarget actions to another player.
-				InspectedPlayerIdx = -1;
-				for (int i = 0;
-					 i < static_cast<int>(AllControllers.size());
-					 ++i)
-				{
-					const auto& Pair = AllControllers[i];
-					if (Pair.first != InspectedPlayerController ||
-						Pair.second != InspectedPlayerConnection)
-					{
-						continue;
-					}
-					if (GetGuiObjectIdentityGuarded(Pair.first) ==
-							InspectedControllerIdentity &&
-						GetGuiObjectIdentityGuarded(Pair.second) ==
-							InspectedConnectionIdentity)
-					{
-						InspectedPlayerIdx = i;
-					}
-					break;
-				}
-				if (InspectedPlayerIdx < 0)
+                InspectedPlayerIdx = -1;
+                for (int i = 0;
+                     i < static_cast<int>(AllControllers.size());
+                     ++i)
                 {
-					ClearInspectedPlayer();
+                    const auto& Pair = AllControllers[i];
+                    if (Pair.first != InspectedPlayerController ||
+                        Pair.second != InspectedPlayerConnection)
+                    {
+                        continue;
+                    }
+                    if (GetGuiObjectIdentityGuarded(Pair.first) == InspectedControllerIdentity &&
+                        GetGuiObjectIdentityGuarded(Pair.second) == InspectedConnectionIdentity)
+                    {
+                        InspectedPlayerIdx = i;
+                    }
+                    break;
+                }
+                if (InspectedPlayerIdx < 0)
+                {
+                    ClearInspectedPlayer();
                     break;
                 }
 
                 auto TargetPC = AllControllers[InspectedPlayerIdx].first;
                 if (!TargetPC)
                 {
-					ClearInspectedPlayer();
+                    ClearInspectedPlayer();
                     break;
                 }
 
                 auto TargetPS = TargetPC->PlayerState;
                 AFortPlayerPawnAthena* TargetPawn = nullptr;
-                auto PlayerPawnClass =
-                    AFortPlayerPawnAthena::StaticClass();
-                if (PlayerPawnClass &&
-                    TargetPC->HasMyFortPawn() &&
-                    TargetPC->MyFortPawn &&
-                    TargetPC->MyFortPawn->IsA(
-                        PlayerPawnClass))
+                auto PlayerPawnClass = AFortPlayerPawnAthena::StaticClass();
+                if (PlayerPawnClass && TargetPC->HasMyFortPawn() && TargetPC->MyFortPawn &&
+                    TargetPC->MyFortPawn->IsA(PlayerPawnClass))
                 {
                     TargetPawn = TargetPC->MyFortPawn;
                 }
-                else if (PlayerPawnClass &&
-                    TargetPC->HasPawn() &&
-                    TargetPC->Pawn &&
+                else if (PlayerPawnClass && TargetPC->HasPawn() && TargetPC->Pawn &&
                     TargetPC->Pawn->IsA(PlayerPawnClass))
                 {
                     TargetPawn = TargetPC->Pawn;
@@ -13944,13 +11271,13 @@ void GUI::Init()
 
                 if (!TargetPawn || !TargetPS)
                 {
-					ClearInspectedPlayer();
+                    ClearInspectedPlayer();
                     break;
                 }
 
                 if (ImGui::Button("Back", ImVec2(Width, Height)))
                 {
-					ClearInspectedPlayer();
+                    ClearInspectedPlayer();
                     break;
                 }
 
@@ -13969,17 +11296,11 @@ void GUI::Init()
                 ImGui::SameLine(0.0f, 0.0f);
                 ImGui::TextColored(ImVec4(1.f, 1.f, 0.f, 1.0f), DisplayName.c_str());
 
-				ImGui::Text("Join Order: #%d", InspectedPlayerIdx + 1);
-
-                //ImGui::Text("Ping: %f ms", TargetPS->GetPingInMilliseconds()); // ig it js doesn't exist on some versions
+                ImGui::Text("Join Order: #%d", InspectedPlayerIdx + 1);
 
                 FPlayerCombatStats PlayerStats{};
-                const bool HasPlayerStats =
-                    TryCopyCachedPlayerCombatStats(
-                        TargetPC,
-                        (AFortPlayerStateAthena*)TargetPS,
-                        TargetPawn,
-                        PlayerStats);
+                const bool HasPlayerStats = TryCopyCachedPlayerCombatStats(TargetPC,
+                        (AFortPlayerStateAthena*)TargetPS, TargetPawn, PlayerStats);
 
                 if (HasPlayerStats)
                     ImGui::Text("Kills: %d", PlayerStats.Kills);
@@ -13990,8 +11311,7 @@ void GUI::Init()
                 ImGui::SameLine(0.0f, 0.0f);
                 if (HasPlayerStats)
                 {
-                    ImGui::TextColored(
-                        ImVec4(0.372f, 0.792f, 0.255f, 1.0f),
+                    ImGui::TextColored(ImVec4(0.372f, 0.792f, 0.255f, 1.0f),
                         "%.0f", PlayerStats.Health);
                 }
                 else
@@ -14003,8 +11323,7 @@ void GUI::Init()
                 ImGui::SameLine(0.0f, 0.0f);
                 if (HasPlayerStats)
                 {
-                    ImGui::TextColored(
-                        ImVec4(0.278f, 0.612f, 0.945f, 1.0f),
+                    ImGui::TextColored(ImVec4(0.278f, 0.612f, 0.945f, 1.0f),
                         "%.0f", PlayerStats.Shield);
                 }
                 else
@@ -14017,10 +11336,7 @@ void GUI::Init()
                 SectionHeader("Player Loadout", SectionWidth);
                 BeginSectionBody();
 
-                PlayerLoadout::Render(
-                    TargetPC,
-                    SectionWidth - 20.f,
-                    g_pd3dDevice);
+                PlayerLoadout::Render(TargetPC, SectionWidth - 20.f, g_pd3dDevice);
 
                 EndSectionBody();
 
@@ -14032,7 +11348,7 @@ void GUI::Init()
                     auto Location = TargetPawn->K2_GetActorLocation();
 
                     Memcury::Util::CopyToClipboard(std::to_string(Location.X) + " " + std::to_string(Location.Y) + " " + std::to_string(Location.Z));
-				}
+                }
 
                 if (ImGui::Button("Teleport All Players", ImVec2(Width, Height)))
                     AFortPlayerControllerAthena::TeleportAllPlayersTo(TargetPC);
@@ -14048,54 +11364,48 @@ void GUI::Init()
                     Tag.TagName = Cue;
                     auto PredictionKey = (FPredictionKey*)malloc(FPredictionKey::Size());
                     memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
-                    TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag, *PredictionKey, Handle);
-                    TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag, *PredictionKey, Handle);
+                    TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueAdded(Tag,
+                        *PredictionKey, Handle);
+                    TargetPS->AbilitySystemComponent->NetMulticast_InvokeGameplayCueExecuted(Tag,
+                        *PredictionKey, Handle);
                     free(PredictionKey);
                 }
 
-                if (VersionInfo.FortniteVersion >= 5.00 &&
-                    ImGui::Button(
+                if (VersionInfo.FortniteVersion >= 5.00 && ImGui::Button(
                         "Rift Player", ImVec2(Width, Height)))
                 {
-					auto Loc = TargetPawn->K2_GetActorLocation();
+                    auto Loc = TargetPawn->K2_GetActorLocation();
 
                     static auto RiftClass = FindObject<UClass>(L"/Game/Athena/Items/Consumables/RiftItem/BGA_RiftPortal_Item_Athena.BGA_RiftPortal_Item_Athena_C");
 
                     if (RiftClass)
                     {
-                        auto Actor = UWorld::SpawnActor<AActor>(
-                            RiftClass, Loc, {});
+                        auto Actor = UWorld::SpawnActor<AActor>(RiftClass, Loc, {});
                         if (Actor)
                         {
                             Actor->ForceNetUpdate();
                             Actor->K2_DestroyActor();
                         }
                     }
-				}
+                }
 
-                const bool bIsMinimumGodded =
-                    AFortPlayerPawnAthena::
+                const bool bIsMinimumGodded = AFortPlayerPawnAthena::
                         HasMinimumHealthGodMode(TargetPC);
-                const bool bIsGodded =
-                    bIsMinimumGodded ||
-                    AFortPlayerPawnAthena::
+                const bool bIsGodded = bIsMinimumGodded || AFortPlayerPawnAthena::
                         HasFullHealthGodMode(TargetPC);
 
                 if (bIsGodded)
                 {
                     if (ImGui::Button("Ungod Player", ImVec2(Width, Height)))
                     {
-                        AFortPlayerPawnAthena::DisableGodModes(
-                            TargetPC, TargetPawn);
+                        AFortPlayerPawnAthena::DisableGodModes(TargetPC, TargetPawn);
                     }
                 }
                 else
                 {
                     if (ImGui::Button("God Player", ImVec2(Width, Height)))
                     {
-                        const bool bAppliedGod =
-                            AFortPlayerPawnAthena::
-                                SetFullHealthGodMode(
+                        const bool bAppliedGod = AFortPlayerPawnAthena::SetFullHealthGodMode(
                                     TargetPC, TargetPawn, true);
 
                         if (bAppliedGod)
@@ -14107,31 +11417,22 @@ void GUI::Init()
                             TargetPawn->SetShield(MaxShield);
                             TargetPawn->ForceNetUpdate();
 
-                            if (TargetPS &&
-                                TargetPS->HasAbilitySystemComponent() &&
+                            if (TargetPS && TargetPS->HasAbilitySystemComponent() &&
                                 TargetPS->AbilitySystemComponent)
                             {
-                                auto AbilitySystem =
-                                    TargetPS->AbilitySystemComponent;
-                                auto Handle =
-                                    AbilitySystem->MakeEffectContext();
+                                auto AbilitySystem = TargetPS->AbilitySystemComponent;
+                                auto Handle = AbilitySystem->MakeEffectContext();
                                 FGameplayTag Tag{};
-                                static auto Cue = FName(
-                                    L"GameplayCue.Shield.PotionConsumed");
+                                static auto Cue = FName(L"GameplayCue.Shield.PotionConsumed");
                                 Tag.TagName = Cue;
-                                auto PredictionKey =
-                                    (FPredictionKey*)malloc(
+                                auto PredictionKey = (FPredictionKey*)malloc(
                                         FPredictionKey::Size());
                                 if (PredictionKey)
                                 {
-                                    memset(
-                                        (PBYTE)PredictionKey, 0,
-                                        FPredictionKey::Size());
-                                    AbilitySystem
-                                        ->NetMulticast_InvokeGameplayCueAdded(
+                                    memset((PBYTE)PredictionKey, 0, FPredictionKey::Size());
+                                    AbilitySystem->NetMulticast_InvokeGameplayCueAdded(
                                             Tag, *PredictionKey, Handle);
-                                    AbilitySystem
-                                        ->NetMulticast_InvokeGameplayCueExecuted(
+                                    AbilitySystem->NetMulticast_InvokeGameplayCueExecuted(
                                             Tag, *PredictionKey, Handle);
                                     free(PredictionKey);
                                 }
@@ -14142,15 +11443,14 @@ void GUI::Init()
 
                 if (ImGui::Button("Eliminate Player", ImVec2(Width, Height)))
                 {
-                    AFortPlayerControllerAthena::TryEliminatePlayer(
-                        TargetPC);
+                    AFortPlayerControllerAthena::TryEliminatePlayer(TargetPC);
                     bIsInspecting = false;
                 }
 
                 if (ImGui::Button("Kick Player", ImVec2(Width, Height)))
                 {
                     TargetPC->ServerReturnToMainMenu("You have been kicked from the game by the host.");
-					bIsInspecting = false;
+                    bIsInspecting = false;
                 }
 
                 ImGui::Spacing();
@@ -14179,7 +11479,7 @@ void GUI::Init()
                 ImGui::Spacing();
 
                 static char WID[256] = {};
-				static int Amount = 1.f;
+                static int Amount = 1.f;
 
                 ImGui::SetNextItemWidth(Width);
                 ImGui::InputText("Item To Give", WID, IM_ARRAYSIZE(WID));
@@ -14200,7 +11500,7 @@ void GUI::Init()
                         int32 Count = Amount;
 
                         if (Count <= 0)
-							Count = ItemDefinition->GetMaxStackSize();
+                            Count = ItemDefinition->GetMaxStackSize();
 
                         FVector FinalLoc = TargetPawn ? TargetPawn->K2_GetActorLocation() : FVector();
 
@@ -14214,12 +11514,15 @@ void GUI::Init()
                         FinalLoc.X += cos(FinalAngle) * 100.f;
                         FinalLoc.Y += sin(FinalAngle) * 100.f;
 
-                        auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count, -1, EFortPickupSourceTypeFlag::GetOther(), EFortPickupSpawnSource::GetUnset(), TargetPawn);
+                        auto Pickup = AFortInventory::SpawnPickup(FinalLoc, ItemDefinition, Count,
+                            -1, EFortPickupSourceTypeFlag::GetOther(),
+                            EFortPickupSpawnSource::GetUnset(), TargetPawn);
 
                         if (TargetPawn && Pickup)
-                            TargetPawn->ServerHandlePickup(Pickup, Pickup->PickupLocationData.FlyTime, FVector(), true);
+                            TargetPawn->ServerHandlePickup(Pickup,
+                                Pickup->PickupLocationData.FlyTime, FVector(), true);
                     }
-				}
+                }
 
                 ImGui::Spacing();
                 ImGui::Spacing();
@@ -14240,7 +11543,6 @@ void GUI::Init()
 
                         TargetPC->ServerChangeName(NewName);
                         TargetPS->OnRep_PlayerName();
-                        //nameStr.clear();
                     }
                 }
 
@@ -14253,35 +11555,24 @@ void GUI::Init()
         {
             enum class ESafeZoneMapGesture
             {
-                None,
-                PlaceNew
+                None, PlaceNew
             };
-            static ESafeZoneMapGesture s_ArmedGesture =
-                ESafeZoneMapGesture::None;
-            static ESafeZoneMapGesture s_DragGesture =
-                ESafeZoneMapGesture::None;
-            static unsigned int s_SafeZoneGestureGeneration =
-                GPreferenceEditorGeneration;
-            if (s_SafeZoneGestureGeneration !=
-                GPreferenceEditorGeneration)
+            static ESafeZoneMapGesture s_ArmedGesture = ESafeZoneMapGesture::None;
+            static ESafeZoneMapGesture s_DragGesture = ESafeZoneMapGesture::None;
+            static unsigned int s_SafeZoneGestureGeneration = GPreferenceEditorGeneration;
+            if (s_SafeZoneGestureGeneration != GPreferenceEditorGeneration)
             {
                 s_ArmedGesture = ESafeZoneMapGesture::None;
                 s_DragGesture = ESafeZoneMapGesture::None;
-                s_SafeZoneGestureGeneration =
-                    GPreferenceEditorGeneration;
+                s_SafeZoneGestureGeneration = GPreferenceEditorGeneration;
             }
 
-            const bool bLaunchCommitted =
-                FConfiguration::bReadyToStart.load(
+            const bool bLaunchCommitted = FConfiguration::bReadyToStart.load(
                     std::memory_order_acquire);
-            const EGSStatus currentServerStatus =
-                gsStatus.load(std::memory_order_acquire);
-            const bool bSafeZoneRuntimeCorrectionAllowed =
-                bLaunchCommitted &&
-                currentServerStatus < StartedMatch &&
-                IsCustomMovingZoneRuntimeCorrectionAllowed();
-            const bool bSafeZoneDraftLocked =
-                bLaunchCommitted &&
+            const EGSStatus currentServerStatus = gsStatus.load(std::memory_order_acquire);
+            const bool bSafeZoneRuntimeCorrectionAllowed = bLaunchCommitted &&
+                currentServerStatus < StartedMatch && IsCustomMovingZoneRuntimeCorrectionAllowed();
+            const bool bSafeZoneDraftLocked = bLaunchCommitted &&
                 !bSafeZoneRuntimeCorrectionAllowed;
 
             SectionHeader("Lategame Options", SectionWidth);
@@ -14289,11 +11580,7 @@ void GUI::Init()
 
             if (currentServerStatus < StartedMatch || bLaunchCommitted)
             {
-                // Special maps and native objective modes require their normal
-                // phase flow.
-                const bool bLockLateGame =
-                    LocksLateGameForSelection(
-                        SelectedPlaylist);
+                const bool bLockLateGame = LocksLateGameForSelection(SelectedPlaylist);
                 if (bLockLateGame && !bLaunchCommitted)
                 {
                     FConfiguration::SetLateGameEnabled(false);
@@ -14301,8 +11588,7 @@ void GUI::Init()
                     s_DragGesture = ESafeZoneMapGesture::None;
                 }
 
-                ImGui::BeginDisabled(
-                    bLockLateGame || bLaunchCommitted);
+                ImGui::BeginDisabled(bLockLateGame || bLaunchCommitted);
                 bool bLateGameEnabled = FConfiguration::bLateGame;
                 if (ImGui::Checkbox("Late Game", &bLateGameEnabled))
                 {
@@ -14319,65 +11605,39 @@ void GUI::Init()
                 {
                     ImGui::BeginDisabled(bLaunchCommitted);
                     if (VersionInfo.FortniteVersion > 2.50)
-                        AtomicCheckbox(
-                            "Use Moving Bus",
-                            FConfiguration::bMovingBus);
+                        AtomicCheckbox("Use Moving Bus", FConfiguration::bMovingBus);
 
-                    const bool bMovingZoneOwnsTiming =
-                        FConfiguration::bCustomSafeZone.load(
-                            std::memory_order_acquire) &&
-                        FConfiguration::
+                    const bool bMovingZoneOwnsTiming = FConfiguration::bCustomSafeZone.load(
+                            std::memory_order_acquire) && FConfiguration::
                             IsCustomMovingZoneSnapshotEnabled() &&
                         IsCustomMovingZoneVersionSupported();
-                    if (bMovingZoneOwnsTiming &&
-                        !bSafeZoneDraftLocked)
+                    if (bMovingZoneOwnsTiming && !bSafeZoneDraftLocked)
                     {
-                        FConfiguration::bLateGameLongZone.store(
-                            false, std::memory_order_release);
+                        FConfiguration::bLateGameLongZone.store(false, std::memory_order_release);
                     }
                     ImGui::BeginDisabled(bMovingZoneOwnsTiming);
-                    AtomicCheckbox(
-                        "Use Long Zone",
-                        FConfiguration::bLateGameLongZone);
+                    AtomicCheckbox("Use Long Zone", FConfiguration::bLateGameLongZone);
                     ImGui::EndDisabled();
                     if (bMovingZoneOwnsTiming)
                         ImGui::TextDisabled(
                             "Long Zone is unavailable while Custom Moving Zone is active.");
-                    if (AtomicCheckbox(
-                            "Use Versionized Lategame Loadouts",
-                            FConfiguration::
-                                bUseVersionizedLoadout) &&
-                        FConfiguration::
-                            bUseVersionizedLoadout)
+                    if (AtomicCheckbox("Use Versionized Lategame Loadouts", FConfiguration::
+                                bUseVersionizedLoadout) && FConfiguration::bUseVersionizedLoadout)
                     {
-                        FConfiguration::
-                            bUseCustomLoadout = false;
+                        FConfiguration::bUseCustomLoadout = false;
                     }
-                    if (AtomicCheckbox(
-                            "Use Custom Lategame Loadout",
-                            FConfiguration::
-                                bUseCustomLoadout) &&
-                        FConfiguration::
-                            bUseCustomLoadout)
+                    if (AtomicCheckbox("Use Custom Lategame Loadout", FConfiguration::
+                                bUseCustomLoadout) && FConfiguration::bUseCustomLoadout)
                     {
-                        FConfiguration::
-                            bUseVersionizedLoadout = false;
+                        FConfiguration::bUseVersionizedLoadout = false;
                     }
                     ImGui::EndDisabled();
 
-                    // The parent bit is part of the launch transaction and
-                    // never reopens after commitment. Recovery unlocks only
-                    // the nested moving-zone draft, whose shared_ptr identity
-                    // participates in the preflight freeze handshake.
                     ImGui::BeginDisabled(bLaunchCommitted);
-                    bool bCustomSafeZoneEnabled =
-                        FConfiguration::bCustomSafeZone.load(
+                    bool bCustomSafeZoneEnabled = FConfiguration::bCustomSafeZone.load(
                             std::memory_order_acquire);
-                    if (ImGui::Checkbox(
-                            "Custom Safe Zone",
-                            &bCustomSafeZoneEnabled) &&
-                        FConfiguration::SetCustomSafeZoneEnabled(
-                            bCustomSafeZoneEnabled) &&
+                    if (ImGui::Checkbox("Custom Safe Zone", &bCustomSafeZoneEnabled) &&
+                        FConfiguration::SetCustomSafeZoneEnabled(bCustomSafeZoneEnabled) &&
                         !bCustomSafeZoneEnabled)
                     {
                         s_ArmedGesture = ESafeZoneMapGesture::None;
@@ -14388,20 +11648,12 @@ void GUI::Init()
                     if (!FConfiguration::bCustomSafeZone)
                     {
                         ImGui::BeginDisabled(bLaunchCommitted);
-                        AtomicLabeledSliderInt(
-                            "Starting Zone",
-                            "##starting-zone",
-                            FConfiguration::LateGameZone,
-                            1, 7, Width);
+                        AtomicLabeledSliderInt("Starting Zone", "##starting-zone",
+                            FConfiguration::LateGameZone, 1, 7, Width);
                         ImGui::EndDisabled();
                     }
                     else
                     {
-                        // Interactive minimap. Stationary mode deliberately keeps
-                        // its original click-to-place/drag-to-size gesture. Moving
-                        // mode uses an explicit selected node and latched edit mode
-                        // so clicking an overlapping preview cannot move it by
-                        // accident.
                         static ID3D11ShaderResourceView* s_MapSRV = nullptr;
                         static int s_MapW = 0, s_MapH = 0;
                         static int s_RetryIn = 0;
@@ -14419,30 +11671,22 @@ void GUI::Init()
                         }
                         ImGui::BeginDisabled(bSafeZoneDraftLocked);
 
-                        FCustomSafeZoneSequence sequence =
-                            SafeZoneMap::EditableSequenceSnapshot();
+                        FCustomSafeZoneSequence sequence = SafeZoneMap::EditableSequenceSnapshot();
                         if (sequence.Nodes.empty())
-                            sequence.Nodes.assign(
-                                1,
-                                SafeZoneMap::LegacyNodeFromConfiguration());
+                            sequence.Nodes.assign(1, SafeZoneMap::LegacyNodeFromConfiguration());
 
-                        const bool bSupportsMovingZone =
-                            IsCustomMovingZoneVersionSupported();
-                        if (!bSupportsMovingZone &&
-                            sequence.bMovingZoneEnabled)
+                        const bool bSupportsMovingZone = IsCustomMovingZoneVersionSupported();
+                        if (!bSupportsMovingZone && sequence.bMovingZoneEnabled)
                         {
                             if (!bSafeZoneDraftLocked)
                             {
-                                SafeZoneMap::PublishSequence(
-                                    sequence, false);
+                                SafeZoneMap::PublishSequence(sequence, false);
                             }
                             sequence.bMovingZoneEnabled = false;
                         }
 
-                        bool bMovingZone = bSupportsMovingZone &&
-                            sequence.bMovingZoneEnabled;
-                        if (bMovingZone &&
-                            SafeZoneMap::ClampRadiiToNonIncreasing(sequence) &&
+                        bool bMovingZone = bSupportsMovingZone && sequence.bMovingZoneEnabled;
+                        if (bMovingZone && SafeZoneMap::ClampRadiiToNonIncreasing(sequence) &&
                             !bSafeZoneDraftLocked)
                         {
                             SafeZoneMap::PublishSequence(sequence, true);
@@ -14450,27 +11694,17 @@ void GUI::Init()
                         ImGui::Indent(12.f);
                         ImGui::BeginDisabled(!bSupportsMovingZone);
                         bool bRequestedMovingZone = bMovingZone;
-                        if (ImGui::Checkbox(
-                                "Custom Moving Zone",
-                                &bRequestedMovingZone))
+                        if (ImGui::Checkbox("Custom Moving Zone", &bRequestedMovingZone))
                         {
                             if (bRequestedMovingZone)
                             {
-                                // Node one is the compatibility circle. Adopt any
-                                // stationary edits made since this sequence was
-                                // last active while retaining its outgoing timing.
                                 const auto oldFirst = sequence.Nodes.front();
-                                auto legacy =
-                                    SafeZoneMap::LegacyNodeFromConfiguration();
-                                legacy.HoldBeforeNextSeconds =
-                                    oldFirst.HoldBeforeNextSeconds;
-                                legacy.MoveToNextSeconds =
-                                    oldFirst.MoveToNextSeconds;
+                                auto legacy = SafeZoneMap::LegacyNodeFromConfiguration();
+                                legacy.HoldBeforeNextSeconds = oldFirst.HoldBeforeNextSeconds;
+                                legacy.MoveToNextSeconds = oldFirst.MoveToNextSeconds;
                                 sequence.Nodes.front() = legacy;
-                                SafeZoneMap::ClampRadiiToNonIncreasing(
-                                    sequence);
-                                if (SafeZoneMap::PublishSequence(
-                                        sequence, true))
+                                SafeZoneMap::ClampRadiiToNonIncreasing(sequence);
+                                if (SafeZoneMap::PublishSequence(sequence, true))
                                 {
                                     FConfiguration::bLateGameLongZone.store(
                                         false, std::memory_order_release);
@@ -14481,60 +11715,42 @@ void GUI::Init()
                             {
                                 SafeZoneMap::PublishSequence(sequence, false);
                                 bMovingZone = false;
-                                s_ArmedGesture =
-                                    ESafeZoneMapGesture::None;
-                                s_DragGesture =
-                                    ESafeZoneMapGesture::None;
+                                s_ArmedGesture = ESafeZoneMapGesture::None;
+                                s_DragGesture = ESafeZoneMapGesture::None;
                             }
                         }
                         ImGui::EndDisabled();
                         if (!bSupportsMovingZone)
                         {
-                            ImGui::TextDisabled(
-                                "Moving zones are supported through Fortnite 30.");
+                            ImGui::TextDisabled("Moving zones are supported through Fortnite 30.");
                         }
                         ImGui::Unindent(12.f);
 
                         if (!bMovingZone)
                         {
-                            // Keep the display copy in lock-step with the legacy
-                            // fields without discarding an inactive authored list.
                             const auto oldFirst = sequence.Nodes.front();
-                            auto legacy =
-                                SafeZoneMap::LegacyNodeFromConfiguration();
-                            legacy.HoldBeforeNextSeconds =
-                                oldFirst.HoldBeforeNextSeconds;
-                            legacy.MoveToNextSeconds =
-                                oldFirst.MoveToNextSeconds;
+                            auto legacy = SafeZoneMap::LegacyNodeFromConfiguration();
+                            legacy.HoldBeforeNextSeconds = oldFirst.HoldBeforeNextSeconds;
+                            legacy.MoveToNextSeconds = oldFirst.MoveToNextSeconds;
                             sequence.Nodes.front() = legacy;
                             s_SelectedNode = 0;
                             s_ArmedGesture = ESafeZoneMapGesture::None;
                         }
                         else
                         {
-                            s_SelectedNode = (std::min)(
-                                s_SelectedNode,
-                                sequence.Nodes.size() - 1);
+                            s_SelectedNode = (std::min)(s_SelectedNode, sequence.Nodes.size() - 1);
 
-                            // Zone Steps is a peer of Lategame Options visually,
-                            // even though it shares the same configuration scope.
                             ImGui::Unindent(10.f);
                             SectionHeader("Zone Steps", SectionWidth);
                             BeginSectionBody();
                             ImGui::TextUnformatted("Selected Step");
                             char selectedCirclePreview[64]{};
-                            snprintf(
-                                selectedCirclePreview,
-                                sizeof(selectedCirclePreview),
+                            snprintf(selectedCirclePreview, sizeof(selectedCirclePreview),
                                 s_SelectedNode + 1 == sequence.Nodes.size()
-                                    ? "Step %d of %d (Final)"
-                                    : "Step %d of %d",
-                                (int)s_SelectedNode + 1,
-                                (int)sequence.Nodes.size());
+                                    ? "Step %d of %d (Final)" : "Step %d of %d",
+                                (int)s_SelectedNode + 1, (int)sequence.Nodes.size());
                             ImGui::SetNextItemWidth(Width);
-                            if (ImGui::BeginCombo(
-                                    "##selected-zone-step",
-                                    selectedCirclePreview))
+                            if (ImGui::BeginCombo("##selected-zone-step", selectedCirclePreview))
                             {
                                 for (size_t index = 0;
                                     index < sequence.Nodes.size(); ++index)
@@ -14542,34 +11758,22 @@ void GUI::Init()
                                     char circleLabel[64]{};
                                     if (index + 1 == sequence.Nodes.size())
                                     {
-                                        snprintf(
-                                            circleLabel,
-                                            sizeof(circleLabel),
-                                            "Step %d  (Final, %.0f m)",
-                                            (int)index + 1,
-                                            sequence.Nodes[index].RadiusCm /
-                                                100.f);
+                                        snprintf(circleLabel, sizeof(circleLabel),
+                                            "Step %d  (Final, %.0f m)", (int)index + 1,
+                                            sequence.Nodes[index].RadiusCm / 100.f);
                                     }
                                     else
                                     {
-                                        snprintf(
-                                            circleLabel,
-                                            sizeof(circleLabel),
-                                            "Step %d  (%.0f m)",
-                                            (int)index + 1,
-                                            sequence.Nodes[index].RadiusCm /
-                                                100.f);
+                                        snprintf(circleLabel, sizeof(circleLabel),
+                                            "Step %d  (%.0f m)", (int)index + 1,
+                                            sequence.Nodes[index].RadiusCm / 100.f);
                                     }
-                                    const bool selected =
-                                        index == s_SelectedNode;
-                                    if (ImGui::Selectable(
-                                            circleLabel, selected))
+                                    const bool selected = index == s_SelectedNode;
+                                    if (ImGui::Selectable(circleLabel, selected))
                                     {
                                         s_SelectedNode = index;
-                                        s_ArmedGesture =
-                                            ESafeZoneMapGesture::None;
-                                        s_DragGesture =
-                                            ESafeZoneMapGesture::None;
+                                        s_ArmedGesture = ESafeZoneMapGesture::None;
+                                        s_DragGesture = ESafeZoneMapGesture::None;
                                     }
                                     if (selected)
                                         ImGui::SetItemDefaultFocus();
@@ -14577,37 +11781,29 @@ void GUI::Init()
                                 ImGui::EndCombo();
                             }
 
-                            const bool canAdd =
-                                sequence.Nodes.size() <
+                            const bool canAdd = sequence.Nodes.size() <
                                 FCustomSafeZoneSequence::MaximumNodeCount;
                             ImGui::BeginDisabled(!canAdd);
                             if (ImGui::Button("Add Step"))
                             {
-                                FCustomSafeZoneNode added =
-                                    sequence.Nodes.back();
+                                FCustomSafeZoneNode added = sequence.Nodes.back();
                                 added.HoldBeforeNextSeconds.reset();
                                 added.MoveToNextSeconds.reset();
                                 sequence.Nodes.push_back(added);
                                 s_SelectedNode = sequence.Nodes.size() - 1;
-                                s_ArmedGesture =
-                                    ESafeZoneMapGesture::PlaceNew;
+                                s_ArmedGesture = ESafeZoneMapGesture::PlaceNew;
                                 SafeZoneMap::PublishSequence(sequence, true);
                             }
                             ImGui::EndDisabled();
                             ImGui::SameLine();
-                            ImGui::BeginDisabled(
-                                sequence.Nodes.size() <= 1);
+                            ImGui::BeginDisabled(sequence.Nodes.size() <= 1);
                             if (ImGui::Button("Remove Step"))
                             {
-                                sequence.Nodes.erase(
-                                    sequence.Nodes.begin() + s_SelectedNode);
-                                s_SelectedNode = (std::min)(
-                                    s_SelectedNode,
+                                sequence.Nodes.erase(sequence.Nodes.begin() + s_SelectedNode);
+                                s_SelectedNode = (std::min)(s_SelectedNode,
                                     sequence.Nodes.size() - 1);
-                                s_ArmedGesture =
-                                    ESafeZoneMapGesture::None;
-                                s_DragGesture =
-                                    ESafeZoneMapGesture::None;
+                                s_ArmedGesture = ESafeZoneMapGesture::None;
+                                s_DragGesture = ESafeZoneMapGesture::None;
                                 SafeZoneMap::PublishSequence(sequence, true);
                             }
                             ImGui::EndDisabled();
@@ -14616,95 +11812,64 @@ void GUI::Init()
                                 s_SelectedNode + 1 == sequence.Nodes.size();
                             if (selectedFinalStep)
                             {
-                                bool closeFinalCircle =
-                                    sequence.bCloseFinalCircle;
-                                if (ImGui::Checkbox(
-                                        "Fully Close Final Zone",
-                                        &closeFinalCircle))
+                                bool closeFinalCircle = sequence.bCloseFinalCircle;
+                                if (ImGui::Checkbox("Fully Close Final Zone", &closeFinalCircle))
                                 {
-                                    sequence.bCloseFinalCircle =
-                                        closeFinalCircle;
-                                    SafeZoneMap::PublishSequence(
-                                        sequence, true);
+                                    sequence.bCloseFinalCircle = closeFinalCircle;
+                                    SafeZoneMap::PublishSequence(sequence, true);
                                 }
                             }
 
-                            const bool selectedStepHasTransition =
-                                !selectedFinalStep ||
+                            const bool selectedStepHasTransition = !selectedFinalStep ||
                                 sequence.bCloseFinalCircle;
                             if (selectedStepHasTransition)
                             {
                                 ImGui::PushID((int)s_SelectedNode);
                                 bool timingChanged = false;
-                                timingChanged |=
-                                    OptionalSafeZoneDurationEditor(
-                                        selectedFinalStep
-                                            ? "Hold before closing"
-                                            : "Hold before next circle",
-                                        "##safe-zone-hold-mode",
-                                        "##safe-zone-hold-value",
-                                        sequence.Nodes[s_SelectedNode]
-                                            .HoldBeforeNextSeconds,
+                                timingChanged |= OptionalSafeZoneDurationEditor(selectedFinalStep
+                                            ? "Hold before closing" : "Hold before next circle",
+                                        "##safe-zone-hold-mode", "##safe-zone-hold-value",
+                                        sequence.Nodes[s_SelectedNode].HoldBeforeNextSeconds,
                                         Width, 30.f);
-                                timingChanged |=
-                                    OptionalSafeZoneDurationEditor(
-                                        selectedFinalStep
-                                            ? "Time to fully close"
-                                            : "Move to next circle",
-                                        "##safe-zone-move-mode",
-                                        "##safe-zone-move-value",
-                                        sequence.Nodes[s_SelectedNode]
-                                            .MoveToNextSeconds,
+                                timingChanged |= OptionalSafeZoneDurationEditor(selectedFinalStep
+                                            ? "Time to fully close" : "Move to next circle",
+                                        "##safe-zone-move-mode", "##safe-zone-move-value",
+                                        sequence.Nodes[s_SelectedNode].MoveToNextSeconds,
                                         Width, 30.f);
                                 if (timingChanged)
                                 {
-                                    SafeZoneMap::PublishSequence(
-                                        sequence, true);
+                                    SafeZoneMap::PublishSequence(sequence, true);
                                 }
                                 ImGui::PopID();
                             }
 
                             std::string sequenceStartError;
-                            if (!bLaunchCommitted &&
-                                !ValidateCustomMovingZoneForStart(
+                            if (!bLaunchCommitted && !ValidateCustomMovingZoneForStart(
                                     sequenceStartError))
                             {
                                 ImGui::PushTextWrapPos(0.f);
-                                ImGui::TextColored(
-                                    ImVec4(1.f, 0.32f, 0.28f, 1.f),
-                                    "Unable to start: %s",
-                                    sequenceStartError.c_str());
+                                ImGui::TextColored(ImVec4(1.f, 0.32f, 0.28f, 1.f),
+                                    "Unable to start: %s", sequenceStartError.c_str());
                                 ImGui::PopTextWrapPos();
                             }
                             EndSectionBody();
                             ImGui::Indent(10.f);
 
-                            // Playlist-specific phase capacity is only known
-                            // after the native phase array becomes available on
-                            // the game thread. Surface that synchronized runtime
-                            // result during setup instead of guessing a capacity
-                            // from the Fortnite version.
                             if (bLaunchCommitted)
                             {
                                 if (bSafeZoneDraftLocked)
                                     ImGui::EndDisabled();
                                 ImGui::Unindent(10.f);
-                                SectionHeader(
-                                    "Runtime Validation",
-                                    SectionWidth);
+                                SectionHeader("Runtime Validation", SectionWidth);
                                 BeginSectionBody();
-                                const auto runtimeStatus =
-                                    CustomSafeZoneRuntime::GetStatus();
-                                const int authoredNodeCount =
-                                    (int)sequence.Nodes.size();
-                                const bool hasTransition =
-                                    HasCustomMovingZoneTransition(sequence);
+                                const auto runtimeStatus = CustomSafeZoneRuntime::GetStatus();
+                                const int authoredNodeCount = (int)sequence.Nodes.size();
+                                const bool hasTransition = HasCustomMovingZoneTransition(sequence);
 
                                 ImGui::PushTextWrapPos(0.f);
                                 if (!hasTransition)
                                 {
-                                    ImGui::TextColored(
-                                        ImVec4(0.45f, 0.88f, 0.58f, 1.f),
+                                    ImGui::TextColored(ImVec4(0.45f, 0.88f, 0.58f, 1.f),
                                         "Custom safe zone is ready. The final "
                                         "circle will stay open while normal "
                                         "storm phases continue.");
@@ -14712,21 +11877,18 @@ void GUI::Init()
                                 else if (runtimeStatus.Failure ==
                                     ECustomSafeZoneRuntimeFailure::NotRequested)
                                 {
-                                    ImGui::TextColored(
-                                        ImVec4(1.f, 0.76f, 0.28f, 1.f),
+                                    ImGui::TextColored(ImVec4(1.f, 0.76f, 0.28f, 1.f),
                                         "Checking that this map has enough "
                                         "storm phases for your zone steps...");
                                 }
                                 else if (runtimeStatus.Failure ==
                                     ECustomSafeZoneRuntimeFailure::None &&
                                     runtimeStatus.NodeCount == authoredNodeCount &&
-                                    runtimeStatus.bCloseFinalCircle ==
-                                        sequence.bCloseFinalCircle)
+                                    runtimeStatus.bCloseFinalCircle == sequence.bCloseFinalCircle)
                                 {
                                     if (sequence.bCloseFinalCircle)
                                     {
-                                        ImGui::TextColored(
-                                            ImVec4(0.45f, 0.88f, 0.58f, 1.f),
+                                        ImGui::TextColored(ImVec4(0.45f, 0.88f, 0.58f, 1.f),
                                             "Custom moving zone is ready. All "
                                             "%d zone steps and the final full "
                                             "close fit this map's storm sequence.",
@@ -14734,45 +11896,37 @@ void GUI::Init()
                                     }
                                     else
                                     {
-                                        ImGui::TextColored(
-                                            ImVec4(0.45f, 0.88f, 0.58f, 1.f),
+                                        ImGui::TextColored(ImVec4(0.45f, 0.88f, 0.58f, 1.f),
                                             "Custom moving zone is ready. All "
                                             "%d zone steps fit this map, and "
-                                            "the final circle will stay open.",
-                                            authoredNodeCount);
+                                            "the final circle will stay open.", authoredNodeCount);
                                     }
                                 }
                                 else if (runtimeStatus.Failure ==
                                     ECustomSafeZoneRuntimeFailure::None)
                                 {
-                                    ImGui::TextColored(
-                                        ImVec4(1.f, 0.76f, 0.28f, 1.f),
+                                    ImGui::TextColored(ImVec4(1.f, 0.76f, 0.28f, 1.f),
                                         "Rechecking your latest zone changes...");
                                 }
                                 else
                                 {
                                     std::string runtimeError;
-                                    if (ValidateCustomMovingZoneForStart(
-                                            runtimeError) ||
+                                    if (ValidateCustomMovingZoneForStart(runtimeError) ||
                                         runtimeError.empty())
                                     {
-                                        runtimeError =
-                                            "The custom zones could not be set "
+                                        runtimeError = "The custom zones could not be set "
                                             "up. Adjust the zone steps or turn "
                                             "Custom Moving Zone off; setup will "
                                             "retry automatically.";
                                     }
-                                    ImGui::TextColored(
-                                        ImVec4(1.f, 0.32f, 0.28f, 1.f),
-                                        "Unable to start: %s",
-                                        runtimeError.c_str());
+                                    ImGui::TextColored(ImVec4(1.f, 0.32f, 0.28f, 1.f),
+                                        "Unable to start: %s", runtimeError.c_str());
                                 }
                                 ImGui::PopTextWrapPos();
                                 if (bSafeZoneRuntimeCorrectionAllowed)
                                 {
                                     ImGui::PushTextWrapPos(0.f);
-                                    ImGui::TextDisabled(
-                                        "Edit the zone steps above. Server setup "
+                                    ImGui::TextDisabled("Edit the zone steps above. Server setup "
                                         "will retry automatically after each change.");
                                     ImGui::PopTextWrapPos();
                                 }
@@ -14783,10 +11937,8 @@ void GUI::Init()
                             }
                         }
 
-                        if (!s_MapSRV) // retry until the minimap texture becomes resident
+                        if (!s_MapSRV)
                         {
-                            // Pixels produced by TickFlush should be uploaded on the
-                            // next GUI frame, not after the normal three-second poll.
                             if (s_RetryIn <= 0 || SafeZoneMap::HasReadyPixels())
                             {
                                 SafeZoneMap::Acquire(g_pd3dDevice, &s_MapSRV, &s_MapW, &s_MapH);
@@ -14799,19 +11951,13 @@ void GUI::Init()
 
                         if (bMovingZone)
                         {
-                            if (s_ArmedGesture ==
-                                ESafeZoneMapGesture::PlaceNew)
+                            if (s_ArmedGesture == ESafeZoneMapGesture::PlaceNew)
                             {
-                                ImGui::TextDisabled(
-                                    "Click and drag to place step %d.",
+                                ImGui::TextDisabled("Click and drag to place step %d.",
                                     (int)s_SelectedNode + 1);
                             }
                         }
 
-                        // A committed draft is read-only, but the map remains
-                        // an interactive preview. Temporarily leave the disabled
-                        // scope for navigation, then explicitly suppress every
-                        // geometry-edit gesture below.
                         if (bSafeZoneDraftLocked)
                             ImGui::EndDisabled();
 
@@ -14835,42 +11981,28 @@ void GUI::Init()
 
                             auto BuildProjectedCircles = [&]()
                             {
-                                std::vector<SafeZoneMap::ProjectedCircle>
-                                    projected;
-                                const size_t count = bMovingZone
-                                    ? sequence.Nodes.size()
-                                    : (std::min)(
-                                        (size_t)1,
-                                        sequence.Nodes.size());
+                                std::vector<SafeZoneMap::ProjectedCircle> projected;
+                                const size_t count = bMovingZone ? sequence.Nodes.size()
+                                    : (std::min)((size_t)1, sequence.Nodes.size());
                                 projected.reserve(count);
                                 for (size_t i = 0; i < count; ++i)
                                 {
                                     const auto& node = sequence.Nodes[i];
                                     float lx = 0.f;
                                     float ly = 0.f;
-                                    SafeZoneMap::NodeToPixel(
-                                        node, S, map, lx, ly);
-                                    ImVec2 radius =
-                                        SafeZoneMap::RadiusToPixelAxes(
+                                    SafeZoneMap::NodeToPixel(node, S, map, lx, ly);
+                                    ImVec2 radius = SafeZoneMap::RadiusToPixelAxes(
                                             node.RadiusCm, S, map);
                                     radius.x *= s_MapZoom;
                                     radius.y *= s_MapZoom;
                                     projected.push_back({
-                                        i,
-                                        ImVec2(
-                                            r0.x + s_MapPan.x +
-                                                lx * s_MapZoom,
-                                            r0.y + s_MapPan.y +
-                                                ly * s_MapZoom),
-                                        radius
+                                        i, ImVec2(r0.x + s_MapPan.x + lx * s_MapZoom,
+                                            r0.y + s_MapPan.y + ly * s_MapZoom), radius
                                     });
                                 }
                                 return projected;
                             };
 
-                            // Ctrl + wheel zooms toward the mouse so the point under
-                            // the cursor remains stationary. The canvas itself stays
-                            // fixed-size and clips the enlarged map and its overlays.
                             if (ImGui::IsItemHovered() && io.KeyCtrl)
                             {
                                 ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
@@ -14889,10 +12021,7 @@ void GUI::Init()
                                 }
                             }
 
-                            // Ctrl + left drag pans the zoomed map. The gesture is latched on
-                            // press so letting go of Ctrl mid-drag does not turn the rest of
-                            // the drag into a zone edit. At 100% zoom ClampMapPan pins the
-                            // offset to zero, so this is a no-op until the user zooms in.
+                            // Latched on press, so releasing Ctrl mid-drag does not turn the rest of it into a zone edit.
                             if (ImGui::IsItemActivated() && io.KeyCtrl)
                                 s_MapPanning = true;
                             if (!ImGui::IsItemActive())
@@ -14925,22 +12054,15 @@ void GUI::Init()
                             }
                             else if (!bSafeZoneDraftLocked)
                             {
-                                const auto MouseToNormalized =
-                                    [&](const ImVec2& mouse,
-                                        float& u,
+                                const auto MouseToNormalized = [&](const ImVec2& mouse, float& u,
                                         float& v)
                                 {
-                                    u = SafeZoneMap::Clamp(
-                                        (mouse.x - r0.x - s_MapPan.x) /
-                                            (S * s_MapZoom),
-                                        0.f, 1.f);
-                                    v = SafeZoneMap::Clamp(
-                                        (mouse.y - r0.y - s_MapPan.y) /
-                                            (S * s_MapZoom),
-                                        0.f, 1.f);
+                                    u = SafeZoneMap::Clamp((mouse.x - r0.x - s_MapPan.x) /
+                                            (S * s_MapZoom), 0.f, 1.f);
+                                    v = SafeZoneMap::Clamp((mouse.y - r0.y - s_MapPan.y) /
+                                            (S * s_MapZoom), 0.f, 1.f);
                                 };
-                                const auto SetNodeCenter =
-                                    [&](FCustomSafeZoneNode& node,
+                                const auto SetNodeCenter = [&](FCustomSafeZoneNode& node,
                                         const ImVec2& mouse)
                                 {
                                     float u = 0.5f;
@@ -14948,93 +12070,61 @@ void GUI::Init()
                                     MouseToNormalized(mouse, u, v);
                                     float worldX = 0.f;
                                     float worldY = 0.f;
-                                    SafeZoneMap::PixelToWorld(
-                                        u, v, 1.f, map,
-                                        worldX, worldY);
+                                    SafeZoneMap::PixelToWorld(u, v, 1.f, map, worldX, worldY);
                                     node.Center.X = worldX;
                                     node.Center.Y = worldY;
                                     node.bHasNormalizedCenter = true;
                                     node.NormalizedU = u;
                                     node.NormalizedV = v;
                                 };
-                                const auto SetNodeRadius =
-                                    [&](FCustomSafeZoneNode& node,
-                                        size_t nodeIndex,
-                                        const ImVec2& mouse)
+                                const auto SetNodeRadius = [&](FCustomSafeZoneNode& node,
+                                        size_t nodeIndex, const ImVec2& mouse)
                                 {
                                     float u = 0.5f;
                                     float v = 0.5f;
                                     MouseToNormalized(mouse, u, v);
                                     float mouseX = 0.f;
                                     float mouseY = 0.f;
-                                    SafeZoneMap::PixelToWorld(
-                                        u, v, 1.f, map,
-                                        mouseX, mouseY);
+                                    SafeZoneMap::PixelToWorld(u, v, 1.f, map, mouseX, mouseY);
                                     float centerX = (float)node.Center.X;
                                     float centerY = (float)node.Center.Y;
                                     if (node.bHasNormalizedCenter &&
                                         std::isfinite(node.NormalizedU) &&
                                         std::isfinite(node.NormalizedV))
                                     {
-                                        // The game thread can publish a more
-                                        // precise projection between mouse-down
-                                        // and a later drag frame. Reconstruct
-                                        // both endpoints with this frame's one
-                                        // coherent map snapshot; never subtract
-                                        // an old-transform world mirror from a
-                                        // new-transform mouse position.
-                                        SafeZoneMap::PixelToWorld(
-                                            SafeZoneMap::Clamp(
-                                                node.NormalizedU, 0.f, 1.f),
-                                            SafeZoneMap::Clamp(
-                                                node.NormalizedV, 0.f, 1.f),
-                                            1.f, map,
+                                        SafeZoneMap::PixelToWorld(SafeZoneMap::Clamp(
+                                                node.NormalizedU, 0.f, 1.f), SafeZoneMap::Clamp(
+                                                node.NormalizedV, 0.f, 1.f), 1.f, map,
                                             centerX, centerY);
                                     }
                                     const float dx = mouseX - centerX;
                                     const float dy = mouseY - centerY;
                                     const float maximumRadius = nodeIndex > 0
                                         ? sequence.Nodes[nodeIndex - 1].RadiusCm
-                                        : FCustomSafeZoneSequence::
-                                            MaximumRadiusCm;
-                                    node.RadiusCm = SafeZoneMap::Clamp(
-                                        sqrtf(dx * dx + dy * dy),
-                                        FCustomSafeZoneSequence::
-                                            MinimumRadiusCm,
-                                        maximumRadius);
+                                        : FCustomSafeZoneSequence::MaximumRadiusCm;
+                                    node.RadiusCm = SafeZoneMap::Clamp(sqrtf(dx * dx + dy * dy),
+                                        FCustomSafeZoneSequence::MinimumRadiusCm, maximumRadius);
                                 };
 
                                 if (!bMovingZone)
                                 {
-                                    // Original stationary interaction: press sets
-                                    // center and the same drag sets radius.
                                     if (ImGui::IsItemActivated())
                                     {
-                                        auto node =
-                                            SafeZoneMap::LegacyNodeFromConfiguration();
+                                        auto node = SafeZoneMap::LegacyNodeFromConfiguration();
                                         SetNodeCenter(node, io.MousePos);
-                                        sequence.Nodes.front().Center =
-                                            node.Center;
-                                        sequence.Nodes.front()
-                                            .bHasNormalizedCenter = true;
-                                        sequence.Nodes.front().NormalizedU =
-                                            node.NormalizedU;
-                                        sequence.Nodes.front().NormalizedV =
-                                            node.NormalizedV;
-                                        SafeZoneMap::PublishSequence(
-                                            sequence, false);
+                                        sequence.Nodes.front().Center = node.Center;
+                                        sequence.Nodes.front().bHasNormalizedCenter = true;
+                                        sequence.Nodes.front().NormalizedU = node.NormalizedU;
+                                        sequence.Nodes.front().NormalizedV = node.NormalizedV;
+                                        SafeZoneMap::PublishSequence(sequence, false);
                                     }
-                                    if (ImGui::IsItemActive() &&
-                                        ImGui::IsMouseDragging(
+                                    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(
                                             ImGuiMouseButton_Left))
                                     {
-                                        auto node =
-                                            SafeZoneMap::LegacyNodeFromConfiguration();
+                                        auto node = SafeZoneMap::LegacyNodeFromConfiguration();
                                         SetNodeRadius(node, 0, io.MousePos);
-                                        sequence.Nodes.front().RadiusCm =
-                                            node.RadiusCm;
-                                        SafeZoneMap::PublishSequence(
-                                            sequence, false);
+                                        sequence.Nodes.front().RadiusCm = node.RadiusCm;
+                                        SafeZoneMap::PublishSequence(sequence, false);
                                     }
                                 }
                                 else
@@ -15043,41 +12133,30 @@ void GUI::Init()
                                     if (ImGui::IsItemActivated())
                                     {
                                         s_DragNode = s_SelectedNode;
-                                        s_DragGesture =
-                                            ESafeZoneMapGesture::PlaceNew;
-                                        s_ArmedGesture =
-                                            ESafeZoneMapGesture::None;
-                                        SetNodeCenter(
-                                            sequence.Nodes[s_DragNode],
-                                            io.MousePos);
+                                        s_DragGesture = ESafeZoneMapGesture::PlaceNew;
+                                        s_ArmedGesture = ESafeZoneMapGesture::None;
+                                        SetNodeCenter(sequence.Nodes[s_DragNode], io.MousePos);
                                         sequenceChanged = true;
                                     }
 
-                                    if (ImGui::IsItemActive() &&
-                                        s_DragGesture ==
+                                    if (ImGui::IsItemActive() && s_DragGesture ==
                                             ESafeZoneMapGesture::PlaceNew &&
                                         s_DragNode < sequence.Nodes.size() &&
-                                        ImGui::IsMouseDragging(
-                                            ImGuiMouseButton_Left))
+                                        ImGui::IsMouseDragging(ImGuiMouseButton_Left))
                                     {
-                                        SetNodeRadius(
-                                            sequence.Nodes[s_DragNode],
-                                            s_DragNode,
+                                        SetNodeRadius(sequence.Nodes[s_DragNode], s_DragNode,
                                             io.MousePos);
-                                        SafeZoneMap::ClampRadiiToNonIncreasing(
-                                            sequence);
+                                        SafeZoneMap::ClampRadiiToNonIncreasing(sequence);
                                         sequenceChanged = true;
                                     }
                                     if (!ImGui::IsItemActive())
                                     {
-                                        s_DragGesture =
-                                            ESafeZoneMapGesture::None;
+                                        s_DragGesture = ESafeZoneMapGesture::None;
                                     }
 
                                     if (sequenceChanged)
                                     {
-                                        SafeZoneMap::PublishSequence(
-                                            sequence, true);
+                                        SafeZoneMap::PublishSequence(sequence, true);
                                     }
                                 }
                             }
@@ -15085,32 +12164,23 @@ void GUI::Init()
                             if (!bMovingZone)
                             {
                                 const auto oldFirst = sequence.Nodes.front();
-                                auto legacy =
-                                    SafeZoneMap::LegacyNodeFromConfiguration();
-                                legacy.HoldBeforeNextSeconds =
-                                    oldFirst.HoldBeforeNextSeconds;
-                                legacy.MoveToNextSeconds =
-                                    oldFirst.MoveToNextSeconds;
+                                auto legacy = SafeZoneMap::LegacyNodeFromConfiguration();
+                                legacy.HoldBeforeNextSeconds = oldFirst.HoldBeforeNextSeconds;
+                                legacy.MoveToNextSeconds = oldFirst.MoveToNextSeconds;
                                 sequence.Nodes.front() = legacy;
                             }
 
-                            // Render one storm pass outside the union of every
-                            // step. Circle interiors and their intersections stay
-                            // clear regardless of selection or overlap.
                             ImDrawList* dl = ImGui::GetWindowDrawList();
                             dl->PushClipRect(r0, r1, true);
                             const ImVec2 imageMin(r0.x + s_MapPan.x, r0.y + s_MapPan.y);
                             const ImVec2 imageMax(imageMin.x + S * s_MapZoom, imageMin.y + S * s_MapZoom);
                             dl->AddImage((void*)s_MapSRV, imageMin, imageMax, uv0, uv1);
                             const auto projected = BuildProjectedCircles();
-                            if (SafeZoneMap::StormBackgroundPassCount(
-                                    projected.size()) == 1)
+                            if (SafeZoneMap::StormBackgroundPassCount(projected.size()) == 1)
                             {
-                                SafeZoneMap::FillOutsideCircleUnion(
-                                    dl, r0, r1, projected,
+                                SafeZoneMap::FillOutsideCircleUnion(dl, r0, r1, projected,
                                     IM_COL32(140, 40, 200, 128));
-                                SafeZoneMap::DrawStormBandsOutsideCircleUnion(
-                                    dl, r0, r1, projected,
+                                SafeZoneMap::DrawStormBandsOutsideCircleUnion(dl, r0, r1, projected,
                                     IM_COL32(205, 80, 235, 105));
                             }
 
@@ -15127,16 +12197,11 @@ void GUI::Init()
 
                             for (size_t i = 0; i < projected.size(); ++i)
                             {
-                                const bool selected =
-                                    bMovingZone && i == s_SelectedNode;
-                                const ImU32 outline = selected
-                                    ? IM_COL32(255, 205, 80, 245)
+                                const bool selected = bMovingZone && i == s_SelectedNode;
+                                const ImU32 outline = selected ? IM_COL32(255, 205, 80, 245)
                                     : IM_COL32(110, 195, 255, 240);
-                                dl->AddEllipse(
-                                    projected[i].Center,
-                                    projected[i].Radius,
-                                    outline, 0.f, 96,
-                                    2.f);
+                                dl->AddEllipse(projected[i].Center, projected[i].Radius,
+                                    outline, 0.f, 96, 2.f);
                             }
 
                             if (bMovingZone)
@@ -15144,21 +12209,16 @@ void GUI::Init()
                                 for (size_t i = 0;
                                     i < projected.size(); ++i)
                                 {
-                                    SafeZoneMap::DrawStepNumberAtCenter(
-                                        dl, projected[i],
-                                        (int)i + 1,
-                                        i == s_SelectedNode);
+                                    SafeZoneMap::DrawStepNumberAtCenter(dl, projected[i],
+                                        (int)i + 1, i == s_SelectedNode);
                                 }
                             }
                             else if (!projected.empty())
                             {
-                                dl->AddCircleFilled(
-                                    projected.front().Center, 4.f,
+                                dl->AddCircleFilled(projected.front().Center, 4.f,
                                     IM_COL32(255, 255, 255, 235));
-                                dl->AddCircle(
-                                    projected.front().Center, 4.f,
-                                    IM_COL32(20, 30, 60, 200),
-                                    0, 1.5f);
+                                dl->AddCircle(projected.front().Center, 4.f,
+                                    IM_COL32(20, 30, 60, 200), 0, 1.5f);
                             }
                             dl->PopClipRect();
 
@@ -15178,12 +12238,8 @@ void GUI::Init()
                         if (bSafeZoneDraftLocked)
                             ImGui::BeginDisabled(true);
 
-                        // Numeric fine-tuning remains available without a map.
-                        s_SelectedNode = (std::min)(
-                            s_SelectedNode,
-                            sequence.Nodes.size() - 1);
-                        const size_t editIndex =
-                            bMovingZone ? s_SelectedNode : 0;
+                        s_SelectedNode = (std::min)(s_SelectedNode, sequence.Nodes.size() - 1);
+                        const size_t editIndex = bMovingZone ? s_SelectedNode : 0;
                         auto editedNode = sequence.Nodes[editIndex];
                         float cx = (float)editedNode.Center.X;
                         float cy = (float)editedNode.Center.Y;
@@ -15191,9 +12247,7 @@ void GUI::Init()
 
                         if (bMovingZone)
                         {
-                            ImGui::Text(
-                                "Step %d",
-                                (int)editIndex + 1);
+                            ImGui::Text("Step %d", (int)editIndex + 1);
                         }
 
                         ImGui::SetNextItemWidth(Width);
@@ -15212,17 +12266,12 @@ void GUI::Init()
                         }
 
                         float RadiusMeters = editedNode.RadiusCm / 100.f;
-                        const float maximumRadiusCm =
-                            bMovingZone && editIndex > 0
+                        const float maximumRadiusCm = bMovingZone && editIndex > 0
                             ? sequence.Nodes[editIndex - 1].RadiusCm
                             : FCustomSafeZoneSequence::MaximumRadiusCm;
-                        if (LabeledSliderFloat(
-                                "Radius", "##custom-sz-radius",
-                                &RadiusMeters,
-                                FCustomSafeZoneSequence::MinimumRadiusCm /
-                                    100.f,
-                                maximumRadiusCm / 100.f,
-                                "%.0f m", Width))
+                        if (LabeledSliderFloat("Radius", "##custom-sz-radius", &RadiusMeters,
+                                FCustomSafeZoneSequence::MinimumRadiusCm / 100.f,
+                                maximumRadiusCm / 100.f, "%.0f m", Width))
                         {
                             editedNode.RadiusCm = RadiusMeters * 100.f;
                             nodeChanged = true;
@@ -15233,11 +12282,9 @@ void GUI::Init()
                             sequence.Nodes[editIndex] = editedNode;
                             if (bMovingZone)
                             {
-                                SafeZoneMap::ClampRadiiToNonIncreasing(
-                                    sequence);
+                                SafeZoneMap::ClampRadiiToNonIncreasing(sequence);
                             }
-                            SafeZoneMap::PublishSequence(
-                                sequence, bMovingZone);
+                            SafeZoneMap::PublishSequence(sequence, bMovingZone);
                         }
 
                         ImGui::EndDisabled();
@@ -15265,15 +12312,13 @@ void GUI::Init()
             static int TrapsAmountBuffer = 6;
 
             static bool bBuffersInitialized = false;
-            static unsigned int LoadoutBufferResetGeneration =
-                GPreferenceEditorGeneration;
+            static unsigned int LoadoutBufferResetGeneration = GPreferenceEditorGeneration;
             static std::string LoadoutStatusMessage;
             static std::chrono::high_resolution_clock::time_point StatusMessageTime;
             static std::string ApplyLoadoutStatusMessage;
             static std::chrono::high_resolution_clock::time_point ApplyStatusMessageTime;
 
-            if (LoadoutBufferResetGeneration !=
-                GPreferenceEditorGeneration)
+            if (LoadoutBufferResetGeneration != GPreferenceEditorGeneration)
             {
                 PrimaryWeaponBuffer[0] = '\0';
                 SecondaryWeaponBuffer[0] = '\0';
@@ -15282,8 +12327,7 @@ void GUI::Init()
                 QuinaryWeaponBuffer[0] = '\0';
                 TrapsBuffer[0] = '\0';
                 bBuffersInitialized = false;
-                LoadoutBufferResetGeneration =
-                    GPreferenceEditorGeneration;
+                LoadoutBufferResetGeneration = GPreferenceEditorGeneration;
             }
 
             if (FConfiguration::bUseCustomLoadout)
@@ -15356,7 +12400,8 @@ void GUI::Init()
 
                         if (Elapsed < 5)
                         {
-                            ImVec4 StatusColor = (ApplyLoadoutStatusMessage.find("Failed.") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+                            ImVec4 StatusColor = (ApplyLoadoutStatusMessage.find("Failed.") != std::string::npos) ? ImVec4(
+                                1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
 
                             ImGui::TextColored(StatusColor, "%s", LoadoutStatusMessage.c_str());
                         }
@@ -15374,7 +12419,10 @@ void GUI::Init()
 
                 if (ImGui::Button("Save Loadout to File", ImVec2(Width, Height)))
                 {
-                    if (LoadoutManager::SaveLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
+                    if (LoadoutManager::SaveLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer,
+                        SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer,
+                        TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer,
+                        QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
                     {
                         LoadoutStatusMessage = "Loadout saved successfully!";
                         printf("Loadout saved to: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
@@ -15389,7 +12437,10 @@ void GUI::Init()
 
                 if (ImGui::Button("Load Loadout from File", ImVec2(Width, Height)))
                 {
-                    if (LoadoutManager::LoadLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer, SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer, TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer, QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
+                    if (LoadoutManager::LoadLoadout(PrimaryWeaponBuffer, PrimaryAmountBuffer,
+                        SecondaryWeaponBuffer, SecondaryAmountBuffer, TertiaryWeaponBuffer,
+                        TertiaryAmountBuffer, QuaternaryWeaponBuffer, QuaternaryAmountBuffer,
+                        QuinaryWeaponBuffer, QuinaryAmountBuffer, TrapsBuffer, TrapsAmountBuffer))
                     {
                         LoadoutStatusMessage = "Loadout loaded successfully!";
                         printf("Loadout loaded from: %s\n", LoadoutManager::GetLoadoutFilePath().c_str());
@@ -15408,7 +12459,8 @@ void GUI::Init()
 
                     if (Elapsed < 5)
                     {
-                        ImVec4 StatusColor = (LoadoutStatusMessage.find("Failed") != std::string::npos) ? ImVec4(1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+                        ImVec4 StatusColor = (LoadoutStatusMessage.find("Failed") != std::string::npos) ? ImVec4(
+                            1.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
 
                         ImGui::TextColored(StatusColor, "%s", LoadoutStatusMessage.c_str());
                     }
@@ -15431,12 +12483,8 @@ void GUI::Init()
             BeginSectionBody();
 
             ImGui::PushItemWidth(Width);
-            AtomicInputInt(
-                "Bot Health",
-                FConfiguration::BotHealth);
-            AtomicInputInt(
-                "Bot Shield",
-                FConfiguration::BotShield);
+            AtomicInputInt("Bot Health", FConfiguration::BotHealth);
+            AtomicInputInt("Bot Shield", FConfiguration::BotShield);
             ImGui::PopItemWidth();
 
             EndSectionBody();
@@ -15444,27 +12492,22 @@ void GUI::Init()
             SectionHeader("Bot Names", SectionWidth);
             BeginSectionBody();
 
-            AtomicCheckbox(
-                "Use Custom Bot Names",
-                FConfiguration::UseCustomBotNames);
+            AtomicCheckbox("Use Custom Bot Names", FConfiguration::UseCustomBotNames);
 
             if (FConfiguration::UseCustomBotNames)
             {
                 static char BotNameBuffer[64] = {};
-                static unsigned int BotNameBufferResetGeneration =
-                    GPreferenceEditorGeneration;
+                static unsigned int BotNameBufferResetGeneration = GPreferenceEditorGeneration;
 
-                if (BotNameBufferResetGeneration !=
-                    GPreferenceEditorGeneration)
+                if (BotNameBufferResetGeneration != GPreferenceEditorGeneration)
                 {
                     BotNameBuffer[0] = '\0';
-                    BotNameBufferResetGeneration =
-                        GPreferenceEditorGeneration;
+                    BotNameBufferResetGeneration = GPreferenceEditorGeneration;
                 }
 
-                if (BotNameBuffer[0] == '\0' &&
-                    !FConfiguration::BotName.empty())
-                    strncpy_s(BotNameBuffer, sizeof(BotNameBuffer), FConfiguration::BotName.c_str(), _TRUNCATE);
+                if (BotNameBuffer[0] == '\0' && !FConfiguration::BotName.empty())
+                    strncpy_s(BotNameBuffer, sizeof(BotNameBuffer), FConfiguration::BotName.c_str(),
+                        _TRUNCATE);
 
                 ImGui::PushItemWidth(Width);
                 ImGui::InputText("Bot Name", BotNameBuffer, sizeof(BotNameBuffer));
@@ -15653,9 +12696,7 @@ void GUI::Init()
             SectionHeader("Custom Map Configuration", SectionWidth);
             BeginSectionBody();
 
-			AtomicCheckbox(
-                "One Kill Ends Game",
-                FConfiguration::AutoEndGame);
+            AtomicCheckbox("One Kill Ends Game", FConfiguration::AutoEndGame);
 
             EndSectionBody();
 
@@ -15735,72 +12776,46 @@ void GUI::Init()
             SectionHeader("Trickshot Customization", SectionWidth);
             BeginSectionBody();
 
-            const bool bBeforeJoinable =
-                gsStatus.load(std::memory_order_acquire) < Joinable;
+            const bool bBeforeJoinable = gsStatus.load(std::memory_order_acquire) < Joinable;
 
-            AtomicCheckbox(
-                "Toggle Swag Lines",
-                FConfiguration::bUseWinLines);
+            AtomicCheckbox("Toggle Swag Lines", FConfiguration::bUseWinLines);
 
             if (VersionInfo.FortniteVersion <= 23.50)
-                AtomicCheckbox(
-                    "Toggle Infinite Render",
-                    FConfiguration::bInfiniteRender);
+                AtomicCheckbox("Toggle Infinite Render", FConfiguration::bInfiniteRender);
 
             if (bBeforeJoinable)
             {
-                if ((IsArenaPlaylist() ||
-                        IsTournamentPlaylist()) &&
-                    FConfiguration::bLateGame &&
+                if ((IsArenaPlaylist() || IsTournamentPlaylist()) && FConfiguration::bLateGame &&
                     !FConfiguration::bForceRespawns)
-                    AtomicCheckbox(
-                        "Randomize Arena Points",
-                        FConfiguration::RandomizeArenaPoints);
+                    AtomicCheckbox("Randomize Arena Points", FConfiguration::RandomizeArenaPoints);
 
-                AtomicCheckbox(
-                    "Player Map Icons",
-                    FConfiguration::bPlayerMapIcons);
+                AtomicCheckbox("Player Map Icons", FConfiguration::bPlayerMapIcons);
             }
 
-            AtomicCheckbox(
-                "Auto Reload on Waypoint TP",
-                FConfiguration::bAutoReloadOnWaypointTP);
+            AtomicCheckbox("Auto Reload on Waypoint TP", FConfiguration::bAutoReloadOnWaypointTP);
 
             if (VersionInfo.FortniteVersion >= 6.01)
             {
-                AtomicCheckbox(
-                    "Remove Ice on Waypoint TP",
-                    FConfiguration::bRemoveIceOnWaypointTP);
+                AtomicCheckbox("Remove Ice on Waypoint TP", FConfiguration::bRemoveIceOnWaypointTP);
             }
 
-            AtomicCheckbox(
-                "Auto God Mode",
-                FConfiguration::bAutoGodMode);
+            AtomicCheckbox("Auto God Mode", FConfiguration::bAutoGodMode);
 
             if (FConfiguration::bAutoGodMode)
             {
                 ImGui::Indent(12.f);
 
                 static const char* const AutoGodModes[] = {
-                    "Maximum",
-                    "Minimum"
+                    "Maximum", "Minimum"
                 };
 
                 ImGui::TextUnformatted("God Mode Type");
                 ImGui::SetNextItemWidth(Width);
-                AtomicCombo(
-                    "##auto-god-mode",
-                    FConfiguration::AutoGodModeType,
-                    AutoGodModes,
+                AtomicCombo("##auto-god-mode", FConfiguration::AutoGodModeType, AutoGodModes,
                     IM_ARRAYSIZE(AutoGodModes));
 
-                // The trickshotters join first and the player they are all
-                // aiming at joins last, so the newest arrival is the one
-                // who has to stay killable.
                 if (FConfiguration::bInfiniteRender)
-                    AtomicCheckbox(
-                        "Exclude Last Player",
-                        FConfiguration::
+                    AtomicCheckbox("Exclude Last Player", FConfiguration::
                             bAutoGodModeExcludeLastPlayer);
 
                 ImGui::Unindent(12.f);
@@ -15809,68 +12824,38 @@ void GUI::Init()
             if (bBeforeJoinable)
             {
                 if (FConfiguration::bLateGame)
-                    AtomicCheckbox(
-                        "Randomize Kills",
-                        FConfiguration::RandomizeKills);
+                    AtomicCheckbox("Randomize Kills", FConfiguration::RandomizeKills);
 
-                AtomicCheckbox(
-                    "Randomize Levels",
-                    FConfiguration::RandomizeLevels);
+                AtomicCheckbox("Randomize Levels", FConfiguration::RandomizeLevels);
             }
 
-            AtomicCheckbox(
-                "Disable Jump Fatigue",
-                FConfiguration::bDisableJumpFatigue);
+            AtomicCheckbox("Disable Jump Fatigue", FConfiguration::bDisableJumpFatigue);
 
-            if (bBeforeJoinable &&
-                !FConfiguration::bReadyToStart)
+            if (bBeforeJoinable && !FConfiguration::bReadyToStart)
             {
-                AtomicCheckbox(
-                    "Disable Supply Drops",
-                    FConfiguration::bDisableSupplyDrops);
+                AtomicCheckbox("Disable Supply Drops", FConfiguration::bDisableSupplyDrops);
             }
-
-            //ImGui::Checkbox("Make Projectiles Rideable (WIP)", &FConfiguration::bRideableProjectiles);
 
             if (VersionInfo.FortniteVersion >= 19.00)
-                AtomicCheckbox(
-                    "Toggle Crown Slomo",
-                    FConfiguration::bCrownSlomo);
+                AtomicCheckbox("Toggle Crown Slomo", FConfiguration::bCrownSlomo);
 
             if (VersionInfo.FortniteVersion >= 23.20 && VersionInfo.FortniteVersion < 25.20)
-                AtomicCheckbox(
-                    "Negate Velocity on Win",
-                    FConfiguration::bCancelVelocityOnWin);
-
-            //ImGui::Checkbox("Down But Not Out (DBNO)", &FConfiguration::bEnableDBNO);
+                AtomicCheckbox("Negate Velocity on Win", FConfiguration::bCancelVelocityOnWin);
 
             if (VersionInfo.FortniteVersion >= 8.00)
             {
-                AtomicCheckbox(
-                    "Cannon Launch Animations",
-                    FConfiguration::bCannonLaunchAnimations);
+                AtomicCheckbox("Cannon Launch Animations", FConfiguration::bCannonLaunchAnimations);
 
-                // The multipliers scale a launch this code applies itself, so
-                // they have nothing to act on while native owns the shot.
                 if (!FConfiguration::bCannonLaunchAnimations)
                 {
                     ImGui::Indent(12.f);
 
-                    AtomicLabeledSliderFloat(
-                        "Cannon Launch X",
-                        "##cannon-launch-x",
-                        FConfiguration::CannonLaunchXMultiplier,
-                        0.0f, 5.0f, "%.2fx", Width);
-                    AtomicLabeledSliderFloat(
-                        "Cannon Launch Y",
-                        "##cannon-launch-y",
-                        FConfiguration::CannonLaunchYMultiplier,
-                        0.0f, 5.0f, "%.2fx", Width);
-                    AtomicLabeledSliderFloat(
-                        "Cannon Launch Z",
-                        "##cannon-launch-z",
-                        FConfiguration::CannonLaunchZMultiplier,
-                        0.0f, 5.0f, "%.2fx", Width);
+                    AtomicLabeledSliderFloat("Cannon Launch X", "##cannon-launch-x",
+                        FConfiguration::CannonLaunchXMultiplier, 0.0f, 5.0f, "%.2fx", Width);
+                    AtomicLabeledSliderFloat("Cannon Launch Y", "##cannon-launch-y",
+                        FConfiguration::CannonLaunchYMultiplier, 0.0f, 5.0f, "%.2fx", Width);
+                    AtomicLabeledSliderFloat("Cannon Launch Z", "##cannon-launch-z",
+                        FConfiguration::CannonLaunchZMultiplier, 0.0f, 5.0f, "%.2fx", Width);
 
                     ImGui::Unindent(12.f);
                 }
@@ -15878,44 +12863,30 @@ void GUI::Init()
 
             if (VersionInfo.FortniteVersion >= 4.30)
             {
-                AtomicCheckbox(
-                    "Vehicle Bump Launch",
-                    FConfiguration::bVehicleBumpLaunch);
+                AtomicCheckbox("Vehicle Bump Launch", FConfiguration::bVehicleBumpLaunch);
 
                 if (FConfiguration::bVehicleBumpLaunch)
                 {
                     ImGui::Indent(12.f);
 
-                    AtomicCheckbox(
-                        "Bump Damage",
-                        FConfiguration::bVehicleBumpDamage);
+                    AtomicCheckbox("Bump Damage", FConfiguration::bVehicleBumpDamage);
 
-                    AtomicLabeledSliderFloat(
-                        "Bump Minimum Speed",
-                        "##vehicle-bump-min-speed",
-                        FConfiguration::VehicleBumpMinSpeedKmh,
-                        0.0f, 120.0f, "%.0f km/h", Width);
+                    AtomicLabeledSliderFloat("Bump Minimum Speed", "##vehicle-bump-min-speed",
+                        FConfiguration::VehicleBumpMinSpeedKmh, 0.0f, 120.0f, "%.0f km/h", Width);
 
-                    AtomicLabeledSliderFloat(
-                        "Bump Force Multiplier",
+                    AtomicLabeledSliderFloat("Bump Force Multiplier",
                         "##vehicle-bump-force-multiplier",
-                        FConfiguration::VehicleBumpForceMultiplier,
-                        0.0f, 10.0f, "%.1fx", Width);
+                        FConfiguration::VehicleBumpForceMultiplier, 0.0f, 10.0f, "%.1fx", Width);
 
                     ImGui::Unindent(12.f);
                 }
             }
 
-            AtomicCheckbox(
-                "Auto Pause TODM",
-                FConfiguration::bAutoPauseTODM);
+            AtomicCheckbox("Auto Pause TODM", FConfiguration::bAutoPauseTODM);
 
             if (FConfiguration::bAutoPauseTODM)
             {
-                AtomicLabeledSliderFloat(
-                    "Time Of Day",
-                    "##time-of-day",
-                    FConfiguration::TODMTime,
+                AtomicLabeledSliderFloat("Time Of Day", "##time-of-day", FConfiguration::TODMTime,
                     0.f, 24.f, "%.1f h", Width);
             }
 
@@ -16006,44 +12977,31 @@ void GUI::Init()
             BeginSectionBody();
 
             static char TrickshotName[128]{};
-            static std::vector<TrickshotManager::FPresetEntry>
-                TrickshotPresets;
+            static std::vector<TrickshotManager::FPresetEntry> TrickshotPresets;
             static int SelectedTrickshot = -1;
             static std::string TrickshotMessage;
             static bool InitializedTrickshotList = false;
             static ULONGLONG NextTrickshotListRefreshAtMs = 0;
 
             const ULONGLONG NowMs = GetTickCount64();
-            if (!InitializedTrickshotList ||
-                NowMs >= NextTrickshotListRefreshAtMs)
+            if (!InitializedTrickshotList || NowMs >= NextTrickshotListRefreshAtMs)
             {
-                const std::string SelectedId =
-                    SelectedTrickshot >= 0 &&
+                const std::string SelectedId = SelectedTrickshot >= 0 &&
                     SelectedTrickshot < TrickshotPresets.size()
-                        ? TrickshotPresets[SelectedTrickshot].Id
-                        : "";
+                        ? TrickshotPresets[SelectedTrickshot].Id : "";
                 bool bRefreshSucceeded = false;
-                auto RefreshedPresets =
-                    TrickshotManager::GetAvailablePresets(
-                        &bRefreshSucceeded);
-                if ((bRefreshSucceeded ||
-                        !InitializedTrickshotList) &&
+                auto RefreshedPresets = TrickshotManager::GetAvailablePresets(&bRefreshSucceeded);
+                if ((bRefreshSucceeded || !InitializedTrickshotList) &&
                     RefreshedPresets != TrickshotPresets)
                 {
-                    TrickshotPresets =
-                        std::move(RefreshedPresets);
-                    auto Selected = std::find_if(
-                        TrickshotPresets.begin(),
-                        TrickshotPresets.end(),
+                    TrickshotPresets = std::move(RefreshedPresets);
+                    auto Selected = std::find_if(TrickshotPresets.begin(), TrickshotPresets.end(),
                         [&](const TrickshotManager::FPresetEntry& Entry)
                         {
                             return Entry.Id == SelectedId;
                         });
-                    SelectedTrickshot =
-                        SelectedId.empty() ||
-                        Selected == TrickshotPresets.end()
-                            ? -1
-                            : static_cast<int>(std::distance(
+                    SelectedTrickshot = SelectedId.empty() || Selected == TrickshotPresets.end()
+                            ? -1 : static_cast<int>(std::distance(
                                 TrickshotPresets.begin(), Selected));
                 }
                 InitializedTrickshotList = true;
@@ -16055,44 +13013,31 @@ void GUI::Init()
             bool CompletedSuccessfully = false;
             std::string CompletedName;
             std::string CompletedMessage;
-            if (TrickshotManager::ConsumeResult(
-                    CompletedOperation,
-                    CompletedSuccessfully,
-                    CompletedName,
-                    CompletedMessage))
+            if (TrickshotManager::ConsumeResult(CompletedOperation, CompletedSuccessfully,
+                    CompletedName, CompletedMessage))
             {
                 TrickshotMessage = CompletedMessage;
-                if (CompletedSuccessfully &&
-                    CompletedOperation ==
+                if (CompletedSuccessfully && CompletedOperation ==
                         TrickshotManager::EAsyncOperation::Save)
                 {
-                    const std::string SavedName =
-                        TrickshotManager::SanitizeName(
+                    const std::string SavedName = TrickshotManager::SanitizeName(
                             CompletedName.c_str());
-                    const std::string SavedId =
-                        "saved:" + SavedName;
+                    const std::string SavedId = "saved:" + SavedName;
                     bool bRefreshSucceeded = false;
-                    auto RefreshedPresets =
-                        TrickshotManager::GetAvailablePresets(
+                    auto RefreshedPresets = TrickshotManager::GetAvailablePresets(
                             &bRefreshSucceeded);
                     if (bRefreshSucceeded)
-                        TrickshotPresets =
-                            std::move(RefreshedPresets);
-                    const auto HasSavedPreset = std::find_if(
-                        TrickshotPresets.begin(),
-                        TrickshotPresets.end(),
-                        [&](const TrickshotManager::FPresetEntry& Entry)
+                        TrickshotPresets = std::move(RefreshedPresets);
+                    const auto HasSavedPreset = std::find_if(TrickshotPresets.begin(),
+                        TrickshotPresets.end(), [&](const TrickshotManager::FPresetEntry& Entry)
                         {
                             return Entry.Id == SavedId;
                         });
                     if (HasSavedPreset == TrickshotPresets.end())
                     {
-                        TrickshotPresets.push_back(
-                            TrickshotManager::MakeSavedPresetEntry(
+                        TrickshotPresets.push_back(TrickshotManager::MakeSavedPresetEntry(
                                 SavedName));
-                        std::stable_sort(
-                            TrickshotPresets.begin(),
-                            TrickshotPresets.end(),
+                        std::stable_sort(TrickshotPresets.begin(), TrickshotPresets.end(),
                             [](const TrickshotManager::FPresetEntry& Left,
                                const TrickshotManager::FPresetEntry& Right)
                             {
@@ -16101,40 +13046,31 @@ void GUI::Init()
                                 return Left.Name < Right.Name;
                             });
                     }
-                    auto It = std::find_if(
-                        TrickshotPresets.begin(),
-                        TrickshotPresets.end(),
+                    auto It = std::find_if(TrickshotPresets.begin(), TrickshotPresets.end(),
                         [&](const TrickshotManager::FPresetEntry& Entry)
                         {
                             return Entry.Id == SavedId;
                         });
-                    SelectedTrickshot =
-                        It == TrickshotPresets.end()
-                            ? -1
-                            : static_cast<int>(std::distance(
-                                TrickshotPresets.begin(), It));
+                    SelectedTrickshot = It == TrickshotPresets.end() ? -1
+                            : static_cast<int>(std::distance(TrickshotPresets.begin(), It));
                 }
             }
 
             ImGui::SetNextItemWidth(Width);
-            ImGui::InputTextWithHint("##trickshot-name", "Trickshot Name", TrickshotName, IM_ARRAYSIZE(TrickshotName));
+            ImGui::InputTextWithHint("##trickshot-name", "Trickshot Name", TrickshotName,
+                IM_ARRAYSIZE(TrickshotName));
 
             ImGui::SetNextItemWidth(Width);
             const char* Preview = SelectedTrickshot >= 0 &&
-                SelectedTrickshot < TrickshotPresets.size()
-                ? TrickshotPresets[SelectedTrickshot]
-                    .DisplayName.c_str()
-                : "Select Trickshot Preset";
+                SelectedTrickshot < TrickshotPresets.size() ? TrickshotPresets[SelectedTrickshot]
+                    .DisplayName.c_str() : "Select Trickshot Preset";
             if (ImGui::BeginCombo("##saved-trickshots", Preview))
             {
                 for (int Index = 0;
                     Index < TrickshotPresets.size(); ++Index)
                 {
                     const bool Selected = Index == SelectedTrickshot;
-                    if (ImGui::Selectable(
-                            TrickshotPresets[Index]
-                                .DisplayName.c_str(),
-                            Selected))
+                    if (ImGui::Selectable(TrickshotPresets[Index].DisplayName.c_str(), Selected))
                         SelectedTrickshot = Index;
                     if (Selected)
                         ImGui::SetItemDefaultFocus();
@@ -16145,22 +13081,17 @@ void GUI::Init()
             const float ButtonWidth = (Width - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (ImGui::Button("Save", ImVec2(ButtonWidth, Height)))
             {
-                TrickshotManager::RequestSave(
-                    TrickshotName, TrickshotMessage);
+                TrickshotManager::RequestSave(TrickshotName, TrickshotMessage);
             }
             ImGui::SameLine();
             if (ImGui::Button("Load", ImVec2(ButtonWidth, Height)))
             {
-                TrickshotManager::RequestLoad(
-                    SelectedTrickshot >= 0 &&
+                TrickshotManager::RequestLoad(SelectedTrickshot >= 0 &&
                         SelectedTrickshot < TrickshotPresets.size()
-                        ? TrickshotPresets[SelectedTrickshot].Id
-                        : "",
-                    TrickshotMessage);
+                        ? TrickshotPresets[SelectedTrickshot].Id : "", TrickshotMessage);
             }
 
-            const bool SelectedBuiltInPreset =
-                SelectedTrickshot >= 0 &&
+            const bool SelectedBuiltInPreset = SelectedTrickshot >= 0 &&
                 SelectedTrickshot < TrickshotPresets.size() &&
                 TrickshotPresets[SelectedTrickshot].BuiltIn;
             ImGui::BeginDisabled(SelectedBuiltInPreset);
@@ -16168,43 +13099,29 @@ void GUI::Init()
             {
                 if (TrickshotManager::IsBusy())
                 {
-                    TrickshotMessage =
-                        "Wait for the current trickshot operation to finish.";
+                    TrickshotMessage = "Wait for the current trickshot operation to finish.";
                 }
                 else
                 {
-                    const std::string SelectedName =
-                        SelectedTrickshot >= 0 &&
+                    const std::string SelectedName = SelectedTrickshot >= 0 &&
                             SelectedTrickshot < TrickshotPresets.size() &&
                             !TrickshotPresets[SelectedTrickshot].BuiltIn
-                            ? TrickshotPresets[SelectedTrickshot].Name
-                            : "";
-                    if (TrickshotManager::Delete(
-                            SelectedName, TrickshotMessage))
+                            ? TrickshotPresets[SelectedTrickshot].Name : "";
+                    if (TrickshotManager::Delete(SelectedName, TrickshotMessage))
                     {
-                        TrickshotPresets.erase(
-                            std::remove_if(
-                                TrickshotPresets.begin(),
+                        TrickshotPresets.erase(std::remove_if(TrickshotPresets.begin(),
                                 TrickshotPresets.end(),
                                 [&](const TrickshotManager::FPresetEntry& Entry)
                                 {
-                                    return !Entry.BuiltIn &&
-                                        Entry.Name == SelectedName;
-                                }),
-                            TrickshotPresets.end());
+                                    return !Entry.BuiltIn && Entry.Name == SelectedName;
+                                }), TrickshotPresets.end());
                         bool bRefreshSucceeded = false;
-                        auto RefreshedPresets =
-                            TrickshotManager::GetAvailablePresets(
+                        auto RefreshedPresets = TrickshotManager::GetAvailablePresets(
                                 &bRefreshSucceeded);
                         if (bRefreshSucceeded)
-                            TrickshotPresets =
-                                std::move(RefreshedPresets);
-                        SelectedTrickshot = TrickshotPresets.empty()
-                            ? -1
-                            : (std::min)(
-                                SelectedTrickshot,
-                                static_cast<int>(
-                                    TrickshotPresets.size()) - 1);
+                            TrickshotPresets = std::move(RefreshedPresets);
+                        SelectedTrickshot = TrickshotPresets.empty() ? -1 : (std::min)(
+                                SelectedTrickshot, static_cast<int>(TrickshotPresets.size()) - 1);
                     }
                 }
             }
@@ -16216,12 +13133,9 @@ void GUI::Init()
             if (!TrickshotMessage.empty())
                 ImGui::TextWrapped("%s", TrickshotMessage.c_str());
 
-            AtomicCheckbox(
-                "Save and Track Spawned Objects",
+            AtomicCheckbox("Save and Track Spawned Objects",
                 FConfiguration::bSaveAndTrackSpawnedObjects);
-            AtomicCheckbox(
-                "Save Waypoints",
-                FConfiguration::bSaveWaypoints);
+            AtomicCheckbox("Save Waypoints", FConfiguration::bSaveWaypoints);
 
             EndSectionBody();
 
@@ -16234,7 +13148,8 @@ void GUI::Init()
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 const ImVec2 p = ImGui::GetCursorScreenPos();
                 const float w = ImGui::GetContentRegionAvail().x;
-                dl->AddLine(ImVec2(p.x, p.y + 1.f), ImVec2(p.x + w, p.y + 1.f), ImGui::GetColorU32(Accent(0.30f)), 1.f);
+                dl->AddLine(ImVec2(p.x, p.y + 1.f), ImVec2(p.x + w, p.y + 1.f),
+                    ImGui::GetColorU32(Accent(0.30f)), 1.f);
                 ImGui::Dummy(ImVec2(0.f, 9.f));
             };
             auto credit = [](const char* name, const char* role, const char* url)
@@ -16276,9 +13191,6 @@ void GUI::Init()
             ImGui::PopStyleColor();
             rule();
 
-            // Core attribution is part of Magnesium itself, so keep it
-            // independent of every optional feature, playlist and runtime
-            // integration used to decide which contributor credits apply.
             struct CoreCredit
             {
                 const char* Name;
@@ -16287,13 +13199,10 @@ void GUI::Init()
             };
             static constexpr CoreCredit CoreCredits[] = {
                 {
-                    "Erbium",
-                    "Base of the project",
-                    "https://github.com/plooshi/Erbium"
+                    "Erbium", "Base of the project", "https://github.com/plooshi/Erbium"
                 },
                 {
-                    "Core",
-                    "Feature inspiration and references",
+                    "Core", "Feature inspiration and references",
                     "https://github.com/PongooDev/Core"
                 },
             };
@@ -16318,11 +13227,13 @@ void GUI::Init()
                 if (FConfiguration::bInfiniteRender)
                     credit("Sweefy / Milxnor", "Infinite Render research", "https://x.com/Sweefyyy");
                 if (SelectedPlaylist == static_cast<int>(Playlist::Gav))
-                    credit("Gav", "Maker of the 27.11 1v1 map", "https://github.com/gavbowersdomain/27.11-Mods/tree/main/Mods/1v1");
+                    credit("Gav", "Maker of the 27.11 1v1 map",
+                        "https://github.com/gavbowersdomain/27.11-Mods/tree/main/Mods/1v1");
                 if (SelectedPlaylist == static_cast<int>(Playlist::Retrac1v1) || SelectedPlaylist == static_cast<int>(Playlist::RetracTurtle))
                     credit("Retrac", "Creator of the 1v1 & Turtle Fight maps", "https://discord.gg/retrac");
                 if (SelectedPlaylist == static_cast<int>(Playlist::OnlyUp) || SelectedPlaylist == static_cast<int>(Playlist::TiltedZW))
-                    credit("Jett", "Maker of the Only Up & Tilted FFA maps", "https://discord.com/channels/1469866169635962884/1473850399994806362/1473850399994806362");
+                    credit("Jett", "Maker of the Only Up & Tilted FFA maps",
+                        "https://discord.com/channels/1469866169635962884/1473850399994806362/1473850399994806362");
             }
 
             ImGui::Dummy(ImVec2(0.f, 18.f));
@@ -16334,107 +13245,74 @@ void GUI::Init()
         }
         case 9:
         {
-            const Calendar::FSnowVersionModel SnowModel =
-                Calendar::GetSnowVersionModel();
-            const bool bSnowPhases =
-                SnowModel.Model == Calendar::ESnowValueModel::Phase;
+            const Calendar::FSnowVersionModel SnowModel = Calendar::GetSnowVersionModel();
+            const bool bSnowPhases = SnowModel.Model == Calendar::ESnowValueModel::Phase;
 
             SectionHeader("Snow", SectionWidth);
             BeginSectionBody();
 
             if (SnowModel.Model == Calendar::ESnowValueModel::Unsupported)
             {
-                ImGui::TextWrapped(
-                    "This build has no snow setup to drive.");
+                ImGui::TextWrapped("This build has no snow setup to drive.");
             }
             else
             {
-                ImGui::PushStyleColor(
-                    ImGuiCol_Text,
-                    ImVec4(0.58f, 0.60f, 0.66f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.58f, 0.60f, 0.66f, 1.f));
                 ImGui::TextWrapped("%s", SnowModel.Note);
                 ImGui::PopStyleColor();
                 ImGui::Spacing();
 
-                float SnowValue =
-                    FConfiguration::SnowValue.load(
-                        std::memory_order_acquire);
+                float SnowValue = FConfiguration::SnowValue.load(std::memory_order_acquire);
 
                 if (bSnowPhases)
                 {
                     int SnowPhase = (int)SnowValue;
-                    if (LabeledSliderInt(
-                            "Snow Phase",
-                            "##snow-value",
-                            &SnowPhase,
-                            (int)SnowModel.Min,
-                            (int)SnowModel.Max,
-                            Width))
+                    if (LabeledSliderInt("Snow Phase", "##snow-value", &SnowPhase,
+                            (int)SnowModel.Min, (int)SnowModel.Max, Width))
                     {
-                        FConfiguration::SnowValue.store(
-                            (float)SnowPhase,
+                        FConfiguration::SnowValue.store((float)SnowPhase,
                             std::memory_order_release);
                     }
                 }
-                else if (LabeledSliderFloat(
-                             "Snow Coverage",
-                             "##snow-value",
-                             &SnowValue,
-                             SnowModel.Min,
-                             SnowModel.Max,
-                             "%.3f",
-                             Width))
+                else if (LabeledSliderFloat("Snow Coverage", "##snow-value", &SnowValue,
+                             SnowModel.Min, SnowModel.Max, "%.3f", Width))
                 {
-                    FConfiguration::SnowValue.store(
-                        SnowValue, std::memory_order_release);
+                    FConfiguration::SnowValue.store(SnowValue, std::memory_order_release);
                 }
 
-                const float PresetWidth =
-                    (Width -
-                        ImGui::GetStyle().ItemSpacing.x *
-                            (SnowModel.PresetCount - 1)) /
-                    SnowModel.PresetCount;
+                const float PresetWidth = (Width - ImGui::GetStyle().ItemSpacing.x *
+                            (SnowModel.PresetCount - 1)) / SnowModel.PresetCount;
 
                 for (int Index = 0;
                     Index < SnowModel.PresetCount;
                     ++Index)
                 {
-                    const Calendar::FSnowPreset& Preset =
-                        SnowModel.Presets[Index];
+                    const Calendar::FSnowPreset& Preset = SnowModel.Presets[Index];
 
                     if (Index > 0)
                         ImGui::SameLine();
 
                     ImGui::PushID(Index);
-                    if (ImGui::Button(
-                            Preset.Label,
-                            ImVec2(PresetWidth, Height)))
+                    if (ImGui::Button(Preset.Label, ImVec2(PresetWidth, Height)))
                     {
-                        FConfiguration::SnowValue.store(
-                            Preset.Value,
-                            std::memory_order_release);
+                        FConfiguration::SnowValue.store(Preset.Value, std::memory_order_release);
                     }
                     ImGui::PopID();
                 }
 
-                AtomicCheckbox(
-                    "Apply On Bus Start",
-                    FConfiguration::bSnowOnMatchStart);
+                AtomicCheckbox("Apply On Bus Start", FConfiguration::bSnowOnMatchStart);
 
                 if (gsStatus >= Joinable)
                 {
-                    if (ImGui::Button(
-                            "Apply Now", ImVec2(Width, Height)))
+                    if (ImGui::Button("Apply Now", ImVec2(Width, Height)))
                     {
-                        Calendar::RequestSnow(
-                            FConfiguration::SnowValue.load(
+                        Calendar::RequestSnow(FConfiguration::SnowValue.load(
                                 std::memory_order_acquire));
                     }
                 }
                 else
                 {
-                    ImGui::TextWrapped(
-                        "Start the server to change snow live.");
+                    ImGui::TextWrapped("Start the server to change snow live.");
                 }
 
                 switch (Calendar::GetSnowStatus())
@@ -16447,19 +13325,14 @@ void GUI::Init()
                 case Calendar::ESnowStatus::Applied:
                 {
                     if (bSnowPhases)
-                        ImGui::Text(
-                            "- Applied phase %d.",
-                            (int)Calendar::GetAppliedSnowValue());
+                        ImGui::Text("- Applied phase %d.", (int)Calendar::GetAppliedSnowValue());
                     else
-                        ImGui::Text(
-                            "- Applied %.3f.",
-                            Calendar::GetAppliedSnowValue());
+                        ImGui::Text("- Applied %.3f.", Calendar::GetAppliedSnowValue());
                     break;
                 }
                 case Calendar::ESnowStatus::SetupMissing:
                 {
-                    ImGui::TextWrapped(
-                        "- No snow setup was found in this map.");
+                    ImGui::TextWrapped("- No snow setup was found in this map.");
                     break;
                 }
                 default:
@@ -16479,9 +13352,6 @@ void GUI::Init()
         }
         }
 
-        // Render the loadout modal every frame, even when the inspected pawn
-        // vanished or another tab was selected, so ImGui cannot retain an
-        // invisible modal that blocks the rest of the interface.
         PlayerLoadout::RenderPicker();
 
         AutoHosting::SaveIfChanged();
@@ -16491,7 +13361,6 @@ void GUI::Init()
         ImGui::PopStyleVar();   // content WindowPadding
         ImGui::PopStyleColor(); // content ChildBg
         ImGui::End();           // window
-
 
         ImGui::Render();
         const float clear_color_with_alpha[4] = { clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w };
@@ -16503,8 +13372,6 @@ void GUI::Init()
         g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
     }
 
-    // GUI close ends the entire host process below, so there is no later
-    // destructor/atexit opportunity to flush the toggle or delay.
     AutoHosting::SaveNow(false);
 
     PlayerLoadout::ShutdownRenderer();

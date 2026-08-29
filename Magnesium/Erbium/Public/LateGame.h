@@ -13,17 +13,15 @@ struct FLateGameItem
 
 enum class EAmmoType : uint8
 {
-    Assault = 0,
-    Shotgun = 1,
-    Submachine = 2,
-    Rocket = 3,
-    Sniper = 4
+    Assault = 0, Shotgun = 1, Submachine = 2, Rocket = 3, Sniper = 4
 };
 
 static inline bool IsOneShot()
 {
-	const int Selected = GUI::GetSelectedPlaylist();
-	return Selected == static_cast<int>(Playlist::OneShotSolos) || Selected == static_cast<int>(Playlist::OneShotDuos) || Selected == static_cast<int>(Playlist::OneShotSquads);
+    const int Selected = GUI::GetSelectedPlaylist();
+    return Selected == static_cast<int>(Playlist::OneShotSolos) ||
+        Selected == static_cast<int>(Playlist::OneShotDuos) ||
+        Selected == static_cast<int>(Playlist::OneShotSquads);
 }
 
 class LateGame

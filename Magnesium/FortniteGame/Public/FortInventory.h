@@ -24,7 +24,6 @@ struct FGuid
     }
 };
 
-
 class UFortItem : public UObject
 {
 public:
@@ -426,24 +425,15 @@ public:
     DEFINE_PROP(GameplayAbility, TSoftClassPtr<UClass>);
     static inline int32
         WeaponItemDefinitionSoftPtr__Offset = -2;
-    TSoftObjectPtr<UFortWeaponItemDefinition>*
-        GetWeaponItemDefinitionSoftPtr() const
+    TSoftObjectPtr<UFortWeaponItemDefinition>* GetWeaponItemDefinitionSoftPtr() const
     {
         if (WeaponItemDefinitionSoftPtr__Offset == -2)
         {
-            WeaponItemDefinitionSoftPtr__Offset =
-                GetOffset(
-                    "WeaponItemDefinition",
-                    GUESS_PROP_FLAGS(
-                        TSoftObjectPtr<
-                            UFortWeaponItemDefinition>));
+            WeaponItemDefinitionSoftPtr__Offset = GetOffset("WeaponItemDefinition",
+                    GUESS_PROP_FLAGS(TSoftObjectPtr<UFortWeaponItemDefinition>));
         }
-        return WeaponItemDefinitionSoftPtr__Offset != -1
-            ? &GetFromOffset<
-                  TSoftObjectPtr<
-                      UFortWeaponItemDefinition>>(
-                  this,
-                  WeaponItemDefinitionSoftPtr__Offset)
+        return WeaponItemDefinitionSoftPtr__Offset != -1 ? &GetFromOffset<TSoftObjectPtr<
+                      UFortWeaponItemDefinition>>(this, WeaponItemDefinitionSoftPtr__Offset)
             : nullptr;
     }
     DEFINE_PROP(bValidForLastEquipped, bool);
@@ -472,24 +462,15 @@ public:
             return;
 
         auto Property = GetProperty("RegenCooldown");
-        RegenCooldown__Offset =
-            Property
-                ? static_cast<int32>(GetOffset("RegenCooldown"))
-                : -1;
+        RegenCooldown__Offset = Property ? static_cast<int32>(GetOffset("RegenCooldown")) : -1;
 
-        // RegenCooldown is a FloatProperty in the older builds (including
-        // 4.20) and becomes an FScalableFloat in later builds. The generic
-        // FScalableFloat accessor cannot distinguish those layouts.
+        // RegenCooldown is a FloatProperty on older builds including 4.20 and an FScalableFloat later.
         if (Property)
         {
-            auto FloatProperty =
-                GetProperty("RegenCooldown", 0x100);
-            auto StructProperty =
-                GetProperty("RegenCooldown", 0x100000);
-            RegenCooldown__IsFloat =
-                FloatProperty == Property;
-            if (!RegenCooldown__IsFloat &&
-                StructProperty != Property)
+            auto FloatProperty = GetProperty("RegenCooldown", 0x100);
+            auto StructProperty = GetProperty("RegenCooldown", 0x100000);
+            RegenCooldown__IsFloat = FloatProperty == Property;
+            if (!RegenCooldown__IsFloat && StructProperty != Property)
             {
                 RegenCooldown__Offset = -1;
             }
@@ -510,12 +491,10 @@ public:
 
         if (RegenCooldown__IsFloat)
         {
-            return GetFromOffset<float>(
-                this, RegenCooldown__Offset);
+            return GetFromOffset<float>(this, RegenCooldown__Offset);
         }
 
-        return GetFromOffset<FScalableFloat>(
-            this, RegenCooldown__Offset).Evaluate(ItemLevel);
+        return GetFromOffset<FScalableFloat>(this, RegenCooldown__Offset).Evaluate(ItemLevel);
     }
 };
 
@@ -555,56 +534,47 @@ public:
 
     DEFINE_FUNC(HandleInventoryLocalUpdate, void);
 
-    UFortWorldItem* GiveItem(const UFortItemDefinition*, int = 1, int = 0, int = 0, bool = true, bool = true, int = 0, TArray<FFortItemEntryStateValue> = {}, bool = true, TArray<float> = {}, bool* = nullptr, bool* = nullptr);
+    UFortWorldItem* GiveItem(const UFortItemDefinition*, int = 1, int = 0, int = 0, bool = true,
+        bool = true, int = 0, TArray<FFortItemEntryStateValue> = {}, bool = true,
+        TArray<float> = {}, bool* = nullptr, bool* = nullptr);
     UFortWorldItem* GiveItem(FFortItemEntry&, int = -1, bool = true, bool = true, bool* = nullptr);
     bool InitializeGadgetItem(UFortWorldItem*, bool = true);
     bool InitializeGadgetItemWithFallback(UFortWorldItem*, bool = true);
-    bool EnsureExact1040AshtonBackingAndFocus(
-        FGuid* OutBackingGuid = nullptr);
+    bool EnsureExact1040AshtonBackingAndFocus(FGuid* OutBackingGuid = nullptr);
     int32 GiveItemToSingleStack(const UFortItemDefinition*, int32, bool = false);
     void Update(FFortItemEntry*);
     void Remove(FGuid);
     int32 RemoveItem(FGuid, int32, bool = false);
-    static bool ShouldBypassItemConsumption(
-        AFortPlayerControllerAthena*,
-        int32,
-        bool);
-    static void TrackGhostModeActivation(
-        AFortPlayerControllerAthena*,
-        const UFortItemDefinition*,
+    static bool ShouldBypassItemConsumption(AFortPlayerControllerAthena*, int32, bool);
+    static void TrackGhostModeActivation(AFortPlayerControllerAthena*, const UFortItemDefinition*,
         const FGuid&);
-    static void NotifyGhostModeExitAbilityActivated(
-        UAbilitySystemComponent*,
+    static void NotifyGhostModeExitAbilityActivated(UAbilitySystemComponent*,
         const UFortGameplayAbility*);
-    static void NotifyGhostModeHarvestingToolRequested(
-        AFortPlayerControllerAthena*,
+    static void NotifyGhostModeHarvestingToolRequested(AFortPlayerControllerAthena*,
         const UFortItemDefinition*);
-    static AFortPickupAthena* SpawnPickup(FVector, FFortItemEntry&, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, int = -1, bool = true, bool = true, bool = true, const UClass* = nullptr, FVector = FVector());
-    static AFortPickupAthena* SpawnPickup(FVector, const UFortItemDefinition*, int, int, long long = EFortPickupSourceTypeFlag::GetOther(), long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, bool = true, bool = true, const UClass* = nullptr);
-    static AFortPickupAthena* SpawnPickup(ABuildingContainer*, FFortItemEntry&, AFortPlayerPawnAthena* = nullptr, int = -1);
+    static AFortPickupAthena* SpawnPickup(FVector, FFortItemEntry&,
+        long long = EFortPickupSourceTypeFlag::GetOther(),
+        long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr, int = -1,
+        bool = true, bool = true, bool = true, const UClass* = nullptr, FVector = FVector());
+    static AFortPickupAthena* SpawnPickup(FVector, const UFortItemDefinition*, int, int,
+        long long = EFortPickupSourceTypeFlag::GetOther(),
+        long long = EFortPickupSpawnSource::GetUnset(), AFortPlayerPawnAthena* = nullptr,
+        bool = true, bool = true, const UClass* = nullptr);
+    static AFortPickupAthena* SpawnPickup(ABuildingContainer*, FFortItemEntry&,
+        AFortPlayerPawnAthena* = nullptr, int = -1);
     static FFortItemEntry* MakeItemEntry(const UFortItemDefinition*, int32, int32);
     static FFortRangedWeaponStats* GetStats(const UFortWeaponItemDefinition*);
     static FFortRangedWeaponStats* CloneStats(const UFortWeaponItemDefinition* Def);
-    static int32 ReloadAllWeaponAmmo(
-        AFortPlayerControllerAthena*);
+    static int32 ReloadAllWeaponAmmo(AFortPlayerControllerAthena*);
     static bool IsPrimaryQuickbar(const UFortItemDefinition*);
     static void TickRegeneratingItems();
-    static bool BeginTrackedRechargeEquip(
-        AFortPlayerControllerAthena*,
-        const FGuid&);
-    static void FinishTrackedRechargeEquip(
-        AFortPlayerControllerAthena*,
-        const FGuid&,
+    static bool BeginTrackedRechargeEquip(AFortPlayerControllerAthena*, const FGuid&);
+    static void FinishTrackedRechargeEquip(AFortPlayerControllerAthena*, const FGuid&,
         AFortWeapon*);
-    // Scoped around native pawn-death processing so Keep Inventory can retain
-    // ordinary rows without weakening forced/admin removals at any other time.
-    static void BeginNativeDeathInventoryRetention(
-        AFortPlayerControllerAthena*,
+    static void BeginNativeDeathInventoryRetention(AFortPlayerControllerAthena*,
         const std::vector<FGuid>&);
-    static void EndNativeDeathInventoryRetention(
-        AFortPlayerControllerAthena*);
-    static void HandlePendingCarmineFocus(
-        AFortPlayerControllerAthena*);
+    static void EndNativeDeathInventoryRetention(AFortPlayerControllerAthena*);
+    static void HandlePendingCarmineFocus(AFortPlayerControllerAthena*);
     void UpdateEntry(FFortItemEntry&);
     void SetRequiresUpdate();
     static void RemoveWeaponAbilities(AActor*);

@@ -16,21 +16,7 @@ public:
     DEFINE_STRUCT_PROP(Translation, FVector);
     DEFINE_STRUCT_PROP(EnabledState, uint8);
 
-    // Rotation is NOT the same type on every build:
-    //
-    //   Season X (10.40): Translation FVector @ 0x00, Rotation FQuat    @ 0x10
-    //   13.40 onwards:    Rotation    FRotator @ 0x00, Translation FVector @ 0x0C
-    //
-    // Reflection resolves the offset either way, but the TYPE is baked into
-    // the DEFINE_STRUCT_PROP above. Writing a 12-byte FRotator into the
-    // 16-byte FQuat leaves W holding whatever was there before, which
-    // denormalises the quaternion into an arbitrary rotation - that is the
-    // upside-down moveable island on 10.40.
-    //
-    // Detected structurally instead of by version number: FQuat needs
-    // 16-byte alignment, so that layout has to put the 12-byte Translation
-    // first to fill the gap. Rotation sitting AFTER Translation therefore
-    // means it is the quaternion form.
+    // Season X (10.40) is Translation FVector @0x00 + Rotation FQuat @0x10; 13.40+ is Rotation FRotator @0x00 + Translation FVector @0x0C.
     static bool IsRotationQuat()
     {
         static int Cached = -1;
@@ -46,9 +32,6 @@ public:
         return Cached == 1;
     }
 
-    // Writes the rotation in whichever form this build expects. Takes the
-    // quaternion because that is what FTransform carries - converting to
-    // Euler first would throw away the precision we need on the quat builds.
     void SetRotationFromQuat(FQuat& Quat) const
     {
         if (!HasRotation())
@@ -56,8 +39,7 @@ public:
 
         if (IsRotationQuat())
         {
-            // FQuat::operator= memcpy's exactly Size() bytes, so this stays
-            // correct across the 0x10 / 0x20 (LWC) layouts too.
+            // FQuat::operator= memcpies exactly Size() bytes, so this holds across the 0x10 and 0x20 LWC layouts.
             GetFromOffset<FQuat>(this, Rotation__Offset) = Quat;
             return;
         }
@@ -91,7 +73,6 @@ public:
     DEFINE_BITFIELD_PROP(bFoundationEnabled);
 
     DEFINE_FUNC(OnRep_DynamicFoundationRepData, void);
-    //DEFINE_FUNC(SetDynamicFoundationTransform, void);
     DEFINE_FUNC(SetDynamicFoundationEnabled, void);
     DEFINE_FUNC(OnRep_ServerStreamedInLevel, void);
     DEFINE_FUNC(OnRep_LevelToStream, void);

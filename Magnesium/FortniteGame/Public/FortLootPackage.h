@@ -34,7 +34,6 @@ public:
     CountThresholdMap LootPackageData;
 };
 
-
 struct FFortLootPackageData
 {
 public:
@@ -49,7 +48,6 @@ public:
     DEFINE_STRUCT_PROP(MinWorldLevel, int);
     DEFINE_STRUCT_PROP(MaxWorldLevel, int);
 };
-
 
 struct FFortLootTierData
 {
@@ -66,9 +64,6 @@ public:
     DEFINE_STRUCT_PROP(LootPackageCategoryMaxArray, TArray<int32>);
 };
 
-
-//inline TArray<FFortLootTierData*> TierDataAllGroups;
-//inline TArray<FFortLootPackageData*> LPGroupsAll;
 inline std::map<int32, TArray<FFortLootTierData*>> TierDataMap;
 inline std::map<int32, TArray<FFortLootPackageData*>> LootPackageMap;
 
@@ -153,8 +148,12 @@ public:
 class UFortLootPackage
 {
 public:
-    static void SetupLDSForPackage(TArray<FFortItemEntry*>&, SDK::FName, int, FName, int WorldLevel = ((AFortGameStateAthena*)UWorld::GetWorld()->GameState)->WorldLevel, ABuildingContainer* = nullptr);
-    static void ChooseLootForContainer(TArray<FFortItemEntry*>&, FName, int = -1, int = ((AFortGameStateAthena*)UWorld::GetWorld()->GameState)->WorldLevel, ABuildingContainer* = nullptr);
+    static void SetupLDSForPackage(TArray<FFortItemEntry*>&, SDK::FName, int, FName,
+        int WorldLevel = ((AFortGameStateAthena*)UWorld::GetWorld()->GameState)->WorldLevel,
+        ABuildingContainer* = nullptr);
+    static void ChooseLootForContainer(TArray<FFortItemEntry*>&, FName, int = -1,
+        int = ((AFortGameStateAthena*)UWorld::GetWorld()->GameState)->WorldLevel,
+        ABuildingContainer* = nullptr);
     static void SpawnFloorLootForContainer(const UClass*);
     static bool SpawnLootHook(ABuildingContainer*);
     static void SpawnLoot(FName&, FVector);

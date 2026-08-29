@@ -21,8 +21,8 @@ public:
 struct FURL
 {
 public:
-	USCRIPTSTRUCT_COMMON_MEMBERS(FURL);
-	
+    USCRIPTSTRUCT_COMMON_MEMBERS(FURL);
+
     DEFINE_STRUCT_PROP(Port, int32);
 };
 
@@ -77,13 +77,11 @@ struct FNetworkObjectInfo
     TSet<TWeakObjectPtr<UNetConnection>> DormantConnections;
     TSet<TWeakObjectPtr<UNetConnection>> RecentlyDormantConnections;
 };
-template< class ObjectType>
-class TSharedPtr
+template< class ObjectType> class TSharedPtr
 {
 public:
     ObjectType* Object;
     void* ReferenceController;
-
 
     bool IsValid() const
     {
@@ -127,13 +125,10 @@ public:
     TMap<TWeakObjectPtr<UNetConnection>, int32> NumDormantObjectsPerConnection;
 };
 
-
 struct FActorDestructionInfo
 {
 public:
-    FActorDestructionInfo()
-        : Reason(0)
-        , bIgnoreDistanceCulling(false)
+    FActorDestructionInfo() : Reason(0), bIgnoreDistanceCulling(false)
     {
     }
 
@@ -170,9 +165,9 @@ public:
 
         if (ViewingController)
         {
-            //FRotator ViewRotation = ViewingController->GetControlRotation();
             FRotator ViewRotation;
-            AFortPlayerControllerAthena::GetPlayerViewPoint(ViewingController, NetViewer->ViewLocation, ViewRotation);
+            AFortPlayerControllerAthena::GetPlayerViewPoint(ViewingController,
+                NetViewer->ViewLocation, ViewRotation);
             constexpr auto radian = 0.017453292519943295;
             auto UnwindedPitch = FRotator::UnwindDegrees(ViewRotation.Pitch);
             auto UnwindedYaw = FRotator::UnwindDegrees(ViewRotation.Yaw);
@@ -217,12 +212,8 @@ public:
     InitPostLoadHooks;
 };
 
-// Removes a stale native outside-safe-zone effect carried by the persistent
-// PlayerState ability system when a lower-season pawn is replaced.
 void ResetLowerSeasonStormStateForRespawn(AFortPlayerControllerAthena* Player,
     AFortPlayerPawnAthena* OldPawn, AFortPlayerPawnAthena* NewPawn);
 
-// Removes only the native outside-safe-zone damage effect and optionally arms
-// the pawn's application latch. It does not grant general damage immunity.
 bool SuppressOutsideSafeZoneEffectForController(
     AFortPlayerControllerAthena* Player, bool bPrimeSafeZoneLatch = false);

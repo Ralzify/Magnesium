@@ -70,8 +70,7 @@ public:
     float TimeOfShutdown = 0.0f;
 };
 
-static_assert(
-    sizeof(FControlPointInstanceData) == 0x50,
+static_assert(sizeof(FControlPointInstanceData) == 0x50,
     "10.40 Disco control-point instance layout changed");
 
 struct FAshtonStoneState
@@ -120,9 +119,7 @@ struct FItemsToGive final
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FItemsToGive);
 
-    DEFINE_STRUCT_PROP(
-        ItemToDrop,
-        UFortWorldItemDefinition*);
+    DEFINE_STRUCT_PROP(ItemToDrop, UFortWorldItemDefinition*);
     DEFINE_STRUCT_PROP(NumberToGive, FScalableFloat);
 };
 
@@ -131,9 +128,7 @@ struct FItemsToGiveAtPhase final
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FItemsToGiveAtPhase);
 
-    DEFINE_STRUCT_PROP(
-        ItemToDrop,
-        UFortWorldItemDefinition*);
+    DEFINE_STRUCT_PROP(ItemToDrop, UFortWorldItemDefinition*);
     DEFINE_STRUCT_PROP(NumberToGive, FScalableFloat);
 };
 
@@ -153,14 +148,9 @@ class UFortMutatorListComponent : public UActorComponent
 public:
     UCLASS_COMMON_MEMBERS(UFortMutatorListComponent);
 
-    DEFINE_PROP(
-        MutatorDefs,
-        TArray<TSoftClassPtr<UClass>>);
-    DEFINE_PROP(
-        Mutators,
-        TArray<AFortGameplayMutator*>);
-    // 10.40 exposes this EnumProperty with an IntProperty underlying
-    // storage type.
+    DEFINE_PROP(MutatorDefs, TArray<TSoftClassPtr<UClass>>);
+    DEFINE_PROP(Mutators, TArray<AFortGameplayMutator*>);
+    // 10.40 exposes this EnumProperty with an IntProperty underlying storage type.
     DEFINE_PROP(InitState, uint32);
 
     DEFINE_FUNC(GetMutatorByClass, AFortGameplayMutator*);
@@ -180,18 +170,9 @@ public:
 
 enum class EAthenaScoringEventCompat : uint8
 {
-    None = 0,
-    Elimination = 1,
-    ChestOpened = 2,
-    AmmoCanOpened = 3,
-    SupplyDropOpened = 4,
-    SupplyLlamaOpened = 5,
-    ForagedItemConsumed = 6,
-    SurvivalInMinutes = 7,
-    CollectedCoinBronze = 8,
-    CollectedCoinSilver = 9,
-    CollectedCoinGold = 10,
-    AIKilled = 11
+    None = 0, Elimination = 1, ChestOpened = 2, AmmoCanOpened = 3, SupplyDropOpened = 4,
+    SupplyLlamaOpened = 5, ForagedItemConsumed = 6, SurvivalInMinutes = 7, CollectedCoinBronze = 8,
+    CollectedCoinSilver = 9, CollectedCoinGold = 10, AIKilled = 11
 };
 
 class AFortAthenaMutator_Score : public AFortAthenaMutator
@@ -225,32 +206,20 @@ class FFortAthenaScoreRoyaleCompatibility final
 {
 public:
     static bool IsSupportedBuild();
-    static bool IsScoreRoyalePlaylist(
-        const UFortPlaylistAthena* Playlist);
+    static bool IsScoreRoyalePlaylist(const UFortPlaylistAthena* Playlist);
     static bool IsActive();
-    static void PreparePlaylist(
-        AFortGameStateAthena* GameState,
+    static void PreparePlaylist(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
     static void Tick(UNetDriver* Driver, float DeltaSeconds);
-    static bool AwardEvent(
-        AFortPlayerControllerAthena* PlayerController,
-        EAthenaScoringEventCompat Event,
-        const FGameplayTagContainer* ContextTags = nullptr);
-    static void HandleContainerSearched(
-        ABuildingContainer* Container,
-        AFortPlayerPawnAthena* SearchingPawn,
-        const FName& OriginalTierGroup);
-    static void HandleForagedItemConsumed(
-        AFortPlayerControllerAthena* PlayerController,
-        AActor* SourceActor,
-        int32 ScoreBefore);
-    static void HandleElimination(
-        AFortPlayerStateAthena* KillerPlayerState,
-        AFortPlayerStateAthena* VictimPlayerState,
-        int32 ScoreBefore);
-    static bool TryGetRespawnAllowed(
-        AFortPlayerStateAthena* PlayerState,
-        bool& OutAllowed);
+    static bool AwardEvent(AFortPlayerControllerAthena* PlayerController,
+        EAthenaScoringEventCompat Event, const FGameplayTagContainer* ContextTags = nullptr);
+    static void HandleContainerSearched(ABuildingContainer* Container,
+        AFortPlayerPawnAthena* SearchingPawn, const FName& OriginalTierGroup);
+    static void HandleForagedItemConsumed(AFortPlayerControllerAthena* PlayerController,
+        AActor* SourceActor, int32 ScoreBefore);
+    static void HandleElimination(AFortPlayerStateAthena* KillerPlayerState,
+        AFortPlayerStateAthena* VictimPlayerState, int32 ScoreBefore);
+    static bool TryGetRespawnAllowed(AFortPlayerStateAthena* PlayerState, bool& OutAllowed);
 };
 
 struct FActiveGameplayModifier
@@ -258,12 +227,8 @@ struct FActiveGameplayModifier
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FActiveGameplayModifier);
 
-    DEFINE_STRUCT_PROP(
-        ModifierDef,
-        UFortGameplayModifierItemDefinition*);
-    DEFINE_STRUCT_PROP(
-        Mutators,
-        TArray<AFortGameplayMutator*>);
+    DEFINE_STRUCT_PROP(ModifierDef, UFortGameplayModifierItemDefinition*);
+    DEFINE_STRUCT_PROP(Mutators, TArray<AFortGameplayMutator*>);
 };
 
 struct FActiveGameplayModifierArray
@@ -271,9 +236,7 @@ struct FActiveGameplayModifierArray
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FActiveGameplayModifierArray);
 
-    DEFINE_STRUCT_PROP(
-        Items,
-        TArray<FActiveGameplayModifier>);
+    DEFINE_STRUCT_PROP(Items, TArray<FActiveGameplayModifier>);
 };
 
 struct FExitCraftInfo
@@ -330,9 +293,7 @@ public:
     DEFINE_PROP(ExitCraftInfo, UFortAthenaExitCraftInfo*);
     DEFINE_PROP(SpawnedExitCraftList, TArray<FHeistExitCraftData>);
     DEFINE_PROP(SpawnExitCraftTime, float);
-    DEFINE_PROP(
-        RemainingExitCraftSpawnIndexes,
-        TArray<int32>);
+    DEFINE_PROP(RemainingExitCraftSpawnIndexes, TArray<int32>);
     DEFINE_PROP(NumUnspawnedExitCrafts, int32);
     DEFINE_PROP(NumSpawnedExitCrafts, int32);
     DEFINE_PROP(NumDepartedExitCrafts, int32);
@@ -347,9 +308,7 @@ struct FGunGameGunEntry
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FGunGameGunEntry);
 
-    DEFINE_STRUCT_PROP(
-        Weapon,
-        UFortWeaponItemDefinition*);
+    DEFINE_STRUCT_PROP(Weapon, UFortWeaponItemDefinition*);
     DEFINE_STRUCT_PROP(Enabled, FScalableFloat);
     DEFINE_STRUCT_PROP(AwardAtElim, FScalableFloat);
 };
@@ -362,9 +321,7 @@ public:
     DEFINE_PROP(UseInfiniteAmmo, FScalableFloat);
     DEFINE_PROP(GameIsReverse, FScalableFloat);
     DEFINE_PROP(ElimsWithFinalTierToWin, FScalableFloat);
-    DEFINE_PROP(
-        WeaponEntries,
-        TArray<FGunGameGunEntry>);
+    DEFINE_PROP(WeaponEntries, TArray<FGunGameGunEntry>);
     DEFINE_PROP(ScoreToWin, int32);
 };
 
@@ -373,9 +330,7 @@ struct FWaxPlayerDataEntry : public FFastArraySerializerItem
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FWaxPlayerDataEntry);
 
-    DEFINE_STRUCT_PROP(
-        PlayerState,
-        AFortPlayerStateAthena*);
+    DEFINE_STRUCT_PROP(PlayerState, AFortPlayerStateAthena*);
     DEFINE_STRUCT_PROP(bPermanentlyWaxed, bool);
     DEFINE_STRUCT_PROP(bPlayerWasLeader, bool);
     DEFINE_STRUCT_PROP(TokenBasedPlacement, int32);
@@ -394,12 +349,8 @@ struct FWaxPlayerDataArray : public FFastArraySerializer
 public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FWaxPlayerDataArray);
 
-    DEFINE_STRUCT_PROP(
-        OwningMutator,
-        UObject*);
-    DEFINE_STRUCT_PROP(
-        Entries,
-        TArray<FWaxPlayerDataEntry>);
+    DEFINE_STRUCT_PROP(OwningMutator, UObject*);
+    DEFINE_STRUCT_PROP(Entries, TArray<FWaxPlayerDataEntry>);
 };
 
 class AFortGameModePickup_Wax : public AFortPickupAthena
@@ -416,18 +367,10 @@ class AFortAthenaMutator_Wax : public AFortAthenaMutator
 public:
     UCLASS_COMMON_MEMBERS(AFortAthenaMutator_Wax);
 
-    DEFINE_PROP(
-        TokenClass,
-        TSubclassOf<AFortAthena_WaxToken>);
-    DEFINE_PROP(
-        TokenPickupClass,
-        TSubclassOf<AFortGameModePickup_Wax>);
-    DEFINE_PROP(
-        TeamLeadersInOrder,
-        TArray<AFortPlayerStateAthena*>);
-    DEFINE_PROP(
-        PlayerLeadersInOrder,
-        TArray<AFortPlayerStateAthena*>);
+    DEFINE_PROP(TokenClass, TSubclassOf<AFortAthena_WaxToken>);
+    DEFINE_PROP(TokenPickupClass, TSubclassOf<AFortGameModePickup_Wax>);
+    DEFINE_PROP(TeamLeadersInOrder, TArray<AFortPlayerStateAthena*>);
+    DEFINE_PROP(PlayerLeadersInOrder, TArray<AFortPlayerStateAthena*>);
     DEFINE_PROP(TokensToStartWith, FScalableFloat);
     DEFINE_PROP(LivesToStartPlayerWith, FScalableFloat);
     DEFINE_PROP(PlayerData, FWaxPlayerDataArray);
@@ -448,111 +391,68 @@ class FFortAthenaHeistCompatibility final
 public:
     static bool IsSupportedBuild();
     static bool IsHeistPlaylist(const UFortPlaylistAthena* Playlist);
-    static void PreparePlaylist(
-        AFortGameStateAthena* GameState,
+    static void PreparePlaylist(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
-    static bool LoadAdditionalPlaylistLevels(
-        AFortGameStateAthena* GameState,
+    static bool LoadAdditionalPlaylistLevels(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
     static void Tick(UNetDriver* Driver, float DeltaSeconds);
 };
 
-// Fortnite 10.40 owns these LTMs through the configured Blueprint mutators
-// referenced by each playlist. This layer restores the native mutator
-// lifecycle and narrowly repairs gameplay callbacks that the stripped server
-// no longer dispatches.
 class FFortAthenaNativeLTMCompatibility final
 {
 public:
     static bool IsSupportedBuild();
     static bool IsOriginalFoodFightSupportedBuild();
-    static bool IsOriginalFoodFightPlaylist(
+    static bool IsOriginalFoodFightPlaylist(const UFortPlaylistAthena* Playlist);
+    static bool IsTargetPlaylist(const UFortPlaylistAthena* Playlist);
+    static bool IsReadyForMatch(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
-    static bool IsTargetPlaylist(
+    static void BeginPlaylistPublication(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
-    static bool IsReadyForMatch(
-        AFortGameStateAthena* GameState,
+    static void EndPlaylistPublication(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
-    static void BeginPlaylistPublication(
-        AFortGameStateAthena* GameState,
-        const UFortPlaylistAthena* Playlist);
-    static void EndPlaylistPublication(
-        AFortGameStateAthena* GameState,
-        const UFortPlaylistAthena* Playlist);
-    static void PreparePlaylist(
-        AFortGameStateAthena* GameState,
+    static void PreparePlaylist(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist);
     static void Tick(UNetDriver* Driver, float DeltaSeconds);
     static void RequestFoodFightWallDrop();
-    static bool TryGetFoodFightRespawnAllowed(
-        const AFortPlayerStateAthena* PlayerState,
+    static bool TryGetFoodFightRespawnAllowed(const AFortPlayerStateAthena* PlayerState,
         bool& OutAllowed);
-    static bool TryGetWaxRespawnAllowed(
-        const AFortPlayerStateAthena* PlayerState,
+    static bool TryGetWaxRespawnAllowed(const AFortPlayerStateAthena* PlayerState,
         bool& OutAllowed);
-    static bool TryGetDiscoRespawnAllowed(
-        const AFortPlayerStateAthena* PlayerState,
+    static bool TryGetDiscoRespawnAllowed(const AFortPlayerStateAthena* PlayerState,
         bool& OutAllowed);
-    static void HandleDiscoPlayerReady(
-        AFortPlayerControllerAthena* PlayerController);
-    static void HandleAshtonPlayerReady(
-        AFortPlayerControllerAthena* PlayerController);
-    static bool IsCurrentAshtonLeader(
-        AFortPlayerControllerAthena* PlayerController);
-    static void HandleAshtonLeaderEliminated(
-        AFortPlayerControllerAthena* PlayerController,
+    static void HandleDiscoPlayerReady(AFortPlayerControllerAthena* PlayerController);
+    static void HandleAshtonPlayerReady(AFortPlayerControllerAthena* PlayerController);
+    static bool IsCurrentAshtonLeader(AFortPlayerControllerAthena* PlayerController);
+    static void HandleAshtonLeaderEliminated(AFortPlayerControllerAthena* PlayerController,
         bool bAfterNativeDeath);
-    static bool ShouldSuppressAshtonLeaderWorldPickup(
+    static bool ShouldSuppressAshtonLeaderWorldPickup(const UFortItemDefinition* ItemDefinition);
+    static bool ShouldRejectAshtonLeaderGrant(AFortPlayerControllerAthena* PlayerController,
         const UFortItemDefinition* ItemDefinition);
-    static bool ShouldRejectAshtonLeaderGrant(
-        AFortPlayerControllerAthena* PlayerController,
+    static bool ShouldPreserveAshtonInventoryItem(AFortPlayerControllerAthena* PlayerController,
         const UFortItemDefinition* ItemDefinition);
-    static bool ShouldPreserveAshtonInventoryItem(
-        AFortPlayerControllerAthena* PlayerController,
+    static bool ShouldBlockAshtonInventoryDrop(AFortPlayerControllerAthena* PlayerController,
         const UFortItemDefinition* ItemDefinition);
-    static bool ShouldBlockAshtonInventoryDrop(
-        AFortPlayerControllerAthena* PlayerController,
+    static bool ShouldRejectAshtonPickup(AFortPlayerPawnAthena* Pawn,
         const UFortItemDefinition* ItemDefinition);
-    static bool ShouldRejectAshtonPickup(
-        AFortPlayerPawnAthena* Pawn,
+    static bool ShouldBlockAshtonGenericPickup(AFortPlayerPawnAthena* Pawn,
         const UFortItemDefinition* ItemDefinition);
-    static bool ShouldBlockAshtonGenericPickup(
-        AFortPlayerPawnAthena* Pawn,
+    static bool IsCurrentAshtonStone(AFortPlayerPawnAthena* Pawn,
         const UFortItemDefinition* ItemDefinition);
-    static bool IsCurrentAshtonStone(
-        AFortPlayerPawnAthena* Pawn,
-        const UFortItemDefinition* ItemDefinition);
-    static bool IsAshtonStoneCaptured(
-        const UFortItemDefinition* ItemDefinition);
-    // Returns true for an Ashton stone even when capture is rejected, keeping
-    // the game-mode objective out of every generic inventory pickup route.
-    static bool TryCompleteAshtonStonePickup(
-        AFortPlayerPawnAthena* Pawn,
-        AFortPickupAthena* Pickup,
-        const UFortItemDefinition* ItemDefinition,
-        const char* Reason);
-    static void HandleWaxPlayerReady(
-        AFortPlayerControllerAthena* PlayerController);
-    static void HandleWaxElimination(
-        AFortPlayerStateAthena* VictimPlayerState,
+    static bool IsAshtonStoneCaptured(const UFortItemDefinition* ItemDefinition);
+    static bool TryCompleteAshtonStonePickup(AFortPlayerPawnAthena* Pawn, AFortPickupAthena* Pickup,
+        const UFortItemDefinition* ItemDefinition, const char* Reason);
+    static void HandleWaxPlayerReady(AFortPlayerControllerAthena* PlayerController);
+    static void HandleWaxElimination(AFortPlayerStateAthena* VictimPlayerState,
         AFortPlayerPawnAthena* VictimPawn);
-    // Returns true for the Wax pickup class even when collection is rejected,
-    // keeping game-mode tokens out of generic inventory pickup handling.
-    static bool TryCollectWaxPickup(
-        AFortPlayerPawnAthena* Pawn,
-        AFortPickupAthena* Pickup);
+    static bool TryCollectWaxPickup(AFortPlayerPawnAthena* Pawn, AFortPickupAthena* Pickup);
     static bool ShouldSuppressArsenalWorldLoot();
-    static bool TryClaimArsenalElimination(
-        AFortPlayerStateAthena* VictimPlayerState,
+    static bool TryClaimArsenalElimination(AFortPlayerStateAthena* VictimPlayerState,
         AFortPlayerPawnAthena* VictimPawn);
-    static void HandleArsenalPlayerReady(
-        AFortPlayerControllerAthena* PlayerController);
-    static void HandleArsenalElimination(
-        AFortPlayerControllerAthena* KillerController,
-        AFortPlayerStateAthena* KillerPlayerState,
-        AFortPlayerControllerAthena* VictimController,
-        AFortPlayerStateAthena* VictimPlayerState,
-        AFortPlayerPawnAthena* VictimPawn);
+    static void HandleArsenalPlayerReady(AFortPlayerControllerAthena* PlayerController);
+    static void HandleArsenalElimination(AFortPlayerControllerAthena* KillerController,
+        AFortPlayerStateAthena* KillerPlayerState, AFortPlayerControllerAthena* VictimController,
+        AFortPlayerStateAthena* VictimPlayerState, AFortPlayerPawnAthena* VictimPawn);
 };
 
 struct FFillFloorPositionData
@@ -572,9 +472,7 @@ public:
 
     DEFINE_PROP(StepIndex, int32);
     DEFINE_PROP(FloorZ, float);
-    DEFINE_PROP(
-        FloorPositionData,
-        TArray<FFillFloorPositionData>);
+    DEFINE_PROP(FloorPositionData, TArray<FFillFloorPositionData>);
     DEFINE_PROP(EventHeights, TArray<float>);
 };
 
@@ -598,8 +496,6 @@ public:
     DEFINE_PROP(ObjectiveDamageState, uint8);
     DEFINE_PROP(HeadRotationYaw, float);
     DEFINE_PROP(bAllowDamage, bool);
-    // Inherited ABuildingActor state. Reflection walks the native hierarchy,
-    // so these remain capability checked on every supported Food Fight build.
     DEFINE_PROP(BuildingAttributeSet, UFortHealthSet*);
     DEFINE_PROP(ReplicatedBuildingAttributeSet, UFortHealthSet*);
     DEFINE_PROP(MaxHealthInitializationValue, float);
@@ -637,10 +533,6 @@ public:
 
     DEFINE_PROP(CurrentState, uint8);
     DEFINE_PROP(FoodTeam, uint8);
-    // These are inherited from ABuildingActor.  Reflection walks the native
-    // class hierarchy, so declaring them here lets the compatibility layer
-    // consume the floating-base Blueprint's authored snap contract without
-    // changing the repo-wide ABuildingActor wrapper.
     DEFINE_PROP(SnapGridSize, float);
     DEFINE_PROP(VertSnapGridSize, float);
     DEFINE_PROP(SnapOffset, FVector);
@@ -653,10 +545,8 @@ public:
     DEFINE_FUNC(GetObjectiveActor, AAthenaBarrierObjective*);
     DEFINE_FUNC(SetTeam, void);
 
-    static inline AAthenaBarrierObjective*
-        (*GetObjectiveActorOG)(AAthenaBarrierFlag*) = nullptr;
-    static AAthenaBarrierObjective* GetObjectiveActorHook(
-        AAthenaBarrierFlag* Flag);
+    static inline AAthenaBarrierObjective* (*GetObjectiveActorOG)(AAthenaBarrierFlag*) = nullptr;
+    static AAthenaBarrierObjective* GetObjectiveActorHook(AAthenaBarrierFlag* Flag);
 };
 
 struct FBarrierTeamState
@@ -676,9 +566,7 @@ class AFortAthenaMutator_Barrier : public AFortAthenaMutator
 public:
     UCLASS_COMMON_MEMBERS(AFortAthenaMutator_Barrier);
 
-    DEFINE_PROP(
-        BigBaseWallClass,
-        TSubclassOf<AAthenaBigBaseWall>);
+    DEFINE_PROP(BigBaseWallClass, TSubclassOf<AAthenaBigBaseWall>);
     DEFINE_PROP(ObjectiveFlag, TSubclassOf<AAthenaBarrierFlag>);
     DEFINE_PROP(bGameEndsWhenObjectiveIsDestroyed, bool);
     DEFINE_PROP(BigBaseWall, AAthenaBigBaseWall*);
@@ -693,9 +581,7 @@ public:
     DEFINE_PROP(WallGravity, FScalableFloat);
     DEFINE_PROP(SafeZonePhaseWhenToBringDownWall, FScalableFloat);
     DEFINE_PROP(TimeToBringDownWall, FScalableFloat);
-    DEFINE_PROP(
-        GameMsg_WallComingDown,
-        FAthenaGameMessageData);
+    DEFINE_PROP(GameMsg_WallComingDown, FAthenaGameMessageData);
     DEFINE_PROP(GameMsg_WallDown, FAthenaGameMessageData);
 
     DEFINE_FUNC(CheckHealthThreshold, void);
@@ -711,15 +597,9 @@ public:
     UCLASS_COMMON_MEMBERS(AFortAthenaMutator_Ashton);
 
     DEFINE_PROP(StoneList, TArray<FAshtonStoneState>);
-    DEFINE_PROP(
-        VillainLeaderItemDef,
-        UFortGadgetItemDefinition*);
-    DEFINE_PROP(
-        VillainItemDefs,
-        TArray<UFortWorldItemDefinition*>);
-    DEFINE_PROP(
-        VillainLeaderPC,
-        AFortPlayerControllerAthena*);
+    DEFINE_PROP(VillainLeaderItemDef, UFortGadgetItemDefinition*);
+    DEFINE_PROP(VillainItemDefs, TArray<UFortWorldItemDefinition*>);
+    DEFINE_PROP(VillainLeaderPC, AFortPlayerControllerAthena*);
 
     DEFINE_FUNC(OnRep_StoneList, void);
 
@@ -730,19 +610,13 @@ public:
     InitPostLoadHooks;
 };
 
-class AFortAthenaMutator_InventoryOverride
-    : public AFortAthenaMutator
+class AFortAthenaMutator_InventoryOverride : public AFortAthenaMutator
 {
 public:
-    UCLASS_COMMON_MEMBERS(
-        AFortAthenaMutator_InventoryOverride);
+    UCLASS_COMMON_MEMBERS(AFortAthenaMutator_InventoryOverride);
 
-    DEFINE_PROP(
-        InventoryLoadouts,
-        TArray<FItemLoadoutContainer>);
-    DEFINE_PROP(
-        TeamLoadouts,
-        TArray<FItemLoadoutTeamMap>);
+    DEFINE_PROP(InventoryLoadouts, TArray<FItemLoadoutContainer>);
+    DEFINE_PROP(TeamLoadouts, TArray<FItemLoadoutTeamMap>);
 };
 
 class AFortAthenaMutator_Disco : public AFortAthenaMutator
@@ -750,9 +624,7 @@ class AFortAthenaMutator_Disco : public AFortAthenaMutator
 public:
     UCLASS_COMMON_MEMBERS(AFortAthenaMutator_Disco);
 
-    DEFINE_PROP(
-        SpawnedControlPoints,
-        TArray<FControlPointInstanceData>);
+    DEFINE_PROP(SpawnedControlPoints, TArray<FControlPointInstanceData>);
     DEFINE_FUNC(IsRespawningAllowed, bool);
 
     DefUHookOg(OnGamePhaseChanged);
@@ -780,9 +652,7 @@ public:
     UCLASS_COMMON_MEMBERS(AFortAthenaMutator_GiveItemsAtGamePhase);
 
     DEFINE_PROP(PhaseToGiveItems, uint8);
-    DEFINE_PROP(
-        ItemsToGive,
-        TArray<FItemsToGiveAtPhase>);
+    DEFINE_PROP(ItemsToGive, TArray<FItemsToGiveAtPhase>);
 
     DefUHookOg(OnGamePhaseChanged);
 

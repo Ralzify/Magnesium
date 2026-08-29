@@ -6,41 +6,41 @@
 bool bHasWorldContextObject = false;
 void UFortMissionLibrary::TeleportPlayerPawn(UObject* Context, FFrame& Stack, bool* Ret)
 {
-	UObject* WorldContextObject;
-	AFortPlayerPawnAthena* PlayerPawn;
-	FVector DestLocation;
-	FRotator DestRotation;
-	bool bIgnoreCollision;
-	bool bIgnoreSupplementalKillVolumeSweep;
+    UObject* WorldContextObject;
+    AFortPlayerPawnAthena* PlayerPawn;
+    FVector DestLocation;
+    FRotator DestRotation;
+    bool bIgnoreCollision;
+    bool bIgnoreSupplementalKillVolumeSweep;
 
-	if (bHasWorldContextObject)
-		Stack.StepCompiledIn(&WorldContextObject);
-	Stack.StepCompiledIn(&PlayerPawn);
-	Stack.StepCompiledIn(&DestLocation);
-	Stack.StepCompiledIn(&DestRotation);
-	Stack.StepCompiledIn(&bIgnoreCollision);
-	Stack.StepCompiledIn(&bIgnoreSupplementalKillVolumeSweep);
-	Stack.IncrementCode();
+    if (bHasWorldContextObject)
+        Stack.StepCompiledIn(&WorldContextObject);
+    Stack.StepCompiledIn(&PlayerPawn);
+    Stack.StepCompiledIn(&DestLocation);
+    Stack.StepCompiledIn(&DestRotation);
+    Stack.StepCompiledIn(&bIgnoreCollision);
+    Stack.StepCompiledIn(&bIgnoreSupplementalKillVolumeSweep);
+    Stack.IncrementCode();
 
-	auto Vehicle = PlayerPawn->GetVehicleActor();
-	if (Vehicle)
-		Vehicle->K2_TeleportTo(DestLocation, DestRotation);
+    auto Vehicle = PlayerPawn->GetVehicleActor();
+    if (Vehicle)
+        Vehicle->K2_TeleportTo(DestLocation, DestRotation);
 
-	PlayerPawn->K2_TeleportTo(DestLocation, DestRotation);
-	*Ret = true;
+    PlayerPawn->K2_TeleportTo(DestLocation, DestRotation);
+    *Ret = true;
 }
 
 void UFortMissionLibrary::PostLoadHook()
 {
-	auto TeleportPlayerPawnFn = GetDefaultObj()->GetFunction("TeleportPlayerPawn");
-	if (TeleportPlayerPawnFn)
-		for (auto& Param : TeleportPlayerPawnFn->GetParamsNamed().NameOffsetMap)
-		{
-			if (Param.Name == "WorldContextObject")
-			{
-				bHasWorldContextObject = true;
-				break;
-			}
-		}
-	Utils::ExecHook(TeleportPlayerPawnFn, TeleportPlayerPawn);
+    auto TeleportPlayerPawnFn = GetDefaultObj()->GetFunction("TeleportPlayerPawn");
+    if (TeleportPlayerPawnFn)
+        for (auto& Param : TeleportPlayerPawnFn->GetParamsNamed().NameOffsetMap)
+        {
+            if (Param.Name == "WorldContextObject")
+            {
+                bHasWorldContextObject = true;
+                break;
+            }
+        }
+    Utils::ExecHook(TeleportPlayerPawnFn, TeleportPlayerPawn);
 }

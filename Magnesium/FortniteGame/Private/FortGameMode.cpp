@@ -77,15 +77,13 @@ namespace
 
         auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
         constexpr int32 InvalidObjectFlags = 0x20;
-        return Item && Item->GetObject() == Object &&
-            !(Item->GetFlags() & InvalidObjectFlags) &&
+        return Item && Item->GetObject() == Object && !(Item->GetFlags() & InvalidObjectFlags) &&
             Object->Class && SDK::MemReadable(Object->Class, sizeof(UClass));
     }
 
     bool IsSanePlaylist(const UFortPlaylistAthena* Playlist)
     {
-        auto MutablePlaylist =
-            const_cast<UFortPlaylistAthena*>(Playlist);
+        auto MutablePlaylist = const_cast<UFortPlaylistAthena*>(Playlist);
         auto PlaylistClass = UFortPlaylistAthena::StaticClass();
         return IsSaneObject(MutablePlaylist) && PlaylistClass &&
             MutablePlaylist->IsA(PlaylistClass);
@@ -124,16 +122,12 @@ namespace
         GLateSeasonHumanTeams.PlayersOnTeam = 0;
         GLateSeasonHumanTeams.AssignedTeams.clear();
 
-        // Keep the legacy PickTeam fallback in sync in case a particular
-        // 17/18 build still reaches it for one of its join paths.
         AFortGameMode::CurrentTeam = FirstTeam;
         AFortGameMode::PlayersOnCurTeam = 0;
     }
 
-    uint8 ReserveLateSeasonHumanTeam(
-        AFortGameMode* GameMode,
-        AFortPlayerControllerAthena* Controller,
-        AFortPlayerStateAthena* PlayerState,
+    uint8 ReserveLateSeasonHumanTeam(AFortGameMode* GameMode,
+        AFortPlayerControllerAthena* Controller, AFortPlayerStateAthena* PlayerState,
         const UFortPlaylistAthena* Playlist)
     {
         if (GLateSeasonHumanTeams.GameMode != GameMode ||
@@ -148,10 +142,8 @@ namespace
         {
             if (Existing->second.PlayerState == PlayerState)
             {
-                AFortGameMode::CurrentTeam =
-                    GLateSeasonHumanTeams.NextTeam;
-                AFortGameMode::PlayersOnCurTeam =
-                    GLateSeasonHumanTeams.PlayersOnTeam;
+                AFortGameMode::CurrentTeam = GLateSeasonHumanTeams.NextTeam;
+                AFortGameMode::PlayersOnCurTeam = GLateSeasonHumanTeams.PlayersOnTeam;
                 return Existing->second.Team;
             }
 
@@ -159,22 +151,17 @@ namespace
         }
 
         const uint8 AssignedTeam = GLateSeasonHumanTeams.NextTeam;
-        GLateSeasonHumanTeams.AssignedTeams.emplace(
-            Controller,
+        GLateSeasonHumanTeams.AssignedTeams.emplace(Controller,
             FLateSeasonHumanTeamState::FAssignment{ PlayerState, AssignedTeam });
 
         if (Playlist && Playlist->HasbIsLargeTeamGame() && Playlist->bIsLargeTeamGame)
         {
-            GLateSeasonHumanTeams.NextTeam =
-                AssignedTeam == GLateSeasonHumanTeams.FirstTeam
-                ? (uint8)(GLateSeasonHumanTeams.FirstTeam + 1)
-                : GLateSeasonHumanTeams.FirstTeam;
+            GLateSeasonHumanTeams.NextTeam = AssignedTeam == GLateSeasonHumanTeams.FirstTeam
+                ? (uint8)(GLateSeasonHumanTeams.FirstTeam + 1) : GLateSeasonHumanTeams.FirstTeam;
         }
         else
         {
-            int32 SquadSize = Playlist && Playlist->HasMaxSquadSize()
-                ? Playlist->MaxSquadSize
-                : 1;
+            int32 SquadSize = Playlist && Playlist->HasMaxSquadSize() ? Playlist->MaxSquadSize : 1;
             if (SquadSize < 1)
                 SquadSize = 1;
             else if (SquadSize > 100)
@@ -187,13 +174,8 @@ namespace
             }
         }
 
-        // PickTeam is still used directly by synthetic controllers such as
-        // `spawnbot`. Keep its legacy counters at the same position as the
-        // repaired 17/18 allocator so bots cannot be placed on a full human
-        // duo/squad merely because native human joins skipped PickTeam.
         AFortGameMode::CurrentTeam = GLateSeasonHumanTeams.NextTeam;
-        AFortGameMode::PlayersOnCurTeam =
-            GLateSeasonHumanTeams.PlayersOnTeam;
+        AFortGameMode::PlayersOnCurTeam = GLateSeasonHumanTeams.PlayersOnTeam;
 
         return AssignedTeam;
     }
@@ -209,17 +191,13 @@ namespace
         return Object && Object->Class ? Object : nullptr;
     }
 
-    int32 GetLateSeasonIntProperty(
-        const UObject* Object,
-        const char* Name,
-        int32 Fallback)
+    int32 GetLateSeasonIntProperty(const UObject* Object, const char* Name, int32 Fallback)
     {
         if (!IsSaneObject(const_cast<UObject*>(Object)))
             return Fallback;
 
         const int32 Offset = (int32)Object->GetOffset(Name);
-        if (Offset < 0 ||
-            !SDK::MemReadable((const uint8*)Object + Offset, sizeof(int32)))
+        if (Offset < 0 || !SDK::MemReadable((const uint8*)Object + Offset, sizeof(int32)))
         {
             return Fallback;
         }
@@ -227,17 +205,13 @@ namespace
         return GetFromOffset<int32>(Object, Offset);
     }
 
-    bool SetLateSeasonIntProperty(
-        UObject* Object,
-        const char* Name,
-        int32 Value)
+    bool SetLateSeasonIntProperty(UObject* Object, const char* Name, int32 Value)
     {
         if (!IsSaneObject(Object))
             return false;
 
         const int32 Offset = (int32)Object->GetOffset(Name);
-        if (Offset < 0 ||
-            !SDK::MemReadable((uint8*)Object + Offset, sizeof(int32)))
+        if (Offset < 0 || !SDK::MemReadable((uint8*)Object + Offset, sizeof(int32)))
         {
             return false;
         }
@@ -246,102 +220,71 @@ namespace
         return true;
     }
 
-    void SyncPlaylistTeamSettings(
-        AFortGameMode* GameMode,
-        AFortGameStateAthena* GameState,
+    void SyncPlaylistTeamSettings(AFortGameMode* GameMode, AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist)
     {
         if (!IsSaneObject(GameMode) || !IsSaneObject(GameState) || !Playlist)
             return;
 
-        int32 MaxSquadSize = Playlist->HasMaxSquadSize()
-            ? Playlist->MaxSquadSize
-            : 1;
+        int32 MaxSquadSize = Playlist->HasMaxSquadSize() ? Playlist->MaxSquadSize : 1;
         if (MaxSquadSize < 1)
             MaxSquadSize = 1;
 
-        int32 MaxTeamSize =
-            GetLateSeasonIntProperty(Playlist, "MaxTeamSize", MaxSquadSize);
+        int32 MaxTeamSize = GetLateSeasonIntProperty(Playlist, "MaxTeamSize", MaxSquadSize);
         if (MaxTeamSize < 1)
             MaxTeamSize = MaxSquadSize;
 
-        int32 MaxTeamCount = GetLateSeasonIntProperty(
-            Playlist,
-            "MaxTeamCount",
+        int32 MaxTeamCount = GetLateSeasonIntProperty(Playlist, "MaxTeamCount",
             (Playlist->MaxPlayers + MaxTeamSize - 1) / MaxTeamSize);
         if (MaxTeamCount < 1)
             MaxTeamCount = (Playlist->MaxPlayers + MaxTeamSize - 1) / MaxTeamSize;
 
-        const bool bSetTeamSize =
-            SetLateSeasonIntProperty(GameState, "TeamSize", MaxTeamSize);
-        const bool bSetTeamCount =
-            SetLateSeasonIntProperty(GameState, "TeamCount", MaxTeamCount);
-        const bool bSetPartySize = GameMode->GameSession &&
-            SetLateSeasonIntProperty(
+        const bool bSetTeamSize = SetLateSeasonIntProperty(GameState, "TeamSize", MaxTeamSize);
+        const bool bSetTeamCount = SetLateSeasonIntProperty(GameState, "TeamCount", MaxTeamCount);
+        const bool bSetPartySize = GameMode->GameSession && SetLateSeasonIntProperty(
                 GameMode->GameSession, "MaxPartySize", MaxSquadSize);
 
-        SDK::DbgLog(
-            "[Teams] playlist team settings: "
+        SDK::DbgLog("[Teams] playlist team settings: "
             "TeamSize=%d(%d) TeamCount=%d(%d) "
-            "MaxPartySize=%d(%d)\n",
-            MaxTeamSize,
-            bSetTeamSize ? 1 : 0,
-            MaxTeamCount,
-            bSetTeamCount ? 1 : 0,
-            MaxSquadSize,
-            bSetPartySize ? 1 : 0);
+            "MaxPartySize=%d(%d)\n", MaxTeamSize, bSetTeamSize ? 1 : 0, MaxTeamCount,
+            bSetTeamCount ? 1 : 0, MaxSquadSize, bSetPartySize ? 1 : 0);
     }
 
     bool IsTeamPlaylist(const UFortPlaylistAthena* Playlist)
     {
-        return Playlist && Playlist->HasMaxSquadSize() &&
-            Playlist->MaxSquadSize > 1;
+        return Playlist && Playlist->HasMaxSquadSize() && Playlist->MaxSquadSize > 1;
     }
 
-    bool DoesPlaylistAllowDBNO(
-        const UFortPlaylistAthena* Playlist)
+    bool DoesPlaylistAllowDBNO(const UFortPlaylistAthena* Playlist)
     {
         if (!Playlist)
             return false;
 
         const int32 DBNOTypeOffset = (int32)Playlist->GetOffset("DBNOType");
-        if (DBNOTypeOffset < 0 ||
-            !SDK::MemReadable(
+        if (DBNOTypeOffset < 0 || !SDK::MemReadable(
                 (const uint8*)Playlist + DBNOTypeOffset, sizeof(uint8)))
         {
-            // Older playlists use an inverse reflected bit instead of
-            // DBNOType. Read its field mask: treating the containing byte as
-            // a bool would make adjacent playlist flags affect DBNO.
-            auto MutablePlaylist =
-                const_cast<UFortPlaylistAthena*>(Playlist);
-            auto NoDBNOProperty =
-                MutablePlaylist->GetProperty("bNoDBNO", 0x20000);
+            // Older playlists use an inverse bit instead of DBNOType, so read the field mask rather than the containing byte.
+            auto MutablePlaylist = const_cast<UFortPlaylistAthena*>(Playlist);
+            auto NoDBNOProperty = MutablePlaylist->GetProperty("bNoDBNO", 0x20000);
             if (!NoDBNOProperty)
                 return true;
 
-            const uint32 NoDBNOOffset =
-                GetFromOffset<uint32>(
+            const uint32 NoDBNOOffset = GetFromOffset<uint32>(
                     NoDBNOProperty, Offsets::Offset_Internal);
-            if (NoDBNOOffset == uint32(-1) ||
-                !SDK::MemReadable(
-                    (const uint8*)Playlist + NoDBNOOffset,
-                    sizeof(uint8)))
+            if (NoDBNOOffset == uint32(-1) || !SDK::MemReadable(
+                    (const uint8*)Playlist + NoDBNOOffset, sizeof(uint8)))
             {
                 return true;
             }
 
-            const uint8 FieldMask =
-                NoDBNOProperty->GetFieldMask();
-            const uint8 Value =
-                GetFromOffset<uint8>(Playlist, NoDBNOOffset);
-            const bool bNoDBNO = FieldMask
-                ? (Value & FieldMask) != 0
-                : Value != 0;
+            const uint8 FieldMask = NoDBNOProperty->GetFieldMask();
+            const uint8 Value = GetFromOffset<uint8>(Playlist, NoDBNOOffset);
+            const bool bNoDBNO = FieldMask ? (Value & FieldMask) != 0 : Value != 0;
             return !bNoDBNO;
         }
 
-        const uint8 DBNOType =
-            GetFromOffset<uint8>(Playlist, DBNOTypeOffset);
+        const uint8 DBNOType = GetFromOffset<uint8>(Playlist, DBNOTypeOffset);
         switch (DBNOType)
         {
         case 0: // EDBNOType::On
@@ -350,9 +293,7 @@ namespace
             return false;
         case 2: // EDBNOType::NotWhenRespawning
         {
-            const bool bRespawning =
-                Playlist->HasRespawnType()
-                ? Playlist->RespawnType > 0
+            const bool bRespawning = Playlist->HasRespawnType() ? Playlist->RespawnType > 0
                 : FConfiguration::bForceRespawns.load();
             return !bRespawning;
         }
@@ -361,31 +302,22 @@ namespace
         }
     }
 
-    void SetDBNODeathEnabled(
-        AFortGameStateAthena* GameState,
-        bool bEnabled)
+    void SetDBNODeathEnabled(AFortGameStateAthena* GameState, bool bEnabled)
     {
         if (!GameState)
             return;
 
-        // Some builds expose this protected replicated state through a native
-        // setter. Prefer it so the matching side effects/replication run;
-        // retain the reflected field fallback for older layouts.
-        auto Setter =
-            GameState->GetFunction("SetIsDBNODeathEnabled");
+        auto Setter = GameState->GetFunction("SetIsDBNODeathEnabled");
         bool bCalledSetter = false;
         if (Setter)
         {
             const auto Params = Setter->GetParamsNamed();
-            const auto* EnabledParam =
-                Params.NameOffsetMap.size() == 1
-                    ? &Params.NameOffsetMap[0]
+            const auto* EnabledParam = Params.NameOffsetMap.size() == 1 ? &Params.NameOffsetMap[0]
                     : nullptr;
             constexpr uint64 CPF_Parm = 0x80;
             constexpr uint64 CPF_OutParm = 0x100;
             constexpr uint64 CPF_ReturnParm = 0x400;
-            const bool bSchemaValid =
-                Params.Size == sizeof(bool) &&
+            const bool bSchemaValid = Params.Size == sizeof(bool) &&
                 Setter->GetPropertiesSize() == sizeof(bool) &&
                 EnabledParam && EnabledParam->Offset == 0 &&
                 EnabledParam->ElementSize == sizeof(bool) &&
@@ -404,24 +336,16 @@ namespace
             GameState->bDBNODeathEnabled = bEnabled;
     }
 
-    void ApplyLateSeasonDBNOSettings(
-        AFortGameMode* GameMode,
-        AFortGameStateAthena* GameState,
-        const UFortPlaylistAthena* Playlist,
-        const char* Stage)
+    void ApplyLateSeasonDBNOSettings(AFortGameMode* GameMode, AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist, const char* Stage)
     {
-        if (!ShouldRepairLateSeasonTeams() ||
-            !IsSaneObject(GameMode) || !IsSaneObject(GameState))
+        if (!ShouldRepairLateSeasonTeams() || !IsSaneObject(GameMode) || !IsSaneObject(GameState))
         {
             return;
         }
 
-        // Native Athena only enables DBNO for actual team playlists. Keep
-        // bAlwaysDBNO disabled so the last living member of a team is
-        // eliminated instead of being knocked with nobody able to revive.
         const bool bTeamMode = IsTeamPlaylist(Playlist);
-        bool bDBNOEnabled =
-            FConfiguration::bEnableDBNO && bTeamMode &&
+        bool bDBNOEnabled = FConfiguration::bEnableDBNO && bTeamMode &&
             DoesPlaylistAllowDBNO(Playlist);
 
         if (GameMode->HasbEnableDBNO())
@@ -435,16 +359,11 @@ namespace
         SetDBNODeathEnabled(GameState, bDBNOEnabled);
 
         GameState->ForceNetUpdate();
-        SDK::DbgLog(
-            "[Teams] FN17-18 DBNO %s: TeamMode=%d Enabled=%d\n",
-            Stage,
-            bTeamMode ? 1 : 0,
+        SDK::DbgLog("[Teams] FN17-18 DBNO %s: TeamMode=%d Enabled=%d\n", Stage, bTeamMode ? 1 : 0,
             bDBNOEnabled ? 1 : 0);
     }
 
-    UObject* FindLateSeasonTeamInfo(
-        AFortGameStateAthena* GameState,
-        uint8 TeamIndex)
+    UObject* FindLateSeasonTeamInfo(AFortGameStateAthena* GameState, uint8 TeamIndex)
     {
         if (!GameState)
             return nullptr;
@@ -464,8 +383,6 @@ namespace
             return nullptr;
         }
 
-        // Match the replicated Team value instead of assuming an array base.
-        // Reserved team slots differ between builds.
         for (int32 Index = 0; Index < TeamCount; Index++)
         {
             auto TeamInfo = Teams[Index];
@@ -484,9 +401,7 @@ namespace
         return nullptr;
     }
 
-    void EnsureLateSeasonTeamObjects(
-        AFortGameMode* GameMode,
-        AFortGameStateAthena* GameState,
+    void EnsureLateSeasonTeamObjects(AFortGameMode* GameMode, AFortGameStateAthena* GameState,
         uint8 FirstTeam)
     {
         if (!IsSaneObject(GameMode) || !IsSaneObject(GameState) ||
@@ -499,18 +414,15 @@ namespace
         if (InitializeTeamsVftIndex == -2)
         {
             InitializeTeamsVftIndex = -1;
-            auto StringRef = Memcury::Scanner::FindStringRef(
-                L"InitializeTeams()", false);
+            auto StringRef = Memcury::Scanner::FindStringRef(L"InitializeTeams()", false);
             const uintptr_t FunctionAddress = StringRef.IsValid()
-                ? StringRef.FindFunctionBoundary(false).Get()
-                : 0;
+                ? StringRef.FindFunctionBoundary(false).Get() : 0;
 
             if (FunctionAddress && GameMode->Vft)
             {
                 for (int32 Index = 0; Index < 1024; Index++)
                 {
-                    if (!SDK::MemReadable(
-                        &GameMode->Vft[Index], sizeof(void*)))
+                    if (!SDK::MemReadable(&GameMode->Vft[Index], sizeof(void*)))
                     {
                         break;
                     }
@@ -523,29 +435,23 @@ namespace
                 }
             }
 
-            SDK::DbgLog(
-                "[Teams] FN17-18 InitializeTeams resolver: Address=%p VFT=%d\n",
-                (void*)FunctionAddress,
-                InitializeTeamsVftIndex);
+            SDK::DbgLog("[Teams] FN17-18 InitializeTeams resolver: Address=%p VFT=%d\n",
+                (void*)FunctionAddress, InitializeTeamsVftIndex);
         }
 
-        if (InitializeTeamsVftIndex < 0 || !GameMode->Vft ||
-            !SDK::MemReadable(
+        if (InitializeTeamsVftIndex < 0 || !GameMode->Vft || !SDK::MemReadable(
                 &GameMode->Vft[InitializeTeamsVftIndex], sizeof(void*)))
         {
             return;
         }
 
-        auto InitializeTeams =
-            (void(*)(AFortGameMode*))GameMode->Vft[InitializeTeamsVftIndex];
+        auto InitializeTeams = (void(*)(AFortGameMode*))GameMode->Vft[InitializeTeamsVftIndex];
         if (!SDK::MemReadable((void*)InitializeTeams, 16))
             return;
 
         InitializeTeams(GameMode);
-        SDK::DbgLog(
-            "[Teams] FN17-18 InitializeTeams invoked: FirstTeam=%u TeamInfo=%p\n",
-            (unsigned)FirstTeam,
-            (void*)FindLateSeasonTeamInfo(GameState, FirstTeam));
+        SDK::DbgLog("[Teams] FN17-18 InitializeTeams invoked: FirstTeam=%u TeamInfo=%p\n",
+            (unsigned)FirstTeam, (void*)FindLateSeasonTeamInfo(GameState, FirstTeam));
     }
 
     TArray<AActor*>* GetLateSeasonTeamMembers(UObject* TeamInfo)
@@ -589,9 +495,7 @@ namespace
         }
     }
 
-    void RemoveLateSeasonMemberFromOtherTeams(
-        AFortGameStateAthena* GameState,
-        UObject* DesiredTeam,
+    void RemoveLateSeasonMemberFromOtherTeams(AFortGameStateAthena* GameState, UObject* DesiredTeam,
         AActor* Controller)
     {
         if (!IsSaneObject(GameState))
@@ -618,17 +522,11 @@ namespace
         }
     }
 
-    bool ApplyLateSeasonHumanTeam(
-        AFortGameStateAthena* GameState,
-        AFortPlayerControllerAthena* Controller,
-        AFortPlayerStateAthena* PlayerState,
-        uint8 TeamIndex,
-        uint8 FirstTeam,
-        bool bNotify,
-        const char* Stage)
+    bool ApplyLateSeasonHumanTeam(AFortGameStateAthena* GameState,
+        AFortPlayerControllerAthena* Controller, AFortPlayerStateAthena* PlayerState,
+        uint8 TeamIndex, uint8 FirstTeam, bool bNotify, const char* Stage)
     {
-        if (!IsSaneObject(GameState) || !IsSaneObject(Controller) ||
-            !IsSaneObject(PlayerState) ||
+        if (!IsSaneObject(GameState) || !IsSaneObject(Controller) || !IsSaneObject(PlayerState) ||
             !PlayerState->HasTeamIndex())
         {
             return false;
@@ -637,52 +535,33 @@ namespace
         UObject* TeamInfo = FindLateSeasonTeamInfo(GameState, TeamIndex);
         auto TeamMembers = GetLateSeasonTeamMembers(TeamInfo);
         const int32 PlayerTeamOffset = (int32)PlayerState->GetOffset("PlayerTeam");
-        const int32 PlayerTeamPrivateOffset =
-            (int32)PlayerState->GetOffset("PlayerTeamPrivate");
-        const int32 PrivateInfoOffset = TeamInfo
-            ? (int32)TeamInfo->GetOffset("PrivateInfo")
-            : -1;
+        const int32 PlayerTeamPrivateOffset = (int32)PlayerState->GetOffset("PlayerTeamPrivate");
+        const int32 PrivateInfoOffset = TeamInfo ? (int32)TeamInfo->GetOffset("PrivateInfo") : -1;
 
-        if (!TeamInfo || !TeamMembers ||
-            PlayerTeamOffset < 0 || PlayerTeamPrivateOffset < 0 ||
-            PrivateInfoOffset < 0 ||
-            !SDK::MemReadable(
-                (const uint8*)PlayerState + PlayerTeamOffset,
-                sizeof(UObject*)) ||
-            !SDK::MemReadable(
-                (const uint8*)PlayerState + PlayerTeamPrivateOffset,
-                sizeof(UObject*)) ||
-            !SDK::MemReadable(
-                (const uint8*)TeamInfo + PrivateInfoOffset,
-                sizeof(UObject*)))
+        if (!TeamInfo || !TeamMembers || PlayerTeamOffset < 0 || PlayerTeamPrivateOffset < 0 ||
+            PrivateInfoOffset < 0 || !SDK::MemReadable((const uint8*)PlayerState + PlayerTeamOffset,
+                sizeof(UObject*)) || !SDK::MemReadable(
+                (const uint8*)PlayerState + PlayerTeamPrivateOffset, sizeof(UObject*)) ||
+            !SDK::MemReadable((const uint8*)TeamInfo + PrivateInfoOffset, sizeof(UObject*)))
         {
             SDK::DbgLog(
                 "[Teams] FN17-18 %s could not resolve complete TeamInfo graph for Team=%u (TeamInfo=%p Members=%p)\n",
-                Stage,
-                (unsigned)TeamIndex,
-                (void*)TeamInfo,
-                (void*)TeamMembers);
+                Stage, (unsigned)TeamIndex, (void*)TeamInfo, (void*)TeamMembers);
             return false;
         }
 
         auto PrivateInfo = GetFromOffset<UObject*>(TeamInfo, PrivateInfoOffset);
         if (!IsSaneObject(PrivateInfo))
         {
-            SDK::DbgLog(
-                "[Teams] FN17-18 %s rejected invalid PrivateInfo=%p for Team=%u\n",
-                Stage,
-                (void*)PrivateInfo,
-                (unsigned)TeamIndex);
+            SDK::DbgLog("[Teams] FN17-18 %s rejected invalid PrivateInfo=%p for Team=%u\n", Stage,
+                (void*)PrivateInfo, (unsigned)TeamIndex);
             return false;
         }
 
         const uint8 OldTeamIndex = PlayerState->TeamIndex;
-        uint8 SquadId = TeamIndex >= FirstTeam
-            ? (uint8)(TeamIndex - FirstTeam)
-            : 0;
+        uint8 SquadId = TeamIndex >= FirstTeam ? (uint8)(TeamIndex - FirstTeam) : 0;
 
-        auto& PlayerTeam = GetFromOffset<UObject*>(
-            PlayerState, PlayerTeamOffset);
+        auto& PlayerTeam = GetFromOffset<UObject*>(PlayerState, PlayerTeamOffset);
         auto OldPlayerTeam = PlayerTeam;
         if (OldPlayerTeam != TeamInfo && IsSaneObject(OldPlayerTeam))
             RemoveLateSeasonTeamMember(OldPlayerTeam, Controller);
@@ -701,18 +580,15 @@ namespace
 
         if (bNotify)
         {
-            if (auto OnRepPlayerTeam =
-                PlayerState->GetFunction("OnRep_PlayerTeam"))
+            if (auto OnRepPlayerTeam = PlayerState->GetFunction("OnRep_PlayerTeam"))
             {
                 PlayerState->Call<void>(OnRepPlayerTeam);
             }
-            if (auto OnRepPlayerTeamPrivate =
-                PlayerState->GetFunction("OnRep_PlayerTeamPrivate"))
+            if (auto OnRepPlayerTeamPrivate = PlayerState->GetFunction("OnRep_PlayerTeamPrivate"))
             {
                 PlayerState->Call<void>(OnRepPlayerTeamPrivate);
             }
-            if (auto OnRepTeamIndex =
-                PlayerState->GetFunction("OnRep_TeamIndex"))
+            if (auto OnRepTeamIndex = PlayerState->GetFunction("OnRep_TeamIndex"))
             {
                 PlayerState->Call<void>(OnRepTeamIndex, OldTeamIndex);
             }
@@ -724,15 +600,9 @@ namespace
             GameState->ForceNetUpdate();
         }
 
-        SDK::DbgLog(
-            "[Teams] FN17-18 %s PC=%p PS=%p Team=%u Squad=%u TeamInfo=%p Members=%d\n",
-            Stage,
-            (void*)Controller,
-            (void*)PlayerState,
-            (unsigned)TeamIndex,
-            (unsigned)SquadId,
-            (void*)TeamInfo,
-            TeamMemberCount);
+        SDK::DbgLog("[Teams] FN17-18 %s PC=%p PS=%p Team=%u Squad=%u TeamInfo=%p Members=%d\n",
+            Stage, (void*)Controller, (void*)PlayerState, (unsigned)TeamIndex, (unsigned)SquadId,
+            (void*)TeamInfo, TeamMemberCount);
         return true;
     }
 
@@ -746,8 +616,7 @@ namespace
             if (!bValidFunctionInitialized)
             {
                 bValidFunctionInitialized = true;
-                ValidFunction =
-                    Library->GetFunction("IsValid_UniqueNetIdRepl");
+                ValidFunction = Library->GetFunction("IsValid_UniqueNetIdRepl");
             }
 
             if (ValidFunction)
@@ -764,12 +633,9 @@ namespace
         return true;
     }
 
-    bool LateSeasonUniqueIdsMatch(
-        const FUniqueNetIdRepl& Left,
-        const FUniqueNetIdRepl& Right)
+    bool LateSeasonUniqueIdsMatch(const FUniqueNetIdRepl& Left, const FUniqueNetIdRepl& Right)
     {
-        if (!IsLateSeasonUniqueIdValid(Left) ||
-            !IsLateSeasonUniqueIdValid(Right))
+        if (!IsLateSeasonUniqueIdValid(Left) || !IsLateSeasonUniqueIdValid(Right))
         {
             return false;
         }
@@ -782,8 +648,7 @@ namespace
             if (!bEqualFunctionInitialized)
             {
                 bEqualFunctionInitialized = true;
-                EqualFunction = Library->GetFunction(
-                    "EqualEqual_UniqueNetIdReplUniqueNetIdRepl");
+                EqualFunction = Library->GetFunction("EqualEqual_UniqueNetIdReplUniqueNetIdRepl");
             }
 
             if (EqualFunction)
@@ -800,10 +665,7 @@ namespace
                 SDK::MemReadable(LeftBytes.GetData(), LeftBytes.Num()) &&
                 SDK::MemReadable(RightBytes.GetData(), RightBytes.Num()))
             {
-                return memcmp(
-                    LeftBytes.GetData(),
-                    RightBytes.GetData(),
-                    LeftBytes.Num()) == 0;
+                return memcmp(LeftBytes.GetData(), RightBytes.GetData(), LeftBytes.Num()) == 0;
             }
         }
 
@@ -816,8 +678,7 @@ namespace
         return memcmp(&Left, &Right, IdSize) == 0;
     }
 
-    void UpsertLateSeasonGameMemberInfo(
-        AFortGameStateAthena* GameState,
+    void UpsertLateSeasonGameMemberInfo(AFortGameStateAthena* GameState,
         AFortPlayerStateAthena* PlayerState)
     {
         if (!IsSaneObject(GameState) || !IsSaneObject(PlayerState) ||
@@ -830,11 +691,8 @@ namespace
         const int32 MemberCount = Members.Num();
         const int32 MemberSize = FGameMemberInfo::Size();
         if (MemberCount < 0 || MemberCount > 256 || MemberSize <= 0 ||
-            Members.Max() < MemberCount || Members.Max() > 4096 ||
-            (MemberCount > 0 &&
-                !SDK::MemReadable(
-                    Members.GetData(),
-                    (size_t)MemberSize * MemberCount)))
+            Members.Max() < MemberCount || Members.Max() > 4096 || (MemberCount > 0 &&
+                !SDK::MemReadable(Members.GetData(), (size_t)MemberSize * MemberCount)))
         {
             return;
         }
@@ -859,8 +717,7 @@ namespace
             for (int32 Index = Members.Num() - 1; Index > KeptIndex; Index--)
             {
                 auto& Member = Members.Get(Index, MemberSize);
-                if (LateSeasonUniqueIdsMatch(
-                    Member.MemberUniqueId, PlayerUniqueId))
+                if (LateSeasonUniqueIdsMatch(Member.MemberUniqueId, PlayerUniqueId))
                 {
                     Members.Remove(Index, MemberSize);
                     RemovedDuplicates++;
@@ -889,9 +746,7 @@ namespace
         }
 
         StoredMember->TeamIndex = PlayerState->TeamIndex;
-        StoredMember->SquadId = PlayerState->HasSquadId()
-            ? PlayerState->SquadId
-            : (uint8)0;
+        StoredMember->SquadId = PlayerState->HasSquadId() ? PlayerState->SquadId : (uint8)0;
         GameState->GameMemberInfoArray.MarkItemDirty(*StoredMember);
         if (RemovedDuplicates > 0)
             GameState->GameMemberInfoArray.MarkArrayDirty();
@@ -901,28 +756,18 @@ namespace
             NotifyGameMemberAdded_;
         if (KeptIndex < 0 && NotifyGameMemberAdded)
         {
-            NotifyGameMemberAdded(
-                GameState,
-                StoredMember->SquadId,
-                StoredMember->TeamIndex,
+            NotifyGameMemberAdded(GameState, StoredMember->SquadId, StoredMember->TeamIndex,
                 &StoredMember->MemberUniqueId);
         }
 
         SDK::DbgLog(
             "[Teams] FN17-18 GameMemberInfo upsert Team=%u Squad=%u Existing=%d DuplicatesRemoved=%d\n",
-            (unsigned)StoredMember->TeamIndex,
-            (unsigned)StoredMember->SquadId,
-            KeptIndex >= 0 ? 1 : 0,
-            RemovedDuplicates);
+            (unsigned)StoredMember->TeamIndex, (unsigned)StoredMember->SquadId,
+            KeptIndex >= 0 ? 1 : 0, RemovedDuplicates);
     }
 
-    using FHeistStartEndGamePhase =
-        bool(*)(
-            AFortGameModeAthena*,
-            AFortPlayerControllerAthena*,
-            AActor*,
-            const UFortWeaponItemDefinition*,
-            uint8);
+    using FHeistStartEndGamePhase = bool(*)(AFortGameModeAthena*, AFortPlayerControllerAthena*,
+            AActor*, const UFortWeaponItemDefinition*, uint8);
 
     FHeistStartEndGamePhase GHeistStartEndGamePhaseOG = nullptr;
 
@@ -938,35 +783,24 @@ namespace
 
     bool IsActiveHeistMatch(AFortGameModeAthena* GameMode)
     {
-        if (!FFortAthenaHeistCompatibility::IsSupportedBuild() ||
-            !IsSaneObject(GameMode) ||
+        if (!FFortAthenaHeistCompatibility::IsSupportedBuild() || !IsSaneObject(GameMode) ||
             !IsSaneObject(GameMode->GameState))
         {
             return false;
         }
 
         auto GameState = GameMode->GameState;
-        if (GameState->HasCurrentPlaylistInfo() &&
-            FPlaylistPropertyArray::StaticStruct())
+        if (GameState->HasCurrentPlaylistInfo() && FPlaylistPropertyArray::StaticStruct())
         {
             const UFortPlaylistAthena* OverridePlaylist =
                 FPlaylistPropertyArray::HasOverridePlaylist()
-                    ? GameState->CurrentPlaylistInfo.OverridePlaylist
-                    : nullptr;
-            const UFortPlaylistAthena* BasePlaylist =
-                FPlaylistPropertyArray::HasBasePlaylist()
-                    ? GameState->CurrentPlaylistInfo.BasePlaylist
-                    : nullptr;
-            if ((IsSaneObject(
-                     const_cast<UFortPlaylistAthena*>(
-                         OverridePlaylist)) &&
-                    FFortAthenaHeistCompatibility::IsHeistPlaylist(
-                        OverridePlaylist)) ||
-                (IsSaneObject(
-                     const_cast<UFortPlaylistAthena*>(
-                         BasePlaylist)) &&
-                    FFortAthenaHeistCompatibility::IsHeistPlaylist(
-                        BasePlaylist)))
+                    ? GameState->CurrentPlaylistInfo.OverridePlaylist : nullptr;
+            const UFortPlaylistAthena* BasePlaylist = FPlaylistPropertyArray::HasBasePlaylist()
+                    ? GameState->CurrentPlaylistInfo.BasePlaylist : nullptr;
+            if ((IsSaneObject(const_cast<UFortPlaylistAthena*>(OverridePlaylist)) &&
+                    FFortAthenaHeistCompatibility::IsHeistPlaylist(OverridePlaylist)) ||
+                (IsSaneObject(const_cast<UFortPlaylistAthena*>(BasePlaylist)) &&
+                    FFortAthenaHeistCompatibility::IsHeistPlaylist(BasePlaylist)))
             {
                 return true;
             }
@@ -974,32 +808,25 @@ namespace
 
         if (GameState->HasCurrentPlaylistData())
         {
-            const UFortPlaylistAthena* Playlist =
-                GameState->CurrentPlaylistData;
-            return IsSaneObject(
-                       const_cast<UFortPlaylistAthena*>(Playlist)) &&
+            const UFortPlaylistAthena* Playlist = GameState->CurrentPlaylistData;
+            return IsSaneObject(const_cast<UFortPlaylistAthena*>(Playlist)) &&
                 FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist);
         }
 
         return false;
     }
 
-    std::vector<AFortPlayerControllerAthena*>
-    CaptureConnectedHeistTeammates(
+    std::vector<AFortPlayerControllerAthena*> CaptureConnectedHeistTeammates(
         AFortPlayerControllerAthena* WinningPlayer)
     {
         std::vector<AFortPlayerControllerAthena*> Teammates;
-        if (!IsSaneObject(WinningPlayer) ||
-            !IsSaneObject(WinningPlayer->PlayerState))
+        if (!IsSaneObject(WinningPlayer) || !IsSaneObject(WinningPlayer->PlayerState))
         {
             return Teammates;
         }
 
-        auto WinningPlayerState =
-            static_cast<AFortPlayerStateAthena*>(
-                WinningPlayer->PlayerState);
-        if (!WinningPlayerState->HasTeamIndex() ||
-            WinningPlayerState->TeamIndex < 3 ||
+        auto WinningPlayerState = static_cast<AFortPlayerStateAthena*>(WinningPlayer->PlayerState);
+        if (!WinningPlayerState->HasTeamIndex() || WinningPlayerState->TeamIndex < 3 ||
             WinningPlayerState->TeamIndex >= 250)
         {
             return Teammates;
@@ -1009,18 +836,14 @@ namespace
         if (!IsSaneObject(World))
             return Teammates;
 
-        auto Driver =
-            static_cast<UNetDriver*>(World->NetDriver);
+        auto Driver = static_cast<UNetDriver*>(World->NetDriver);
         if (!IsSaneObject(Driver))
             return Teammates;
 
         auto& Connections = Driver->ClientConnections;
         if (Connections.Num() < 0 || Connections.Num() > 256 ||
-            Connections.Max() < Connections.Num() ||
-            Connections.Max() > 4096 ||
-            (Connections.Num() > 0 &&
-                !SDK::MemReadable(
-                    Connections.GetData(),
+            Connections.Max() < Connections.Num() || Connections.Max() > 4096 ||
+            (Connections.Num() > 0 && !SDK::MemReadable(Connections.GetData(),
                     sizeof(UNetConnection*) * Connections.Num())))
         {
             return Teammates;
@@ -1033,26 +856,20 @@ namespace
                 continue;
 
             auto Controller = Connection->PlayerController;
-            if (Controller == WinningPlayer ||
-                !IsSaneObject(Controller) ||
+            if (Controller == WinningPlayer || !IsSaneObject(Controller) ||
                 !IsSaneObject(Controller->PlayerState))
             {
                 continue;
             }
 
-            auto PlayerState =
-                static_cast<AFortPlayerStateAthena*>(
-                    Controller->PlayerState);
-            if (!PlayerState->HasTeamIndex() ||
-                PlayerState->TeamIndex !=
+            auto PlayerState = static_cast<AFortPlayerStateAthena*>(Controller->PlayerState);
+            if (!PlayerState->HasTeamIndex() || PlayerState->TeamIndex !=
                     WinningPlayerState->TeamIndex)
             {
                 continue;
             }
 
-            if (std::find(
-                    Teammates.begin(), Teammates.end(), Controller) ==
-                Teammates.end())
+            if (std::find(Teammates.begin(), Teammates.end(), Controller) == Teammates.end())
             {
                 Teammates.push_back(Controller);
             }
@@ -1061,23 +878,18 @@ namespace
         return Teammates;
     }
 
-    bool NotifyHeistTeammateOfWin(
-        AFortPlayerControllerAthena* Controller,
-        AActor* FinisherPawn,
-        const UFortWeaponItemDefinition* FinishingWeapon,
-        uint8 DeathCause)
+    bool NotifyHeistTeammateOfWin(AFortPlayerControllerAthena* Controller, AActor* FinisherPawn,
+        const UFortWeaponItemDefinition* FinishingWeapon, uint8 DeathCause)
     {
         if (!IsSaneObject(Controller))
             return false;
 
-        UFunction* Function =
-            Controller->GetFunction("ClientNotifyTeamWon");
+        UFunction* Function = Controller->GetFunction("ClientNotifyTeamWon");
         if (!Function)
             return false;
 
         const auto Parameters = Function->GetParamsNamed();
-        if (Parameters.Size == 0 || Parameters.Size > 0x100 ||
-            Parameters.NameOffsetMap.size() != 3)
+        if (Parameters.Size == 0 || Parameters.Size > 0x100 || Parameters.NameOffsetMap.size() != 3)
         {
             return false;
         }
@@ -1090,8 +902,7 @@ namespace
 
         for (const auto& Parameter : Parameters.NameOffsetMap)
         {
-            if (!(Parameter.PropertyFlags & CPF_Parm) ||
-                (Parameter.PropertyFlags & CPF_ReturnParm))
+            if (!(Parameter.PropertyFlags & CPF_Parm) || (Parameter.PropertyFlags & CPF_ReturnParm))
             {
                 return false;
             }
@@ -1118,8 +929,7 @@ namespace
                 return false;
             }
 
-            if (*DestinationOffset != uint32(-1) ||
-                Parameter.ElementSize != ExpectedSize ||
+            if (*DestinationOffset != uint32(-1) || Parameter.ElementSize != ExpectedSize ||
                 Parameter.Offset > Parameters.Size ||
                 ExpectedSize > Parameters.Size - Parameter.Offset)
             {
@@ -1129,8 +939,7 @@ namespace
             *DestinationOffset = Parameter.Offset;
         }
 
-        if (FinisherPawnOffset == uint32(-1) ||
-            FinishingWeaponOffset == uint32(-1) ||
+        if (FinisherPawnOffset == uint32(-1) || FinishingWeaponOffset == uint32(-1) ||
             DeathCauseOffset == uint32(-1))
         {
             return false;
@@ -1141,54 +950,35 @@ namespace
             return false;
 
         memset(Memory, 0, Parameters.Size);
-        auto MutableFinishingWeapon =
-            const_cast<UFortWeaponItemDefinition*>(FinishingWeapon);
-        memcpy(
-            static_cast<uint8*>(Memory) + FinisherPawnOffset,
-            &FinisherPawn,
+        auto MutableFinishingWeapon = const_cast<UFortWeaponItemDefinition*>(FinishingWeapon);
+        memcpy(static_cast<uint8*>(Memory) + FinisherPawnOffset, &FinisherPawn,
             sizeof(FinisherPawn));
-        memcpy(
-            static_cast<uint8*>(Memory) + FinishingWeaponOffset,
-            &MutableFinishingWeapon,
+        memcpy(static_cast<uint8*>(Memory) + FinishingWeaponOffset, &MutableFinishingWeapon,
             sizeof(MutableFinishingWeapon));
-        memcpy(
-            static_cast<uint8*>(Memory) + DeathCauseOffset,
-            &DeathCause,
-            sizeof(DeathCause));
+        memcpy(static_cast<uint8*>(Memory) + DeathCauseOffset, &DeathCause, sizeof(DeathCause));
 
         Controller->ProcessEvent(Function, Memory);
         FMemory::Free(Memory);
         return true;
     }
 
-    bool HeistStartEndGamePhase(
-        AFortGameModeAthena* GameMode,
-        AFortPlayerControllerAthena* WinningPlayer,
-        AActor* FinisherPawn,
-        const UFortWeaponItemDefinition* FinishingWeapon,
-        uint8 DeathCause)
+    bool HeistStartEndGamePhase(AFortGameModeAthena* GameMode,
+        AFortPlayerControllerAthena* WinningPlayer, AActor* FinisherPawn,
+        const UFortWeaponItemDefinition* FinishingWeapon, uint8 DeathCause)
     {
         if (!GHeistStartEndGamePhaseOG)
             return false;
 
-        const bool bActiveHeistMatch =
-            IsActiveHeistMatch(GameMode);
+        const bool bActiveHeistMatch = IsActiveHeistMatch(GameMode);
         static const FName WaitingPostMatchState(L"WaitingPostMatch");
-        const bool bBeginningEndGame =
-            IsSaneObject(GameMode) &&
-            GameMode->HasMatchState() &&
+        const bool bBeginningEndGame = IsSaneObject(GameMode) && GameMode->HasMatchState() &&
             GameMode->MatchState != WaitingPostMatchState;
         auto MatchWorld = UWorld::GetWorld();
-        auto Teammates = bActiveHeistMatch
-            ? CaptureConnectedHeistTeammates(WinningPlayer)
+        auto Teammates = bActiveHeistMatch ? CaptureConnectedHeistTeammates(WinningPlayer)
             : std::vector<AFortPlayerControllerAthena*>{};
 
-        const bool bResult = GHeistStartEndGamePhaseOG(
-            GameMode,
-            WinningPlayer,
-            FinisherPawn,
-            FinishingWeapon,
-            DeathCause);
+        const bool bResult = GHeistStartEndGamePhaseOG(GameMode, WinningPlayer, FinisherPawn,
+            FinishingWeapon, DeathCause);
 
         if (!bActiveHeistMatch)
             return bResult;
@@ -1197,18 +987,14 @@ namespace
         if (World != MatchWorld || !IsSaneObject(World))
             return bResult;
 
-        auto MarkControllerWon =
-            [](AFortPlayerControllerAthena* Controller)
+        auto MarkControllerWon = [](AFortPlayerControllerAthena* Controller)
             {
-                if (!IsSaneObject(Controller) ||
-                    !IsSaneObject(Controller->PlayerState))
+                if (!IsSaneObject(Controller) || !IsSaneObject(Controller->PlayerState))
                 {
                     return;
                 }
 
-                auto PlayerState =
-                    static_cast<AFortPlayerStateAthena*>(
-                        Controller->PlayerState);
+                auto PlayerState = static_cast<AFortPlayerStateAthena*>(Controller->PlayerState);
                 if (PlayerState->HasbHasWonAGame())
                 {
                     PlayerState->bHasWonAGame = true;
@@ -1225,8 +1011,7 @@ namespace
 
         if (GHeistTeamWinNotifications.World != World ||
             GHeistTeamWinNotifications.GameMode != GameMode ||
-            GHeistTeamWinNotifications.WinningPlayer != WinningPlayer ||
-            bBeginningEndGame)
+            GHeistTeamWinNotifications.WinningPlayer != WinningPlayer || bBeginningEndGame)
         {
             GHeistTeamWinNotifications.World = World;
             GHeistTeamWinNotifications.GameMode = GameMode;
@@ -1237,33 +1022,23 @@ namespace
         int32 NotifiedCount = 0;
         for (auto Controller : Teammates)
         {
-            if (!IsSaneObject(Controller) ||
-                !IsSaneObject(Controller->PlayerState) ||
-                std::find(
+            if (!IsSaneObject(Controller) || !IsSaneObject(Controller->PlayerState) || std::find(
                     GHeistTeamWinNotifications.NotifiedControllers.begin(),
-                    GHeistTeamWinNotifications.NotifiedControllers.end(),
-                    Controller) !=
+                    GHeistTeamWinNotifications.NotifiedControllers.end(), Controller) !=
                     GHeistTeamWinNotifications.NotifiedControllers.end())
             {
                 continue;
             }
 
-            if (NotifyHeistTeammateOfWin(
-                    Controller,
-                    FinisherPawn,
-                    FinishingWeapon,
-                    DeathCause))
+            if (NotifyHeistTeammateOfWin(Controller, FinisherPawn, FinishingWeapon, DeathCause))
             {
-                GHeistTeamWinNotifications.NotifiedControllers.push_back(
-                    Controller);
+                GHeistTeamWinNotifications.NotifiedControllers.push_back(Controller);
                 ++NotifiedCount;
             }
         }
 
-        SDK::DbgLog(
-            "[Heist] StartEndGamePhase notified %d/%d connected teammate(s)\n",
-            NotifiedCount,
-            static_cast<int32>(Teammates.size()));
+        SDK::DbgLog("[Heist] StartEndGamePhase notified %d/%d connected teammate(s)\n",
+            NotifiedCount, static_cast<int32>(Teammates.size()));
         return bResult;
     }
 
@@ -1275,28 +1050,19 @@ namespace
         uint8 FrameRegisterAndOffset;
     };
 
-    static_assert(
-        sizeof(FHeistUnwindInfoHeader) == 4,
-        "Unexpected x64 unwind header size");
+    static_assert(sizeof(FHeistUnwindInfoHeader) == 4, "Unexpected x64 unwind header size");
 
-    uintptr_t FindHeistRuntimeFunctionStart(
-        uintptr_t ControlPc,
-        uintptr_t TextStart,
+    uintptr_t FindHeistRuntimeFunctionStart(uintptr_t ControlPc, uintptr_t TextStart,
         uintptr_t TextEnd)
     {
         if (!ControlPc || ControlPc < TextStart || ControlPc >= TextEnd)
             return 0;
 
         DWORD64 RuntimeImageBase = 0;
-        PRUNTIME_FUNCTION Entry = RtlLookupFunctionEntry(
-            static_cast<DWORD64>(ControlPc),
-            &RuntimeImageBase,
-            nullptr);
-        const uintptr_t ExpectedImageBase =
-            Memcury::PE::GetModuleBase();
-        if (!Entry ||
-            !RuntimeImageBase ||
-            static_cast<uintptr_t>(RuntimeImageBase) !=
+        PRUNTIME_FUNCTION Entry = RtlLookupFunctionEntry(static_cast<DWORD64>(ControlPc),
+            &RuntimeImageBase, nullptr);
+        const uintptr_t ExpectedImageBase = Memcury::PE::GetModuleBase();
+        if (!Entry || !RuntimeImageBase || static_cast<uintptr_t>(RuntimeImageBase) !=
                 ExpectedImageBase)
         {
             return 0;
@@ -1318,9 +1084,8 @@ namespace
                 return 0;
 
             const FRuntimeFunctionIdentity Identity{
-                Entry->BeginAddress,
-                Entry->EndAddress,
-                Entry->UnwindData};
+                Entry->BeginAddress, Entry->EndAddress, Entry->UnwindData
+            };
             for (int32 Index = 0; Index < VisitedEntryCount; ++Index)
             {
                 const auto& Visited = VisitedEntries[Index];
@@ -1336,55 +1101,40 @@ namespace
             if (Identity.BeginAddress >= Identity.EndAddress)
                 return 0;
 
-            const uintptr_t BeginAddress =
-                ExpectedImageBase + Identity.BeginAddress;
-            const uintptr_t EndAddress =
-                ExpectedImageBase + Identity.EndAddress;
-            if (BeginAddress < ExpectedImageBase ||
-                EndAddress < ExpectedImageBase ||
-                BeginAddress < TextStart ||
-                EndAddress > TextEnd)
+            const uintptr_t BeginAddress = ExpectedImageBase + Identity.BeginAddress;
+            const uintptr_t EndAddress = ExpectedImageBase + Identity.EndAddress;
+            if (BeginAddress < ExpectedImageBase || EndAddress < ExpectedImageBase ||
+                BeginAddress < TextStart || EndAddress > TextEnd)
             {
                 return 0;
             }
 
-            const uintptr_t UnwindInfoAddress =
-                ExpectedImageBase + Identity.UnwindData;
+            const uintptr_t UnwindInfoAddress = ExpectedImageBase + Identity.UnwindData;
             if (UnwindInfoAddress < ExpectedImageBase)
                 return 0;
 
-            auto UnwindInfo =
-                reinterpret_cast<const FHeistUnwindInfoHeader*>(
-                    UnwindInfoAddress);
-            if (!SDK::MemReadable(
-                    UnwindInfo, sizeof(FHeistUnwindInfoHeader)) ||
+            auto UnwindInfo = reinterpret_cast<const FHeistUnwindInfoHeader*>(UnwindInfoAddress);
+            if (!SDK::MemReadable(UnwindInfo, sizeof(FHeistUnwindInfoHeader)) ||
                 (UnwindInfo->VersionAndFlags & 0x7) != 1)
             {
                 return 0;
             }
 
-            const uint8 Flags =
-                UnwindInfo->VersionAndFlags >> 3;
+            const uint8 Flags = UnwindInfo->VersionAndFlags >> 3;
             if (!(Flags & UnwindFlagChainInfo))
                 return BeginAddress;
             if (Flags != UnwindFlagChainInfo)
                 return 0;
 
-            const size_t AlignedCodeCount =
-                (static_cast<size_t>(UnwindInfo->CodeCount) + 1u) &
+            const size_t AlignedCodeCount = (static_cast<size_t>(UnwindInfo->CodeCount) + 1u) &
                 ~size_t(1);
-            const uintptr_t ChainedEntryAddress =
-                UnwindInfoAddress +
-                sizeof(FHeistUnwindInfoHeader) +
-                AlignedCodeCount * sizeof(uint16);
+            const uintptr_t ChainedEntryAddress = UnwindInfoAddress +
+                sizeof(FHeistUnwindInfoHeader) + AlignedCodeCount * sizeof(uint16);
             if (ChainedEntryAddress < UnwindInfoAddress)
                 return 0;
 
-            auto ChainedEntry =
-                reinterpret_cast<PRUNTIME_FUNCTION>(
-                    ChainedEntryAddress);
-            if (!SDK::MemReadable(
-                    ChainedEntry, sizeof(*ChainedEntry)))
+            auto ChainedEntry = reinterpret_cast<PRUNTIME_FUNCTION>(ChainedEntryAddress);
+            if (!SDK::MemReadable(ChainedEntry, sizeof(*ChainedEntry)))
             {
                 return 0;
             }
@@ -1406,45 +1156,30 @@ namespace
             return 0;
 
         const uintptr_t ReferenceAddress = StringReference.Get();
-        auto TextSection =
-            Memcury::PE::Section::GetSection(".text");
-        const uintptr_t TextStart =
-            TextSection.GetSectionStart().Get();
-        const uintptr_t TextEnd =
-            TextSection.GetSectionEnd().Get();
-        if (!ReferenceAddress ||
-            ReferenceAddress < TextStart ||
-            ReferenceAddress >= TextEnd ||
+        auto TextSection = Memcury::PE::Section::GetSection(".text");
+        const uintptr_t TextStart = TextSection.GetSectionStart().Get();
+        const uintptr_t TextEnd = TextSection.GetSectionEnd().Get();
+        if (!ReferenceAddress || ReferenceAddress < TextStart || ReferenceAddress >= TextEnd ||
             !SDK::MemReadable((void*)ReferenceAddress, 7))
         {
             return 0;
         }
 
-        const uintptr_t FunctionAddress =
-            FindHeistRuntimeFunctionStart(
+        const uintptr_t FunctionAddress = FindHeistRuntimeFunctionStart(
                 ReferenceAddress, TextStart, TextEnd);
-        const uintptr_t ValidatedFunctionAddress =
-            FunctionAddress
-                ? FindHeistRuntimeFunctionStart(
-                      FunctionAddress, TextStart, TextEnd)
-                : 0;
+        const uintptr_t ValidatedFunctionAddress = FunctionAddress ? FindHeistRuntimeFunctionStart(
+                      FunctionAddress, TextStart, TextEnd) : 0;
 
         constexpr uintptr_t MaxFunctionSpan = 0x10000;
-        if (!FunctionAddress ||
-            ValidatedFunctionAddress != FunctionAddress ||
-            FunctionAddress < TextStart ||
-            FunctionAddress >= TextEnd ||
+        if (!FunctionAddress || ValidatedFunctionAddress != FunctionAddress ||
+            FunctionAddress < TextStart || FunctionAddress >= TextEnd ||
             FunctionAddress > ReferenceAddress ||
             ReferenceAddress - FunctionAddress > MaxFunctionSpan ||
-            FunctionAddress + 16 > TextEnd ||
-            !SDK::MemReadable((void*)FunctionAddress, 16))
+            FunctionAddress + 16 > TextEnd || !SDK::MemReadable((void*)FunctionAddress, 16))
         {
             SDK::DbgLog(
                 "[Heist] rejected StartEndGamePhase resolver ref=%p function=%p text=[%p,%p)\n",
-                (void*)ReferenceAddress,
-                (void*)FunctionAddress,
-                (void*)TextStart,
-                (void*)TextEnd);
+                (void*)ReferenceAddress, (void*)FunctionAddress, (void*)TextStart, (void*)TextEnd);
             return 0;
         }
 
@@ -1464,14 +1199,9 @@ namespace
             return;
         }
 
-        Utils::Hook(
-            Address,
-            HeistStartEndGamePhase,
-            GHeistStartEndGamePhaseOG);
-        SDK::DbgLog(
-            "[Heist] StartEndGamePhase team-win bridge installed at %p original=%p\n",
-            (void*)Address,
-            (void*)GHeistStartEndGamePhaseOG);
+        Utils::Hook(Address, HeistStartEndGamePhase, GHeistStartEndGamePhaseOG);
+        SDK::DbgLog("[Heist] StartEndGamePhase team-win bridge installed at %p original=%p\n",
+            (void*)Address, (void*)GHeistStartEndGamePhaseOG);
     }
 
     bool IsCarminePlaylist(const UFortPlaylistAthena* Playlist)
@@ -1488,23 +1218,16 @@ namespace
         if (!Address)
             return 0;
 
-        auto TextSection =
-            Memcury::PE::Section::GetSection(".text");
-        const uintptr_t TextStart =
-            TextSection.GetSectionStart().Get();
-        const uintptr_t TextEnd =
-            TextSection.GetSectionEnd().Get();
-        if (!TextStart || TextEnd <= TextStart ||
-            Address < TextStart || Address >= TextEnd)
+        auto TextSection = Memcury::PE::Section::GetSection(".text");
+        const uintptr_t TextStart = TextSection.GetSectionStart().Get();
+        const uintptr_t TextEnd = TextSection.GetSectionEnd().Get();
+        if (!TextStart || TextEnd <= TextStart || Address < TextStart || Address >= TextEnd)
         {
             return 0;
         }
 
-        return FindHeistRuntimeFunctionStart(
-                   Address, TextStart, TextEnd) == Address &&
-                SDK::MemReadable((void*)Address, 16)
-            ? Address
-            : 0;
+        return FindHeistRuntimeFunctionStart(Address, TextStart, TextEnd) == Address &&
+                SDK::MemReadable((void*)Address, 16) ? Address : 0;
     }
 
     uintptr_t FindCarminePlaylistDataLoader()
@@ -1518,36 +1241,27 @@ namespace
         if (VersionInfo.FortniteVersion != 4.20)
             return 0;
 
-        auto StringReference =
-            Memcury::Scanner::FindStringRef(
+        auto StringReference = Memcury::Scanner::FindStringRef(
                 L"PLAYLIST: Playlist Object is loading its assets in "
                 L"AFortGameStateAthena::LoadCurrentPlaylistData(), "
-                L"PlaylistName is %s (Server Side)",
-                false);
+                L"PlaylistName is %s (Server Side)", false);
         if (!StringReference.IsValid())
         {
-            StringReference =
-                Memcury::Scanner::FindStringRef(
+            StringReference = Memcury::Scanner::FindStringRef(
                     L"PLAYLIST: Playlist Object is loading its assets in "
                     L"AFortGameStateAthena::LoadCurrentPlaylistData(), "
-                    L"PlaylistName is %s (Client Side)",
-                    false);
+                    L"PlaylistName is %s (Client Side)", false);
         }
 
         if (StringReference.IsValid())
         {
-            auto TextSection =
-                Memcury::PE::Section::GetSection(".text");
-            Address = FindHeistRuntimeFunctionStart(
-                StringReference.Get(),
-                TextSection.GetSectionStart().Get(),
-                TextSection.GetSectionEnd().Get());
+            auto TextSection = Memcury::PE::Section::GetSection(".text");
+            Address = FindHeistRuntimeFunctionStart(StringReference.Get(),
+                TextSection.GetSectionStart().Get(), TextSection.GetSectionEnd().Get());
             Address = ValidateCarminePlaylistFunction(Address);
         }
 
-        SDK::DbgLog(
-            "[Carmine] LoadCurrentPlaylistData resolver=%p\n",
-            (void*)Address);
+        SDK::DbgLog("[Carmine] LoadCurrentPlaylistData resolver=%p\n", (void*)Address);
         return Address;
     }
 
@@ -1562,42 +1276,29 @@ namespace
         if (VersionInfo.FortniteVersion != 4.20)
             return 0;
 
-        Address =
-            Memcury::Scanner::FindPattern(
-                "40 53 48 83 EC ? 48 8B D9 48 8B 89 ? ? ? ? "
-                "48 85 C9 74 ? 80 BB",
-                false)
-                .Get();
+        Address = Memcury::Scanner::FindPattern("40 53 48 83 EC ? 48 8B D9 48 8B 89 ? ? ? ? "
+                "48 85 C9 74 ? 80 BB", false).Get();
         Address = ValidateCarminePlaylistFunction(Address);
 
-        SDK::DbgLog(
-            "[Carmine] InitializePlaylistDataPreDataLoad resolver=%p\n",
-            (void*)Address);
+        SDK::DbgLog("[Carmine] InitializePlaylistDataPreDataLoad resolver=%p\n", (void*)Address);
         return Address;
     }
 
-    void LoadCarminePlaylistData(
-        AFortGameStateAthena* GameState,
+    void LoadCarminePlaylistData(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist)
     {
-        if (!IsCarminePlaylist(Playlist) ||
-            !IsSaneObject(GameState))
+        if (!IsCarminePlaylist(Playlist) || !IsSaneObject(GameState))
         {
             return;
         }
 
-        // Core publishes the ID before entering the native data loader.
-        // CurrentPlaylistInfo alone does not start Carmine's playlist-owned
-        // assets on 4.20.
-        if (auto OnRepCurrentPlaylistId =
-                GameState->GetFunction("OnRep_CurrentPlaylistId"))
+        if (auto OnRepCurrentPlaylistId = GameState->GetFunction("OnRep_CurrentPlaylistId"))
         {
             GameState->ProcessEvent(OnRepCurrentPlaylistId, nullptr);
         }
         else
         {
-            SDK::DbgLog(
-                "[Carmine] OnRep_CurrentPlaylistId unavailable; "
+            SDK::DbgLog("[Carmine] OnRep_CurrentPlaylistId unavailable; "
                 "playlist data load skipped\n");
             return;
         }
@@ -1605,71 +1306,56 @@ namespace
         if (!GameState->HasbPlaylistDataIsLoaded() ||
             !GameState->HasbPlaylistDataIsActivelyLoading())
         {
-            SDK::DbgLog(
-                "[Carmine] playlist load-state properties unavailable; "
+            SDK::DbgLog("[Carmine] playlist load-state properties unavailable; "
                 "native data load skipped\n");
             return;
         }
 
-        if (GameState->bPlaylistDataIsLoaded ||
-            GameState->bPlaylistDataIsActivelyLoading)
+        if (GameState->bPlaylistDataIsLoaded || GameState->bPlaylistDataIsActivelyLoading)
         {
-            SDK::DbgLog(
-                "[Carmine] playlist data already loaded/loading\n");
+            SDK::DbgLog("[Carmine] playlist data already loaded/loading\n");
             return;
         }
 
-        auto ReflectedInitialize =
-            GameState->GetFunction(
-                "InitializePlaylistDataPreDataLoad");
-        auto ReflectedLoad =
-            GameState->GetFunction("LoadCurrentPlaylistData");
+        auto ReflectedInitialize = GameState->GetFunction("InitializePlaylistDataPreDataLoad");
+        auto ReflectedLoad = GameState->GetFunction("LoadCurrentPlaylistData");
         if (ReflectedInitialize && ReflectedLoad)
         {
             auto MatchWorld = UWorld::GetWorld();
             GameState->ProcessEvent(ReflectedInitialize, nullptr);
-            if (UWorld::GetWorld() != MatchWorld ||
-                !IsSaneObject(GameState))
+            if (UWorld::GetWorld() != MatchWorld || !IsSaneObject(GameState))
             {
                 return;
             }
 
             GameState->ProcessEvent(ReflectedLoad, nullptr);
-            SDK::DbgLog(
-                "[Carmine] reflected playlist-data load requested\n");
+            SDK::DbgLog("[Carmine] reflected playlist-data load requested\n");
             return;
         }
 
-        const uintptr_t InitializeAddress =
-            FindCarminePlaylistDataInitializer();
-        const uintptr_t LoadAddress =
-            FindCarminePlaylistDataLoader();
+        const uintptr_t InitializeAddress = FindCarminePlaylistDataInitializer();
+        const uintptr_t LoadAddress = FindCarminePlaylistDataLoader();
         if (!InitializeAddress || !LoadAddress)
         {
-            SDK::DbgLog(
-                "[Carmine] native playlist-data pipeline unresolved; "
+            SDK::DbgLog("[Carmine] native playlist-data pipeline unresolved; "
                 "load skipped\n");
             return;
         }
 
         auto MatchWorld = UWorld::GetWorld();
-        auto InitializePlaylistData =
-            reinterpret_cast<void(*)(AFortGameStateAthena*)>(
+        auto InitializePlaylistData = reinterpret_cast<void(*)(AFortGameStateAthena*)>(
                 InitializeAddress);
-        auto LoadCurrentPlaylistData =
-            reinterpret_cast<void(*)(AFortGameStateAthena*)>(
+        auto LoadCurrentPlaylistData = reinterpret_cast<void(*)(AFortGameStateAthena*)>(
                 LoadAddress);
 
         InitializePlaylistData(GameState);
-        if (UWorld::GetWorld() != MatchWorld ||
-            !IsSaneObject(GameState))
+        if (UWorld::GetWorld() != MatchWorld || !IsSaneObject(GameState))
         {
             return;
         }
 
         LoadCurrentPlaylistData(GameState);
-        SDK::DbgLog(
-            "[Carmine] native playlist-data load requested\n");
+        SDK::DbgLog("[Carmine] native playlist-data load requested\n");
     }
 
     struct FNative1040PlaylistPublishState
@@ -1683,39 +1369,28 @@ namespace
     FNative1040PlaylistPublishState
         GNative1040PlaylistPublishState;
 
-    void RefreshPlaylistReflectionCache(
-        AFortGameStateAthena* GameState)
+    void RefreshPlaylistReflectionCache(AFortGameStateAthena* GameState)
     {
         if (!GameState || !GameState->Class)
             return;
 
-        const int32 PreviousInfoOffset =
-            AFortGameStateAthena::CurrentPlaylistInfo__Offset;
-        const int32 PreviousDataOffset =
-            AFortGameStateAthena::CurrentPlaylistData__Offset;
+        const int32 PreviousInfoOffset = AFortGameStateAthena::CurrentPlaylistInfo__Offset;
+        const int32 PreviousDataOffset = AFortGameStateAthena::CurrentPlaylistData__Offset;
 
-        AFortGameStateAthena::CurrentPlaylistInfo__Offset =
-            static_cast<int32>(
+        AFortGameStateAthena::CurrentPlaylistInfo__Offset = static_cast<int32>(
                 GameState->GetOffset("CurrentPlaylistInfo"));
-        AFortGameStateAthena::CurrentPlaylistData__Offset =
-            static_cast<int32>(
+        AFortGameStateAthena::CurrentPlaylistData__Offset = static_cast<int32>(
                 GameState->GetOffset("CurrentPlaylistData"));
 
-        const auto PlaylistInfoStruct =
-            FindStruct("PlaylistPropertyArray");
+        const auto PlaylistInfoStruct = FindStruct("PlaylistPropertyArray");
         if (PlaylistInfoStruct)
         {
-            FPlaylistPropertyArray::BasePlaylist__Offset =
-                static_cast<int32>(
+            FPlaylistPropertyArray::BasePlaylist__Offset = static_cast<int32>(
                     PlaylistInfoStruct->GetOffset("BasePlaylist"));
-            FPlaylistPropertyArray::OverridePlaylist__Offset =
-                static_cast<int32>(
-                    PlaylistInfoStruct->GetOffset(
-                        "OverridePlaylist"));
-            FPlaylistPropertyArray::PlaylistReplicationKey__Offset =
-                static_cast<int32>(
-                    PlaylistInfoStruct->GetOffset(
-                        "PlaylistReplicationKey"));
+            FPlaylistPropertyArray::OverridePlaylist__Offset = static_cast<int32>(
+                    PlaylistInfoStruct->GetOffset("OverridePlaylist"));
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset = static_cast<int32>(
+                    PlaylistInfoStruct->GetOffset("PlaylistReplicationKey"));
         }
         else
         {
@@ -1725,53 +1400,38 @@ namespace
         }
 
         const auto ClassName = GameState->Class->Name.ToString();
-        SDK::DbgLog(
-            "[Playlist] reflection refresh class=%s previousInfo=%d "
+        SDK::DbgLog("[Playlist] reflection refresh class=%s previousInfo=%d "
             "previousData=%d info=%d data=%d struct=%p base=%d "
-            "override=%d key=%d FN=%.2f UE=%.2f\n",
-            ClassName.c_str(),
-            PreviousInfoOffset,
-            PreviousDataOffset,
-            AFortGameStateAthena::CurrentPlaylistInfo__Offset,
-            AFortGameStateAthena::CurrentPlaylistData__Offset,
-            (void*)PlaylistInfoStruct,
+            "override=%d key=%d FN=%.2f UE=%.2f\n", ClassName.c_str(), PreviousInfoOffset,
+            PreviousDataOffset, AFortGameStateAthena::CurrentPlaylistInfo__Offset,
+            AFortGameStateAthena::CurrentPlaylistData__Offset, (void*)PlaylistInfoStruct,
             FPlaylistPropertyArray::BasePlaylist__Offset,
             FPlaylistPropertyArray::OverridePlaylist__Offset,
-            FPlaylistPropertyArray::PlaylistReplicationKey__Offset,
-            VersionInfo.FortniteVersion,
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset, VersionInfo.FortniteVersion,
             VersionInfo.EngineVersion);
     }
 
-    const UFortPlaylistAthena* GetPublishedPlaylist(
-        AFortGameStateAthena* GameState)
+    const UFortPlaylistAthena* GetPublishedPlaylist(AFortGameStateAthena* GameState)
     {
         if (!IsSaneObject(GameState))
             return nullptr;
 
-        const bool bHasPlaylistInfo =
-            GameState->HasCurrentPlaylistInfo();
-        const bool bHasBasePlaylist =
-            FPlaylistPropertyArray::BasePlaylist__Offset >= 0;
-        const bool bHasOverridePlaylist =
-            FPlaylistPropertyArray::OverridePlaylist__Offset >= 0;
+        const bool bHasPlaylistInfo = GameState->HasCurrentPlaylistInfo();
+        const bool bHasBasePlaylist = FPlaylistPropertyArray::BasePlaylist__Offset >= 0;
+        const bool bHasOverridePlaylist = FPlaylistPropertyArray::OverridePlaylist__Offset >= 0;
 
-        if (VersionInfo.EngineVersion < 4.24 &&
-            bHasPlaylistInfo && bHasBasePlaylist)
+        if (VersionInfo.EngineVersion < 4.24 && bHasPlaylistInfo && bHasBasePlaylist)
         {
-            const auto BasePlaylist =
-                GameState->CurrentPlaylistInfo.BasePlaylist;
+            const auto BasePlaylist = GameState->CurrentPlaylistInfo.BasePlaylist;
             if (IsSanePlaylist(BasePlaylist))
                 return BasePlaylist;
         }
 
-        if (bHasPlaylistInfo &&
-            (bHasBasePlaylist || bHasOverridePlaylist))
+        if (bHasPlaylistInfo && (bHasBasePlaylist || bHasOverridePlaylist))
         {
             if (bHasOverridePlaylist)
             {
-                if (const auto OverridePlaylist =
-                        GameState->CurrentPlaylistInfo
-                            .OverridePlaylist)
+                if (const auto OverridePlaylist = GameState->CurrentPlaylistInfo.OverridePlaylist)
                 {
                     if (IsSanePlaylist(OverridePlaylist))
                         return OverridePlaylist;
@@ -1779,8 +1439,7 @@ namespace
             }
             if (bHasBasePlaylist)
             {
-                const auto BasePlaylist =
-                    GameState->CurrentPlaylistInfo.BasePlaylist;
+                const auto BasePlaylist = GameState->CurrentPlaylistInfo.BasePlaylist;
                 if (IsSanePlaylist(BasePlaylist))
                     return BasePlaylist;
             }
@@ -1796,36 +1455,25 @@ namespace
         return nullptr;
     }
 
-    const UFortPlaylistAthena* ResolveActivePlaylist(
-        AFortGameStateAthena* GameState)
+    const UFortPlaylistAthena* ResolveActivePlaylist(AFortGameStateAthena* GameState)
     {
         if (const auto Published = GetPublishedPlaylist(GameState))
             return Published;
 
-        // Several event builds, including 18.40, expose
-        // CurrentPlaylistInfo without exposing a readable BasePlaylist member
-        // and omit CurrentPlaylistData entirely. Never fall through from one
-        // missing reflected slot into an unchecked DEFINE_PROP read. The
-        // configured asset is the authoritative safe fallback on those dumps.
-        auto Configured =
-            FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+        // Several event builds (18.40) expose CurrentPlaylistInfo without a readable BasePlaylist and omit CurrentPlaylistData.
+        auto Configured = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
         if (IsSanePlaylist(Configured))
             return Configured;
 
-        auto DefaultPlaylist = FindObject<UFortPlaylistAthena>(
-            L"/Game/Athena/Playlists/"
+        auto DefaultPlaylist = FindObject<UFortPlaylistAthena>(L"/Game/Athena/Playlists/"
             L"Playlist_DefaultSolo.Playlist_DefaultSolo");
-        return IsSanePlaylist(DefaultPlaylist)
-            ? DefaultPlaylist
-            : nullptr;
+        return IsSanePlaylist(DefaultPlaylist) ? DefaultPlaylist : nullptr;
     }
 
-    bool PublishNative1040Playlist(
-        AFortGameStateAthena* GameState,
+    bool PublishNative1040Playlist(AFortGameStateAthena* GameState,
         const UFortPlaylistAthena* Playlist)
     {
-        if (!IsSaneObject(GameState) ||
-            !FFortAthenaNativeLTMCompatibility::
+        if (!IsSaneObject(GameState) || !FFortAthenaNativeLTMCompatibility::
                 IsTargetPlaylist(Playlist))
         {
             return false;
@@ -1833,9 +1481,7 @@ namespace
 
         UWorld* World = UWorld::GetWorld();
         auto& State = GNative1040PlaylistPublishState;
-        if (State.World != World ||
-            State.GameState != GameState ||
-            State.Playlist != Playlist)
+        if (State.World != World || State.GameState != GameState || State.Playlist != Playlist)
         {
             State = {};
             State.World = World;
@@ -1845,36 +1491,23 @@ namespace
         if (State.bPublished)
             return true;
 
-        // Exact 10.40 initializes playlist-owned mission generators,
-        // modifiers, and persistent effects only after MapInfo exists.
         if (GameState->HasMapInfo() && !GameState->MapInfo)
             return false;
 
-        // OnRep_CurrentPlaylistInfo is not idempotent: it creates and
-        // registers the playlist's configured mutators. Mark this publication
-        // complete before either callback so a NetDriver tick re-entering this
-        // function cannot create a second set.
         State.bPublished = true;
-        FFortAthenaNativeLTMCompatibility::
-            BeginPlaylistPublication(GameState, Playlist);
+        FFortAthenaNativeLTMCompatibility::BeginPlaylistPublication(GameState, Playlist);
         GameState->OnRep_CurrentPlaylistId();
         GameState->OnRep_CurrentPlaylistInfo();
-        FFortAthenaNativeLTMCompatibility::
-            EndPlaylistPublication(GameState, Playlist);
+        FFortAthenaNativeLTMCompatibility::EndPlaylistPublication(GameState, Playlist);
 
-        SDK::DbgLog(
-            "[NativeLTM] published 10.40 playlist once after MapInfo "
-            "(id=%d name=%s)\n",
-            Playlist->PlaylistId,
-            Playlist->Name.ToString().c_str());
-        FFortAthenaNativeLTMCompatibility::PreparePlaylist(
-            GameState, Playlist);
+        SDK::DbgLog("[NativeLTM] published 10.40 playlist once after MapInfo "
+            "(id=%d name=%s)\n", Playlist->PlaylistId, Playlist->Name.ToString().c_str());
+        FFortAthenaNativeLTMCompatibility::PreparePlaylist(GameState, Playlist);
         return true;
     }
 }
 
-const UFortPlaylistAthena* AFortGameMode::GetActivePlaylist(
-    AFortGameStateAthena* GameState)
+const UFortPlaylistAthena* AFortGameMode::GetActivePlaylist(AFortGameStateAthena* GameState)
 {
     return ResolveActivePlaylist(GameState);
 }
@@ -1890,25 +1523,13 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
     {
         RefreshPlaylistReflectionCache(GameState);
 
-        // Capture the authored values before this function applies any
-        // pre-start override. The same game-thread policy is reasserted after
-        // native mutators initialize and can therefore restore these values if
-        // the user disables the toggle during the match.
-        AFortPlayerControllerAthena::
-            ApplyConfiguredRespawnPolicy();
+        AFortPlayerControllerAthena::ApplyConfiguredRespawnPolicy();
 
-        const bool bIsCarminePlaylist =
-            IsCarminePlaylist(Playlist);
-        const bool bIsNative1040LTM =
-            FFortAthenaNativeLTMCompatibility::
-                IsTargetPlaylist(Playlist);
-        const bool bIsOriginalFoodFight =
-            FFortAthenaNativeLTMCompatibility::
+        const bool bIsCarminePlaylist = IsCarminePlaylist(Playlist);
+        const bool bIsNative1040LTM = FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(Playlist);
+        const bool bIsOriginalFoodFight = FFortAthenaNativeLTMCompatibility::
                 IsOriginalFoodFightPlaylist(Playlist);
 
-        // Respawn options are user gameplay policy even for native LTMs.
-        // Apply the selected values after loading the authored playlist while
-        // leaving its teams, inventory, and objective data untouched.
         if (FConfiguration::bForceRespawns)
         {
             if (Playlist->HasbRespawnInAir())
@@ -1933,19 +1554,14 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
                 else
                     Playlist->RespawnType = 2; // InfiniteRespawnExceptStorm
             }
-
-            //if (Playlist->HasbForceRespawnLocationInsideOfVolume())
-            //    Playlist->bForceRespawnLocationInsideOfVolume = true;
         }
-        if ((FConfiguration::bForceRespawns ||
-                FConfiguration::bJoinInProgress))
+        if ((FConfiguration::bForceRespawns || FConfiguration::bJoinInProgress))
         {
             if (Playlist->HasbAllowJoinInProgress())
                 Playlist->bAllowJoinInProgress = true;
             if (Playlist->HasJoinInProgressMatchType())
                 Playlist->JoinInProgressMatchType = UKismetTextLibrary::Conv_StringToText(FString(L"Creative"));
         }
-        //if (VersionInfo.FortniteVersion >= 16)
         {
             if (Playlist->HasGarbageCollectionFrequency())
                 Playlist->GarbageCollectionFrequency = 9999999999999999.f; // easier than hooking collectgarbage
@@ -1956,41 +1572,28 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             if (GameMode->HasbPlaylistHotfixChangedGCDisabling())
                 GameMode->bPlaylistHotfixChangedGCDisabling = true;
         }
-        const bool bHasCurrentPlaylistInfo =
-            GameState->HasCurrentPlaylistInfo();
-        const bool bHasPlaylistInfoLayout =
-            bHasCurrentPlaylistInfo &&
+        const bool bHasCurrentPlaylistInfo = GameState->HasCurrentPlaylistInfo();
+        const bool bHasPlaylistInfoLayout = bHasCurrentPlaylistInfo &&
             FPlaylistPropertyArray::BasePlaylist__Offset >= 0 &&
             FPlaylistPropertyArray::PlaylistReplicationKey__Offset >= 0;
-        const bool bUseLegacyPlaylistInfo =
-            VersionInfo.EngineVersion < 4.24 &&
+        const bool bUseLegacyPlaylistInfo = VersionInfo.EngineVersion < 4.24 &&
             bHasPlaylistInfoLayout;
-        SDK::DbgLog(
-            "[Playlist] setup gameState=%p playlist=%p name=%s "
+        SDK::DbgLog("[Playlist] setup gameState=%p playlist=%p name=%s "
             "hasInfo=%d hasData=%d infoOffset=%d dataOffset=%d "
-            "baseOffset=%d keyOffset=%d legacy=%d FN=%.2f UE=%.2f\n",
-            (void*)GameState,
-            (void*)Playlist,
-            Playlist->Name.ToString().c_str(),
-            (int)bHasCurrentPlaylistInfo,
+            "baseOffset=%d keyOffset=%d legacy=%d FN=%.2f UE=%.2f\n", (void*)GameState,
+            (void*)Playlist, Playlist->Name.ToString().c_str(), (int)bHasCurrentPlaylistInfo,
             (int)GameState->HasCurrentPlaylistData(),
             AFortGameStateAthena::CurrentPlaylistInfo__Offset,
             AFortGameStateAthena::CurrentPlaylistData__Offset,
             FPlaylistPropertyArray::BasePlaylist__Offset,
-            FPlaylistPropertyArray::PlaylistReplicationKey__Offset,
-            (int)bUseLegacyPlaylistInfo,
-            VersionInfo.FortniteVersion,
-            VersionInfo.EngineVersion);
+            FPlaylistPropertyArray::PlaylistReplicationKey__Offset, (int)bUseLegacyPlaylistInfo,
+            VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
         if (bUseLegacyPlaylistInfo)
         {
             GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
-            if ((ShouldRepairLateSeasonTeams() ||
-                    FFortAthenaHeistCompatibility::IsHeistPlaylist(
-                        Playlist) ||
-                    bIsNative1040LTM ||
-                    bIsOriginalFoodFight ||
-                    bIsCarminePlaylist) &&
-                FPlaylistPropertyArray::HasOverridePlaylist())
+            if ((ShouldRepairLateSeasonTeams() || FFortAthenaHeistCompatibility::IsHeistPlaylist(
+                        Playlist) || bIsNative1040LTM || bIsOriginalFoodFight ||
+                    bIsCarminePlaylist) && FPlaylistPropertyArray::HasOverridePlaylist())
             {
                 GameState->CurrentPlaylistInfo.OverridePlaylist = Playlist;
             }
@@ -1999,29 +1602,21 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
             if (!bIsNative1040LTM)
                 GameState->OnRep_CurrentPlaylistInfo();
 
-            SDK::DbgLog(
-                "[Playlist] legacy publication gameState=%p playlist=%p "
-                "name=%s key=%d FN=%.2f UE=%.2f\n",
-                (void*)GameState,
-                (void*)Playlist,
+            SDK::DbgLog("[Playlist] legacy publication gameState=%p playlist=%p "
+                "name=%s key=%d FN=%.2f UE=%.2f\n", (void*)GameState, (void*)Playlist,
                 Playlist->Name.ToString().c_str(),
-                GameState->CurrentPlaylistInfo.PlaylistReplicationKey,
-                VersionInfo.FortniteVersion,
+                GameState->CurrentPlaylistInfo.PlaylistReplicationKey, VersionInfo.FortniteVersion,
                 VersionInfo.EngineVersion);
         }
         else
         {
-            const bool bUseReflectedPlaylistInfo =
-                bHasPlaylistInfoLayout;
+            const bool bUseReflectedPlaylistInfo = bHasPlaylistInfoLayout;
             if (bUseReflectedPlaylistInfo)
             {
                 GameState->CurrentPlaylistInfo.BasePlaylist = Playlist;
                 if ((ShouldRepairLateSeasonTeams() ||
-                        FFortAthenaHeistCompatibility::IsHeistPlaylist(
-                            Playlist) ||
-                        bIsNative1040LTM ||
-                        bIsOriginalFoodFight ||
-                        bIsCarminePlaylist) &&
+                        FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist) ||
+                        bIsNative1040LTM || bIsOriginalFoodFight || bIsCarminePlaylist) &&
                     FPlaylistPropertyArray::HasOverridePlaylist())
                 {
                     GameState->CurrentPlaylistInfo.OverridePlaylist = Playlist;
@@ -2053,32 +1648,20 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         if (GameMode->GameSession->HasMaxPlayers())
             GameMode->GameSession->MaxPlayers = Playlist->MaxPlayers;
 
-
         if (GameState->HasAirCraftBehavior() && Playlist->HasAirCraftBehavior())
             GameState->AirCraftBehavior = Playlist->AirCraftBehavior;
         if (GameState->HasCachedSafeZoneStartUp() && Playlist->HasSafeZoneStartUp())
             GameState->CachedSafeZoneStartUp = Playlist->SafeZoneStartUp;
 
-        const bool bIsHeistPlaylist =
-            FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist);
-        if (bIsHeistPlaylist || bIsNative1040LTM ||
-            bIsOriginalFoodFight ||
+        const bool bIsHeistPlaylist = FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist);
+        if (bIsHeistPlaylist || bIsNative1040LTM || bIsOriginalFoodFight ||
             ShouldRepairLateSeasonTeams())
         {
             SyncPlaylistTeamSettings(GameMode, GameState, Playlist);
         }
 
-        // Configure each reflected DBNO property independently because their
-        // availability and names vary by game version. Never force DBNO on in
-        // solo or when the playlist's own DBNO rules disallow it: several
-        // builds (notably 15.30) can take the native downed branch without a
-        // valid teammate/DBNO transition, leaving a possessed pawn alive at
-        // zero health. The playlist exposes either DBNOType or the older
-        // inverse bNoDBNO bit, so use whichever capability exists instead of
-        // a season gate.
-        bool bDBNOOn =
-            FConfiguration::bEnableDBNO &&
-            IsTeamPlaylist(Playlist) &&
+        // Never force DBNO in solo: some builds (15.30) take the downed branch without a valid transition and leave a pawn alive at zero health.
+        bool bDBNOOn = FConfiguration::bEnableDBNO && IsTeamPlaylist(Playlist) &&
             DoesPlaylistAllowDBNO(Playlist);
         bool bAlwaysDBNO = false;
         if (GameMode->HasbEnableDBNO())
@@ -2088,8 +1671,6 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
         if (GameState->HasbDBNOEnabledForGameMode())
             GameState->bDBNOEnabledForGameMode = bDBNOOn;
         SetDBNODeathEnabled(GameState, bDBNOOn);
-        // Last living teammates must eliminate instead of entering an
-        // unrecoverable downed state.
         if (GameMode->HasbAlwaysDBNO())
             GameMode->bAlwaysDBNO = bAlwaysDBNO;
 
@@ -2097,10 +1678,8 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 
         if (ShouldRepairLateSeasonTeams())
         {
-            EnsureLateSeasonTeamObjects(
-                GameMode, GameState, GetPlaylistFirstTeam(Playlist));
-            ApplyLateSeasonDBNOSettings(
-                GameMode, GameState, Playlist, "playlist");
+            EnsureLateSeasonTeamObjects(GameMode, GameState, GetPlaylistFirstTeam(Playlist));
+            ApplyLateSeasonDBNOSettings(GameMode, GameState, Playlist, "playlist");
             if (GLateSeasonHumanTeams.GameMode != GameMode ||
                 GLateSeasonHumanTeams.World != UWorld::GetWorld() ||
                 GLateSeasonHumanTeams.Playlist != Playlist)
@@ -2114,17 +1693,11 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
                 Playlist->HasbIsLargeTeamGame() ? (int)Playlist->bIsLargeTeamGame : 0);
         }
 
-        FFortAthenaHeistCompatibility::PreparePlaylist(
-            GameState, Playlist);
-        FFortAthenaScoreRoyaleCompatibility::PreparePlaylist(
-            GameState, Playlist);
+        FFortAthenaHeistCompatibility::PreparePlaylist(GameState, Playlist);
+        FFortAthenaScoreRoyaleCompatibility::PreparePlaylist(GameState, Playlist);
         if (bIsNative1040LTM)
             PublishNative1040Playlist(GameState, Playlist);
-        FFortAthenaNativeLTMCompatibility::PreparePlaylist(
-            GameState, Playlist);
-
-        // if (GameState->HasAdditionalPlaylistLevelsStreamed())
-            // GameState->OnRep_AdditionalPlaylistLevelsStreamed();
+        FFortAthenaNativeLTMCompatibility::PreparePlaylist(GameState, Playlist);
     }
     else
     {
@@ -2135,12 +1708,6 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
     }
 }
 
-// PlaylistDataLoaded is what fills AFortGameMode::SafeZoneLocations in the
-// newer Athena flow, but Seasons 5 and earlier never run that setup here.
-// Late game used to choose a fallback center only *after*
-// StartAircraftPhase had already consumed the empty array.  Seed the native
-// array first so the indicator, map preview and server storm all use the same
-// center from the beginning.
 static bool FindLegacyLateGameSafeZoneCenter(FVector& OutCenter)
 {
     TArray<ABuildingFoundation*> Foundations;
@@ -2193,12 +1760,7 @@ static const UFortPlaylistAthena* GetLegacySafeZonePlaylist(AFortGameMode* GameM
 
 static const UFortPlaylistAthena* GetConfiguredSafeZonePlaylist()
 {
-    // ReadyToStartMatch runs before SetupPlaylist publishes the selected
-    // playlist to GameState. Resolve the same configured asset and fallback
-    // used by SetupPlaylist so preflight never validates a stale/default
-    // CurrentPlaylistInfo from the travel world.
-    auto Playlist =
-        FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
+    auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
     return Playlist ? Playlist : FindObject<UFortPlaylistAthena>(
         L"/Game/Athena/Playlists/Playlist_DefaultSolo.Playlist_DefaultSolo");
 }
@@ -2226,139 +1788,94 @@ static int GetLegacySafeZoneLocationCount(AFortGameMode* GameMode)
     if (RequiredLocationCount <= 0 || RequiredLocationCount > 32)
         RequiredLocationCount = 12;
 
-    // The existing late-game aircraft path intentionally requires one entry
-    // beyond the selected phase before it trusts the native array.
     const int MinimumLocationCount = FConfiguration::LateGameZone + 1;
     if (RequiredLocationCount < MinimumLocationCount)
         RequiredLocationCount = MinimumLocationCount;
     return RequiredLocationCount;
 }
 
-// FN21.10-25.19 may keep its managed phase schedule outside the indicator.
-// Tag that process-static fallback with its exact world/map generation so a
-// previous travel's smaller array cannot falsely constrain startup preflight.
 TArray<FFortSafeZonePhaseInfo> Phases;
 static TWeakObjectPtr<UWorld> GManagedSafeZonePhasesWorld;
 static TWeakObjectPtr<AFortAthenaMapInfo> GManagedSafeZonePhasesMapInfo;
 
-int32 AFortGameMode::ResolveMovingSafeZonePreflightCapacity(
-	AFortGameMode* GameMode,
-	AFortAthenaMapInfo* MapInfo)
+int32 AFortGameMode::ResolveMovingSafeZonePreflightCapacity(AFortGameMode* GameMode,
+    AFortAthenaMapInfo* MapInfo)
 {
-	int32 Capacity =
-		CustomSafeZoneRuntime::ResolveNativePhaseCapacity(MapInfo);
+    int32 Capacity = CustomSafeZoneRuntime::ResolveNativePhaseCapacity(MapInfo);
 
-	// Native-owned early builds can expose their already-sized center array
-	// instead of the later SafeZoneDefinition.Count field. Only a populated
-	// native array is exact enough for this strict gate; the legacy helper's
-	// synthetic 12-entry fallback must never be treated as capacity evidence.
-	if (VersionInfo.FortniteVersion < 21.10f && GameMode &&
-		GameMode->HasSafeZoneLocations() &&
-		GameMode->SafeZoneLocations.IsValid())
-	{
-		const int32 LocationCount =
-			GameMode->SafeZoneLocations.Num();
-		if (LocationCount > 0 && LocationCount <= 64)
-		{
-			Capacity = Capacity > 0
-				? (std::min)(Capacity, LocationCount)
-				: LocationCount;
-		}
-	}
+    if (VersionInfo.FortniteVersion < 21.10f && GameMode && GameMode->HasSafeZoneLocations() &&
+        GameMode->SafeZoneLocations.IsValid())
+    {
+        const int32 LocationCount = GameMode->SafeZoneLocations.Num();
+        if (LocationCount > 0 && LocationCount <= 64)
+        {
+            Capacity = Capacity > 0 ? (std::min)(Capacity, LocationCount) : LocationCount;
+        }
+    }
 
-	// LastSafeZoneIndex is inclusive. A non-negative playlist override can
-	// shorten the phases reachable from the map's schedule, but -1 explicitly
-	// means that the live map Count remains authoritative.
-	const auto Playlist = GetConfiguredSafeZonePlaylist();
-	if (Playlist && Playlist->HasLastSafeZoneIndex() &&
-		Playlist->LastSafeZoneIndex >= 0 &&
-		Playlist->LastSafeZoneIndex < 64)
-	{
-		const int32 PlaylistCapacity =
-			Playlist->LastSafeZoneIndex + 1;
-		Capacity = Capacity > 0
-			? (std::min)(Capacity, PlaylistCapacity)
-			: PlaylistCapacity;
-	}
+    const auto Playlist = GetConfiguredSafeZonePlaylist();
+    if (Playlist && Playlist->HasLastSafeZoneIndex() && Playlist->LastSafeZoneIndex >= 0 &&
+        Playlist->LastSafeZoneIndex < 64)
+    {
+        const int32 PlaylistCapacity = Playlist->LastSafeZoneIndex + 1;
+        Capacity = Capacity > 0 ? (std::min)(Capacity, PlaylistCapacity) : PlaylistCapacity;
+    }
 
-	auto TightenToPopulatedArray = [&](const int32 Count)
-	{
-		if (Count <= 0 || Count > 64)
-			return;
-		Capacity = Capacity > 0
-			? (std::min)(Capacity, Count)
-			: Count;
-	};
+    auto TightenToPopulatedArray = [&](const int32 Count)
+    {
+        if (Count <= 0 || Count > 64)
+            return;
+        Capacity = Capacity > 0 ? (std::min)(Capacity, Count) : Count;
+    };
 
-	AFortSafeZoneIndicator* Indicator = nullptr;
-	if (VersionInfo.FortniteVersion >= 25.20f)
-	{
-		auto PhaseLogic =
-			CustomSafeZoneRuntime::ResolveLiveComponentPhaseLogic(
-				UWorld::GetWorld());
-		if (PhaseLogic && PhaseLogic->HasSafeZoneIndicator())
-			Indicator = PhaseLogic->SafeZoneIndicator;
-	}
-	else if (GameMode && GameMode->HasSafeZoneIndicator())
-	{
-		Indicator = GameMode->SafeZoneIndicator;
-	}
+    AFortSafeZoneIndicator* Indicator = nullptr;
+    if (VersionInfo.FortniteVersion >= 25.20f)
+    {
+        auto PhaseLogic = CustomSafeZoneRuntime::ResolveLiveComponentPhaseLogic(UWorld::GetWorld());
+        if (PhaseLogic && PhaseLogic->HasSafeZoneIndicator())
+            Indicator = PhaseLogic->SafeZoneIndicator;
+    }
+    else if (GameMode && GameMode->HasSafeZoneIndicator())
+    {
+        Indicator = GameMode->SafeZoneIndicator;
+    }
 
-	if (Indicator && Indicator->HasSafeZonePhases() &&
-		Indicator->SafeZonePhases.IsValid())
-	{
-		TightenToPopulatedArray(Indicator->SafeZonePhases.Num());
-	}
-	else if (VersionInfo.FortniteVersion >= 21.10f &&
-		VersionInfo.FortniteVersion < 25.20f && Phases.IsValid() &&
-		GManagedSafeZonePhasesWorld.Get() == UWorld::GetWorld() &&
-		GManagedSafeZonePhasesMapInfo.Get() == MapInfo)
-	{
-		TightenToPopulatedArray(Phases.Num());
-	}
+    if (Indicator && Indicator->HasSafeZonePhases() && Indicator->SafeZonePhases.IsValid())
+    {
+        TightenToPopulatedArray(Indicator->SafeZonePhases.Num());
+    }
+    else if (VersionInfo.FortniteVersion >= 21.10f &&
+        VersionInfo.FortniteVersion < 25.20f && Phases.IsValid() &&
+        GManagedSafeZonePhasesWorld.Get() == UWorld::GetWorld() &&
+        GManagedSafeZonePhasesMapInfo.Get() == MapInfo)
+    {
+        TightenToPopulatedArray(Phases.Num());
+    }
 
-	return Capacity;
+    return Capacity;
 }
 
-static float GetLegacySafeZonePhaseRadius(
-    AFortGameMode* GameMode,
-    int PhaseIndex)
+static float GetLegacySafeZonePhaseRadius(AFortGameMode* GameMode, int PhaseIndex)
 {
-    // Used only when an early build did not publish its native phase centers.
-    // Prefer the map's authored radius curve; the fallback mirrors the legacy
-    // phase table already used by Magnesium's component-owned storm path.
     constexpr static std::array<float, 13> FallbackRadii{
-        150000.f, 120000.f, 95000.f, 70000.f, 55000.f,
-        32500.f, 20000.f, 10000.f, 5000.f, 2500.f,
+        150000.f, 120000.f, 95000.f, 70000.f, 55000.f, 32500.f, 20000.f, 10000.f, 5000.f, 2500.f,
         1650.f, 1090.f, 0.f,
     };
 
     if (PhaseIndex < 0)
         return 0.f;
 
-    auto GameState =
-        GameMode && GameMode->GameState
-            ? (AFortGameStateAthena*)GameMode->GameState
+    auto GameState = GameMode && GameMode->GameState ? (AFortGameStateAthena*)GameMode->GameState
             : nullptr;
-    auto MapInfo =
-        GameState && GameState->HasMapInfo()
-            ? GameState->MapInfo
-            : nullptr;
-    if (MapInfo && MapInfo->HasSafeZoneDefinition() &&
-        FFortSafeZoneDefinition::HasRadius())
+    auto MapInfo = GameState && GameState->HasMapInfo() ? GameState->MapInfo : nullptr;
+    if (MapInfo && MapInfo->HasSafeZoneDefinition() && FFortSafeZoneDefinition::HasRadius())
     {
-        auto& RadiusDefinition =
-            MapInfo->SafeZoneDefinition.Radius;
-        const float Radius =
-            RadiusDefinition.Evaluate((float)PhaseIndex);
-        const bool bHasAuthoredRadius =
-            RadiusDefinition.Value > 0.f ||
-            (RadiusDefinition.Curve.CurveTable &&
-                RadiusDefinition.Curve.RowName.IsValid());
-        const int LastPhase =
-            GetLegacySafeZoneLocationCount(GameMode) - 1;
-        if (bHasAuthoredRadius && std::isfinite(Radius) &&
-            (Radius > 0.f ||
+        auto& RadiusDefinition = MapInfo->SafeZoneDefinition.Radius;
+        const float Radius = RadiusDefinition.Evaluate((float)PhaseIndex);
+        const bool bHasAuthoredRadius = RadiusDefinition.Value > 0.f ||
+            (RadiusDefinition.Curve.CurveTable && RadiusDefinition.Curve.RowName.IsValid());
+        const int LastPhase = GetLegacySafeZoneLocationCount(GameMode) - 1;
+        if (bHasAuthoredRadius && std::isfinite(Radius) && (Radius > 0.f ||
                 (Radius == 0.f && PhaseIndex >= LastPhase)))
         {
             return Radius;
@@ -2371,33 +1888,19 @@ static float GetLegacySafeZonePhaseRadius(
     return 0.f;
 }
 
-static FVector GenerateContainedLegacySafeZoneCenter(
-    AFortGameMode* GameMode,
-    const FVector& PreviousCenter,
-    int PreviousPhase,
-    int NextPhase)
+static FVector GenerateContainedLegacySafeZoneCenter(AFortGameMode* GameMode,
+    const FVector& PreviousCenter, int PreviousPhase, int NextPhase)
 {
-    const float PreviousRadius =
-        GetLegacySafeZonePhaseRadius(GameMode, PreviousPhase);
-    const float NextRadius =
-        GetLegacySafeZonePhaseRadius(GameMode, NextPhase);
-    if (!std::isfinite(PreviousRadius) ||
-        !std::isfinite(NextRadius) ||
-        PreviousRadius <= 0.f ||
-        NextRadius < 0.f ||
-        NextRadius >= PreviousRadius)
+    const float PreviousRadius = GetLegacySafeZonePhaseRadius(GameMode, PreviousPhase);
+    const float NextRadius = GetLegacySafeZonePhaseRadius(GameMode, NextPhase);
+    if (!std::isfinite(PreviousRadius) || !std::isfinite(NextRadius) || PreviousRadius <= 0.f ||
+        NextRadius < 0.f || NextRadius >= PreviousRadius)
     {
         return PreviousCenter;
     }
 
-    // Retain the project's original slight-drift character, but cap the
-    // displacement by the radius difference so the white circle is always
-    // fully contained by the current blue circle.
-    const float MaximumOffset = (std::min)(
-        PreviousRadius - NextRadius,
-        PreviousRadius * 0.4f);
-    if (!std::isfinite(MaximumOffset) ||
-        MaximumOffset <= KINDA_SMALL_NUMBER)
+    const float MaximumOffset = (std::min)(PreviousRadius - NextRadius, PreviousRadius * 0.4f);
+    if (!std::isfinite(MaximumOffset) || MaximumOffset <= KINDA_SMALL_NUMBER)
     {
         return PreviousCenter;
     }
@@ -2406,29 +1909,19 @@ static FVector GenerateContainedLegacySafeZoneCenter(
     static std::uniform_real_distribution<float> Unit(0.f, 1.f);
     constexpr float TwoPi = 6.28318530717958647692f;
     const float Angle = Unit(Generator) * TwoPi;
-    const float Distance =
-        std::sqrt(Unit(Generator)) * MaximumOffset;
+    const float Distance = std::sqrt(Unit(Generator)) * MaximumOffset;
 
     FVector Center = PreviousCenter;
     Center.X += std::cos(Angle) * Distance;
     Center.Y += std::sin(Angle) * Distance;
-    return std::isfinite(Center.X) &&
-        std::isfinite(Center.Y)
-            ? Center
-            : PreviousCenter;
+    return std::isfinite(Center.X) && std::isfinite(Center.Y) ? Center : PreviousCenter;
 }
 
-static void ClampLegacySafeZoneCenterToContainment(
-    const FVector& PreviousCenter,
-    FVector& NextCenter,
-    float PreviousRadius,
-    float NextRadius)
+static void ClampLegacySafeZoneCenterToContainment(const FVector& PreviousCenter,
+    FVector& NextCenter, float PreviousRadius, float NextRadius)
 {
-    if (!std::isfinite(PreviousRadius) ||
-        !std::isfinite(NextRadius) ||
-        PreviousRadius <= 0.f ||
-        NextRadius < 0.f ||
-        NextRadius > PreviousRadius)
+    if (!std::isfinite(PreviousRadius) || !std::isfinite(NextRadius) || PreviousRadius <= 0.f ||
+        NextRadius < 0.f || NextRadius > PreviousRadius)
     {
         return;
     }
@@ -2444,8 +1937,7 @@ static void ClampLegacySafeZoneCenterToContainment(
     const double DeltaX = NextCenter.X - PreviousCenter.X;
     const double DeltaY = NextCenter.Y - PreviousCenter.Y;
     const double Distance = std::hypot(DeltaX, DeltaY);
-    const double MaximumOffset =
-        (double)PreviousRadius - (double)NextRadius;
+    const double MaximumOffset = (double)PreviousRadius - (double)NextRadius;
     if (!std::isfinite(Distance))
     {
         NextCenter.X = PreviousCenter.X;
@@ -2457,8 +1949,7 @@ static void ClampLegacySafeZoneCenterToContainment(
     if (Distance <= MaximumOffset)
         return;
 
-    if (Distance <= KINDA_SMALL_NUMBER ||
-        MaximumOffset <= KINDA_SMALL_NUMBER)
+    if (Distance <= KINDA_SMALL_NUMBER || MaximumOffset <= KINDA_SMALL_NUMBER)
     {
         NextCenter.X = PreviousCenter.X;
         NextCenter.Y = PreviousCenter.Y;
@@ -2466,10 +1957,7 @@ static void ClampLegacySafeZoneCenterToContainment(
         return;
     }
 
-    // Keep a small numerical margin so float-backed Chapter 1 replication
-    // cannot round an exactly tangent inner circle outside the live wall.
-    const double Scale =
-        MaximumOffset * 0.98 / Distance;
+    const double Scale = MaximumOffset * 0.98 / Distance;
     NextCenter.X = PreviousCenter.X + DeltaX * Scale;
     NextCenter.Y = PreviousCenter.Y + DeltaY * Scale;
     NextCenter.Z = PreviousCenter.Z;
@@ -2489,36 +1977,27 @@ static FLegacyFallbackSafeZonePlan
 
 static void ResetLegacyFallbackSafeZonePlan()
 {
-    GLegacyFallbackSafeZonePlan =
-        FLegacyFallbackSafeZonePlan{};
+    GLegacyFallbackSafeZonePlan = FLegacyFallbackSafeZonePlan{};
 }
 
-static void BuildLegacyFallbackSafeZonePlan(
-    AFortGameMode* GameMode,
-    const FVector& Anchor)
+static void BuildLegacyFallbackSafeZonePlan(AFortGameMode* GameMode, const FVector& Anchor)
 {
     ResetLegacyFallbackSafeZonePlan();
-    if (!GameMode || FConfiguration::bCustomSafeZone ||
-        !std::isfinite(Anchor.X) ||
-        !std::isfinite(Anchor.Y) ||
-        !std::isfinite(Anchor.Z) ||
-        Anchor.IsZero())
+    if (!GameMode || FConfiguration::bCustomSafeZone || !std::isfinite(Anchor.X) ||
+        !std::isfinite(Anchor.Y) || !std::isfinite(Anchor.Z) || Anchor.IsZero())
     {
         return;
     }
 
     auto World = UWorld::GetWorld();
-    const int CenterCount =
-        GetLegacySafeZoneLocationCount(GameMode);
+    const int CenterCount = GetLegacySafeZoneLocationCount(GameMode);
     if (!World || CenterCount <= 0 || CenterCount > 32)
         return;
 
     auto& Plan = GLegacyFallbackSafeZonePlan;
     Plan.World = World;
     Plan.GameMode = GameMode;
-    Plan.AnchorIndex = std::clamp(
-        FConfiguration::LateGameZone.load() - 1,
-        0, CenterCount - 1);
+    Plan.AnchorIndex = std::clamp(FConfiguration::LateGameZone.load() - 1, 0, CenterCount - 1);
     Plan.Centers.clear();
     Plan.Centers.reserve(CenterCount);
     for (int Index = 0; Index < CenterCount; ++Index)
@@ -2528,77 +2007,51 @@ static void BuildLegacyFallbackSafeZonePlan(
         Index < CenterCount;
         ++Index)
     {
-        Plan.Centers[Index] =
-            GenerateContainedLegacySafeZoneCenter(
-                GameMode, Plan.Centers[Index - 1],
-                Index - 1, Index);
+        Plan.Centers[Index] = GenerateContainedLegacySafeZoneCenter(
+                GameMode, Plan.Centers[Index - 1], Index - 1, Index);
     }
 
-    const int PreviewIndex = (std::min)(
-        Plan.AnchorIndex + 1, CenterCount - 1);
+    const int PreviewIndex = (std::min)(Plan.AnchorIndex + 1, CenterCount - 1);
     const FVector& Preview = Plan.Centers[PreviewIndex];
     SDK::DbgLog(
         "[SafeZone] built fallback center plan phase=%d anchor=(%.1f, %.1f, %.1f) preview=(%.1f, %.1f, %.1f) offset=%.1f\n",
-        Plan.AnchorIndex + 1,
-        Anchor.X, Anchor.Y, Anchor.Z,
-        Preview.X, Preview.Y, Preview.Z,
-        (float)std::hypot(
-            Preview.X - Anchor.X,
-            Preview.Y - Anchor.Y));
+        Plan.AnchorIndex + 1, Anchor.X, Anchor.Y, Anchor.Z, Preview.X, Preview.Y, Preview.Z,
+        (float)std::hypot(Preview.X - Anchor.X, Preview.Y - Anchor.Y));
 }
 
-static bool ApplyLegacyFallbackSafeZonePlan(
-    AFortGameMode* GameMode,
-    int SafeZonePhase)
+static bool ApplyLegacyFallbackSafeZonePlan(AFortGameMode* GameMode, int SafeZonePhase)
 {
     auto& Plan = GLegacyFallbackSafeZonePlan;
     auto World = UWorld::GetWorld();
-    auto Indicator =
-        GameMode && GameMode->HasSafeZoneIndicator()
-            ? GameMode->SafeZoneIndicator
+    auto Indicator = GameMode && GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator
             : nullptr;
-    if (!World || !GameMode || !Indicator ||
-        FConfiguration::bCustomSafeZone ||
-        Plan.World != World || Plan.GameMode != GameMode ||
-        Plan.Centers.empty())
+    if (!World || !GameMode || !Indicator || FConfiguration::bCustomSafeZone ||
+        Plan.World != World || Plan.GameMode != GameMode || Plan.Centers.empty())
     {
         return false;
     }
 
-    const int LastIndex =
-        static_cast<int>(Plan.Centers.size()) - 1;
-    const int CurrentIndex = std::clamp(
-        SafeZonePhase - 1, 0, LastIndex);
-    const int NextIndex = std::clamp(
-        SafeZonePhase, 0, LastIndex);
-    const int NextNextIndex = std::clamp(
-        SafeZonePhase + 1, 0, LastIndex);
+    const int LastIndex = static_cast<int>(Plan.Centers.size()) - 1;
+    const int CurrentIndex = std::clamp(SafeZonePhase - 1, 0, LastIndex);
+    const int NextIndex = std::clamp(SafeZonePhase, 0, LastIndex);
+    const int NextNextIndex = std::clamp(SafeZonePhase + 1, 0, LastIndex);
 
-    float CurrentRadius =
-        GetLegacySafeZonePhaseRadius(
-            GameMode, CurrentIndex);
-    float NextRadius =
-        GetLegacySafeZonePhaseRadius(
-            GameMode, NextIndex);
+    float CurrentRadius = GetLegacySafeZonePhaseRadius(GameMode, CurrentIndex);
+    float NextRadius = GetLegacySafeZonePhaseRadius(GameMode, NextIndex);
     bool bUsedLiveRadii = false;
     float LiveCurrentRadius = -1.f;
-    if (Indicator->HasRadius() &&
-        std::isfinite(Indicator->Radius) &&
-        Indicator->Radius > 0.f)
+    if (Indicator->HasRadius() && std::isfinite(Indicator->Radius) && Indicator->Radius > 0.f)
     {
         LiveCurrentRadius = Indicator->Radius;
     }
-    else if (Indicator->HasLastRadius() &&
-        std::isfinite(Indicator->LastRadius) &&
+    else if (Indicator->HasLastRadius() && std::isfinite(Indicator->LastRadius) &&
         Indicator->LastRadius > 0.f)
     {
         LiveCurrentRadius = Indicator->LastRadius;
     }
 
-    if (Indicator->HasNextRadius() &&
-        std::isfinite(Indicator->NextRadius) &&
-        LiveCurrentRadius > 0.f &&
-        Indicator->NextRadius >= 0.f &&
+    if (Indicator->HasNextRadius() && std::isfinite(Indicator->NextRadius) &&
+        LiveCurrentRadius > 0.f && Indicator->NextRadius >= 0.f &&
         Indicator->NextRadius <= LiveCurrentRadius)
     {
         CurrentRadius = LiveCurrentRadius;
@@ -2608,39 +2061,28 @@ static bool ApplyLegacyFallbackSafeZonePlan(
 
     if (CurrentIndex != NextIndex)
     {
-        ClampLegacySafeZoneCenterToContainment(
-            Plan.Centers[CurrentIndex],
-            Plan.Centers[NextIndex],
+        ClampLegacySafeZoneCenterToContainment(Plan.Centers[CurrentIndex], Plan.Centers[NextIndex],
             CurrentRadius, NextRadius);
     }
 
     if (NextIndex != NextNextIndex)
     {
-        float NextNextRadius =
-            GetLegacySafeZonePhaseRadius(
-                GameMode, NextNextIndex);
-        if (Indicator->HasNextNextRadius() &&
-            std::isfinite(Indicator->NextNextRadius) &&
-            Indicator->NextNextRadius >= 0.f &&
-            Indicator->NextNextRadius <= NextRadius)
+        float NextNextRadius = GetLegacySafeZonePhaseRadius(GameMode, NextNextIndex);
+        if (Indicator->HasNextNextRadius() && std::isfinite(Indicator->NextNextRadius) &&
+            Indicator->NextNextRadius >= 0.f && Indicator->NextNextRadius <= NextRadius)
         {
             NextNextRadius = Indicator->NextNextRadius;
         }
-        else if (Indicator->HasFutureReplicator() &&
-            Indicator->FutureReplicator &&
-            Indicator->FutureReplicator->HasNextNextRadius() &&
-            std::isfinite(
+        else if (Indicator->HasFutureReplicator() && Indicator->FutureReplicator &&
+            Indicator->FutureReplicator->HasNextNextRadius() && std::isfinite(
                 Indicator->FutureReplicator->NextNextRadius) &&
             Indicator->FutureReplicator->NextNextRadius >= 0.f &&
             Indicator->FutureReplicator->NextNextRadius <= NextRadius)
         {
-            NextNextRadius =
-                Indicator->FutureReplicator->NextNextRadius;
+            NextNextRadius = Indicator->FutureReplicator->NextNextRadius;
         }
 
-        ClampLegacySafeZoneCenterToContainment(
-            Plan.Centers[NextIndex],
-            Plan.Centers[NextNextIndex],
+        ClampLegacySafeZoneCenterToContainment(Plan.Centers[NextIndex], Plan.Centers[NextNextIndex],
             NextRadius, NextNextRadius);
     }
 
@@ -2649,14 +2091,11 @@ static bool ApplyLegacyFallbackSafeZonePlan(
     if (Indicator->HasNextCenter())
         Indicator->NextCenter = Plan.Centers[NextIndex];
     if (Indicator->HasNextNextCenter())
-        Indicator->NextNextCenter =
-            Plan.Centers[NextNextIndex];
-    if (Indicator->HasFutureReplicator() &&
-        Indicator->FutureReplicator &&
+        Indicator->NextNextCenter = Plan.Centers[NextNextIndex];
+    if (Indicator->HasFutureReplicator() && Indicator->FutureReplicator &&
         Indicator->FutureReplicator->HasNextNextCenter())
     {
-        Indicator->FutureReplicator->NextNextCenter =
-            Plan.Centers[NextNextIndex];
+        Indicator->FutureReplicator->NextNextCenter = Plan.Centers[NextNextIndex];
     }
 
     Indicator->ForceNetUpdate();
@@ -2668,15 +2107,9 @@ static bool ApplyLegacyFallbackSafeZonePlan(
         const FVector& Next = Plan.Centers[NextIndex];
         SDK::DbgLog(
             "[SafeZone] applied fallback centers phase=%d currentIndex=%d nextIndex=%d offset=%.1f radii=%.1f->%.1f live=%d contained=%d\n",
-            SafeZonePhase, CurrentIndex, NextIndex,
-            (float)std::hypot(
-                Next.X - Current.X,
-                Next.Y - Current.Y),
-            CurrentRadius, NextRadius,
-            (int)bUsedLiveRadii,
-            (int)(CurrentRadius >= NextRadius +
-                std::hypot(
-                    Next.X - Current.X,
+            SafeZonePhase, CurrentIndex, NextIndex, (float)std::hypot(Next.X - Current.X,
+                Next.Y - Current.Y), CurrentRadius, NextRadius, (int)bUsedLiveRadii,
+            (int)(CurrentRadius >= NextRadius + std::hypot(Next.X - Current.X,
                     Next.Y - Current.Y)));
     }
 
@@ -2685,8 +2118,7 @@ static bool ApplyLegacyFallbackSafeZonePlan(
 
 static bool UsesLegacySafeZoneLocFallback()
 {
-    return VersionInfo.FortniteVersion == 1.10 ||
-        VersionInfo.FortniteVersion == 1.72 ||
+    return VersionInfo.FortniteVersion == 1.10 || VersionInfo.FortniteVersion == 1.72 ||
         VersionInfo.FortniteVersion == 2.50;
 }
 
@@ -2710,8 +2142,7 @@ static void EnsureLegacySafeZoneDamageEffect(AFortGameMode* GameMode)
         bAssigned = true;
     }
 
-    auto DefaultGameMode = GameMode->Class
-        ? (AFortGameMode*)GameMode->Class->GetDefaultObj()
+    auto DefaultGameMode = GameMode->Class ? (AFortGameMode*)GameMode->Class->GetDefaultObj()
         : nullptr;
     if (DefaultGameMode && DefaultGameMode->HasGE_OutsideSafeZone() &&
         !DefaultGameMode->GE_OutsideSafeZone)
@@ -2730,37 +2161,32 @@ static bool GHasManagedMovingSafeZonePhaseHooks = false;
 
 static bool HasNativeMovingSafeZonePhasePublisher()
 {
-	return GHasNativeLateGameSafeZonePhaseHook ||
-		VersionInfo.FortniteVersion == 2.50 ||
-		VersionInfo.FortniteVersion == 7.30;
+    return GHasNativeLateGameSafeZonePhaseHook || VersionInfo.FortniteVersion == 2.50 ||
+        VersionInfo.FortniteVersion == 7.30;
 }
 
 bool AFortGameMode::ProbeMovingSafeZonePhasePublisher()
 {
-	static double CachedVersion = -1.0;
-	static bool bCachedAvailable = false;
-	if (CachedVersion == VersionInfo.FortniteVersion)
-		return bCachedAvailable;
+    static double CachedVersion = -1.0;
+    static bool bCachedAvailable = false;
+    if (CachedVersion == VersionInfo.FortniteVersion)
+        return bCachedAvailable;
 
-	CachedVersion = VersionInfo.FortniteVersion;
-	if (VersionInfo.FortniteVersion >= 25.20)
-	{
-		bCachedAvailable = true;
-	}
-	else if (VersionInfo.FortniteVersion >= 21.10)
-	{
-		bCachedAvailable =
-			FindSpawnInitialSafeZone() != 0 &&
-			FindUpdateSafeZonesPhase() != 0;
-	}
-	else
-	{
-		bCachedAvailable =
-			VersionInfo.FortniteVersion == 2.50 ||
-			VersionInfo.FortniteVersion == 7.30 ||
-			FindHandlePostSafeZonePhaseChanged() != 0;
-	}
-	return bCachedAvailable;
+    CachedVersion = VersionInfo.FortniteVersion;
+    if (VersionInfo.FortniteVersion >= 25.20)
+    {
+        bCachedAvailable = true;
+    }
+    else if (VersionInfo.FortniteVersion >= 21.10)
+    {
+        bCachedAvailable = FindSpawnInitialSafeZone() != 0 && FindUpdateSafeZonesPhase() != 0;
+    }
+    else
+    {
+        bCachedAvailable = VersionInfo.FortniteVersion == 2.50 ||
+            VersionInfo.FortniteVersion == 7.30 || FindHandlePostSafeZonePhaseChanged() != 0;
+    }
+    return bCachedAvailable;
 }
 
 static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
@@ -2768,69 +2194,44 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
     if (!GameMode || VersionInfo.FortniteVersion >= 7.00 || !FConfiguration::bLateGame)
         return;
 
-    // Damage lifecycle setup is needed through Season 6. Location generation
-    // itself is already native there, so keep the geometry workaround pre-S6.
     EnsureLegacySafeZoneDamageEffect(GameMode);
 
     if (!UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bEnableZones ||
         !GameMode->HasSafeZoneLocations())
         return;
 
-	const bool bUseCustomCenter = FConfiguration::bCustomSafeZone;
+    const bool bUseCustomCenter = FConfiguration::bCustomSafeZone;
     if (bUseCustomCenter)
     {
-        auto GameState = GameMode->GameState
-            ? (AFortGameStateAthena*)GameMode->GameState
-            : nullptr;
-		if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
-			GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
-	}
-	const auto LegacyCustomZone =
-		FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+        auto GameState = GameMode->GameState ? (AFortGameStateAthena*)GameMode->GameState : nullptr;
+        if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
+            GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
+    }
+    const auto LegacyCustomZone = FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
 
-	if (bUseCustomCenter &&
-		CustomSafeZoneRuntime::IsMovingModeRequested())
-	{
-		auto GameState = GameMode->GameState
-			? (AFortGameStateAthena*)GameMode->GameState
-			: nullptr;
-		const int RequiredLocationCount =
-			GetLegacySafeZoneLocationCount(GameMode);
-		if (CustomSafeZoneRuntime::ApplyToLegacyLocations(
-				GameMode,
-				GameState && GameState->HasMapInfo()
-					? GameState->MapInfo
-					: nullptr,
-				RequiredLocationCount,
-				HasNativeMovingSafeZonePhasePublisher()))
-		{
-			AFortGameMode::SafeZoneLoc = FVector{};
-			return;
-		}
-	}
+    if (bUseCustomCenter && CustomSafeZoneRuntime::IsMovingModeRequested())
+    {
+        auto GameState = GameMode->GameState ? (AFortGameStateAthena*)GameMode->GameState : nullptr;
+        const int RequiredLocationCount = GetLegacySafeZoneLocationCount(GameMode);
+        if (CustomSafeZoneRuntime::ApplyToLegacyLocations(GameMode,
+                GameState && GameState->HasMapInfo() ? GameState->MapInfo : nullptr,
+                RequiredLocationCount, HasNativeMovingSafeZonePhasePublisher()))
+        {
+            AFortGameMode::SafeZoneLoc = FVector{};
+            return;
+        }
+    }
 
-    // Season 6 already receives native playlist locations. Leave those alone
-    // unless the user explicitly selected a custom circle; custom geometry has
-    // to replace the native source before StartAircraftPhase consumes it.
     if (VersionInfo.FortniteVersion >= 6.00 && !bUseCustomCenter)
         return;
 
-    // 1.10, 1.7.2 and 2.50 build their real indicator location only after
-    // aircraft exit. Pre-filling the empty array makes the bus use a temporary
-    // foundation while native SafeZones later regenerates a different center.
-    // Preserve the original Erbium SafeZoneLoc fallback on those exact builds.
-    // Custom zones remain deliberately concentric and may seed every entry.
+    // 1.10, 1.7.2 and 2.50 only build their real indicator location after aircraft exit.
     if (UsesLegacySafeZoneLocFallback() && !bUseCustomCenter)
         return;
 
-    // Keep every location the build did initialize. Missing entries through
-    // the selected current phase retain the chosen foundation anchor so the
-    // aircraft remains over the blue circle; the white preview and subsequent
-    // phases receive stable contained offsets from that anchor.
     const int RequiredLocationCount = GetLegacySafeZoneLocationCount(GameMode);
     const int ExistingLocationCount = GameMode->SafeZoneLocations.Num();
-    const int AnchorIndex = std::clamp(
-        FConfiguration::LateGameZone.load() - 1,
+    const int AnchorIndex = std::clamp(FConfiguration::LateGameZone.load() - 1,
         0, RequiredLocationCount - 1);
     FVector Center;
     bool bHasCenter = false;
@@ -2838,10 +2239,7 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
     if (bUseCustomCenter)
     {
         Center = FVector(LegacyCustomZone.Center);
-        // (0, 0) is a valid deliberate map selection. Only reject corrupt
-        // coordinates; the generated-center path below still rejects zero.
-        bHasCenter = std::isfinite(Center.X) && std::isfinite(Center.Y) &&
-            std::isfinite(Center.Z);
+        bHasCenter = std::isfinite(Center.X) && std::isfinite(Center.Y) && std::isfinite(Center.Z);
     }
 
     for (int Index = ExistingLocationCount - 1; !bHasCenter && Index >= 0; Index--)
@@ -2869,22 +2267,17 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
     for (int Index = 0; Index < ExistingLocationCount; Index++)
     {
         auto& ExistingCenter = GameMode->SafeZoneLocations.Get(Index, FVector::Size());
-        const bool bInvalidCenter =
-            !std::isfinite(ExistingCenter.X) ||
-            !std::isfinite(ExistingCenter.Y) ||
-            ExistingCenter.IsZero();
+        const bool bInvalidCenter = !std::isfinite(ExistingCenter.X) ||
+            !std::isfinite(ExistingCenter.Y) || ExistingCenter.IsZero();
         if (bUseCustomCenter)
         {
             ExistingCenter = Center;
         }
         else if (bInvalidCenter)
         {
-            ExistingCenter =
-                Index > AnchorIndex && Index > 0
-                    ? GenerateContainedLegacySafeZoneCenter(
-                        GameMode, PreviousCenter,
-                        Index - 1, Index)
-                    : PreviousCenter;
+            ExistingCenter = Index > AnchorIndex && Index > 0
+                    ? GenerateContainedLegacySafeZoneCenter(GameMode, PreviousCenter,
+                        Index - 1, Index) : PreviousCenter;
         }
 
         PreviousCenter = ExistingCenter;
@@ -2893,60 +2286,41 @@ static void EnsureLegacyLateGameSafeZoneLocations(AFortGameMode* GameMode)
     for (int Index = ExistingLocationCount; Index < RequiredLocationCount; Index++)
     {
         FVector NextCenter = PreviousCenter;
-        if (!bUseCustomCenter &&
-            Index > AnchorIndex && Index > 0)
+        if (!bUseCustomCenter && Index > AnchorIndex && Index > 0)
         {
-            NextCenter =
-                GenerateContainedLegacySafeZoneCenter(
-                    GameMode, PreviousCenter,
+            NextCenter = GenerateContainedLegacySafeZoneCenter(GameMode, PreviousCenter,
                     Index - 1, Index);
         }
 
-        GameMode->SafeZoneLocations.Add(
-            NextCenter, FVector::Size());
+        GameMode->SafeZoneLocations.Add(NextCenter, FVector::Size());
         PreviousCenter = NextCenter;
     }
 
     if (GameMode->HasbSafeZoneLocationsInitialized())
         GameMode->bSafeZoneLocationsInitialized = true;
 
-    // A populated native array means the old post-aircraft fallback must stay
-    // inactive; otherwise HandlePostSafeZonePhaseChanged would overwrite the
-    // native wall and recreate the offset circle. The custom radius is applied
-    // separately, once the native fast-forward reaches its target phase.
     AFortGameMode::SafeZoneLoc = FVector{};
 
     if (bUseCustomCenter)
         SDK::DbgLog("[SafeZoneMap] initialized lower native custom locations %d -> %d at (%.1f, %.1f, %.1f) radius=%.1f\n",
-            ExistingLocationCount, GameMode->SafeZoneLocations.Num(),
-            Center.X, Center.Y, Center.Z,
+            ExistingLocationCount, GameMode->SafeZoneLocations.Num(), Center.X, Center.Y, Center.Z,
             LegacyCustomZone.RadiusCm);
     else if (ExistingLocationCount < RequiredLocationCount)
     {
-        const int CurrentIndex = (std::min)(
-            AnchorIndex,
-            GameMode->SafeZoneLocations.Num() - 1);
-        const int PreviewIndex = (std::min)(
-            AnchorIndex + 1,
-            GameMode->SafeZoneLocations.Num() - 1);
-        const FVector& CurrentCenter =
-            GameMode->SafeZoneLocations.Get(
+        const int CurrentIndex = (std::min)(AnchorIndex, GameMode->SafeZoneLocations.Num() - 1);
+        const int PreviewIndex = (std::min)(AnchorIndex + 1, GameMode->SafeZoneLocations.Num() - 1);
+        const FVector& CurrentCenter = GameMode->SafeZoneLocations.Get(
                 CurrentIndex, FVector::Size());
-        const FVector& PreviewCenter =
-            GameMode->SafeZoneLocations.Get(
+        const FVector& PreviewCenter = GameMode->SafeZoneLocations.Get(
                 PreviewIndex, FVector::Size());
         SDK::DbgLog(
             "[SafeZone] initialized pre-S6 native locations %d -> %d current=(%.1f, %.1f, %.1f) preview=(%.1f, %.1f, %.1f) offset=%.1f\n",
-            ExistingLocationCount,
-            GameMode->SafeZoneLocations.Num(),
+            ExistingLocationCount, GameMode->SafeZoneLocations.Num(),
             CurrentCenter.X, CurrentCenter.Y, CurrentCenter.Z,
-            PreviewCenter.X, PreviewCenter.Y, PreviewCenter.Z,
-            (float)std::hypot(
-                PreviewCenter.X - CurrentCenter.X,
-                PreviewCenter.Y - CurrentCenter.Y));
+            PreviewCenter.X, PreviewCenter.Y, PreviewCenter.Z, (float)std::hypot(
+                PreviewCenter.X - CurrentCenter.X, PreviewCenter.Y - CurrentCenter.Y));
     }
 }
-
 
 void (*VendWobble__FinishedFuncOG)(UObject* Context, FFrame& Stack);
 void VendWobble__FinishedFunc(UObject* Context, FFrame& Stack)
@@ -2981,12 +2355,6 @@ void VendWobble__FinishedFunc(UObject* Context, FFrame& Stack)
         if (CollectorActor->HasPickupSpawned())
             CollectorActor->PickupSpawned.Process();
     }
-
-    /*if (Cost == 0)
-    {
-        CollectorActor->DoVendDeath();
-        CollectorActor->K2_DestroyActor();
-    }*/
 
     return VendWobble__FinishedFuncOG(Context, Stack);
 }
@@ -3033,9 +2401,7 @@ class AFortAthenaMutator_SupplyDrop : public AActor
 public:
     UCLASS_COMMON_MEMBERS(AFortAthenaMutator_SupplyDrop);
 
-    DEFINE_PROP(
-        SafeZoneMutatorData,
-        FSupplyDropSpawnDataArrayHeader);
+    DEFINE_PROP(SafeZoneMutatorData, FSupplyDropSpawnDataArrayHeader);
 };
 
 namespace
@@ -3044,11 +2410,8 @@ namespace
     {
         TWeakObjectPtr<UWorld> World;
         TWeakObjectPtr<UFortPlaylistAthena> Playlist;
-        TWeakObjectPtr<
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic>
-            GamePhaseLogic;
-        TWeakObjectPtr<AFortAthenaMutator_SupplyDrop>
-            SupplyDropMutator;
+        TWeakObjectPtr<UFortGameStateComponent_BattleRoyaleGamePhaseLogic> GamePhaseLogic;
+        TWeakObjectPtr<AFortAthenaMutator_SupplyDrop> SupplyDropMutator;
         ULONGLONG NextPlaylistResolveTimeMs = 0;
         ULONGLONG NextGamePhaseLogicResolveTimeMs = 0;
         ULONGLONG NextSupplyDropMutatorResolveTimeMs = 0;
@@ -3062,27 +2425,20 @@ namespace
 
     FSupplyDropSuppressionState GSupplyDropSuppressionState{};
 
-    bool IsSaneSupplyDropArrayHeader(
-        const FSupplyDropSpawnDataArrayHeader& Header)
+    bool IsSaneSupplyDropArrayHeader(const FSupplyDropSpawnDataArrayHeader& Header)
     {
-        if (Header.NumElements < 0 ||
-            Header.MaxElements < Header.NumElements ||
+        if (Header.NumElements < 0 || Header.MaxElements < Header.NumElements ||
             Header.MaxElements > 100000)
         {
             return false;
         }
 
-        return Header.NumElements == 0 ||
-            (Header.Data && SDK::MemReadable(Header.Data, 1));
+        return Header.NumElements == 0 || (Header.Data && SDK::MemReadable(Header.Data, 1));
     }
 
-    bool IsOffsetWithinStruct(
-        int32 Offset, int32 ValueSize, int32 StructSize)
+    bool IsOffsetWithinStruct(int32 Offset, int32 ValueSize, int32 StructSize)
     {
-        return Offset >= 0 &&
-            ValueSize > 0 &&
-            StructSize > 0 &&
-            Offset <= StructSize - ValueSize;
+        return Offset >= 0 && ValueSize > 0 && StructSize > 0 && Offset <= StructSize - ValueSize;
     }
 
     struct FSupplyDropRuntimeLayout
@@ -3117,79 +2473,46 @@ namespace
         Layout.NextResolveTimeMs = CurrentTimeMs + 1000ULL;
 
         auto EntryStruct = FindStruct("SupplyDropSpawnData");
-        auto ZoneStruct =
-            FindStruct("SupplyDropZoneBasedSpawnData");
-        auto ItemStruct =
-            FindStruct("SupplyDropItemDeliverySpawnData");
+        auto ZoneStruct = FindStruct("SupplyDropZoneBasedSpawnData");
+        auto ItemStruct = FindStruct("SupplyDropItemDeliverySpawnData");
         if (!EntryStruct || !ZoneStruct || !ItemStruct)
             return false;
 
         FSupplyDropRuntimeLayout Candidate{};
         Candidate.EntrySize = EntryStruct->GetPropertiesSize();
-        Candidate.ZoneDataOffset =
-            (int32)EntryStruct->GetOffset("ZoneBasedData");
+        Candidate.ZoneDataOffset = (int32)EntryStruct->GetOffset("ZoneBasedData");
         Candidate.ZoneDataSize = ZoneStruct->GetPropertiesSize();
         Candidate.DropsRemainingOffset = (int32)
-            ZoneStruct->GetOffset(
-                "NumDropsRemainingInWave", 0x80);
+            ZoneStruct->GetOffset("NumDropsRemainingInWave", 0x80);
         Candidate.NextWaveTimeOffset = (int32)
             ZoneStruct->GetOffset("NextWaveSpawnTime", 0x100);
         Candidate.ZoneNextSpawnTimeOffset = (int32)
             ZoneStruct->GetOffset("NextSpawnTime", 0x100);
-        Candidate.ItemDataOffset =
-            (int32)EntryStruct->GetOffset("ItemDeliveryData");
+        Candidate.ItemDataOffset = (int32)EntryStruct->GetOffset("ItemDeliveryData");
         Candidate.ItemDataSize = ItemStruct->GetPropertiesSize();
         Candidate.ItemsToDeliverOffset = (int32)
             ItemStruct->GetOffset("NumItemsToDeliver", 0x80);
-        Candidate.QueuedTimesOffset =
-            (int32)ItemStruct->GetOffset("QueuedSpawnTimes");
+        Candidate.QueuedTimesOffset = (int32)ItemStruct->GetOffset("QueuedSpawnTimes");
         Candidate.ItemNextSpawnTimeOffset = (int32)
             ItemStruct->GetOffset("NextSpawnTime", 0x100);
         Candidate.InitialSpawnsOffset = (int32)
             ItemStruct->GetOffset("NumInitialSpawns", 0x80);
 
-        if (Candidate.EntrySize <= 0 ||
-            Candidate.EntrySize > 0x400 ||
-            Candidate.ZoneDataSize <= 0 ||
-            Candidate.ZoneDataSize > 0x200 ||
-            Candidate.ItemDataSize <= 0 ||
-            Candidate.ItemDataSize > 0x200 ||
-            !IsOffsetWithinStruct(
-                Candidate.ZoneDataOffset,
-                Candidate.ZoneDataSize,
-                Candidate.EntrySize) ||
-            !IsOffsetWithinStruct(
-                Candidate.DropsRemainingOffset,
-                sizeof(int32),
-                Candidate.ZoneDataSize) ||
-            !IsOffsetWithinStruct(
-                Candidate.NextWaveTimeOffset,
-                sizeof(float),
-                Candidate.ZoneDataSize) ||
-            !IsOffsetWithinStruct(
-                Candidate.ZoneNextSpawnTimeOffset,
-                sizeof(float),
-                Candidate.ZoneDataSize) ||
-            !IsOffsetWithinStruct(
-                Candidate.ItemDataOffset,
-                Candidate.ItemDataSize,
-                Candidate.EntrySize) ||
-            !IsOffsetWithinStruct(
-                Candidate.ItemsToDeliverOffset,
-                sizeof(int32),
-                Candidate.ItemDataSize) ||
-            !IsOffsetWithinStruct(
-                Candidate.QueuedTimesOffset,
-                sizeof(FSupplyDropSpawnDataArrayHeader),
-                Candidate.ItemDataSize) ||
-            !IsOffsetWithinStruct(
-                Candidate.ItemNextSpawnTimeOffset,
-                sizeof(float),
-                Candidate.ItemDataSize) ||
-            !IsOffsetWithinStruct(
-                Candidate.InitialSpawnsOffset,
-                sizeof(int32),
-                Candidate.ItemDataSize))
+        if (Candidate.EntrySize <= 0 || Candidate.EntrySize > 0x400 ||
+            Candidate.ZoneDataSize <= 0 || Candidate.ZoneDataSize > 0x200 ||
+            Candidate.ItemDataSize <= 0 || Candidate.ItemDataSize > 0x200 || !IsOffsetWithinStruct(
+                Candidate.ZoneDataOffset, Candidate.ZoneDataSize, Candidate.EntrySize) ||
+            !IsOffsetWithinStruct(Candidate.DropsRemainingOffset, sizeof(int32),
+                Candidate.ZoneDataSize) || !IsOffsetWithinStruct(Candidate.NextWaveTimeOffset,
+                sizeof(float), Candidate.ZoneDataSize) || !IsOffsetWithinStruct(
+                Candidate.ZoneNextSpawnTimeOffset, sizeof(float), Candidate.ZoneDataSize) ||
+            !IsOffsetWithinStruct(Candidate.ItemDataOffset, Candidate.ItemDataSize,
+                Candidate.EntrySize) || !IsOffsetWithinStruct(Candidate.ItemsToDeliverOffset,
+                sizeof(int32), Candidate.ItemDataSize) || !IsOffsetWithinStruct(
+                Candidate.QueuedTimesOffset, sizeof(FSupplyDropSpawnDataArrayHeader),
+                Candidate.ItemDataSize) || !IsOffsetWithinStruct(Candidate.ItemNextSpawnTimeOffset,
+                sizeof(float), Candidate.ItemDataSize) || !IsOffsetWithinStruct(
+                Candidate.InitialSpawnsOffset, sizeof(int32), Candidate.ItemDataSize))
         {
             return false;
         }
@@ -3203,34 +2526,25 @@ namespace
     {
         auto& State = GSupplyDropSuppressionState;
 
-        // Runtime schedules and mutator actors are world-owned and suppression
-        // is match-locked. Re-enabling either can release overdue drops, so only
-        // restore the shared playlist asset when the tracked world changes.
         auto Playlist = State.Playlist.Get();
-        if (IsSaneObject(Playlist) &&
-            State.bHasPlaylistSupplyDropFlag &&
-            Playlist->HasbUseDefaultSupplyDrops() &&
-            !Playlist->bUseDefaultSupplyDrops)
+        if (IsSaneObject(Playlist) && State.bHasPlaylistSupplyDropFlag &&
+            Playlist->HasbUseDefaultSupplyDrops() && !Playlist->bUseDefaultSupplyDrops)
         {
-            Playlist->bUseDefaultSupplyDrops =
-                State.bOriginalUseDefaultSupplyDrops;
+            Playlist->bUseDefaultSupplyDrops = State.bOriginalUseDefaultSupplyDrops;
         }
 
         if (State.bApplied)
         {
-            SDK::DbgLog(
-                "[SupplyDrops] suppression state released\n");
+            SDK::DbgLog("[SupplyDrops] suppression state released\n");
         }
 
         State = FSupplyDropSuppressionState{};
     }
 
-    template <typename TOwner>
-    bool SuppressSupplyDropRuntimeArray(
+    template <typename TOwner> bool SuppressSupplyDropRuntimeArray(
         TOwner* Owner, int32& SuppressedEntryCount)
     {
-        if (!IsSaneObject(Owner) ||
-            !Owner->HasSupplyDropSpawnDataList() ||
+        if (!IsSaneObject(Owner) || !Owner->HasSupplyDropSpawnDataList() ||
             !ResolveSupplyDropRuntimeLayout())
         {
             return false;
@@ -3241,59 +2555,34 @@ namespace
             return false;
 
         const auto& Layout = GSupplyDropRuntimeLayout;
-        const size_t EntryBytes =
-            (size_t)Header.NumElements *
-            (size_t)Layout.EntrySize;
-        if (Header.NumElements > 0 &&
-            (!Header.Data ||
-                !SDK::MemReadable(Header.Data, EntryBytes)))
+        const size_t EntryBytes = (size_t)Header.NumElements * (size_t)Layout.EntrySize;
+        if (Header.NumElements > 0 && (!Header.Data || !SDK::MemReadable(Header.Data, EntryBytes)))
         {
             return false;
         }
 
-        constexpr float NeverSpawn =
-            (std::numeric_limits<float>::max)();
+        constexpr float NeverSpawn = (std::numeric_limits<float>::max)();
         for (int32 Index = 0; Index < Header.NumElements; ++Index)
         {
-            auto Entry =
-                (uint8*)Header.Data +
-                (size_t)Index * (size_t)Layout.EntrySize;
+            auto Entry = (uint8*)Header.Data + (size_t)Index * (size_t)Layout.EntrySize;
             auto ZoneData = Entry + Layout.ZoneDataOffset;
-            GetFromOffset<int32>(
-                ZoneData,
-                Layout.DropsRemainingOffset) = 0;
-            GetFromOffset<float>(
-                ZoneData,
-                Layout.NextWaveTimeOffset) = NeverSpawn;
-            GetFromOffset<float>(
-                ZoneData,
-                Layout.ZoneNextSpawnTimeOffset) = NeverSpawn;
+            GetFromOffset<int32>(ZoneData, Layout.DropsRemainingOffset) = 0;
+            GetFromOffset<float>(ZoneData, Layout.NextWaveTimeOffset) = NeverSpawn;
+            GetFromOffset<float>(ZoneData, Layout.ZoneNextSpawnTimeOffset) = NeverSpawn;
 
             auto ItemData = Entry + Layout.ItemDataOffset;
-            GetFromOffset<int32>(
-                ItemData,
-                Layout.ItemsToDeliverOffset) = 0;
-            GetFromOffset<float>(
-                ItemData,
-                Layout.ItemNextSpawnTimeOffset) = NeverSpawn;
-            GetFromOffset<int32>(
-                ItemData,
-                Layout.InitialSpawnsOffset) = 0;
+            GetFromOffset<int32>(ItemData, Layout.ItemsToDeliverOffset) = 0;
+            GetFromOffset<float>(ItemData, Layout.ItemNextSpawnTimeOffset) = NeverSpawn;
+            GetFromOffset<int32>(ItemData, Layout.InitialSpawnsOffset) = 0;
 
-            auto& QueuedTimes =
-                GetFromOffset<FSupplyDropSpawnDataArrayHeader>(
-                    ItemData,
+            auto& QueuedTimes = GetFromOffset<FSupplyDropSpawnDataArrayHeader>(ItemData,
                     Layout.QueuedTimesOffset);
             if (!IsSaneSupplyDropArrayHeader(QueuedTimes))
                 continue;
 
-            const size_t QueuedTimeBytes =
-                (size_t)QueuedTimes.NumElements * sizeof(float);
-            if (QueuedTimes.NumElements > 0 &&
-                (!QueuedTimes.Data ||
-                    !SDK::MemReadable(
-                        QueuedTimes.Data,
-                        QueuedTimeBytes)))
+            const size_t QueuedTimeBytes = (size_t)QueuedTimes.NumElements * sizeof(float);
+            if (QueuedTimes.NumElements > 0 && (!QueuedTimes.Data || !SDK::MemReadable(
+                        QueuedTimes.Data, QueuedTimeBytes)))
             {
                 continue;
             }
@@ -3315,10 +2604,8 @@ namespace
     {
         if (World && IsSaneObject(World->GameState))
         {
-            auto GameState =
-                static_cast<AFortGameStateAthena*>(World->GameState);
-            auto CurrentPlaylist =
-                const_cast<UFortPlaylistAthena*>(
+            auto GameState = static_cast<AFortGameStateAthena*>(World->GameState);
+            auto CurrentPlaylist = const_cast<UFortPlaylistAthena*>(
                     GetPublishedPlaylist(GameState));
             if (IsSaneObject(CurrentPlaylist))
                 return CurrentPlaylist;
@@ -3339,60 +2626,42 @@ namespace
             return nullptr;
         State.NextPlaylistResolveTimeMs = CurrentTimeMs + 1000ULL;
 
-        auto Playlist = const_cast<UFortPlaylistAthena*>(
-            FindObject<UFortPlaylistAthena>(
+        auto Playlist = const_cast<UFortPlaylistAthena*>(FindObject<UFortPlaylistAthena>(
                 FConfiguration::Playlist));
         if (!Playlist)
         {
-            Playlist = const_cast<UFortPlaylistAthena*>(
-                FindObject<UFortPlaylistAthena>(
+            Playlist = const_cast<UFortPlaylistAthena*>(FindObject<UFortPlaylistAthena>(
                     L"/Game/Athena/Playlists/"
                     L"Playlist_DefaultSolo.Playlist_DefaultSolo"));
         }
         return Playlist;
     }
 
-    bool IsNativeSupplyDeliveryPlaylist(
-        const UFortPlaylistAthena* Playlist)
+    bool IsNativeSupplyDeliveryPlaylist(const UFortPlaylistAthena* Playlist)
     {
-        if (!FFortAthenaNativeLTMCompatibility::
-                IsTargetPlaylist(Playlist))
+        if (!FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(Playlist))
         {
             return false;
         }
 
-        // IsTargetPlaylist has already verified exact 10.40 canonical asset
-        // identity. Only Getaway and Food Fight depend on their authored
-        // item-delivery data here; Arsenal intentionally remains suppressible.
         const auto ObjectName = Playlist->Name.ToWString();
-        return ObjectName == L"Playlist_Bling_Solo" ||
-            ObjectName == L"Playlist_Bling_Duos" ||
-            ObjectName == L"Playlist_Bling_Squads" ||
-            ObjectName == L"Playlist_Barrier" ||
+        return ObjectName == L"Playlist_Bling_Solo" || ObjectName == L"Playlist_Bling_Duos" ||
+            ObjectName == L"Playlist_Bling_Squads" || ObjectName == L"Playlist_Barrier" ||
             ObjectName == L"Playlist_Barrier_16_B_Lava";
     }
 
-    const UFortPlaylistAthena*
-        ResolveNativeSupplyDeliveryPlaylist(
-            UWorld* World,
+    const UFortPlaylistAthena* ResolveNativeSupplyDeliveryPlaylist(UWorld* World,
             const UFortPlaylistAthena* ResolvedPlaylist)
     {
-        // Prefer either published playlist slot. During native 10.40
-        // publication one can become valid a frame before the other, and the
-        // generic resolver otherwise favors BasePlaylist exclusively.
         if (World && IsSaneObject(World->GameState))
         {
-            auto GameState =
-                static_cast<AFortGameStateAthena*>(World->GameState);
-            if (GameState->HasCurrentPlaylistInfo() &&
-                FPlaylistPropertyArray::StaticStruct())
+            auto GameState = static_cast<AFortGameStateAthena*>(World->GameState);
+            if (GameState->HasCurrentPlaylistInfo() && FPlaylistPropertyArray::StaticStruct())
             {
                 if (FPlaylistPropertyArray::HasOverridePlaylist())
                 {
-                    auto OverridePlaylist =
-                        GameState->CurrentPlaylistInfo.OverridePlaylist;
-                    if (IsNativeSupplyDeliveryPlaylist(
-                            OverridePlaylist))
+                    auto OverridePlaylist = GameState->CurrentPlaylistInfo.OverridePlaylist;
+                    if (IsNativeSupplyDeliveryPlaylist(OverridePlaylist))
                     {
                         return OverridePlaylist;
                     }
@@ -3400,8 +2669,7 @@ namespace
 
                 if (FPlaylistPropertyArray::HasBasePlaylist())
                 {
-                    auto BasePlaylist =
-                        GameState->CurrentPlaylistInfo.BasePlaylist;
+                    auto BasePlaylist = GameState->CurrentPlaylistInfo.BasePlaylist;
                     if (IsNativeSupplyDeliveryPlaylist(BasePlaylist))
                         return BasePlaylist;
                 }
@@ -3409,20 +2677,16 @@ namespace
 
             if (GameState->HasCurrentPlaylistData())
             {
-                auto CurrentPlaylist =
-                    GameState->CurrentPlaylistData;
+                auto CurrentPlaylist = GameState->CurrentPlaylistData;
                 if (IsNativeSupplyDeliveryPlaylist(CurrentPlaylist))
                     return CurrentPlaylist;
             }
         }
 
-        return IsNativeSupplyDeliveryPlaylist(ResolvedPlaylist)
-            ? ResolvedPlaylist
-            : nullptr;
+        return IsNativeSupplyDeliveryPlaylist(ResolvedPlaylist) ? ResolvedPlaylist : nullptr;
     }
 
-    bool IsOwnedByCurrentGameState(
-        const UObject* Object, UWorld* World)
+    bool IsOwnedByCurrentGameState(const UObject* Object, UWorld* World)
     {
         if (!Object || !World || !World->GameState)
             return false;
@@ -3454,61 +2718,44 @@ namespace
         return false;
     }
 
-    UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
-        ResolveCurrentGamePhaseLogic(
+    UFortGameStateComponent_BattleRoyaleGamePhaseLogic* ResolveCurrentGamePhaseLogic(
             UWorld* World, bool bForceDiscovery)
     {
-        // The component-owned phase runtime is a modern Athena path. Legacy
-        // builds such as FN 10.40 keep the supply-drop cache on GameMode and/or
-        // an active mutator; walking every live UObject once per second can
-        // never find this component there and stalls the same game thread that
-        // processes lethal damage and winner replication.
         if (VersionInfo.FortniteVersion < 25.20)
             return nullptr;
 
         auto& State = GSupplyDropSuppressionState;
         auto Cached = State.GamePhaseLogic.Get();
-        if (IsSaneObject(Cached) &&
-            IsOwnedByCurrentGameState(Cached, World))
+        if (IsSaneObject(Cached) && IsOwnedByCurrentGameState(Cached, World))
             return Cached;
 
         State.GamePhaseLogic = {};
         const ULONGLONG CurrentTimeMs = GetTickCount64();
-        if (!bForceDiscovery && CurrentTimeMs <
-            State.NextGamePhaseLogicResolveTimeMs)
+        if (!bForceDiscovery && CurrentTimeMs <State.NextGamePhaseLogicResolveTimeMs)
         {
             return nullptr;
         }
-        State.NextGamePhaseLogicResolveTimeMs =
-            CurrentTimeMs + 1000ULL;
+        State.NextGamePhaseLogicResolveTimeMs = CurrentTimeMs + 1000ULL;
 
-        const UClass* ComponentClass =
-            FindClass(
+        const UClass* ComponentClass = FindClass(
                 "FortGameStateComponent_BattleRoyaleGamePhaseLogic");
         auto GameState = World && IsSaneObject(World->GameState)
-            ? static_cast<AFortGameStateAthena*>(World->GameState)
-            : nullptr;
+            ? static_cast<AFortGameStateAthena*>(World->GameState) : nullptr;
         if (!ComponentClass || !GameState)
             return nullptr;
 
-        auto Component =
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-                Get(World);
-        if ((!IsSaneObject(Component) ||
-                !IsOwnedByCurrentGameState(Component, World)) &&
+        auto Component = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
+        if ((!IsSaneObject(Component) || !IsOwnedByCurrentGameState(Component, World)) &&
             IsSaneObject(GameState))
         {
-            Component = reinterpret_cast<
-                UFortGameStateComponent_BattleRoyaleGamePhaseLogic*>(
+            Component = reinterpret_cast<UFortGameStateComponent_BattleRoyaleGamePhaseLogic*>(
                     GameState->GetComponentByClass(ComponentClass));
         }
-        if (IsSaneObject(Component) &&
-            !Component->IsDefaultObject() &&
+        if (IsSaneObject(Component) && !Component->IsDefaultObject() &&
             IsOwnedByCurrentGameState(Component, World))
         {
             State.GamePhaseLogic = TWeakObjectPtr<
-                UFortGameStateComponent_BattleRoyaleGamePhaseLogic>(
-                    Component);
+                UFortGameStateComponent_BattleRoyaleGamePhaseLogic>(Component);
             return Component;
         }
 
@@ -3538,51 +2785,35 @@ namespace
             return false;
         Layout.NextResolveTimeMs = CurrentTimeMs + 1000ULL;
 
-        auto MutatorDataStruct =
-            FindStruct("FortSupplyDropMutatorData");
-        auto ItemDeliveryDataStruct =
-            FindStruct("FortItemDeliverySupplyDropMutatorData");
+        auto MutatorDataStruct = FindStruct("FortSupplyDropMutatorData");
+        auto ItemDeliveryDataStruct = FindStruct("FortItemDeliverySupplyDropMutatorData");
         if (!MutatorDataStruct || !ItemDeliveryDataStruct)
             return false;
 
-        const int32 MutatorDataSize =
-            MutatorDataStruct->GetPropertiesSize();
-        const int32 ItemDeliveryDataSize =
-            ItemDeliveryDataStruct->GetPropertiesSize();
+        const int32 MutatorDataSize = MutatorDataStruct->GetPropertiesSize();
+        const int32 ItemDeliveryDataSize = ItemDeliveryDataStruct->GetPropertiesSize();
         const int32 ItemDeliveryArrayOffset = (int32)
-            MutatorDataStruct->GetOffset(
-                "ItemDeliveryMutatorPerSafeZonePhase");
+            MutatorDataStruct->GetOffset("ItemDeliveryMutatorPerSafeZonePhase");
         const int32 ShouldApplyOffset = (int32)
-            ItemDeliveryDataStruct->GetOffset(
-                "bShouldApplyMutator", 0x20000);
+            ItemDeliveryDataStruct->GetOffset("bShouldApplyMutator", 0x20000);
 
-        if (MutatorDataSize <= 0 || MutatorDataSize > 0x400 ||
-            ItemDeliveryDataSize <= 0 ||
-            ItemDeliveryDataSize > 0x400 ||
-            !IsOffsetWithinStruct(
-                ItemDeliveryArrayOffset,
-                sizeof(FSupplyDropSpawnDataArrayHeader),
-                MutatorDataSize) ||
-            !IsOffsetWithinStruct(
-                ShouldApplyOffset,
-                sizeof(bool),
-                ItemDeliveryDataSize))
+        if (MutatorDataSize <= 0 || MutatorDataSize > 0x400 || ItemDeliveryDataSize <= 0 ||
+            ItemDeliveryDataSize > 0x400 || !IsOffsetWithinStruct(ItemDeliveryArrayOffset,
+                sizeof(FSupplyDropSpawnDataArrayHeader), MutatorDataSize) || !IsOffsetWithinStruct(
+                ShouldApplyOffset, sizeof(bool), ItemDeliveryDataSize))
         {
             return false;
         }
 
         Layout.MutatorDataSize = MutatorDataSize;
-        Layout.ItemDeliveryArrayOffset =
-            ItemDeliveryArrayOffset;
-        Layout.ItemDeliveryDataSize =
-            ItemDeliveryDataSize;
+        Layout.ItemDeliveryArrayOffset = ItemDeliveryArrayOffset;
+        Layout.ItemDeliveryDataSize = ItemDeliveryDataSize;
         Layout.ShouldApplyOffset = ShouldApplyOffset;
         Layout.bValid = true;
         return true;
     }
 
-    AFortAthenaMutator_SupplyDrop*
-        ResolveCurrentSupplyDropMutator(
+    AFortAthenaMutator_SupplyDrop* ResolveCurrentSupplyDropMutator(
             UWorld* World, bool bForceDiscovery)
     {
         auto& State = GSupplyDropSuppressionState;
@@ -3592,49 +2823,38 @@ namespace
 
         State.SupplyDropMutator = {};
         const ULONGLONG CurrentTimeMs = GetTickCount64();
-        if (!bForceDiscovery && CurrentTimeMs <
-            State.NextSupplyDropMutatorResolveTimeMs)
+        if (!bForceDiscovery && CurrentTimeMs <State.NextSupplyDropMutatorResolveTimeMs)
         {
             return nullptr;
         }
-        State.NextSupplyDropMutatorResolveTimeMs =
-            CurrentTimeMs + 15000ULL;
+        State.NextSupplyDropMutatorResolveTimeMs = CurrentTimeMs + 15000ULL;
 
-        const UClass* MutatorClass =
-            FindClass("FortAthenaMutator_SupplyDrop");
+        const UClass* MutatorClass = FindClass("FortAthenaMutator_SupplyDrop");
         if (!MutatorClass)
             return nullptr;
 
         bool bInspectedAuthoritativeMutatorList = false;
         if (World && IsSaneObject(World->GameState))
         {
-            auto GameState =
-                static_cast<AFortGameStateAthena*>(World->GameState);
+            auto GameState = static_cast<AFortGameStateAthena*>(World->GameState);
             if (GameState->HasGameplayMutators())
             {
                 bInspectedAuthoritativeMutatorList = true;
                 auto& ActiveMutators = GameState->GetGameplayMutators();
-                const auto& ActiveMutatorHeader =
-                    reinterpret_cast<
-                        const FSupplyDropSpawnDataArrayHeader&>(
-                            ActiveMutators);
-                const size_t ActiveMutatorBytes =
-                    (size_t)ActiveMutatorHeader.NumElements *
+                const auto& ActiveMutatorHeader = reinterpret_cast<
+                        const FSupplyDropSpawnDataArrayHeader&>(ActiveMutators);
+                const size_t ActiveMutatorBytes = (size_t)ActiveMutatorHeader.NumElements *
                     sizeof(AFortAthenaMutator*);
-                if (IsSaneSupplyDropArrayHeader(
-                        ActiveMutatorHeader) &&
-                    (ActiveMutatorHeader.NumElements == 0 ||
-                        SDK::MemReadable(
-                            ActiveMutatorHeader.Data,
-                            ActiveMutatorBytes)))
+                if (IsSaneSupplyDropArrayHeader(ActiveMutatorHeader) &&
+                    (ActiveMutatorHeader.NumElements == 0 || SDK::MemReadable(
+                            ActiveMutatorHeader.Data, ActiveMutatorBytes)))
                 {
                     for (int32 Index = 0;
                         Index < ActiveMutators.Num();
                         ++Index)
                     {
                         auto Mutator = ActiveMutators[Index];
-                        if (!IsSaneObject(Mutator) ||
-                            !Mutator->IsA(MutatorClass) ||
+                        if (!IsSaneObject(Mutator) || !Mutator->IsA(MutatorClass) ||
                             !IsOwnedByWorld(Mutator, World))
                         {
                             continue;
@@ -3642,9 +2862,7 @@ namespace
 
                         auto SupplyDropMutator = reinterpret_cast<
                             AFortAthenaMutator_SupplyDrop*>(Mutator);
-                        State.SupplyDropMutator =
-                            TWeakObjectPtr<
-                                AFortAthenaMutator_SupplyDrop>(
+                        State.SupplyDropMutator = TWeakObjectPtr<AFortAthenaMutator_SupplyDrop>(
                                 SupplyDropMutator);
                         return SupplyDropMutator;
                     }
@@ -3652,42 +2870,30 @@ namespace
             }
         }
 
-        // Registered gameplay mutators are authoritative once that reflected
-        // list exists. A loaded-but-unregistered UObject cannot schedule a
-        // supply drop, so a normal live tick must not fall through to a global
-        // registry scan. Forced discovery at startup/phase transitions retains
-        // the fallback for builds whose list is populated unusually late.
         if (bInspectedAuthoritativeMutatorList && !bForceDiscovery)
             return nullptr;
 
         for (int32 Index = 0; Index < TUObjectArray::Num(); ++Index)
         {
             auto Object = GetLiveObjectByIndex(Index);
-            if (!Object || Object->IsDefaultObject() ||
-                !Object->IsA(MutatorClass) ||
-                !IsSaneObject(Object) ||
-                !IsOwnedByWorld(Object, World))
+            if (!Object || Object->IsDefaultObject() || !Object->IsA(MutatorClass) ||
+                !IsSaneObject(Object) || !IsOwnedByWorld(Object, World))
             {
                 continue;
             }
 
-            auto Mutator = reinterpret_cast<
-                AFortAthenaMutator_SupplyDrop*>(Object);
-            State.SupplyDropMutator =
-                TWeakObjectPtr<AFortAthenaMutator_SupplyDrop>(
-                    Mutator);
+            auto Mutator = reinterpret_cast<AFortAthenaMutator_SupplyDrop*>(Object);
+            State.SupplyDropMutator = TWeakObjectPtr<AFortAthenaMutator_SupplyDrop>(Mutator);
             return Mutator;
         }
 
         return nullptr;
     }
 
-    bool SuppressSupplyDropMutator(
-        AFortAthenaMutator_SupplyDrop* Mutator,
+    bool SuppressSupplyDropMutator(AFortAthenaMutator_SupplyDrop* Mutator,
         int32& SuppressedPhaseCount)
     {
-        if (!IsSaneObject(Mutator) ||
-            !Mutator->HasSafeZoneMutatorData() ||
+        if (!IsSaneObject(Mutator) || !Mutator->HasSafeZoneMutatorData() ||
             !ResolveSupplyDropMutatorLayout())
         {
             return false;
@@ -3698,13 +2904,9 @@ namespace
         if (!IsSaneSupplyDropArrayHeader(MutatorData))
             return false;
 
-        const size_t MutatorDataBytes =
-            (size_t)MutatorData.NumElements *
+        const size_t MutatorDataBytes = (size_t)MutatorData.NumElements *
             (size_t)Layout.MutatorDataSize;
-        if (MutatorData.NumElements > 0 &&
-            (!MutatorData.Data ||
-                !SDK::MemReadable(
-                    MutatorData.Data,
+        if (MutatorData.NumElements > 0 && (!MutatorData.Data || !SDK::MemReadable(MutatorData.Data,
                     MutatorDataBytes)))
         {
             return false;
@@ -3714,25 +2916,17 @@ namespace
             MutatorIndex < MutatorData.NumElements;
             ++MutatorIndex)
         {
-            auto MutatorEntry =
-                (uint8*)MutatorData.Data +
-                (size_t)MutatorIndex *
+            auto MutatorEntry = (uint8*)MutatorData.Data + (size_t)MutatorIndex *
                     (size_t)Layout.MutatorDataSize;
-            auto& DeliveryPhases =
-                GetFromOffset<FSupplyDropSpawnDataArrayHeader>(
-                    MutatorEntry,
+            auto& DeliveryPhases = GetFromOffset<FSupplyDropSpawnDataArrayHeader>(MutatorEntry,
                     Layout.ItemDeliveryArrayOffset);
             if (!IsSaneSupplyDropArrayHeader(DeliveryPhases))
                 continue;
 
-            const size_t DeliveryPhaseBytes =
-                (size_t)DeliveryPhases.NumElements *
+            const size_t DeliveryPhaseBytes = (size_t)DeliveryPhases.NumElements *
                 (size_t)Layout.ItemDeliveryDataSize;
-            if (DeliveryPhases.NumElements > 0 &&
-                (!DeliveryPhases.Data ||
-                    !SDK::MemReadable(
-                        DeliveryPhases.Data,
-                        DeliveryPhaseBytes)))
+            if (DeliveryPhases.NumElements > 0 && (!DeliveryPhases.Data || !SDK::MemReadable(
+                        DeliveryPhases.Data, DeliveryPhaseBytes)))
             {
                 continue;
             }
@@ -3741,14 +2935,9 @@ namespace
                 PhaseIndex < DeliveryPhases.NumElements;
                 ++PhaseIndex)
             {
-                auto PhaseEntry =
-                    (uint8*)DeliveryPhases.Data +
-                    (size_t)PhaseIndex *
+                auto PhaseEntry = (uint8*)DeliveryPhases.Data + (size_t)PhaseIndex *
                         (size_t)Layout.ItemDeliveryDataSize;
-                auto& bShouldApply =
-                    GetFromOffset<bool>(
-                        PhaseEntry,
-                        Layout.ShouldApplyOffset);
+                auto& bShouldApply = GetFromOffset<bool>(PhaseEntry, Layout.ShouldApplyOffset);
                 if (bShouldApply)
                 {
                     bShouldApply = false;
@@ -3760,8 +2949,7 @@ namespace
         return true;
     }
 
-    void ApplySupplyDropSuppression(
-        UWorld* World, bool bForceDiscovery)
+    void ApplySupplyDropSuppression(UWorld* World, bool bForceDiscovery)
     {
         if (!World)
         {
@@ -3778,18 +2966,15 @@ namespace
         }
 
         auto Playlist = ResolveSupplyDropPlaylist(World);
-        auto NativeDeliveryPlaylist =
-            ResolveNativeSupplyDeliveryPlaylist(World, Playlist);
+        auto NativeDeliveryPlaylist = ResolveNativeSupplyDeliveryPlaylist(World, Playlist);
         if (NativeDeliveryPlaylist)
         {
-            if (FConfiguration::bDisableSupplyDrops &&
-                FConfiguration::bReadyToStart)
+            if (FConfiguration::bDisableSupplyDrops && FConfiguration::bReadyToStart)
             {
                 State.bLockedForMatch = true;
             }
 
-            const bool bShouldSuppress =
-                FConfiguration::bDisableSupplyDrops ||
+            const bool bShouldSuppress = FConfiguration::bDisableSupplyDrops ||
                 State.bLockedForMatch;
             if (!bShouldSuppress)
             {
@@ -3801,21 +2986,13 @@ namespace
                 return;
             }
 
-            // The runtime arrays also contain Getaway escape-van delivery and
-            // Food Fight objective delivery. Honor the user's toggle by
-            // disabling only the playlist's generic/default supply drops and
-            // leave those native item-delivery schedules intact.
-            const bool bHasStaleRuntimeSuppression =
-                State.GamePhaseLogic.Get() ||
+            const bool bHasStaleRuntimeSuppression = State.GamePhaseLogic.Get() ||
                 State.SupplyDropMutator.Get();
-            const bool bTracksDifferentPlaylist =
-                State.Playlist.Get() &&
+            const bool bTracksDifferentPlaylist = State.Playlist.Get() &&
                 State.Playlist.Get() != NativeDeliveryPlaylist;
-            if (bHasStaleRuntimeSuppression ||
-                bTracksDifferentPlaylist)
+            if (bHasStaleRuntimeSuppression || bTracksDifferentPlaylist)
             {
-                const bool bLockedForMatch =
-                    State.bLockedForMatch;
+                const bool bLockedForMatch = State.bLockedForMatch;
                 RestoreSupplyDropSuppressionState();
                 State.World = TWeakObjectPtr<UWorld>(World);
                 State.bLockedForMatch = bLockedForMatch;
@@ -3823,53 +3000,41 @@ namespace
 
             if (State.Playlist.Get() != NativeDeliveryPlaylist)
             {
-                State.Playlist =
-                    TWeakObjectPtr<UFortPlaylistAthena>(
-                        const_cast<UFortPlaylistAthena*>(
-                            NativeDeliveryPlaylist));
-                State.bHasPlaylistSupplyDropFlag =
-                    NativeDeliveryPlaylist
+                State.Playlist = TWeakObjectPtr<UFortPlaylistAthena>(
+                        const_cast<UFortPlaylistAthena*>(NativeDeliveryPlaylist));
+                State.bHasPlaylistSupplyDropFlag = NativeDeliveryPlaylist
                         ->HasbUseDefaultSupplyDrops();
                 if (State.bHasPlaylistSupplyDropFlag)
                 {
-                    State.bOriginalUseDefaultSupplyDrops =
-                        NativeDeliveryPlaylist
+                    State.bOriginalUseDefaultSupplyDrops = NativeDeliveryPlaylist
                             ->bUseDefaultSupplyDrops;
                 }
             }
 
             if (State.bHasPlaylistSupplyDropFlag)
             {
-                const_cast<UFortPlaylistAthena*>(
-                    NativeDeliveryPlaylist)
+                const_cast<UFortPlaylistAthena*>(NativeDeliveryPlaylist)
                     ->bUseDefaultSupplyDrops = false;
             }
 
-            State.bApplied =
-                State.bHasPlaylistSupplyDropFlag;
+            State.bApplied = State.bHasPlaylistSupplyDropFlag;
             if (!State.bLoggedNativeDeliveryPreserved)
             {
-                SDK::DbgLog(
-                    "[SupplyDrops] default drops suppressed; "
+                SDK::DbgLog("[SupplyDrops] default drops suppressed; "
                     "native item delivery preserved playlist=%s "
-                    "playlistFlag=%d\n",
-                    NativeDeliveryPlaylist->Name
-                        .ToString().c_str(),
+                    "playlistFlag=%d\n", NativeDeliveryPlaylist->Name.ToString().c_str(),
                     (int)State.bApplied);
                 State.bLoggedNativeDeliveryPreserved = true;
             }
             return;
         }
 
-        if (FConfiguration::bDisableSupplyDrops &&
-            FConfiguration::bReadyToStart)
+        if (FConfiguration::bDisableSupplyDrops && FConfiguration::bReadyToStart)
         {
             State.bLockedForMatch = true;
         }
 
-        const bool bShouldSuppress =
-            FConfiguration::bDisableSupplyDrops ||
-            State.bLockedForMatch;
+        const bool bShouldSuppress = FConfiguration::bDisableSupplyDrops || State.bLockedForMatch;
         if (!bShouldSuppress)
         {
             if (State.bApplied)
@@ -3887,23 +3052,18 @@ namespace
             if (State.Playlist.Get() != Playlist)
             {
                 auto PreviousPlaylist = State.Playlist.Get();
-                if (IsSaneObject(PreviousPlaylist) &&
-                    State.bHasPlaylistSupplyDropFlag &&
+                if (IsSaneObject(PreviousPlaylist) && State.bHasPlaylistSupplyDropFlag &&
                     PreviousPlaylist->HasbUseDefaultSupplyDrops() &&
                     !PreviousPlaylist->bUseDefaultSupplyDrops)
                 {
-                    PreviousPlaylist->bUseDefaultSupplyDrops =
-                        State.bOriginalUseDefaultSupplyDrops;
+                    PreviousPlaylist->bUseDefaultSupplyDrops = State.bOriginalUseDefaultSupplyDrops;
                 }
 
-                State.Playlist =
-                    TWeakObjectPtr<UFortPlaylistAthena>(Playlist);
-                State.bHasPlaylistSupplyDropFlag =
-                    Playlist->HasbUseDefaultSupplyDrops();
+                State.Playlist = TWeakObjectPtr<UFortPlaylistAthena>(Playlist);
+                State.bHasPlaylistSupplyDropFlag = Playlist->HasbUseDefaultSupplyDrops();
                 if (State.bHasPlaylistSupplyDropFlag)
                 {
-                    State.bOriginalUseDefaultSupplyDrops =
-                        Playlist->bUseDefaultSupplyDrops;
+                    State.bOriginalUseDefaultSupplyDrops = Playlist->bUseDefaultSupplyDrops;
                 }
             }
 
@@ -3920,43 +3080,27 @@ namespace
         bool bSuppressedMutator = false;
         if (State.bLockedForMatch)
         {
-            auto GameMode = World->AuthorityGameMode
-                ? (AFortGameMode*)World->AuthorityGameMode
+            auto GameMode = World->AuthorityGameMode ? (AFortGameMode*)World->AuthorityGameMode
                 : nullptr;
-            bSuppressedGameModeCache =
-                SuppressSupplyDropRuntimeArray(
+            bSuppressedGameModeCache = SuppressSupplyDropRuntimeArray(
                     GameMode, SuppressedEntryCount);
 
-            auto GamePhaseLogic =
-                ResolveCurrentGamePhaseLogic(
-                    World, bForceDiscovery);
-            bSuppressedComponentCache =
-                SuppressSupplyDropRuntimeArray(
+            auto GamePhaseLogic = ResolveCurrentGamePhaseLogic(World, bForceDiscovery);
+            bSuppressedComponentCache = SuppressSupplyDropRuntimeArray(
                     GamePhaseLogic, SuppressedEntryCount);
 
-            bSuppressedMutator =
-                SuppressSupplyDropMutator(
-                    ResolveCurrentSupplyDropMutator(
-                        World, bForceDiscovery),
-                    SuppressedMutatorPhaseCount);
+            bSuppressedMutator = SuppressSupplyDropMutator(ResolveCurrentSupplyDropMutator(
+                        World, bForceDiscovery), SuppressedMutatorPhaseCount);
         }
 
-        State.bApplied =
-            bSuppressedPlaylist ||
-            bSuppressedGameModeCache ||
-            bSuppressedComponentCache ||
-            bSuppressedMutator;
+        State.bApplied = bSuppressedPlaylist || bSuppressedGameModeCache ||
+            bSuppressedComponentCache || bSuppressedMutator;
         if (!State.bLoggedEnabled && State.bApplied)
         {
-            SDK::DbgLog(
-                "[SupplyDrops] suppression enabled playlist=%d "
+            SDK::DbgLog("[SupplyDrops] suppression enabled playlist=%d "
                 "gameModeCache=%d componentCache=%d mutator=%d "
-                "entries=%d phases=%d\n",
-                (int)bSuppressedPlaylist,
-                (int)bSuppressedGameModeCache,
-                (int)bSuppressedComponentCache,
-                (int)bSuppressedMutator,
-                SuppressedEntryCount,
+                "entries=%d phases=%d\n", (int)bSuppressedPlaylist, (int)bSuppressedGameModeCache,
+                (int)bSuppressedComponentCache, (int)bSuppressedMutator, SuppressedEntryCount,
                 SuppressedMutatorPhaseCount);
             State.bLoggedEnabled = true;
         }
@@ -3968,11 +3112,8 @@ namespace
         TWeakObjectPtr<UClass> ProviderClass;
         TWeakObjectPtr<UClass> VehicleSpawnerClass;
         std::vector<TWeakObjectPtr<UObject>> ProcessedSources;
-        std::vector<TWeakObjectPtr<
-            AFortAthenaLivingWorldStaticPointProvider>>
-                CachedProviders;
-        std::vector<TWeakObjectPtr<AFortAthenaVehicleSpawner>>
-            CachedVehicleSpawners;
+        std::vector<TWeakObjectPtr<AFortAthenaLivingWorldStaticPointProvider>> CachedProviders;
+        std::vector<TWeakObjectPtr<AFortAthenaVehicleSpawner>> CachedVehicleSpawners;
         ULONGLONG NextAttemptTimeMs = 0;
         ULONGLONG DeadlineTimeMs = 0;
         ULONGLONG NextProviderRefreshTimeMs = 0;
@@ -4012,118 +3153,95 @@ namespace
         {
             L"Athena.Vehicle.SpawnLocation.Motorcycle.Dirtbike",
             L"/Dirtbike/Vehicle/Motorcycle_DirtBike_Vehicle."
-                L"Motorcycle_DirtBike_Vehicle_C",
-            100
+                L"Motorcycle_DirtBike_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Motorcycle.Sportbike",
             L"/Sportbike/Vehicle/Motorcycle_Sport_Vehicle."
-                L"Motorcycle_Sport_Vehicle_C",
-            100
+                L"Motorcycle_Sport_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Base",
             L"/Valet/BasicCar/Valet_BasicCar_Vehicle."
-                L"Valet_BasicCar_Vehicle_C",
-            100
+                L"Valet_BasicCar_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BasicCar",
             L"/Valet/BasicCar/Valet_BasicCar_Vehicle."
-                L"Valet_BasicCar_Vehicle_C",
-            100
+                L"Valet_BasicCar_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Taxi",
             L"/Valet/TaxiCab/Valet_TaxiCab_Vehicle."
-                L"Valet_TaxiCab_Vehicle_C",
-            50
+                L"Valet_TaxiCab_Vehicle_C", 50
         },
         {
-            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Modded",
-            L"/ModdedBasicCar/Vehicle/"
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Modded", L"/ModdedBasicCar/Vehicle/"
                 L"Valet_BasicCar_Vehicle_SuperSedan."
-                L"Valet_BasicCar_Vehicle_SuperSedan_C",
-            50
+                L"Valet_BasicCar_Vehicle_SuperSedan_C", 50
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BasicSUV",
             L"/BasicSUV/Vehicle/Valet_BasicSUV_Vehicle."
-                L"Valet_BasicSUV_Vehicle_C",
-            100
+                L"Valet_BasicSUV_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BasicTruck.Base",
             L"/Valet/BasicTruck/Valet_BasicTruck_Vehicle."
-                L"Valet_BasicTruck_Vehicle_C",
-            100
+                L"Valet_BasicTruck_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BasicTruck",
             L"/Valet/BasicTruck/Valet_BasicTruck_Vehicle."
-                L"Valet_BasicTruck_Vehicle_C",
-            100
+                L"Valet_BasicTruck_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet."
-                L"BasicTruck.Upgraded",
-            L"/Valet/BasicTruck/"
+                L"BasicTruck.Upgraded", L"/Valet/BasicTruck/"
                 L"Valet_BasicTruck_Vehicle_Upgrade."
-                L"Valet_BasicTruck_Vehicle_Upgrade_C",
-            10
+                L"Valet_BasicTruck_Vehicle_Upgrade_C", 10
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BigRig.Base",
             L"/Valet/BigRig/Valet_BigRig_Vehicle."
-                L"Valet_BigRig_Vehicle_C",
-            100
+                L"Valet_BigRig_Vehicle_C", 100
         },
         {
-            L"Athena.Vehicle.SpawnLocation.Valet.BigRig",
-            L"/Valet/BigRig/Valet_BigRig_Vehicle."
-                L"Valet_BigRig_Vehicle_C",
-            100
+            L"Athena.Vehicle.SpawnLocation.Valet.BigRig", L"/Valet/BigRig/Valet_BigRig_Vehicle."
+                L"Valet_BigRig_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.BigRig.Upgraded",
             L"/Valet/BigRig/Valet_BigRig_Vehicle_Upgrade."
-                L"Valet_BigRig_Vehicle_Upgrade_C",
-            10
+                L"Valet_BigRig_Vehicle_Upgrade_C", 10
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.SportsCar.Base",
             L"/Valet/SportsCar/Valet_SportsCar_Vehicle."
-                L"Valet_SportsCar_Vehicle_C",
-            100
+                L"Valet_SportsCar_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet.SportsCar",
             L"/Valet/SportsCar/Valet_SportsCar_Vehicle."
-                L"Valet_SportsCar_Vehicle_C",
-            100
+                L"Valet_SportsCar_Vehicle_C", 100
         },
         {
             L"Athena.Vehicle.SpawnLocation.Valet."
-                L"SportsCar.Upgraded",
-            L"/Valet/SportsCar/"
+                L"SportsCar.Upgraded", L"/Valet/SportsCar/"
                 L"Valet_SportsCar_Vehicle_Upgrade."
-                L"Valet_SportsCar_Vehicle_Upgrade_C",
-            10
+                L"Valet_SportsCar_Vehicle_Upgrade_C", 10
         },
         {
-            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Upgraded",
-            L"/Valet/BasicCar/"
+            L"Athena.Vehicle.SpawnLocation.Valet.BasicCar.Upgraded", L"/Valet/BasicCar/"
                 L"Valet_BasicCar_Vehicle_Upgrade."
-                L"Valet_BasicCar_Vehicle_Upgrade_C",
-            10
+                L"Valet_BasicCar_Vehicle_Upgrade_C", 10
         }
     };
     uint32 GVehicleProviderResolveEpoch = 0;
 
     bool UsesDeferredVehicleSpawnDiscovery()
     {
-        return VersionInfo.FortniteVersion >= 30.00 &&
-            VersionInfo.FortniteVersion < 31.00;
+        return VersionInfo.FortniteVersion >= 30.00 && VersionInfo.FortniteVersion < 31.00;
     }
 
     bool IsVehicleSpawnSourceProcessed(const UObject* Source)
@@ -4131,8 +3249,7 @@ namespace
         if (!Source)
             return true;
 
-        for (const auto& Processed :
-            GDeferredVehicleSpawnState.ProcessedSources)
+        for (const auto& Processed : GDeferredVehicleSpawnState.ProcessedSources)
         {
             if (Processed.Get() == Source)
                 return true;
@@ -4145,15 +3262,11 @@ namespace
         if (!Source || IsVehicleSpawnSourceProcessed(Source))
             return;
 
-        GDeferredVehicleSpawnState.ProcessedSources.emplace_back(
-            TWeakObjectPtr<UObject>(Source));
+        GDeferredVehicleSpawnState.ProcessedSources.emplace_back(TWeakObjectPtr<UObject>(Source));
     }
 
-    bool ResolveVehicleProviderClass(
-        const FName& GameplayTag,
-        uint32 ResolveEpoch,
-        const UClass*& OutVehicleClass,
-        int32& OutSelectionPriority)
+    bool ResolveVehicleProviderClass(const FName& GameplayTag, uint32 ResolveEpoch,
+        const UClass*& OutVehicleClass, int32& OutSelectionPriority)
     {
         OutVehicleClass = nullptr;
         OutSelectionPriority = 0;
@@ -4161,8 +3274,7 @@ namespace
         {
             if (!Entry.TagInitialized)
             {
-                Entry.GameplayTag =
-                    FName(Entry.GameplayTagName);
+                Entry.GameplayTag = FName(Entry.GameplayTagName);
                 Entry.TagInitialized = true;
             }
             if (Entry.GameplayTag != GameplayTag)
@@ -4179,28 +3291,16 @@ namespace
 
             Entry.LastResolveEpoch = ResolveEpoch;
             const ULONGLONG CurrentTimeMs = GetTickCount64();
-            auto* FoundClass = static_cast<const UClass*>(
-                SDK::StaticFindObject(
-                    Entry.ObjectPath,
+            auto* FoundClass = static_cast<const UClass*>(SDK::StaticFindObject(Entry.ObjectPath,
                     UClass::StaticClass()));
-            if (!FoundClass &&
-                CurrentTimeMs >=
-                    Entry.NextLoadAttemptTimeMs)
+            if (!FoundClass && CurrentTimeMs >= Entry.NextLoadAttemptTimeMs)
             {
-                // Only a tag that actually exists in this world may trigger
-                // a load, and a missing path is retried sparsely. Routine
-                // two-second discovery passes remain lookup-only.
-                FoundClass =
-                    FindObject<UClass>(Entry.ObjectPath);
-                Entry.NextLoadAttemptTimeMs =
-                    CurrentTimeMs +
-                        VehicleClassLoadRetryIntervalMs;
+                FoundClass = FindObject<UClass>(Entry.ObjectPath);
+                Entry.NextLoadAttemptTimeMs = CurrentTimeMs + VehicleClassLoadRetryIntervalMs;
             }
             if (FoundClass)
             {
-                Entry.VehicleClass =
-                    TWeakObjectPtr<UClass>(
-                        const_cast<UClass*>(FoundClass));
+                Entry.VehicleClass = TWeakObjectPtr<UClass>(const_cast<UClass*>(FoundClass));
                 OutVehicleClass = FoundClass;
             }
             return true;
@@ -4211,8 +3311,7 @@ namespace
     int32 RunVehicleSpawnDiscoveryPass()
     {
         auto* World = UWorld::GetWorld();
-        if (!World ||
-            GDeferredVehicleSpawnState.World.Get() != World)
+        if (!World || GDeferredVehicleSpawnState.World.Get() != World)
         {
             return 0;
         }
@@ -4224,86 +3323,59 @@ namespace
         int32 UnresolvedProviderCount = 0;
         int32 ProviderDensitySkippedCount = 0;
         int32 SpawnAttemptsThisPass = 0;
-        const uint32 ResolveEpoch =
-            ++GVehicleProviderResolveEpoch;
-        const bool LimitSpawnWork =
-            UsesDeferredVehicleSpawnDiscovery();
+        const uint32 ResolveEpoch = ++GVehicleProviderResolveEpoch;
+        const bool LimitSpawnWork = UsesDeferredVehicleSpawnDiscovery();
         const ULONGLONG CurrentTimeMs = GetTickCount64();
 
-        // Resolve these dynamically on every bounded retry. SDK StaticClass
-        // helpers permanently cache an early miss, while FN30 can stream the
-        // provider class and its vehicle assets well after world init.
-        const UClass* ProviderClass =
-            GDeferredVehicleSpawnState.ProviderClass.Get();
+        const UClass* ProviderClass = GDeferredVehicleSpawnState.ProviderClass.Get();
         if (!ProviderClass)
         {
-            ProviderClass =
-                SDK::FindClass(
-                    LimitSpawnWork
+            ProviderClass = SDK::FindClass(LimitSpawnWork
                         ? "FortAthenaLivingWorldVehiclePointProvider"
                         : "FortAthenaLivingWorldStaticPointProvider");
             if (ProviderClass)
             {
-                GDeferredVehicleSpawnState.ProviderClass =
-                    TWeakObjectPtr<UClass>(
+                GDeferredVehicleSpawnState.ProviderClass = TWeakObjectPtr<UClass>(
                         const_cast<UClass*>(ProviderClass));
             }
         }
         if (ProviderClass)
         {
-            if (CurrentTimeMs >= GDeferredVehicleSpawnState
-                    .NextProviderRefreshTimeMs)
+            if (CurrentTimeMs >= GDeferredVehicleSpawnState.NextProviderRefreshTimeMs)
             {
-                TArray<AFortAthenaLivingWorldStaticPointProvider*>
-                    Providers{};
+                TArray<AFortAthenaLivingWorldStaticPointProvider*> Providers{};
                 Utils::GetAll(ProviderClass, Providers);
                 GDeferredVehicleSpawnState.CachedProviders.clear();
-                GDeferredVehicleSpawnState.CachedProviders.reserve(
-                    Providers.Num());
+                GDeferredVehicleSpawnState.CachedProviders.reserve(Providers.Num());
                 for (auto Provider : Providers)
                 {
                     if (Provider)
                     {
-                        GDeferredVehicleSpawnState.CachedProviders
-                            .emplace_back(Provider);
+                        GDeferredVehicleSpawnState.CachedProviders.emplace_back(Provider);
                     }
                 }
                 Providers.Free();
-                GDeferredVehicleSpawnState
-                    .NextProviderRefreshTimeMs =
-                        CurrentTimeMs +
+                GDeferredVehicleSpawnState.NextProviderRefreshTimeMs = CurrentTimeMs +
                         VehicleSourceRefreshIntervalMs;
             }
-            ProviderCount = static_cast<int32>(
-                GDeferredVehicleSpawnState.CachedProviders.size());
+            ProviderCount = static_cast<int32>(GDeferredVehicleSpawnState.CachedProviders.size());
 
-            const int32 ProviderStartIndex =
-                ProviderCount > 0
-                    ? GDeferredVehicleSpawnState.ProviderCursor %
-                        ProviderCount
-                    : 0;
+            const int32 ProviderStartIndex = ProviderCount > 0
+                    ? GDeferredVehicleSpawnState.ProviderCursor % ProviderCount : 0;
             constexpr int32 ReservedClassicSpawnAttempts = 4;
-            const int32 ProviderAttemptLimit =
-                VehicleSpawnBudgetPerPass -
+            const int32 ProviderAttemptLimit = VehicleSpawnBudgetPerPass -
                     ReservedClassicSpawnAttempts;
             for (int32 Visited = 0;
                 Visited < ProviderCount;
                 ++Visited)
             {
-                if (LimitSpawnWork &&
-                    SpawnAttemptsThisPass >=
-                        ProviderAttemptLimit)
+                if (LimitSpawnWork && SpawnAttemptsThisPass >= ProviderAttemptLimit)
                 {
                     break;
                 }
-                const int32 ProviderIndex =
-                    (ProviderStartIndex + Visited) %
-                        ProviderCount;
-                auto* Provider =
-                    GDeferredVehicleSpawnState.CachedProviders[
-                        ProviderIndex].Get();
-                if (!Provider ||
-                    IsVehicleSpawnSourceProcessed(Provider))
+                const int32 ProviderIndex = (ProviderStartIndex + Visited) % ProviderCount;
+                auto* Provider = GDeferredVehicleSpawnState.CachedProviders[ProviderIndex].Get();
+                if (!Provider || IsVehicleSpawnSourceProcessed(Provider))
                 {
                     continue;
                 }
@@ -4313,56 +3385,37 @@ namespace
                 int32 HighestRecognizedPriority = 0;
                 bool ForceSpawn = false;
                 bool RecognizedTag = false;
-                static const FName AlwaysSpawnTag(
-                    L"Athena.Vehicle.SpawnLocation.AlwaysSpawn");
+                static const FName AlwaysSpawnTag(L"Athena.Vehicle.SpawnLocation.AlwaysSpawn");
                 for (int32 TagIndex = 0;
-                    TagIndex <
-                        Provider->FiltersTags.GameplayTags.Num();
+                    TagIndex <Provider->FiltersTags.GameplayTags.Num();
                     ++TagIndex)
                 {
-                    auto& Tag =
-                        Provider->FiltersTags.GameplayTags.Get(
-                            TagIndex,
+                    auto& Tag = Provider->FiltersTags.GameplayTags.Get(TagIndex,
                             FGameplayTag::Size());
                     if (Tag.TagName == AlwaysSpawnTag)
                         ForceSpawn = true;
 
                     const UClass* CandidateClass = nullptr;
                     int32 CandidatePriority = 0;
-                    if (!ResolveVehicleProviderClass(
-                            Tag.TagName,
-                            ResolveEpoch,
-                            CandidateClass,
+                    if (!ResolveVehicleProviderClass(Tag.TagName, ResolveEpoch, CandidateClass,
                             CandidatePriority))
                     {
                         continue;
                     }
 
                     RecognizedTag = true;
-                    if (CandidatePriority >
-                        HighestRecognizedPriority)
+                    if (CandidatePriority > HighestRecognizedPriority)
                     {
-                        HighestRecognizedPriority =
-                            CandidatePriority;
+                        HighestRecognizedPriority = CandidatePriority;
                     }
-                    if (CandidateClass &&
-                        CandidatePriority >
-                            VehicleClassPriority)
+                    if (CandidateClass && CandidatePriority > VehicleClassPriority)
                     {
                         VehicleClass = CandidateClass;
-                        VehicleClassPriority =
-                            CandidatePriority;
+                        VehicleClassPriority = CandidatePriority;
                     }
                 }
 
-                // FN30's upgraded Lager event requires both the Base and
-                // Upgraded location tags. The old first-match map omitted
-                // Base entirely, which turned practically every compatible
-                // point into the fixed red/blue Whiplash VR-1. Wait for and
-                // prefer the ordinary gameplay class whenever a Base tag is
-                // present.
-                if (VehicleClassPriority <
-                    HighestRecognizedPriority)
+                if (VehicleClassPriority <HighestRecognizedPriority)
                 {
                     VehicleClass = nullptr;
                 }
@@ -4372,15 +3425,7 @@ namespace
                     continue;
                 }
 
-                // These actors are candidate points consumed by Lager, not a
-                // list of vehicles that all exist simultaneously. Since the
-                // private server has to replace the unavailable Lager spawn
-                // action, preserve AlwaysSpawn points and make one bounded,
-                // one-shot density decision for every other point. This
-                // avoids constructing and replicating all 220+ candidates
-                // during the opening seconds of a match.
-                if (!ForceSpawn &&
-                    (rand() / static_cast<float>(RAND_MAX)) >
+                if (!ForceSpawn && (rand() / static_cast<float>(RAND_MAX)) >
                         LivingWorldVehicleSpawnProbability)
                 {
                     MarkVehicleSpawnSourceProcessed(Provider);
@@ -4390,13 +3435,9 @@ namespace
 
                 ++MappedProviderCount;
                 ++SpawnAttemptsThisPass;
-                GDeferredVehicleSpawnState.ProviderCursor =
-                    (ProviderIndex + 1) % ProviderCount;
-                auto* Vehicle =
-                    UWorld::SpawnActor<AFortAthenaVehicle>(
-                        VehicleClass,
-                        Provider->K2_GetActorLocation(),
-                        Provider->K2_GetActorRotation());
+                GDeferredVehicleSpawnState.ProviderCursor = (ProviderIndex + 1) % ProviderCount;
+                auto* Vehicle = UWorld::SpawnActor<AFortAthenaVehicle>(VehicleClass,
+                        Provider->K2_GetActorLocation(), Provider->K2_GetActorRotation());
                 if (!Vehicle)
                 {
                     ++ProviderSpawnFailureCount;
@@ -4404,9 +3445,7 @@ namespace
                 }
 
                 MarkVehicleSpawnSourceProcessed(Provider);
-                FortVehicleMods::RegisterSpawnedVehicle(
-                    Vehicle,
-                    Provider);
+                FortVehicleMods::RegisterSpawnedVehicle(Vehicle, Provider);
                 ++SpawnedThisPass;
             }
         }
@@ -4415,82 +3454,57 @@ namespace
         int32 MissingClassCount = 0;
         int32 ChanceSkippedCount = 0;
         int32 SpawnFailureCount = 0;
-        const bool UsesClassicVehicleSpawners =
-            VersionInfo.EngineVersion >= 4.23 &&
+        const bool UsesClassicVehicleSpawners = VersionInfo.EngineVersion >= 4.23 &&
             std::floor(VersionInfo.FortniteVersion) != 20 &&
             std::floor(VersionInfo.FortniteVersion) != 21 &&
             std::floor(VersionInfo.FortniteVersion) != 22;
-        const UClass* VehicleSpawnerClass =
-            UsesClassicVehicleSpawners
-                ? GDeferredVehicleSpawnState
-                    .VehicleSpawnerClass.Get()
-                : nullptr;
-        if (UsesClassicVehicleSpawners &&
-            !VehicleSpawnerClass)
+        const UClass* VehicleSpawnerClass = UsesClassicVehicleSpawners ? GDeferredVehicleSpawnState
+                    .VehicleSpawnerClass.Get() : nullptr;
+        if (UsesClassicVehicleSpawners && !VehicleSpawnerClass)
         {
-            VehicleSpawnerClass =
-                SDK::FindClass("FortAthenaVehicleSpawner");
+            VehicleSpawnerClass = SDK::FindClass("FortAthenaVehicleSpawner");
             if (VehicleSpawnerClass)
             {
-                GDeferredVehicleSpawnState.VehicleSpawnerClass =
-                    TWeakObjectPtr<UClass>(
-                        const_cast<UClass*>(
-                            VehicleSpawnerClass));
+                GDeferredVehicleSpawnState.VehicleSpawnerClass = TWeakObjectPtr<UClass>(
+                        const_cast<UClass*>(VehicleSpawnerClass));
             }
         }
         if (VehicleSpawnerClass)
         {
-            if (CurrentTimeMs >= GDeferredVehicleSpawnState
-                    .NextSpawnerRefreshTimeMs)
+            if (CurrentTimeMs >= GDeferredVehicleSpawnState.NextSpawnerRefreshTimeMs)
             {
                 TArray<AFortAthenaVehicleSpawner*> Spawners{};
                 Utils::GetAll(VehicleSpawnerClass, Spawners);
-                GDeferredVehicleSpawnState
-                    .CachedVehicleSpawners.clear();
-                GDeferredVehicleSpawnState
-                    .CachedVehicleSpawners.reserve(Spawners.Num());
+                GDeferredVehicleSpawnState.CachedVehicleSpawners.clear();
+                GDeferredVehicleSpawnState.CachedVehicleSpawners.reserve(Spawners.Num());
                 for (auto Spawner : Spawners)
                 {
                     if (Spawner)
                     {
-                        GDeferredVehicleSpawnState
-                            .CachedVehicleSpawners.emplace_back(
-                                Spawner);
+                        GDeferredVehicleSpawnState.CachedVehicleSpawners.emplace_back(Spawner);
                     }
                 }
                 Spawners.Free();
-                GDeferredVehicleSpawnState
-                    .NextSpawnerRefreshTimeMs =
-                        CurrentTimeMs +
+                GDeferredVehicleSpawnState.NextSpawnerRefreshTimeMs = CurrentTimeMs +
                         VehicleSourceRefreshIntervalMs;
             }
-            SpawnerCount = static_cast<int32>(
-                GDeferredVehicleSpawnState
+            SpawnerCount = static_cast<int32>(GDeferredVehicleSpawnState
                     .CachedVehicleSpawners.size());
 
-            const int32 SpawnerStartIndex =
-                SpawnerCount > 0
-                    ? GDeferredVehicleSpawnState
-                        .VehicleSpawnerCursor % SpawnerCount
-                    : 0;
+            const int32 SpawnerStartIndex = SpawnerCount > 0 ? GDeferredVehicleSpawnState
+                        .VehicleSpawnerCursor % SpawnerCount : 0;
             for (int32 Visited = 0;
                 Visited < SpawnerCount;
                 ++Visited)
             {
-                if (LimitSpawnWork &&
-                    SpawnAttemptsThisPass >=
-                        VehicleSpawnBudgetPerPass)
+                if (LimitSpawnWork && SpawnAttemptsThisPass >= VehicleSpawnBudgetPerPass)
                 {
                     break;
                 }
-                const int32 SpawnerIndex =
-                    (SpawnerStartIndex + Visited) %
-                        SpawnerCount;
-                auto* Spawner =
-                    GDeferredVehicleSpawnState
+                const int32 SpawnerIndex = (SpawnerStartIndex + Visited) % SpawnerCount;
+                auto* Spawner = GDeferredVehicleSpawnState
                         .CachedVehicleSpawners[SpawnerIndex].Get();
-                if (!Spawner ||
-                    IsVehicleSpawnSourceProcessed(Spawner))
+                if (!Spawner || IsVehicleSpawnSourceProcessed(Spawner))
                 {
                     continue;
                 }
@@ -4502,39 +3516,24 @@ namespace
                     continue;
                 }
 
-                if (Spawner->HasCachedFortVehicleItemDef() &&
-                    (!Spawner->HasbForceSpawnAlways() ||
+                if (Spawner->HasCachedFortVehicleItemDef() && (!Spawner->HasbForceSpawnAlways() ||
                         !Spawner->bForceSpawnAlways))
                 {
-                    auto* VehicleDef =
-                        Spawner->CachedFortVehicleItemDef;
+                    auto* VehicleDef = Spawner->CachedFortVehicleItemDef;
                     if (!VehicleDef)
                     {
                         ++MissingClassCount;
                         continue;
                     }
 
-                    const double Min = std::clamp(
-                        VehicleDef->VehicleMinSpawnPercent
-                            .Evaluate() * 0.01f,
-                        0.0f,
-                        1.0f);
-                    const double Max = std::clamp(
-                        VehicleDef->VehicleMaxSpawnPercent
-                            .Evaluate() * 0.01f,
-                        0.0f,
-                        1.0f);
-                    const auto SpawnPercent =
-                        Min + (Max - Min) *
-                            (rand() / (float)RAND_MAX);
-                    const bool ShouldSpawn =
-                        (rand() / (float)RAND_MAX) <=
-                            SpawnPercent;
+                    const double Min = std::clamp(VehicleDef->VehicleMinSpawnPercent
+                            .Evaluate() * 0.01f, 0.0f, 1.0f);
+                    const double Max = std::clamp(VehicleDef->VehicleMaxSpawnPercent
+                            .Evaluate() * 0.01f, 0.0f, 1.0f);
+                    const auto SpawnPercent = Min + (Max - Min) * (rand() / (float)RAND_MAX);
+                    const bool ShouldSpawn = (rand() / (float)RAND_MAX) <= SpawnPercent;
                     if (!ShouldSpawn)
                     {
-                        // Preserve the original one-shot probability
-                        // decision; retries must not eventually turn every
-                        // rejected source into a guaranteed vehicle.
                         MarkVehicleSpawnSourceProcessed(Spawner);
                         ++ChanceSkippedCount;
                         continue;
@@ -4542,13 +3541,9 @@ namespace
                 }
 
                 ++SpawnAttemptsThisPass;
-                GDeferredVehicleSpawnState.VehicleSpawnerCursor =
-                    (SpawnerIndex + 1) % SpawnerCount;
-                auto* Vehicle =
-                    UWorld::SpawnActor<AFortAthenaVehicle>(
-                        VehicleClass,
-                        Spawner->K2_GetActorLocation(),
-                        Spawner->K2_GetActorRotation());
+                GDeferredVehicleSpawnState.VehicleSpawnerCursor = (SpawnerIndex + 1) % SpawnerCount;
+                auto* Vehicle = UWorld::SpawnActor<AFortAthenaVehicle>(VehicleClass,
+                        Spawner->K2_GetActorLocation(), Spawner->K2_GetActorRotation());
                 if (!Vehicle)
                 {
                     ++SpawnFailureCount;
@@ -4556,13 +3551,10 @@ namespace
                 }
 
                 MarkVehicleSpawnSourceProcessed(Spawner);
-                FortVehicleMods::RegisterSpawnedVehicle(
-                    Vehicle,
-                    Spawner);
+                FortVehicleMods::RegisterSpawnedVehicle(Vehicle, Spawner);
                 ++SpawnedThisPass;
 
-                if (auto* Car =
-                    Vehicle->Cast<AFortDagwoodVehicle>())
+                if (auto* Car = Vehicle->Cast<AFortDagwoodVehicle>())
                 {
                     Car->SetFuel(100.f);
                 }
@@ -4570,37 +3562,20 @@ namespace
         }
 
         ++GDeferredVehicleSpawnState.PassCount;
-        GDeferredVehicleSpawnState.TotalSpawned +=
-            SpawnedThisPass;
-        const uint32 Pass =
-            GDeferredVehicleSpawnState.PassCount;
-        if (Pass <= 2 ||
-            SpawnedThisPass > 0 ||
-            Pass % 5 == 0)
+        GDeferredVehicleSpawnState.TotalSpawned += SpawnedThisPass;
+        const uint32 Pass = GDeferredVehicleSpawnState.PassCount;
+        if (Pass <= 2 || SpawnedThisPass > 0 || Pass % 5 == 0)
         {
-            SDK::DbgLog(
-                "[VehicleSpawn] pass=%u providers=%d mapped=%d "
+            SDK::DbgLog("[VehicleSpawn] pass=%u providers=%d mapped=%d "
                 "provider-unresolved=%d density-skipped=%d "
                 "provider-failed=%d "
                 "spawners=%d missing-class=%d chance-skipped=%d "
                 "spawner-failed=%d attempts=%d new=%d total=%d "
-                "processed=%d\n",
-                Pass,
-                ProviderCount,
-                MappedProviderCount,
-                UnresolvedProviderCount,
-                ProviderDensitySkippedCount,
-                ProviderSpawnFailureCount,
-                SpawnerCount,
-                MissingClassCount,
-                ChanceSkippedCount,
-                SpawnFailureCount,
-                SpawnAttemptsThisPass,
-                SpawnedThisPass,
-                GDeferredVehicleSpawnState.TotalSpawned,
-                static_cast<int32>(
-                    GDeferredVehicleSpawnState
-                        .ProcessedSources.size()));
+                "processed=%d\n", Pass, ProviderCount, MappedProviderCount, UnresolvedProviderCount,
+                ProviderDensitySkippedCount, ProviderSpawnFailureCount, SpawnerCount,
+                MissingClassCount, ChanceSkippedCount, SpawnFailureCount, SpawnAttemptsThisPass,
+                SpawnedThisPass, GDeferredVehicleSpawnState.TotalSpawned, static_cast<int32>(
+                    GDeferredVehicleSpawnState.ProcessedSources.size()));
         }
         return SpawnedThisPass;
     }
@@ -4616,8 +3591,7 @@ namespace
             GDeferredVehicleSpawnState.ProcessedSources.clear();
             GDeferredVehicleSpawnState.CachedProviders.clear();
             GDeferredVehicleSpawnState.CachedVehicleSpawners.clear();
-            GDeferredVehicleSpawnState.World =
-                TWeakObjectPtr<UWorld>(World);
+            GDeferredVehicleSpawnState.World = TWeakObjectPtr<UWorld>(World);
             GDeferredVehicleSpawnState.NextAttemptTimeMs = 0;
             GDeferredVehicleSpawnState.DeadlineTimeMs = 0;
             GDeferredVehicleSpawnState.NextProviderRefreshTimeMs = 0;
@@ -4635,25 +3609,21 @@ namespace
 
         const ULONGLONG CurrentTimeMs = GetTickCount64();
         GDeferredVehicleSpawnState.Started = true;
-        GDeferredVehicleSpawnState.Active =
-            UsesDeferredVehicleSpawnDiscovery();
+        GDeferredVehicleSpawnState.Active = UsesDeferredVehicleSpawnDiscovery();
         GDeferredVehicleSpawnState.NextAttemptTimeMs =
             CurrentTimeMs + VehicleInitialDiscoveryDelayMs;
-        GDeferredVehicleSpawnState.DeadlineTimeMs =
-            CurrentTimeMs + VehicleSpawnRetryWindowMs;
+        GDeferredVehicleSpawnState.DeadlineTimeMs = CurrentTimeMs + VehicleSpawnRetryWindowMs;
     }
 
     struct FJumpFatiguePolicySnapshot
     {
-        TWeakObjectPtr<UFortMovementComp_CharacterAthena>
-            MovementComponent;
+        TWeakObjectPtr<UFortMovementComp_CharacterAthena> MovementComponent;
         float OriginalResetTime = 0.f;
     };
 
     struct FPlayerResourcePolicySnapshot
     {
-        TWeakObjectPtr<AFortPlayerControllerAthena>
-            PlayerController;
+        TWeakObjectPtr<AFortPlayerControllerAthena> PlayerController;
         bool bHasBuildFree = false;
         bool bOriginalBuildFree = false;
         bool bHasInfiniteAmmo = false;
@@ -4675,10 +3645,8 @@ namespace
     {
         TWeakObjectPtr<UWorld> World;
         TWeakObjectPtr<AFortGameStateAthena> GameState;
-        std::vector<FJumpFatiguePolicySnapshot>
-            JumpFatigueSnapshots;
-        std::vector<FPlayerResourcePolicySnapshot>
-            PlayerResourceSnapshots;
+        std::vector<FJumpFatiguePolicySnapshot> JumpFatigueSnapshots;
+        std::vector<FPlayerResourcePolicySnapshot> PlayerResourceSnapshots;
         bool bGliderRedeployCaptured = false;
         float OriginalGliderRedeploy = 0.f;
         bool bGliderHeightLimitCaptured = false;
@@ -4688,8 +3656,7 @@ namespace
         bool bGliderRowValuesResolved = false;
         float DesiredGliderHeightLimit = 0.f;
         float DesiredGliderLateralVelocityMult = 0.f;
-        std::vector<FGliderRedeployPawnSnapshot>
-            GliderRedeployPawnSnapshots;
+        std::vector<FGliderRedeployPawnSnapshot> GliderRedeployPawnSnapshots;
         bool bTODMApplied = false;
         bool bOriginalTODMSpeedCaptured = false;
         float OriginalTODMSpeed = 0.f;
@@ -4714,11 +3681,7 @@ namespace
 
     bool IsAuthoritativeBusPolicySelection()
     {
-        // Special event/custom-map flows keep their authored schedule by
-        // default. Once the user changes Auto Bus Start or Bus Start Delay,
-        // the visible GUI setting becomes authoritative for the session.
-        switch (static_cast<Playlist>(
-            GUI::GetSelectedPlaylist()))
+        switch (static_cast<Playlist>(GUI::GetSelectedPlaylist()))
         {
         case Playlist::Gav:
         case Playlist::Retrac1v1:
@@ -4731,8 +3694,7 @@ namespace
         case Playlist::Boxfight:
         case Playlist::Backrooms:
         case Playlist::Event:
-            return FConfiguration::bBusSettingsUserOverride.load(
-                std::memory_order_acquire);
+            return FConfiguration::bBusSettingsUserOverride.load(std::memory_order_acquire);
         default:
             return true;
         }
@@ -4740,54 +3702,39 @@ namespace
 
     void RestoreJumpFatiguePolicy()
     {
-        for (const auto& Snapshot :
-            GGameplayConfigurationPolicyState
-                .JumpFatigueSnapshots)
+        for (const auto& Snapshot : GGameplayConfigurationPolicyState.JumpFatigueSnapshots)
         {
             auto Movement = Snapshot.MovementComponent.Get();
-            if (IsSaneObject(Movement) &&
-                Movement->HasJumpPenaltyResetTime())
+            if (IsSaneObject(Movement) && Movement->HasJumpPenaltyResetTime())
             {
-                float OriginalResetTime =
-                    Snapshot.OriginalResetTime;
-                Movement->JumpPenaltyResetTime =
-                    OriginalResetTime;
+                float OriginalResetTime = Snapshot.OriginalResetTime;
+                Movement->JumpPenaltyResetTime = OriginalResetTime;
             }
         }
 
-        GGameplayConfigurationPolicyState
-            .JumpFatigueSnapshots.clear();
+        GGameplayConfigurationPolicyState.JumpFatigueSnapshots.clear();
     }
 
     void RestorePlayerResourcePolicy()
     {
-        auto& Snapshots =
-            GGameplayConfigurationPolicyState
-                .PlayerResourceSnapshots;
+        auto& Snapshots = GGameplayConfigurationPolicyState.PlayerResourceSnapshots;
         for (const auto& Snapshot : Snapshots)
         {
-            auto PlayerController =
-                Snapshot.PlayerController.Get();
+            auto PlayerController = Snapshot.PlayerController.Get();
             if (!IsSaneObject(PlayerController))
                 continue;
 
             bool bChanged = false;
-            if (Snapshot.bHasBuildFree &&
-                PlayerController->HasbBuildFree() &&
-                PlayerController->bBuildFree !=
-                    Snapshot.bOriginalBuildFree)
+            if (Snapshot.bHasBuildFree && PlayerController->HasbBuildFree() &&
+                PlayerController->bBuildFree != Snapshot.bOriginalBuildFree)
             {
-                PlayerController->bBuildFree =
-                    Snapshot.bOriginalBuildFree;
+                PlayerController->bBuildFree = Snapshot.bOriginalBuildFree;
                 bChanged = true;
             }
-            if (Snapshot.bHasInfiniteAmmo &&
-                PlayerController->HasbInfiniteAmmo() &&
-                PlayerController->bInfiniteAmmo !=
-                    Snapshot.bOriginalInfiniteAmmo)
+            if (Snapshot.bHasInfiniteAmmo && PlayerController->HasbInfiniteAmmo() &&
+                PlayerController->bInfiniteAmmo != Snapshot.bOriginalInfiniteAmmo)
             {
-                PlayerController->bInfiniteAmmo =
-                    Snapshot.bOriginalInfiniteAmmo;
+                PlayerController->bInfiniteAmmo = Snapshot.bOriginalInfiniteAmmo;
                 bChanged = true;
             }
             if (bChanged)
@@ -4798,41 +3745,32 @@ namespace
 
     void RestoreGliderRedeployPawnPolicy()
     {
-        auto& Snapshots =
-            GGameplayConfigurationPolicyState
-                .GliderRedeployPawnSnapshots;
+        auto& Snapshots = GGameplayConfigurationPolicyState.GliderRedeployPawnSnapshots;
         for (auto& Snapshot : Snapshots)
         {
             auto Pawn = Snapshot.Pawn.Get();
             if (!IsSaneObject(Pawn))
                 continue;
 
-            if (Snapshot.bHasAllowedRow &&
-                Pawn->HasGliderRedeployAllowedRow())
+            if (Snapshot.bHasAllowedRow && Pawn->HasGliderRedeployAllowedRow())
             {
-                Pawn->GliderRedeployAllowedRow =
-                    Snapshot.OriginalAllowedRow;
+                Pawn->GliderRedeployAllowedRow = Snapshot.OriginalAllowedRow;
             }
-            if (Snapshot.bHasHeightLimitRow &&
-                Pawn->HasGliderRedeployHeighLimitRow())
+            if (Snapshot.bHasHeightLimitRow && Pawn->HasGliderRedeployHeighLimitRow())
             {
-                Pawn->GliderRedeployHeighLimitRow =
-                    Snapshot.OriginalHeightLimitRow;
+                Pawn->GliderRedeployHeighLimitRow = Snapshot.OriginalHeightLimitRow;
             }
-            if (Snapshot.bHasLateralVelocityMultRow &&
-                Pawn
+            if (Snapshot.bHasLateralVelocityMultRow && Pawn
                     ->HasGliderRedeployLateralVelocityMultiplierRow())
             {
-                Pawn
-                    ->GliderRedeployLateralVelocityMultiplierRow =
+                Pawn->GliderRedeployLateralVelocityMultiplierRow =
                     Snapshot.OriginalLateralVelocityMultRow;
             }
         }
         Snapshots.clear();
     }
 
-    void ResetGameplayConfigurationPolicy(
-        bool bRestoreCurrentWorld)
+    void ResetGameplayConfigurationPolicy(bool bRestoreCurrentWorld)
     {
         auto& State = GGameplayConfigurationPolicyState;
         if (bRestoreCurrentWorld)
@@ -4842,60 +3780,40 @@ namespace
             RestoreGliderRedeployPawnPolicy();
 
             auto GameState = State.GameState.Get();
-            if (State.bGliderRedeployCaptured &&
-                IsSaneObject(GameState) &&
-                GameState
+            if (State.bGliderRedeployCaptured && IsSaneObject(GameState) && GameState
                     ->HasDefaultGliderRedeployCanRedeploy())
             {
-                GameState
-                    ->DefaultGliderRedeployCanRedeploy =
-                    State.OriginalGliderRedeploy;
-                if (State.bGliderHeightLimitCaptured &&
-                    GameState
+                GameState->DefaultGliderRedeployCanRedeploy = State.OriginalGliderRedeploy;
+                if (State.bGliderHeightLimitCaptured && GameState
                         ->HasDefaultRedeployGliderHeightLimit())
                 {
-                    GameState
-                        ->DefaultRedeployGliderHeightLimit =
-                        State.OriginalGliderHeightLimit;
+                    GameState->DefaultRedeployGliderHeightLimit = State.OriginalGliderHeightLimit;
                 }
-                if (State
-                        .bGliderLateralVelocityMultCaptured &&
-                    GameState
+                if (State.bGliderLateralVelocityMultCaptured && GameState
                         ->HasDefaultRedeployGliderLateralVelocityMult())
                 {
-                    GameState
-                        ->DefaultRedeployGliderLateralVelocityMult =
-                        State
+                    GameState->DefaultRedeployGliderLateralVelocityMult = State
                             .OriginalGliderLateralVelocityMult;
                 }
                 GameState->ForceNetUpdate();
             }
 
             auto World = State.World.Get();
-            if (State.bTODMApplied &&
-                State.bOriginalTODMSpeedCaptured &&
-                IsSaneObject(World))
+            if (State.bTODMApplied && State.bOriginalTODMSpeedCaptured && IsSaneObject(World))
             {
-                if (!UFortKismetLibrary::
-                        SetResolvedTimeOfDaySpeedCompat(
-                            State.TODMController.Get(),
+                if (!UFortKismetLibrary::SetResolvedTimeOfDaySpeedCompat(State.TODMController.Get(),
                             State.OriginalTODMSpeed))
                 {
-                    UFortKismetLibrary::
-                        SetTimeOfDaySpeedCompat(
-                            World,
-                            State.OriginalTODMSpeed);
+                    UFortKismetLibrary::SetTimeOfDaySpeedCompat(World, State.OriginalTODMSpeed);
                 }
             }
         }
 
         State = FGameplayConfigurationPolicyState{};
-        FConfiguration::GliderRedeployRuntimeSupport.store(
-            -1, std::memory_order_release);
+        FConfiguration::GliderRedeployRuntimeSupport.store(-1, std::memory_order_release);
     }
 
-    void ApplyJumpFatiguePolicy(
-        AFortGameMode* GameMode)
+    void ApplyJumpFatiguePolicy(AFortGameMode* GameMode)
     {
         auto& State = GGameplayConfigurationPolicyState;
         if (!FConfiguration::bDisableJumpFatigue)
@@ -4905,8 +3823,7 @@ namespace
             return;
         }
 
-        for (auto It =
-            State.JumpFatigueSnapshots.begin();
+        for (auto It = State.JumpFatigueSnapshots.begin();
             It != State.JumpFatigueSnapshots.end();)
         {
             if (!IsSaneObject(It->MovementComponent.Get()))
@@ -4917,48 +3834,32 @@ namespace
             ++It;
         }
 
-        auto ApplyController =
-            [&](AFortPlayerControllerAthena*
-                    PlayerController)
+        auto ApplyController = [&](AFortPlayerControllerAthena* PlayerController)
             {
             if (!IsSaneObject(PlayerController))
                 return;
-            auto Pawn =
-                PlayerController &&
-                    IsSaneObject(
-                        PlayerController->MyFortPawn)
-                    ? PlayerController->MyFortPawn
-                    : nullptr;
+            auto Pawn = PlayerController && IsSaneObject(PlayerController->MyFortPawn)
+                    ? PlayerController->MyFortPawn : nullptr;
             if (!Pawn || !Pawn->HasCharacterMovement())
                 return;
 
-            auto Movement =
-                (UFortMovementComp_CharacterAthena*)
+            auto Movement = (UFortMovementComp_CharacterAthena*)
                     Pawn->GetCharacterMovement();
-            if (!IsSaneObject(Movement) ||
-                !Movement->HasJumpPenaltyResetTime())
+            if (!IsSaneObject(Movement) || !Movement->HasJumpPenaltyResetTime())
             {
                 return;
             }
 
-            auto Existing = std::find_if(
-                State.JumpFatigueSnapshots.begin(),
-                State.JumpFatigueSnapshots.end(),
-                [&](const FJumpFatiguePolicySnapshot&
-                        Snapshot)
+            auto Existing = std::find_if(State.JumpFatigueSnapshots.begin(),
+                State.JumpFatigueSnapshots.end(), [&](const FJumpFatiguePolicySnapshot& Snapshot)
                 {
-                    return Snapshot
-                        .MovementComponent.Get() ==
-                        Movement;
+                    return Snapshot.MovementComponent.Get() == Movement;
                 });
-            if (Existing ==
-                State.JumpFatigueSnapshots.end())
+            if (Existing == State.JumpFatigueSnapshots.end())
             {
                 State.JumpFatigueSnapshots.push_back(
                     {
-                        TWeakObjectPtr<
-                            UFortMovementComp_CharacterAthena>(
-                                Movement),
+                        TWeakObjectPtr<UFortMovementComp_CharacterAthena>(Movement),
                         Movement->JumpPenaltyResetTime
                     });
             }
@@ -4969,22 +3870,15 @@ namespace
 
         if (GameMode->HasAlivePlayers())
         {
-            for (auto UncastedController :
-                GameMode->AlivePlayers)
+            for (auto UncastedController : GameMode->AlivePlayers)
             {
-                ApplyController(
-                    IsSaneObject(UncastedController)
-                        ? UncastedController->Cast<
-                            AFortPlayerControllerAthena>()
-                        : nullptr);
+                ApplyController(IsSaneObject(UncastedController) ? UncastedController->Cast<
+                            AFortPlayerControllerAthena>() : nullptr);
             }
         }
 
         auto World = UWorld::GetWorld();
-        auto Driver =
-            World
-                ? (UNetDriver*)World->NetDriver
-                : nullptr;
+        auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
         if (!IsSaneObject(Driver))
             return;
 
@@ -4992,73 +3886,45 @@ namespace
             Index < Driver->ClientConnections.Num();
             ++Index)
         {
-            auto Connection =
-                Driver->ClientConnections[Index];
-            ApplyController(
-                IsSaneObject(Connection) &&
-                    IsSaneObject(
-                        Connection->PlayerController)
-                    ? Connection->PlayerController
-                        ->Cast<
-                            AFortPlayerControllerAthena>()
-                    : nullptr);
-            if (IsSaneObject(Connection) &&
-                Connection->HasChildren())
+            auto Connection = Driver->ClientConnections[Index];
+            ApplyController(IsSaneObject(Connection) && IsSaneObject(Connection->PlayerController)
+                    ? Connection->PlayerController->Cast<AFortPlayerControllerAthena>() : nullptr);
+            if (IsSaneObject(Connection) && Connection->HasChildren())
             {
                 for (int32 ChildIndex = 0;
-                    ChildIndex <
-                        Connection->Children.Num();
+                    ChildIndex <Connection->Children.Num();
                     ++ChildIndex)
                 {
-                    auto Child =
-                        Connection->Children[
-                            ChildIndex];
-                    ApplyController(
-                        IsSaneObject(Child) &&
-                            IsSaneObject(
-                                Child->PlayerController)
-                            ? Child->PlayerController
-                                ->Cast<
-                                    AFortPlayerControllerAthena>()
+                    auto Child = Connection->Children[ChildIndex];
+                    ApplyController(IsSaneObject(Child) && IsSaneObject(Child->PlayerController)
+                            ? Child->PlayerController->Cast<AFortPlayerControllerAthena>()
                             : nullptr);
                 }
             }
         }
 
-        auto GameInstance =
-            World ? World->OwningGameInstance : nullptr;
-        if (IsSaneObject(GameInstance) &&
-            GameInstance->HasLocalPlayers())
+        auto GameInstance = World ? World->OwningGameInstance : nullptr;
+        if (IsSaneObject(GameInstance) && GameInstance->HasLocalPlayers())
         {
             for (int32 Index = 0;
                 Index < GameInstance->LocalPlayers.Num();
                 ++Index)
             {
-                auto LocalPlayer =
-                    GameInstance->LocalPlayers[Index];
-                ApplyController(
-                    IsSaneObject(LocalPlayer) &&
-                        IsSaneObject(
-                            LocalPlayer
-                                ->PlayerController)
-                        ? LocalPlayer->PlayerController
-                            ->Cast<
-                                AFortPlayerControllerAthena>()
-                        : nullptr);
+                auto LocalPlayer = GameInstance->LocalPlayers[Index];
+                ApplyController(IsSaneObject(LocalPlayer) && IsSaneObject(LocalPlayer
+                                ->PlayerController) ? LocalPlayer->PlayerController->Cast<
+                                AFortPlayerControllerAthena>() : nullptr);
             }
         }
     }
 
     void ApplyPlayerResourcePolicy(UWorld* World)
     {
-        auto& Snapshots =
-            GGameplayConfigurationPolicyState
-                .PlayerResourceSnapshots;
+        auto& Snapshots = GGameplayConfigurationPolicyState.PlayerResourceSnapshots;
         for (auto It = Snapshots.begin();
             It != Snapshots.end();)
         {
-            if (!IsSaneObject(
-                    It->PlayerController.Get()))
+            if (!IsSaneObject(It->PlayerController.Get()))
             {
                 It = Snapshots.erase(It);
                 continue;
@@ -5066,107 +3932,73 @@ namespace
             ++It;
         }
 
-        auto Driver =
-            World
-                ? (UNetDriver*)World->NetDriver
-                : nullptr;
+        auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
         if (!IsSaneObject(Driver))
             return;
 
-        auto ApplyController =
-            [&](AFortPlayerControllerAthena*
-                    PlayerController)
+        auto ApplyController = [&](AFortPlayerControllerAthena* PlayerController)
             {
             if (!IsSaneObject(PlayerController))
                 return;
 
-            auto Existing = std::find_if(
-                Snapshots.begin(), Snapshots.end(),
-                [&](const FPlayerResourcePolicySnapshot&
-                        Snapshot)
+            auto Existing = std::find_if(Snapshots.begin(), Snapshots.end(),
+                [&](const FPlayerResourcePolicySnapshot& Snapshot)
                 {
-                    return Snapshot
-                        .PlayerController.Get() ==
-                        PlayerController;
+                    return Snapshot.PlayerController.Get() == PlayerController;
                 });
             if (Existing == Snapshots.end())
             {
                 FPlayerResourcePolicySnapshot Snapshot;
-                Snapshot.PlayerController =
-                    TWeakObjectPtr<
-                        AFortPlayerControllerAthena>(
+                Snapshot.PlayerController = TWeakObjectPtr<AFortPlayerControllerAthena>(
                             PlayerController);
-                Snapshot.bHasBuildFree =
-                    PlayerController->HasbBuildFree();
+                Snapshot.bHasBuildFree = PlayerController->HasbBuildFree();
                 if (Snapshot.bHasBuildFree)
                 {
-                    Snapshot.bOriginalBuildFree =
-                        PlayerController->bBuildFree;
+                    Snapshot.bOriginalBuildFree = PlayerController->bBuildFree;
                 }
-                Snapshot.bHasInfiniteAmmo =
-                    PlayerController
-                        ->HasbInfiniteAmmo();
+                Snapshot.bHasInfiniteAmmo = PlayerController->HasbInfiniteAmmo();
                 if (Snapshot.bHasInfiniteAmmo)
                 {
-                    Snapshot.bOriginalInfiniteAmmo =
-                        PlayerController
-                            ->bInfiniteAmmo;
+                    Snapshot.bOriginalInfiniteAmmo = PlayerController->bInfiniteAmmo;
                 }
                 Snapshots.push_back(Snapshot);
             }
 
             bool bChanged = false;
-            if (PlayerController->HasbBuildFree() &&
-                PlayerController->bBuildFree !=
+            if (PlayerController->HasbBuildFree() && PlayerController->bBuildFree !=
                     FConfiguration::bInfiniteMats)
             {
-                PlayerController->bBuildFree =
-                    FConfiguration::bInfiniteMats;
+                PlayerController->bBuildFree = FConfiguration::bInfiniteMats;
                 bChanged = true;
             }
-            if (PlayerController->HasbInfiniteAmmo() &&
-                PlayerController->bInfiniteAmmo !=
+            if (PlayerController->HasbInfiniteAmmo() && PlayerController->bInfiniteAmmo !=
                     FConfiguration::bInfiniteAmmo)
             {
-                PlayerController->bInfiniteAmmo =
-                    FConfiguration::bInfiniteAmmo;
+                PlayerController->bInfiniteAmmo = FConfiguration::bInfiniteAmmo;
                 bChanged = true;
             }
             if (bChanged)
                 PlayerController->ForceNetUpdate();
             };
 
-        auto ApplyConnection =
-            [&](UNetConnection* Connection)
+        auto ApplyConnection = [&](UNetConnection* Connection)
             {
                 if (!IsSaneObject(Connection))
                     return;
 
-                ApplyController(
-                    IsSaneObject(
-                        Connection->PlayerController)
-                        ? Connection->PlayerController
-                            ->Cast<
-                                AFortPlayerControllerAthena>()
+                ApplyController(IsSaneObject(Connection->PlayerController)
+                        ? Connection->PlayerController->Cast<AFortPlayerControllerAthena>()
                         : nullptr);
 
                 if (!Connection->HasChildren())
                     return;
                 for (int32 ChildIndex = 0;
-                    ChildIndex <
-                        Connection->Children.Num();
+                    ChildIndex <Connection->Children.Num();
                     ++ChildIndex)
                 {
-                    auto Child =
-                        Connection->Children[
-                            ChildIndex];
-                    ApplyController(
-                        IsSaneObject(Child) &&
-                            IsSaneObject(
-                                Child->PlayerController)
-                            ? Child->PlayerController
-                                ->Cast<
-                                    AFortPlayerControllerAthena>()
+                    auto Child = Connection->Children[ChildIndex];
+                    ApplyController(IsSaneObject(Child) && IsSaneObject(Child->PlayerController)
+                            ? Child->PlayerController->Cast<AFortPlayerControllerAthena>()
                             : nullptr);
                 }
             };
@@ -5175,30 +4007,20 @@ namespace
             Index < Driver->ClientConnections.Num();
             ++Index)
         {
-            ApplyConnection(
-                Driver->ClientConnections[Index]);
+            ApplyConnection(Driver->ClientConnections[Index]);
         }
 
-        auto GameInstance =
-            World ? World->OwningGameInstance : nullptr;
-        if (IsSaneObject(GameInstance) &&
-            GameInstance->HasLocalPlayers())
+        auto GameInstance = World ? World->OwningGameInstance : nullptr;
+        if (IsSaneObject(GameInstance) && GameInstance->HasLocalPlayers())
         {
             for (int32 Index = 0;
                 Index < GameInstance->LocalPlayers.Num();
                 ++Index)
             {
-                auto LocalPlayer =
-                    GameInstance->LocalPlayers[Index];
-                ApplyController(
-                    IsSaneObject(LocalPlayer) &&
-                        IsSaneObject(
-                            LocalPlayer
-                                ->PlayerController)
-                        ? LocalPlayer->PlayerController
-                            ->Cast<
-                                AFortPlayerControllerAthena>()
-                        : nullptr);
+                auto LocalPlayer = GameInstance->LocalPlayers[Index];
+                ApplyController(IsSaneObject(LocalPlayer) && IsSaneObject(LocalPlayer
+                                ->PlayerController) ? LocalPlayer->PlayerController->Cast<
+                                AFortPlayerControllerAthena>() : nullptr);
             }
         }
     }
@@ -5207,111 +4029,79 @@ namespace
     {
         const float BaseValue = Row.Value;
         auto CurveTable = (UObject*)Row.Curve.CurveTable;
-        if (!CurveTable || !IsSaneObject(CurveTable) ||
-            !Row.Curve.RowName.IsValid())
+        if (!CurveTable || !IsSaneObject(CurveTable) || !Row.Curve.RowName.IsValid())
         {
-            return std::isfinite(BaseValue)
-                ? BaseValue
-                : 0.f;
+            return std::isfinite(BaseValue) ? BaseValue : 0.f;
         }
 
-        auto Library =
-            UDataTableFunctionLibrary::StaticClass();
-        auto Defaults =
-            Library ? Library->GetDefaultObj() : nullptr;
-        if (!IsSaneObject(Defaults) ||
-            !Defaults->GetFunction(
-                "EvaluateCurveTableRow"))
+        auto Library = UDataTableFunctionLibrary::StaticClass();
+        auto Defaults = Library ? Library->GetDefaultObj() : nullptr;
+        if (!IsSaneObject(Defaults) || !Defaults->GetFunction("EvaluateCurveTableRow"))
         {
-            return std::isfinite(BaseValue)
-                ? BaseValue
-                : 0.f;
+            return std::isfinite(BaseValue) ? BaseValue : 0.f;
         }
 
         const float Value = Row.Evaluate();
         return std::isfinite(Value) ? Value : 0.f;
     }
 
-    AFortPlayerPawnAthena* ResolveGliderRedeployPawnDefaults(
-        AFortGameMode* GameMode)
+    AFortPlayerPawnAthena* ResolveGliderRedeployPawnDefaults(AFortGameMode* GameMode)
     {
-        auto PawnBaseClass =
-            AFortPlayerPawnAthena::StaticClass();
+        auto PawnBaseClass = AFortPlayerPawnAthena::StaticClass();
         if (!PawnBaseClass)
             return nullptr;
 
-        auto PawnClass =
-            IsSaneObject(GameMode) &&
-                GameMode->HasDefaultPawnClass()
-                ? GameMode->DefaultPawnClass
-                : nullptr;
+        auto PawnClass = IsSaneObject(GameMode) && GameMode->HasDefaultPawnClass()
+                ? GameMode->DefaultPawnClass : nullptr;
         if (IsSaneObject((UObject*)PawnClass))
         {
             auto Defaults = PawnClass->GetDefaultObj();
-            if (IsSaneObject(Defaults) &&
-                Defaults->IsA(PawnBaseClass))
+            if (IsSaneObject(Defaults) && Defaults->IsA(PawnBaseClass))
             {
                 return (AFortPlayerPawnAthena*)Defaults;
             }
         }
 
-        auto AthenaDefaults =
-            (AFortPlayerPawnAthena*)
+        auto AthenaDefaults = (AFortPlayerPawnAthena*)
                 AFortPlayerPawnAthena::GetDefaultObj();
-        return IsSaneObject((UObject*)AthenaDefaults)
-            ? AthenaDefaults
-            : nullptr;
+        return IsSaneObject((UObject*)AthenaDefaults) ? AthenaDefaults : nullptr;
     }
 
-    void ResolveGliderRedeployPolicyValues(
-        AFortGameMode* GameMode,
-        float& OutHeightLimit,
+    void ResolveGliderRedeployPolicyValues(AFortGameMode* GameMode, float& OutHeightLimit,
         float& OutLateralVelocityMult)
     {
         OutHeightLimit = 0.f;
         OutLateralVelocityMult = 0.f;
 
-        auto Defaults =
-            ResolveGliderRedeployPawnDefaults(GameMode);
+        auto Defaults = ResolveGliderRedeployPawnDefaults(GameMode);
         if (!Defaults)
             return;
 
         if (Defaults->HasGliderRedeployHeighLimitRow())
         {
-            OutHeightLimit = EvaluateGliderRedeployRow(
-                Defaults->GliderRedeployHeighLimitRow);
+            OutHeightLimit = EvaluateGliderRedeployRow(Defaults->GliderRedeployHeighLimitRow);
         }
-        if (Defaults
-                ->HasGliderRedeployLateralVelocityMultiplierRow())
+        if (Defaults->HasGliderRedeployLateralVelocityMultiplierRow())
         {
-            OutLateralVelocityMult =
-                EvaluateGliderRedeployRow(
-                    Defaults
+            OutLateralVelocityMult = EvaluateGliderRedeployRow(Defaults
                         ->GliderRedeployLateralVelocityMultiplierRow);
         }
     }
 
-    float SelectGliderRedeployValue(
-        float AuthoredValue,
-        float OriginalValue,
-        float FallbackValue)
+    float SelectGliderRedeployValue(float AuthoredValue, float OriginalValue, float FallbackValue)
     {
-        if (std::isfinite(AuthoredValue) &&
-            AuthoredValue > 0.f)
+        if (std::isfinite(AuthoredValue) && AuthoredValue > 0.f)
         {
             return AuthoredValue;
         }
-        if (std::isfinite(OriginalValue) &&
-            OriginalValue > 0.f)
+        if (std::isfinite(OriginalValue) && OriginalValue > 0.f)
         {
             return OriginalValue;
         }
         return FallbackValue;
     }
 
-    void WriteGliderRedeployRow(
-        FScalableFloat& Row,
-        float Value)
+    void WriteGliderRedeployRow(FScalableFloat& Row, float Value)
     {
         if (Row.Value == Value && !Row.Curve.CurveTable)
             return;
@@ -5322,16 +4112,10 @@ namespace
         Row.Curve.RowName.Number = 0;
     }
 
-    void ApplyGliderRedeployPawnPolicy(
-        AFortGameMode* GameMode,
-        UWorld* World,
-        bool bEnabled,
-        float HeightLimit,
-        float LateralVelocityMult)
+    void ApplyGliderRedeployPawnPolicy(AFortGameMode* GameMode, UWorld* World, bool bEnabled,
+        float HeightLimit, float LateralVelocityMult)
     {
-        auto& Snapshots =
-            GGameplayConfigurationPolicyState
-                .GliderRedeployPawnSnapshots;
+        auto& Snapshots = GGameplayConfigurationPolicyState.GliderRedeployPawnSnapshots;
         for (auto It = Snapshots.begin();
             It != Snapshots.end();)
         {
@@ -5350,58 +4134,43 @@ namespace
             return;
         }
 
-        auto ApplyPawn =
-            [&](AFortPlayerPawnAthena* Pawn)
+        auto ApplyPawn = [&](AFortPlayerPawnAthena* Pawn)
             {
             if (!IsSaneObject(Pawn))
                 return;
 
-            const bool bHasAllowedRow =
-                Pawn->HasGliderRedeployAllowedRow();
-            const bool bHasHeightLimitRow =
-                Pawn->HasGliderRedeployHeighLimitRow();
-            const bool bHasLateralVelocityMultRow =
-                Pawn
+            const bool bHasAllowedRow = Pawn->HasGliderRedeployAllowedRow();
+            const bool bHasHeightLimitRow = Pawn->HasGliderRedeployHeighLimitRow();
+            const bool bHasLateralVelocityMultRow = Pawn
                     ->HasGliderRedeployLateralVelocityMultiplierRow();
-            if (!bHasAllowedRow && !bHasHeightLimitRow &&
-                !bHasLateralVelocityMultRow)
+            if (!bHasAllowedRow && !bHasHeightLimitRow && !bHasLateralVelocityMultRow)
             {
                 return;
             }
 
-            auto Existing = std::find_if(
-                Snapshots.begin(), Snapshots.end(),
-                [&](const FGliderRedeployPawnSnapshot&
-                        Snapshot)
+            auto Existing = std::find_if(Snapshots.begin(), Snapshots.end(),
+                [&](const FGliderRedeployPawnSnapshot& Snapshot)
                 {
                     return Snapshot.Pawn.Get() == Pawn;
                 });
             if (Existing == Snapshots.end())
             {
                 FGliderRedeployPawnSnapshot Snapshot;
-                Snapshot.Pawn =
-                    TWeakObjectPtr<AFortPlayerPawnAthena>(
-                        Pawn);
+                Snapshot.Pawn = TWeakObjectPtr<AFortPlayerPawnAthena>(Pawn);
                 Snapshot.bHasAllowedRow = bHasAllowedRow;
                 if (bHasAllowedRow)
                 {
-                    Snapshot.OriginalAllowedRow =
-                        Pawn->GliderRedeployAllowedRow;
+                    Snapshot.OriginalAllowedRow = Pawn->GliderRedeployAllowedRow;
                 }
-                Snapshot.bHasHeightLimitRow =
-                    bHasHeightLimitRow;
+                Snapshot.bHasHeightLimitRow = bHasHeightLimitRow;
                 if (bHasHeightLimitRow)
                 {
-                    Snapshot.OriginalHeightLimitRow =
-                        Pawn->GliderRedeployHeighLimitRow;
+                    Snapshot.OriginalHeightLimitRow = Pawn->GliderRedeployHeighLimitRow;
                 }
-                Snapshot.bHasLateralVelocityMultRow =
-                    bHasLateralVelocityMultRow;
+                Snapshot.bHasLateralVelocityMultRow = bHasLateralVelocityMultRow;
                 if (bHasLateralVelocityMultRow)
                 {
-                    Snapshot
-                        .OriginalLateralVelocityMultRow =
-                        Pawn
+                    Snapshot.OriginalLateralVelocityMultRow = Pawn
                             ->GliderRedeployLateralVelocityMultiplierRow;
                 }
                 Snapshots.push_back(Snapshot);
@@ -5409,93 +4178,61 @@ namespace
 
             if (bHasAllowedRow)
             {
-                WriteGliderRedeployRow(
-                    Pawn->GliderRedeployAllowedRow, 1.f);
+                WriteGliderRedeployRow(Pawn->GliderRedeployAllowedRow, 1.f);
             }
             if (bHasHeightLimitRow && HeightLimit > 0.f)
             {
-                WriteGliderRedeployRow(
-                    Pawn->GliderRedeployHeighLimitRow,
-                    HeightLimit);
+                WriteGliderRedeployRow(Pawn->GliderRedeployHeighLimitRow, HeightLimit);
             }
-            if (bHasLateralVelocityMultRow &&
-                LateralVelocityMult > 0.f)
+            if (bHasLateralVelocityMultRow && LateralVelocityMult > 0.f)
             {
-                WriteGliderRedeployRow(
-                    Pawn
-                        ->GliderRedeployLateralVelocityMultiplierRow,
+                WriteGliderRedeployRow(Pawn->GliderRedeployLateralVelocityMultiplierRow,
                     LateralVelocityMult);
             }
             };
 
-        auto ApplyController =
-            [&](AFortPlayerControllerAthena*
-                    PlayerController)
+        auto ApplyController = [&](AFortPlayerControllerAthena* PlayerController)
             {
                 if (!IsSaneObject(PlayerController))
                     return;
 
-                ApplyPawn(
-                    IsSaneObject(
-                        PlayerController->MyFortPawn)
-                        ? PlayerController->MyFortPawn
+                ApplyPawn(IsSaneObject(PlayerController->MyFortPawn) ? PlayerController->MyFortPawn
                         : nullptr);
             };
 
-        ApplyPawn(
-            ResolveGliderRedeployPawnDefaults(GameMode));
+        ApplyPawn(ResolveGliderRedeployPawnDefaults(GameMode));
 
-        if (IsSaneObject(GameMode) &&
-            GameMode->HasAlivePlayers())
+        if (IsSaneObject(GameMode) && GameMode->HasAlivePlayers())
         {
-            for (auto UncastedController :
-                GameMode->AlivePlayers)
+            for (auto UncastedController : GameMode->AlivePlayers)
             {
-                ApplyController(
-                    IsSaneObject(UncastedController)
-                        ? UncastedController->Cast<
-                            AFortPlayerControllerAthena>()
-                        : nullptr);
+                ApplyController(IsSaneObject(UncastedController) ? UncastedController->Cast<
+                            AFortPlayerControllerAthena>() : nullptr);
             }
         }
 
-        auto Driver =
-            World
-                ? (UNetDriver*)World->NetDriver
-                : nullptr;
+        auto Driver = World ? (UNetDriver*)World->NetDriver : nullptr;
         if (!IsSaneObject(Driver))
             return;
 
-        auto ApplyConnection =
-            [&](UNetConnection* Connection)
+        auto ApplyConnection = [&](UNetConnection* Connection)
             {
                 if (!IsSaneObject(Connection))
                     return;
 
-                ApplyController(
-                    IsSaneObject(
-                        Connection->PlayerController)
-                        ? Connection->PlayerController
-                            ->Cast<
-                                AFortPlayerControllerAthena>()
+                ApplyController(IsSaneObject(Connection->PlayerController)
+                        ? Connection->PlayerController->Cast<AFortPlayerControllerAthena>()
                         : nullptr);
 
                 if (!Connection->HasChildren())
                     return;
                 for (int32 ChildIndex = 0;
-                    ChildIndex <
-                        Connection->Children.Num();
+                    ChildIndex <Connection->Children.Num();
                     ++ChildIndex)
                 {
-                    auto Child =
-                        Connection->Children[ChildIndex];
-                    ApplyController(
-                        IsSaneObject(Child) &&
-                            IsSaneObject(
-                                Child->PlayerController)
-                            ? Child->PlayerController
-                                ->Cast<
-                                    AFortPlayerControllerAthena>()
+                    auto Child = Connection->Children[ChildIndex];
+                    ApplyController(IsSaneObject(Child) && IsSaneObject(Child->PlayerController)
+                            ? Child->PlayerController->Cast<AFortPlayerControllerAthena>()
                             : nullptr);
                 }
             };
@@ -5504,58 +4241,38 @@ namespace
             Index < Driver->ClientConnections.Num();
             ++Index)
         {
-            ApplyConnection(
-                Driver->ClientConnections[Index]);
+            ApplyConnection(Driver->ClientConnections[Index]);
         }
     }
 
     UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
         ResolveGameplayPolicyPhaseLogic(UWorld* World)
     {
-        auto PhaseLogicClass =
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-                StaticClass();
-        auto DefaultObject =
-            PhaseLogicClass
+        auto PhaseLogicClass = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::StaticClass();
+        auto DefaultObject = PhaseLogicClass
                 ? (const UFortGameStateComponent_BattleRoyaleGamePhaseLogic*)
-                    PhaseLogicClass->GetDefaultObj()
-                : nullptr;
-        if (!DefaultObject ||
-            !DefaultObject->GetFunction("Get"))
+                    PhaseLogicClass->GetDefaultObj() : nullptr;
+        if (!DefaultObject || !DefaultObject->GetFunction("Get"))
         {
             return nullptr;
         }
 
-        auto PhaseLogic =
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-                Get(World);
-        return IsSaneObject(PhaseLogic)
-            ? PhaseLogic
-            : nullptr;
+        auto PhaseLogic = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::Get(World);
+        return IsSaneObject(PhaseLogic) ? PhaseLogic : nullptr;
     }
 
-    void ApplyWarmupSchedule(
-        AFortGameMode* GameMode,
-        AFortGameStateAthena* GameState,
-        UFortGameStateComponent_BattleRoyaleGamePhaseLogic*
-            PhaseLogic,
-        float StartTime,
-        float EndTime,
-        float Duration)
+    void ApplyWarmupSchedule(AFortGameMode* GameMode, AFortGameStateAthena* GameState,
+        UFortGameStateComponent_BattleRoyaleGamePhaseLogic* PhaseLogic, float StartTime,
+        float EndTime, float Duration)
     {
         bool bGameStateChanged = false;
-        if (GameState->HasWarmupCountdownStartTime() &&
-            std::fabs(
-                GameState->WarmupCountdownStartTime -
-                    StartTime) > 0.01f)
+        if (GameState->HasWarmupCountdownStartTime() && std::fabs(
+                GameState->WarmupCountdownStartTime - StartTime) > 0.01f)
         {
-            GameState->WarmupCountdownStartTime =
-                StartTime;
+            GameState->WarmupCountdownStartTime = StartTime;
             bGameStateChanged = true;
         }
-        if (GameState->HasWarmupCountdownEndTime() &&
-            std::fabs(
-                GameState->WarmupCountdownEndTime -
+        if (GameState->HasWarmupCountdownEndTime() && std::fabs(GameState->WarmupCountdownEndTime -
                     EndTime) > 0.01f)
         {
             GameState->WarmupCountdownEndTime = EndTime;
@@ -5564,32 +4281,25 @@ namespace
         if (GameMode->HasWarmupCountdownDuration())
             GameMode->WarmupCountdownDuration = Duration;
         if (GameMode->HasWarmupEarlyCountdownDuration())
-            GameMode->WarmupEarlyCountdownDuration =
-                Duration;
+            GameMode->WarmupEarlyCountdownDuration = Duration;
 
         if (PhaseLogic)
         {
             if (PhaseLogic->HasWarmupCountdownStartTime())
             {
-                PhaseLogic->WarmupCountdownStartTime =
-                    StartTime;
+                PhaseLogic->WarmupCountdownStartTime = StartTime;
             }
             if (PhaseLogic->HasWarmupCountdownEndTime())
             {
-                PhaseLogic->WarmupCountdownEndTime =
-                    EndTime;
+                PhaseLogic->WarmupCountdownEndTime = EndTime;
             }
             if (PhaseLogic->HasWarmupCountdownDuration())
             {
-                PhaseLogic->WarmupCountdownDuration =
-                    Duration;
+                PhaseLogic->WarmupCountdownDuration = Duration;
             }
-            if (PhaseLogic
-                ->HasWarmupEarlyCountdownDuration())
+            if (PhaseLogic->HasWarmupEarlyCountdownDuration())
             {
-                PhaseLogic
-                    ->WarmupEarlyCountdownDuration =
-                    Duration;
+                PhaseLogic->WarmupEarlyCountdownDuration = Duration;
             }
         }
 
@@ -5600,223 +4310,131 @@ namespace
 
 void AFortGameMode::TickSupplyDropSuppression(bool bForceDiscovery)
 {
-    ApplySupplyDropSuppression(
-        UWorld::GetWorld(), bForceDiscovery);
+    ApplySupplyDropSuppression(UWorld::GetWorld(), bForceDiscovery);
 }
 
-void AFortGameMode::TickGameplayConfigurationPolicy(
-    float DeltaSeconds)
+void AFortGameMode::TickGameplayConfigurationPolicy(float DeltaSeconds)
 {
     auto World = UWorld::GetWorld();
-    auto GameMode =
-        World && World->AuthorityGameMode
-            ? (AFortGameMode*)World->AuthorityGameMode
+    auto GameMode = World && World->AuthorityGameMode ? (AFortGameMode*)World->AuthorityGameMode
             : nullptr;
-    auto GameState =
-        GameMode
-            ? (AFortGameStateAthena*)GameMode->GameState
-            : nullptr;
-    if (!IsSaneObject(World) ||
-        !IsSaneObject(GameMode) ||
-        !IsSaneObject(GameState))
+    auto GameState = GameMode ? (AFortGameStateAthena*)GameMode->GameState : nullptr;
+    if (!IsSaneObject(World) || !IsSaneObject(GameMode) || !IsSaneObject(GameState))
     {
         ResetGameplayConfigurationPolicy(true);
         return;
     }
 
     auto& State = GGameplayConfigurationPolicyState;
-    if (State.World.Get() != World ||
-        State.GameState.Get() != GameState)
+    if (State.World.Get() != World || State.GameState.Get() != GameState)
     {
         ResetGameplayConfigurationPolicy(true);
         State.World = TWeakObjectPtr<UWorld>(World);
-        State.GameState =
-            TWeakObjectPtr<AFortGameStateAthena>(GameState);
-        FConfiguration::bStartBusRequested.store(
-            false, std::memory_order_release);
+        State.GameState = TWeakObjectPtr<AFortGameStateAthena>(GameState);
+        FConfiguration::bStartBusRequested.store(false, std::memory_order_release);
     }
 
     auto Playlist = ResolveSupplyDropPlaylist(World);
 
-    // Glider Redeploy used to write this replicated UObject directly from
-    // ImGui's render thread. Reconcile both checked and unchecked states here
-    // after native LTM ticks so a playlist-authored true value cannot make the
-    // visible OFF state ineffective. Restore the authored value only when the
-    // policy no longer applies (world/mode/version transition).
-    const bool bGliderBuildSupported =
-        FConfiguration::IsGliderRedeploySupportedBuild();
-    const bool bGliderPolicyAvailable =
-        bGliderBuildSupported &&
-        GUI::UsesDefaultMatchSettings(
+    const bool bGliderBuildSupported = FConfiguration::IsGliderRedeploySupportedBuild();
+    const bool bGliderPolicyAvailable = bGliderBuildSupported && GUI::UsesDefaultMatchSettings(
             GUI::GetSelectedPlaylist());
-    if (!bGliderBuildSupported &&
-        FConfiguration::bGliderRedeploy.load(
-            std::memory_order_acquire))
+    if (!bGliderBuildSupported && FConfiguration::bGliderRedeploy.load(std::memory_order_acquire))
     {
-        // A hidden value restored from another build must not opt a modern or
-        // legacy client into an implementation its UI deliberately gates out.
-        FConfiguration::bGliderRedeploy.store(
-            false, std::memory_order_release);
+        FConfiguration::bGliderRedeploy.store(false, std::memory_order_release);
     }
     if (bGliderBuildSupported)
     {
-        auto PawnDefaults =
-            ResolveGliderRedeployPawnDefaults(GameMode);
-        const bool bRuntimeSupported =
-            GameState
-                ->HasDefaultGliderRedeployCanRedeploy() ||
-            (PawnDefaults &&
-                PawnDefaults
-                    ->HasGliderRedeployAllowedRow());
-        FConfiguration::GliderRedeployRuntimeSupport.store(
-            bRuntimeSupported ? 1 : 0,
+        auto PawnDefaults = ResolveGliderRedeployPawnDefaults(GameMode);
+        const bool bRuntimeSupported = GameState->HasDefaultGliderRedeployCanRedeploy() ||
+            (PawnDefaults && PawnDefaults->HasGliderRedeployAllowedRow());
+        FConfiguration::GliderRedeployRuntimeSupport.store(bRuntimeSupported ? 1 : 0,
             std::memory_order_release);
     }
-    if (bGliderPolicyAvailable &&
-        !State.bGliderRedeployCaptured &&
-        GameState
+    if (bGliderPolicyAvailable && !State.bGliderRedeployCaptured && GameState
             ->HasDefaultGliderRedeployCanRedeploy())
     {
-        State.OriginalGliderRedeploy =
-            GameState->DefaultGliderRedeployCanRedeploy;
+        State.OriginalGliderRedeploy = GameState->DefaultGliderRedeployCanRedeploy;
         State.bGliderRedeployCaptured = true;
 
-        State.bGliderHeightLimitCaptured =
-            GameState
-                ->HasDefaultRedeployGliderHeightLimit();
+        State.bGliderHeightLimitCaptured = GameState->HasDefaultRedeployGliderHeightLimit();
         if (State.bGliderHeightLimitCaptured)
         {
-            State.OriginalGliderHeightLimit =
-                GameState
-                    ->DefaultRedeployGliderHeightLimit;
+            State.OriginalGliderHeightLimit = GameState->DefaultRedeployGliderHeightLimit;
         }
-        State.bGliderLateralVelocityMultCaptured =
-            GameState
+        State.bGliderLateralVelocityMultCaptured = GameState
                 ->HasDefaultRedeployGliderLateralVelocityMult();
         if (State.bGliderLateralVelocityMultCaptured)
         {
-            State.OriginalGliderLateralVelocityMult =
-                GameState
+            State.OriginalGliderLateralVelocityMult = GameState
                     ->DefaultRedeployGliderLateralVelocityMult;
         }
 
         if (State.OriginalGliderRedeploy > 0.f)
         {
-            FConfiguration::bGliderRedeploy.store(
-                true, std::memory_order_release);
+            FConfiguration::bGliderRedeploy.store(true, std::memory_order_release);
         }
     }
-    if (bGliderPolicyAvailable &&
-        !State.bGliderRowValuesResolved)
+    if (bGliderPolicyAvailable && !State.bGliderRowValuesResolved)
     {
         State.bGliderRowValuesResolved = true;
 
-        const bool bHasStateHeightLimit =
-            GameState
-                ->HasDefaultRedeployGliderHeightLimit();
+        const bool bHasStateHeightLimit = GameState->HasDefaultRedeployGliderHeightLimit();
         const float StateHeightLimit = bHasStateHeightLimit
-            ? GameState->DefaultRedeployGliderHeightLimit
-            : 0.f;
-        const bool bHasStateLateralVelocityMult =
-            GameState
+            ? GameState->DefaultRedeployGliderHeightLimit : 0.f;
+        const bool bHasStateLateralVelocityMult = GameState
                 ->HasDefaultRedeployGliderLateralVelocityMult();
-        const float StateLateralVelocityMult =
-            bHasStateLateralVelocityMult
-                ? GameState
-                    ->DefaultRedeployGliderLateralVelocityMult
-                : 0.f;
+        const float StateLateralVelocityMult = bHasStateLateralVelocityMult ? GameState
+                    ->DefaultRedeployGliderLateralVelocityMult : 0.f;
 
         float AuthoredHeightLimit = 0.f;
         float AuthoredLateralVelocityMult = 0.f;
-        ResolveGliderRedeployPolicyValues(
-            GameMode,
-            AuthoredHeightLimit,
+        ResolveGliderRedeployPolicyValues(GameMode, AuthoredHeightLimit,
             AuthoredLateralVelocityMult);
-        const float GroundTraceDistance =
-            GameState
-                ->HasDefaultParachuteDeployTraceForGroundDistance()
-                ? GameState
-                    ->DefaultParachuteDeployTraceForGroundDistance
-                : 0.f;
-        State.DesiredGliderHeightLimit =
-            SelectGliderRedeployValue(
-                AuthoredHeightLimit,
-                StateHeightLimit,
-                SelectGliderRedeployValue(
-                    GroundTraceDistance,
-                    0.f,
-                    FConfiguration::
-                        GliderRedeployFallbackHeightLimit));
-        State.DesiredGliderLateralVelocityMult =
-            SelectGliderRedeployValue(
-                AuthoredLateralVelocityMult,
-                StateLateralVelocityMult,
-                FConfiguration::
+        const float GroundTraceDistance = GameState
+                ->HasDefaultParachuteDeployTraceForGroundDistance() ? GameState
+                    ->DefaultParachuteDeployTraceForGroundDistance : 0.f;
+        State.DesiredGliderHeightLimit = SelectGliderRedeployValue(AuthoredHeightLimit,
+                StateHeightLimit, SelectGliderRedeployValue(GroundTraceDistance, 0.f,
+                    FConfiguration::GliderRedeployFallbackHeightLimit));
+        State.DesiredGliderLateralVelocityMult = SelectGliderRedeployValue(
+                AuthoredLateralVelocityMult, StateLateralVelocityMult, FConfiguration::
                     GliderRedeployFallbackLateralVelocityMult);
-        SDK::DbgLog(
-            "  [GliderRedeploy] FN=%.2f authored height=%.2f lateral=%.2f "
+        SDK::DbgLog("  [GliderRedeploy] FN=%.2f authored height=%.2f lateral=%.2f "
             "state height=%.2f lateral=%.2f trace=%.2f -> "
-            "height=%.2f lateral=%.2f\n",
-            VersionInfo.FortniteVersion,
-            AuthoredHeightLimit,
-            AuthoredLateralVelocityMult,
-            StateHeightLimit,
-            StateLateralVelocityMult,
-            GroundTraceDistance,
-            State.DesiredGliderHeightLimit,
+            "height=%.2f lateral=%.2f\n", VersionInfo.FortniteVersion, AuthoredHeightLimit,
+            AuthoredLateralVelocityMult, StateHeightLimit, StateLateralVelocityMult,
+            GroundTraceDistance, State.DesiredGliderHeightLimit,
             State.DesiredGliderLateralVelocityMult);
     }
-    const bool bGliderRedeployEnabled =
-        bGliderPolicyAvailable &&
-        FConfiguration::bGliderRedeploy.load(
-            std::memory_order_acquire);
-    if (bGliderPolicyAvailable &&
-        GameState
-            ->HasDefaultGliderRedeployCanRedeploy())
+    const bool bGliderRedeployEnabled = bGliderPolicyAvailable &&
+        FConfiguration::bGliderRedeploy.load(std::memory_order_acquire);
+    if (bGliderPolicyAvailable && GameState->HasDefaultGliderRedeployCanRedeploy())
     {
-        float DesiredRedeploy =
-            bGliderRedeployEnabled ? 1.f : 0.f;
+        float DesiredRedeploy = bGliderRedeployEnabled ? 1.f : 0.f;
         bool bGliderStateChanged = false;
-        if (GameState
-                ->DefaultGliderRedeployCanRedeploy !=
-            DesiredRedeploy)
+        if (GameState->DefaultGliderRedeployCanRedeploy != DesiredRedeploy)
         {
-            GameState
-                ->DefaultGliderRedeployCanRedeploy =
-                DesiredRedeploy;
+            GameState->DefaultGliderRedeployCanRedeploy = DesiredRedeploy;
             bGliderStateChanged = true;
         }
         if (State.bGliderHeightLimitCaptured)
         {
-            float DesiredHeightLimit =
-                bGliderRedeployEnabled
-                    ? State.DesiredGliderHeightLimit
+            float DesiredHeightLimit = bGliderRedeployEnabled ? State.DesiredGliderHeightLimit
                     : State.OriginalGliderHeightLimit;
-            if (GameState
-                    ->DefaultRedeployGliderHeightLimit !=
-                DesiredHeightLimit)
+            if (GameState->DefaultRedeployGliderHeightLimit != DesiredHeightLimit)
             {
-                GameState
-                    ->DefaultRedeployGliderHeightLimit =
-                    DesiredHeightLimit;
+                GameState->DefaultRedeployGliderHeightLimit = DesiredHeightLimit;
                 bGliderStateChanged = true;
             }
         }
         if (State.bGliderLateralVelocityMultCaptured)
         {
-            float DesiredLateralVelocityMult =
-                bGliderRedeployEnabled
-                    ? State
-                        .DesiredGliderLateralVelocityMult
-                    : State
-                        .OriginalGliderLateralVelocityMult;
-            if (GameState
-                    ->DefaultRedeployGliderLateralVelocityMult !=
-                DesiredLateralVelocityMult)
+            float DesiredLateralVelocityMult = bGliderRedeployEnabled ? State
+                        .DesiredGliderLateralVelocityMult : State.OriginalGliderLateralVelocityMult;
+            if (GameState->DefaultRedeployGliderLateralVelocityMult != DesiredLateralVelocityMult)
             {
-                GameState
-                    ->DefaultRedeployGliderLateralVelocityMult =
-                    DesiredLateralVelocityMult;
+                GameState->DefaultRedeployGliderLateralVelocityMult = DesiredLateralVelocityMult;
                 bGliderStateChanged = true;
             }
         }
@@ -5825,26 +4443,18 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
     }
     else if (State.bGliderRedeployCaptured)
     {
-        if (GameState
-            ->HasDefaultGliderRedeployCanRedeploy())
+        if (GameState->HasDefaultGliderRedeployCanRedeploy())
         {
-            GameState
-                ->DefaultGliderRedeployCanRedeploy =
-                State.OriginalGliderRedeploy;
-            if (State.bGliderHeightLimitCaptured &&
-                GameState
+            GameState->DefaultGliderRedeployCanRedeploy = State.OriginalGliderRedeploy;
+            if (State.bGliderHeightLimitCaptured && GameState
                     ->HasDefaultRedeployGliderHeightLimit())
             {
-                GameState
-                    ->DefaultRedeployGliderHeightLimit =
-                    State.OriginalGliderHeightLimit;
+                GameState->DefaultRedeployGliderHeightLimit = State.OriginalGliderHeightLimit;
             }
-            if (State.bGliderLateralVelocityMultCaptured &&
-                GameState
+            if (State.bGliderLateralVelocityMultCaptured && GameState
                     ->HasDefaultRedeployGliderLateralVelocityMult())
             {
-                GameState
-                    ->DefaultRedeployGliderLateralVelocityMult =
+                GameState->DefaultRedeployGliderLateralVelocityMult =
                     State.OriginalGliderLateralVelocityMult;
             }
             GameState->ForceNetUpdate();
@@ -5854,56 +4464,27 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
         State.bGliderLateralVelocityMultCaptured = false;
     }
 
-    ApplyGliderRedeployPawnPolicy(
-        GameMode,
-        World,
-        bGliderRedeployEnabled,
-        State.DesiredGliderHeightLimit,
-        State.DesiredGliderLateralVelocityMult);
+    ApplyGliderRedeployPawnPolicy(GameMode, World, bGliderRedeployEnabled,
+        State.DesiredGliderHeightLimit, State.DesiredGliderLateralVelocityMult);
 
     ApplyJumpFatiguePolicy(GameMode);
-    // Infinite materials and ammo are enforced at their consumption sites so
-    // inventory entries retain ordinary numeric counts. Do not mirror those
-    // settings into the native bBuildFree/bInfiniteAmmo controller flags:
-    // legacy clients such as 12.61 render those flags as sentinel HUD values
-    // (an infinity icon and an extremely large material count).
+    // Do not mirror these into the native bBuildFree/bInfiniteAmmo flags: 12.61 renders them as sentinel HUD values.
 
-    // Time of day is a live toggle. Legacy seasons expose a concrete manager;
-    // modern seasons expose a contextual interface-backed manager, with the
-    // streamed DaySequence actor retained as a last-resort fallback. Track the
-    // resolved controller because it can be replaced without world travel.
-    const float SafeDeltaSeconds =
-        std::isfinite(DeltaSeconds) &&
-            DeltaSeconds > 0.f
-            ? (std::min)(DeltaSeconds, 1.f)
-            : 0.f;
+    const float SafeDeltaSeconds = std::isfinite(DeltaSeconds) && DeltaSeconds > 0.f
+            ? (std::min)(DeltaSeconds, 1.f) : 0.f;
     State.TODMReapplySeconds += SafeDeltaSeconds;
-    const bool bAutoPauseTODM =
-        FConfiguration::bAutoPauseTODM.load(
-            std::memory_order_acquire);
-    auto TODMController =
-        bAutoPauseTODM
-            ? UFortKismetLibrary::
-                GetTimeOfDayControllerCompat(World)
+    const bool bAutoPauseTODM = FConfiguration::bAutoPauseTODM.load(std::memory_order_acquire);
+    auto TODMController = bAutoPauseTODM ? UFortKismetLibrary::GetTimeOfDayControllerCompat(World)
             : State.TODMController.Get();
-    auto PreviousTODMController =
-        State.TODMController.Get();
-    if (bAutoPauseTODM &&
-        PreviousTODMController != TODMController)
+    auto PreviousTODMController = State.TODMController.Get();
+    if (bAutoPauseTODM && PreviousTODMController != TODMController)
     {
-        if (PreviousTODMController &&
-            State.bTODMApplied &&
-            State.bOriginalTODMSpeedCaptured)
+        if (PreviousTODMController && State.bTODMApplied && State.bOriginalTODMSpeedCaptured)
         {
-            UFortKismetLibrary::
-                SetResolvedTimeOfDaySpeedCompat(
-                    PreviousTODMController,
+            UFortKismetLibrary::SetResolvedTimeOfDaySpeedCompat(PreviousTODMController,
                     State.OriginalTODMSpeed);
         }
-        State.TODMController =
-            TODMController
-                ? TWeakObjectPtr<UObject>(
-                    TODMController)
+        State.TODMController = TODMController ? TWeakObjectPtr<UObject>(TODMController)
                 : TWeakObjectPtr<UObject>{};
         State.bTODMApplied = false;
         State.bOriginalTODMSpeedCaptured = false;
@@ -5915,59 +4496,34 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
 
     if (bAutoPauseTODM)
     {
-        if (!State.bTODMApplied &&
-            !State.bOriginalTODMSpeedCaptured)
+        if (!State.bTODMApplied && !State.bOriginalTODMSpeedCaptured)
         {
             float OriginalSpeed = 0.f;
-            if (UFortKismetLibrary::
-                    GetTimeOfDaySpeedCompat(
-                        World, OriginalSpeed) &&
+            if (UFortKismetLibrary::GetTimeOfDaySpeedCompat(World, OriginalSpeed) &&
                 std::isfinite(OriginalSpeed))
             {
-                State.OriginalTODMSpeed =
-                    OriginalSpeed;
-                State.bOriginalTODMSpeedCaptured =
-                    true;
+                State.OriginalTODMSpeed = OriginalSpeed;
+                State.bOriginalTODMSpeedCaptured = true;
             }
         }
 
-        float DesiredTime =
-            FConfiguration::TODMTime.load(
-                std::memory_order_acquire);
+        float DesiredTime = FConfiguration::TODMTime.load(std::memory_order_acquire);
         if (!std::isfinite(DesiredTime))
             DesiredTime = 7.f;
-        DesiredTime =
-            std::fmod(DesiredTime, 24.f);
+        DesiredTime = std::fmod(DesiredTime, 24.f);
         if (DesiredTime < 0.f)
             DesiredTime += 24.f;
 
-        const bool bPeriodicReassert =
-            State.TODMReapplySeconds >= 0.5f;
-        bool bNeedsTimeSeek =
-            !State.bTODMApplied ||
-            std::fabs(
-                State.LastTODMTime -
+        const bool bPeriodicReassert = State.TODMReapplySeconds >= 0.5f;
+        bool bNeedsTimeSeek = !State.bTODMApplied || std::fabs(State.LastTODMTime -
                 DesiredTime) > 0.001f;
 
-        // Do not seek every half-second. It can retrigger phase events on
-        // DaySequence. Only seek again when the manager drifted, the slider
-        // changed, or no streamed manager has resolved yet.
-        if (!bNeedsTimeSeek &&
-            bPeriodicReassert)
+        if (!bNeedsTimeSeek && bPeriodicReassert)
         {
             float CurrentTime = 0.f;
-            if (!TODMController ||
-                !UFortKismetLibrary::
-                    GetTimeOfDayCompat(
-                        World, CurrentTime) ||
-                (std::min)(
-                    std::fabs(
-                        CurrentTime -
-                        DesiredTime),
-                    24.f - std::fabs(
-                        CurrentTime -
-                        DesiredTime)) >
-                    0.02f)
+            if (!TODMController || !UFortKismetLibrary::GetTimeOfDayCompat(World, CurrentTime) ||
+                (std::min)(std::fabs(CurrentTime - DesiredTime), 24.f - std::fabs(CurrentTime -
+                        DesiredTime)) > 0.02f)
             {
                 bNeedsTimeSeek = true;
             }
@@ -5976,21 +4532,13 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
         bool bTimeApplied = true;
         if (bNeedsTimeSeek)
         {
-            bTimeApplied =
-                UFortKismetLibrary::
-                    SetTimeOfDayCompat(
-                        World, DesiredTime);
+            bTimeApplied = UFortKismetLibrary::SetTimeOfDayCompat(World, DesiredTime);
         }
 
         bool bPauseApplied = true;
-        if (!State.bTODMApplied ||
-            bNeedsTimeSeek ||
-            bPeriodicReassert)
+        if (!State.bTODMApplied || bNeedsTimeSeek || bPeriodicReassert)
         {
-            bPauseApplied =
-                UFortKismetLibrary::
-                    SetTimeOfDaySpeedCompat(
-                        World, 0.f);
+            bPauseApplied = UFortKismetLibrary::SetTimeOfDaySpeedCompat(World, 0.f);
         }
 
         if (bTimeApplied && bPauseApplied)
@@ -5998,50 +4546,32 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
             State.bTODMApplied = true;
             if (bNeedsTimeSeek)
             {
-                State.LastTODMTime =
-                    DesiredTime;
+                State.LastTODMTime = DesiredTime;
             }
             if (!State.bLoggedTODMSuccess)
             {
                 float ObservedTime = -1.f;
                 float ObservedSpeed = -1.f;
-                const bool bHasTimeReadback =
-                    UFortKismetLibrary::
-                        GetTimeOfDayCompat(
+                const bool bHasTimeReadback = UFortKismetLibrary::GetTimeOfDayCompat(
                             World, ObservedTime);
-                const bool bHasSpeedReadback =
-                    UFortKismetLibrary::
-                        GetTimeOfDaySpeedCompat(
+                const bool bHasSpeedReadback = UFortKismetLibrary::GetTimeOfDaySpeedCompat(
                             World, ObservedSpeed);
-                SDK::DbgLog(
-                    "[TimeOfDay] auto-pause applied "
+                SDK::DbgLog("[TimeOfDay] auto-pause applied "
                     "version=%.2f controller=%p name=%s "
                     "requested=%.2f observed=%s%.2f "
-                    "speed=%s%.2f\n",
-                    VersionInfo.FortniteVersion,
-                    (void*)TODMController,
-                    TODMController
-                        ? TODMController->Name
-                            .ToString().c_str()
-                        : "static-fallback",
-                    DesiredTime,
-                    bHasTimeReadback ? "" : "unavailable/",
-                    ObservedTime,
-                    bHasSpeedReadback ? "" : "unavailable/",
-                    ObservedSpeed);
+                    "speed=%s%.2f\n", VersionInfo.FortniteVersion, (void*)TODMController,
+                    TODMController ? TODMController->Name.ToString().c_str() : "static-fallback",
+                    DesiredTime, bHasTimeReadback ? "" : "unavailable/", ObservedTime,
+                    bHasSpeedReadback ? "" : "unavailable/", ObservedSpeed);
                 State.bLoggedTODMSuccess = true;
             }
         }
         else if (!State.bLoggedTODMFailure)
         {
-            SDK::DbgLog(
-                "[TimeOfDay] auto-pause pending "
+            SDK::DbgLog("[TimeOfDay] auto-pause pending "
                 "version=%.2f controller=%p "
-                "timeApplied=%d pauseApplied=%d\n",
-                VersionInfo.FortniteVersion,
-                (void*)TODMController,
-                bTimeApplied ? 1 : 0,
-                bPauseApplied ? 1 : 0);
+                "timeApplied=%d pauseApplied=%d\n", VersionInfo.FortniteVersion,
+                (void*)TODMController, bTimeApplied ? 1 : 0, bPauseApplied ? 1 : 0);
             State.bLoggedTODMFailure = true;
         }
 
@@ -6052,20 +4582,12 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
     }
     else if (State.bTODMApplied)
     {
-        // Restore the actual authored speed when the build exposes a getter.
-        // If it does not, stop enforcing rather than inventing 1.0 and
-        // overwriting an event or playlist-owned day/night cycle.
         if (State.bOriginalTODMSpeedCaptured)
         {
-            if (!UFortKismetLibrary::
-                    SetResolvedTimeOfDaySpeedCompat(
-                        State.TODMController.Get(),
+            if (!UFortKismetLibrary::SetResolvedTimeOfDaySpeedCompat(State.TODMController.Get(),
                         State.OriginalTODMSpeed))
             {
-                UFortKismetLibrary::
-                    SetTimeOfDaySpeedCompat(
-                        World,
-                        State.OriginalTODMSpeed);
+                UFortKismetLibrary::SetTimeOfDaySpeedCompat(World, State.OriginalTODMSpeed);
             }
         }
         State.bTODMApplied = false;
@@ -6077,22 +4599,13 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
         State.bLoggedTODMFailure = false;
     }
 
-    const bool bWarmupActive =
-        GUI::gsStatus == Joinable &&
-        (!GameState->HasGamePhase() ||
-            GameState->GamePhase <
-                (uint8)EAthenaGamePhase::Aircraft);
-    const bool bSkipAircraft =
-        Playlist && Playlist->HasbSkipAircraft() &&
-        Playlist->bSkipAircraft;
-    const bool bOwnsAutomaticBusSchedule =
-        IsAuthoritativeBusPolicySelection();
-    if (bWarmupActive && !bSkipAircraft &&
-        FConfiguration::bStartBusRequested.exchange(
+    const bool bWarmupActive = GUI::gsStatus == Joinable && (!GameState->HasGamePhase() ||
+            GameState->GamePhase <(uint8)EAthenaGamePhase::Aircraft);
+    const bool bSkipAircraft = Playlist && Playlist->HasbSkipAircraft() && Playlist->bSkipAircraft;
+    const bool bOwnsAutomaticBusSchedule = IsAuthoritativeBusPolicySelection();
+    if (bWarmupActive && !bSkipAircraft && FConfiguration::bStartBusRequested.exchange(
             false, std::memory_order_acq_rel))
     {
-        // Repeated clicks must not continuously restart the same ten-second
-        // manual countdown.
         if (!State.bManualBusRelease)
         {
             State.bManualBusRelease = true;
@@ -6100,36 +4613,18 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
         }
     }
 
-    if (bWarmupActive && !bSkipAircraft &&
-        (bOwnsAutomaticBusSchedule ||
-            State.bManualBusRelease))
+    if (bWarmupActive && !bSkipAircraft && (bOwnsAutomaticBusSchedule || State.bManualBusRelease))
     {
-        const int32 DesiredBusMode =
-            State.bManualBusRelease
-                ? 2
-                : (FConfiguration::bAutoBusStart.load()
-                    ? 1
-                    : 0);
-        const float DesiredDelay =
-            DesiredBusMode == 2
-                ? 10.f
-                : (DesiredBusMode == 1
-                    ? std::clamp(
-                        FConfiguration::BusStartDelay.load(),
-                        0.f, 300.f)
-                    : 99999999.f);
-        const float CurrentTime =
-            (float)UGameplayStatics::GetTimeSeconds(
-                World);
+        const int32 DesiredBusMode = State.bManualBusRelease ? 2
+                : (FConfiguration::bAutoBusStart.load() ? 1 : 0);
+        const float DesiredDelay = DesiredBusMode == 2 ? 10.f : (DesiredBusMode == 1 ? std::clamp(
+                        FConfiguration::BusStartDelay.load(), 0.f, 300.f) : 99999999.f);
+        const float CurrentTime = (float)UGameplayStatics::GetTimeSeconds(World);
         static const FName InProgress(L"InProgress");
-        const bool bCanStartAircraft =
-            GameMode->MatchState == InProgress &&
+        const bool bCanStartAircraft = GameMode->MatchState == InProgress &&
             GameMode->AlivePlayers.Num() > 0;
-        const bool bPolicyChanged =
-            State.BusPolicyMode != DesiredBusMode ||
-            std::fabs(
-                State.BusPolicyDelay -
-                    DesiredDelay) > 0.01f;
+        const bool bPolicyChanged = State.BusPolicyMode != DesiredBusMode || std::fabs(
+                State.BusPolicyDelay - DesiredDelay) > 0.01f;
         if (bPolicyChanged)
         {
             State.BusPolicyMode = DesiredBusMode;
@@ -6139,68 +4634,41 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
             State.bLoggedBlockedAircraftStart = false;
             State.BusNextStartAttemptTime = 0.f;
             State.BusScheduleStartTime = CurrentTime;
-            State.BusScheduleEndTime =
-                CurrentTime + 99999999.f;
+            State.BusScheduleEndTime = CurrentTime + 99999999.f;
         }
 
-        if (DesiredBusMode != 0 &&
-            bCanStartAircraft &&
-            !State.bBusCountdownArmed)
+        if (DesiredBusMode != 0 && bCanStartAircraft && !State.bBusCountdownArmed)
         {
             State.bBusCountdownArmed = true;
             State.bAircraftStartRequested = false;
             State.BusNextStartAttemptTime = 0.f;
             State.BusScheduleStartTime = CurrentTime;
-            State.BusScheduleEndTime =
-                CurrentTime + DesiredDelay;
-            SDK::DbgLog(
-                "[GameplayPolicy] bus countdown armed mode=%d "
-                "delay=%.2f FN=%.2f\n",
-                DesiredBusMode, DesiredDelay,
-                VersionInfo.FortniteVersion);
+            State.BusScheduleEndTime = CurrentTime + DesiredDelay;
+            SDK::DbgLog("[GameplayPolicy] bus countdown armed mode=%d "
+                "delay=%.2f FN=%.2f\n", DesiredBusMode, DesiredDelay, VersionInfo.FortniteVersion);
         }
-        else if ((!bCanStartAircraft ||
-            DesiredBusMode == 0) &&
-            State.bBusCountdownArmed)
+        else if ((!bCanStartAircraft || DesiredBusMode == 0) && State.bBusCountdownArmed)
         {
             State.bBusCountdownArmed = false;
             State.bAircraftStartRequested = false;
             State.BusNextStartAttemptTime = 0.f;
             State.BusScheduleStartTime = CurrentTime;
-            State.BusScheduleEndTime =
-                CurrentTime + 99999999.f;
+            State.BusScheduleEndTime = CurrentTime + 99999999.f;
         }
 
-        const float AppliedDuration =
-            State.bBusCountdownArmed
-                ? DesiredDelay
-                : 99999999.f;
+        const float AppliedDuration = State.bBusCountdownArmed ? DesiredDelay : 99999999.f;
 
-        auto PhaseLogic =
-            ResolveGameplayPolicyPhaseLogic(World);
-        ApplyWarmupSchedule(
-            GameMode, GameState, PhaseLogic,
-            State.BusScheduleStartTime,
-            State.BusScheduleEndTime,
-            AppliedDuration);
+        auto PhaseLogic = ResolveGameplayPolicyPhaseLogic(World);
+        ApplyWarmupSchedule(GameMode, GameState, PhaseLogic, State.BusScheduleStartTime,
+            State.BusScheduleEndTime, AppliedDuration);
 
-        // The legacy NetDriver auto-start branch begins at Season 11. Fill the
-        // earlier supported versions from this same authoritative schedule.
-        // Do not consume the one-shot request while the native GameMode still
-        // has no real passenger; otherwise it can never retry after a join.
-        if (VersionInfo.FortniteVersion < 11.00 &&
-            DesiredBusMode != 0 &&
-            bCanStartAircraft &&
-            State.bBusCountdownArmed &&
-            CurrentTime >= State.BusScheduleEndTime &&
-            CurrentTime >=
+        if (VersionInfo.FortniteVersion < 11.00 && DesiredBusMode != 0 && bCanStartAircraft &&
+            State.bBusCountdownArmed && CurrentTime >= State.BusScheduleEndTime && CurrentTime >=
                 State.BusNextStartAttemptTime)
         {
             State.bAircraftStartRequested = true;
-            State.BusNextStartAttemptTime =
-                CurrentTime + 1.f;
-            UKismetSystemLibrary::ExecuteConsoleCommand(
-                World, FString(L"startaircraft"), nullptr);
+            State.BusNextStartAttemptTime = CurrentTime + 1.f;
+            UKismetSystemLibrary::ExecuteConsoleCommand(World, FString(L"startaircraft"), nullptr);
         }
     }
     else
@@ -6218,47 +4686,37 @@ void AFortGameMode::TickGameplayConfigurationPolicy(
 
 void AFortGameMode::TickPendingVehicleSpawns()
 {
-    if (!UsesDeferredVehicleSpawnDiscovery() ||
-        !GDeferredVehicleSpawnState.Started ||
+    if (!UsesDeferredVehicleSpawnDiscovery() || !GDeferredVehicleSpawnState.Started ||
         !GDeferredVehicleSpawnState.Active)
     {
         return;
     }
 
     auto* World = UWorld::GetWorld();
-    if (!World ||
-        GDeferredVehicleSpawnState.World.Get() != World)
+    if (!World || GDeferredVehicleSpawnState.World.Get() != World)
     {
         GDeferredVehicleSpawnState.Active = false;
         return;
     }
 
     const ULONGLONG CurrentTimeMs = GetTickCount64();
-    if (CurrentTimeMs <
-        GDeferredVehicleSpawnState.NextAttemptTimeMs)
+    if (CurrentTimeMs <GDeferredVehicleSpawnState.NextAttemptTimeMs)
     {
         return;
     }
-    const bool FinalPass =
-        CurrentTimeMs >=
-            GDeferredVehicleSpawnState.DeadlineTimeMs;
+    const bool FinalPass = CurrentTimeMs >= GDeferredVehicleSpawnState.DeadlineTimeMs;
     RunVehicleSpawnDiscoveryPass();
     if (FinalPass)
     {
         GDeferredVehicleSpawnState.Active = false;
-        SDK::DbgLog(
-            "[VehicleSpawn] discovery complete passes=%u "
-            "spawned=%d processed=%d\n",
-            GDeferredVehicleSpawnState.PassCount,
-            GDeferredVehicleSpawnState.TotalSpawned,
-            static_cast<int32>(
-                GDeferredVehicleSpawnState
+        SDK::DbgLog("[VehicleSpawn] discovery complete passes=%u "
+            "spawned=%d processed=%d\n", GDeferredVehicleSpawnState.PassCount,
+            GDeferredVehicleSpawnState.TotalSpawned, static_cast<int32>(GDeferredVehicleSpawnState
                     .ProcessedSources.size()));
         return;
     }
 
-    GDeferredVehicleSpawnState.NextAttemptTimeMs =
-        CurrentTimeMs + VehicleSpawnRetryIntervalMs;
+    GDeferredVehicleSpawnState.NextAttemptTimeMs = CurrentTimeMs + VehicleSpawnRetryIntervalMs;
 }
 
 namespace
@@ -6277,9 +4735,7 @@ namespace
 
     FManagedPlaylistStreamingState GManagedPlaylistStreamingState;
 
-    bool TryGetPlaylistLevelName(
-        const FSoftObjectPtr& SoftLevel,
-        FName& OutLevelName)
+    bool TryGetPlaylistLevelName(const FSoftObjectPtr& SoftLevel, FName& OutLevelName)
     {
         OutLevelName = FName();
         if (VersionInfo.FortniteVersion < 23)
@@ -6290,29 +4746,18 @@ namespace
             return true;
         }
 
-        // UE5 split FSoftObjectPath into package/asset names and UE5.3 also
-        // moved those fields. Reading ObjectID.AssetPathName on 27.11 reads
-        // the weak-pointer bytes instead of the Durian level path.
-        const uint8* Value =
-            reinterpret_cast<const uint8*>(&SoftLevel);
-        const uint32 PackageOffset =
-            VersionInfo.EngineVersion < 5.3 ? 0x10 : 0x08;
-        const uint32 AssetOffset =
-            VersionInfo.EngineVersion < 5.3 ? 0x14 : 0x0C;
-        if (!SDK::MemReadable(
-                Value + PackageOffset, sizeof(FName)) ||
-            !SDK::MemReadable(
+        // UE5 split FSoftObjectPath into package/asset names and 5.3 moved them, so 27.11 would read weak-pointer bytes.
+        const uint8* Value = reinterpret_cast<const uint8*>(&SoftLevel);
+        const uint32 PackageOffset = VersionInfo.EngineVersion < 5.3 ? 0x10 : 0x08;
+        const uint32 AssetOffset = VersionInfo.EngineVersion < 5.3 ? 0x14 : 0x0C;
+        if (!SDK::MemReadable(Value + PackageOffset, sizeof(FName)) || !SDK::MemReadable(
                 Value + AssetOffset, sizeof(FName)))
         {
             return false;
         }
 
-        const auto& PackageName =
-            *reinterpret_cast<const FName*>(
-                Value + PackageOffset);
-        const auto& AssetName =
-            *reinterpret_cast<const FName*>(
-                Value + AssetOffset);
+        const auto& PackageName = *reinterpret_cast<const FName*>(Value + PackageOffset);
+        const auto& AssetName = *reinterpret_cast<const FName*>(Value + AssetOffset);
         if (!PackageName.IsValid())
             return false;
 
@@ -6329,15 +4774,10 @@ namespace
         return OutLevelName.IsValid();
     }
 
-    bool IsSaneReflectedArray(
-        const void* Data,
-        int32 Num,
-        int32 Max,
-        int32 ElementSize,
+    bool IsSaneReflectedArray(const void* Data, int32 Num, int32 Max, int32 ElementSize,
         int32 MaximumElements)
     {
-        if (Num < 0 || Max < Num || Max > MaximumElements ||
-            ElementSize <= 0)
+        if (Num < 0 || Max < Num || Max > MaximumElements || ElementSize <= 0)
         {
             return false;
         }
@@ -6345,100 +4785,60 @@ namespace
         if (Max == 0)
             return Data == nullptr;
 
-        return Data &&
-            SDK::MemReadable(
-                Data,
-                static_cast<size_t>(Max) *
+        return Data && SDK::MemReadable(Data, static_cast<size_t>(Max) *
                     static_cast<size_t>(ElementSize));
     }
 
-    bool GetInternalPlaylistStreamingTracker(
-        AFortGameStateAthena* GameState,
-        const TArray<FPlaylistStreamedLevelData>** OutTracker,
-        int32* OutElementSize)
+    bool GetInternalPlaylistStreamingTracker(AFortGameStateAthena* GameState,
+        const TArray<FPlaylistStreamedLevelData>** OutTracker, int32* OutElementSize)
     {
         if (OutTracker)
             *OutTracker = nullptr;
         if (OutElementSize)
             *OutElementSize = 0;
-        if (!GameState ||
-            !GameState->HasAdditionalPlaylistLevelsStreamed())
+        if (!GameState || !GameState->HasAdditionalPlaylistLevelsStreamed())
         {
             return false;
         }
 
-        const int32 ReplicatedLevelsOffset =
-            GameState->GetOffset(
+        const int32 ReplicatedLevelsOffset = GameState->GetOffset(
                 "AdditionalPlaylistLevelsStreamed");
-        int32 TrackerOffset =
-            GameState->GetOffset("AdditionalPlaylistLevels");
-        const UStruct* TrackerStruct =
-            FPlaylistStreamedLevelData::StaticStruct();
-        if (ReplicatedLevelsOffset < 0x10 || !TrackerStruct ||
-            !FPlaylistStreamedLevelData::
+        int32 TrackerOffset = GameState->GetOffset("AdditionalPlaylistLevels");
+        const UStruct* TrackerStruct = FPlaylistStreamedLevelData::StaticStruct();
+        if (ReplicatedLevelsOffset < 0x10 || !TrackerStruct || !FPlaylistStreamedLevelData::
                 HasbIsFinishedStreaming())
         {
             return false;
         }
 
-        const int32 ElementSize =
-            TrackerStruct->GetPropertiesSize();
-        if (ElementSize < static_cast<int32>(sizeof(void*)) ||
-            ElementSize > 0x100)
+        const int32 ElementSize = TrackerStruct->GetPropertiesSize();
+        if (ElementSize < static_cast<int32>(sizeof(void*)) || ElementSize > 0x100)
         {
             return false;
         }
 
-        // This tracker is owned by Fortnite's asynchronous playlist loader.
-        // Some older dumps omit its property even though the field is adjacent
-        // to the replicated array. The adjacent fallback is observation-only:
-        // callers receive a const array and must never add, remove, clear, or
-        // update entries that a native async completion may still reference.
-        const bool bKnownAdjacentTrackerLayout =
-            std::fabs(
-                VersionInfo.FortniteVersion - 9.40) < 0.001 ||
-            std::fabs(
-                VersionInfo.FortniteVersion - 9.41) < 0.001 ||
-            std::fabs(
-                VersionInfo.FortniteVersion - 18.40) < 0.001 ||
-            std::fabs(
+        const bool bKnownAdjacentTrackerLayout = std::fabs(
+                VersionInfo.FortniteVersion - 9.40) < 0.001 || std::fabs(
+                VersionInfo.FortniteVersion - 9.41) < 0.001 || std::fabs(
+                VersionInfo.FortniteVersion - 18.40) < 0.001 || std::fabs(
                 VersionInfo.FortniteVersion - 27.11) < 0.001;
-        const bool bUsingAdjacentTracker =
-            TrackerOffset < 0 && bKnownAdjacentTrackerLayout;
+        const bool bUsingAdjacentTracker = TrackerOffset < 0 && bKnownAdjacentTrackerLayout;
         if (bUsingAdjacentTracker)
             TrackerOffset = ReplicatedLevelsOffset - 0x10;
-        const int32 GameStateSize =
-            GameState->Class
-                ? GameState->Class->GetPropertiesSize()
-                : 0;
-        if (TrackerOffset < 0 ||
-            TrackerOffset == ReplicatedLevelsOffset ||
-            GameStateSize <= 0 ||
-            TrackerOffset >
-                GameStateSize -
-                    static_cast<int32>(sizeof(TArray<void*>)) ||
-            ReplicatedLevelsOffset >
-                GameStateSize -
-                    static_cast<int32>(sizeof(TArray<void*>)) ||
-            (bUsingAdjacentTracker &&
-             TrackerOffset +
-                     static_cast<int32>(sizeof(TArray<void*>)) !=
+        const int32 GameStateSize = GameState->Class ? GameState->Class->GetPropertiesSize() : 0;
+        if (TrackerOffset < 0 || TrackerOffset == ReplicatedLevelsOffset || GameStateSize <= 0 ||
+            TrackerOffset > GameStateSize - static_cast<int32>(sizeof(TArray<void*>)) ||
+            ReplicatedLevelsOffset > GameStateSize - static_cast<int32>(sizeof(TArray<void*>)) ||
+            (bUsingAdjacentTracker && TrackerOffset + static_cast<int32>(sizeof(TArray<void*>)) !=
                  ReplicatedLevelsOffset))
         {
             return false;
         }
 
-        const auto Tracker =
-            reinterpret_cast<const TArray<FPlaylistStreamedLevelData>*>(
-                reinterpret_cast<uint8*>(GameState) +
-                TrackerOffset);
-        if (!SDK::MemReadable(Tracker, sizeof(*Tracker)) ||
-            !IsSaneReflectedArray(
-                Tracker->Data,
-                Tracker->Num(),
-                Tracker->Max(),
-                ElementSize,
-                256))
+        const auto Tracker = reinterpret_cast<const TArray<FPlaylistStreamedLevelData>*>(
+                reinterpret_cast<uint8*>(GameState) + TrackerOffset);
+        if (!SDK::MemReadable(Tracker, sizeof(*Tracker)) || !IsSaneReflectedArray(Tracker->Data,
+                Tracker->Num(), Tracker->Max(), ElementSize, 256))
         {
             return false;
         }
@@ -6450,35 +4850,23 @@ namespace
         return true;
     }
 
-    bool EnsureReplicatedPlaylistLevel(
-        AFortGameStateAthena* GameState,
-        const FName& LevelName,
-        bool bServerOnly,
-        bool* OutAdded)
+    bool EnsureReplicatedPlaylistLevel(AFortGameStateAthena* GameState, const FName& LevelName,
+        bool bServerOnly, bool* OutAdded)
     {
         if (OutAdded)
             *OutAdded = false;
-        if (!GameState || !LevelName.IsValid() ||
-            !GameState->HasAdditionalPlaylistLevelsStreamed())
+        if (!GameState || !LevelName.IsValid() || !GameState->HasAdditionalPlaylistLevelsStreamed())
         {
             return false;
         }
 
-        auto& StreamedLevels =
-            GameState->AdditionalPlaylistLevelsStreamed;
-        const UStruct* AdditionalLevelStruct =
-            FAdditionalLevelStreamed::StaticStruct();
+        auto& StreamedLevels = GameState->AdditionalPlaylistLevelsStreamed;
+        const UStruct* AdditionalLevelStruct = FAdditionalLevelStreamed::StaticStruct();
         if (!AdditionalLevelStruct)
         {
-            auto& LegacyLevels =
-                reinterpret_cast<TArray<FName>&>(
-                    StreamedLevels);
-            if (!IsSaneReflectedArray(
-                    LegacyLevels.Data,
-                    LegacyLevels.Num(),
-                    LegacyLevels.Max(),
-                    static_cast<int32>(sizeof(FName)),
-                    256))
+            auto& LegacyLevels = reinterpret_cast<TArray<FName>&>(StreamedLevels);
+            if (!IsSaneReflectedArray(LegacyLevels.Data, LegacyLevels.Num(), LegacyLevels.Max(),
+                    static_cast<int32>(sizeof(FName)), 256))
             {
                 return false;
             }
@@ -6497,17 +4885,10 @@ namespace
             return true;
         }
 
-        const int32 ElementSize =
-            AdditionalLevelStruct->GetPropertiesSize();
-        if (ElementSize <= 0 || ElementSize > 0x100 ||
-            !FAdditionalLevelStreamed::HasLevelName() ||
-            !FAdditionalLevelStreamed::HasbIsServerOnly() ||
-            !IsSaneReflectedArray(
-                StreamedLevels.Data,
-                StreamedLevels.Num(),
-                StreamedLevels.Max(),
-                ElementSize,
-                256))
+        const int32 ElementSize = AdditionalLevelStruct->GetPropertiesSize();
+        if (ElementSize <= 0 || ElementSize > 0x100 || !FAdditionalLevelStreamed::HasLevelName() ||
+            !FAdditionalLevelStreamed::HasbIsServerOnly() || !IsSaneReflectedArray(
+                StreamedLevels.Data, StreamedLevels.Num(), StreamedLevels.Max(), ElementSize, 256))
         {
             return false;
         }
@@ -6515,8 +4896,7 @@ namespace
         for (int32 Index = 0;
              Index < StreamedLevels.Num(); ++Index)
         {
-            auto& Existing =
-                StreamedLevels.Get(Index, ElementSize);
+            auto& Existing = StreamedLevels.Get(Index, ElementSize);
             if (Existing.LevelName == LevelName)
                 return true;
         }
@@ -6526,8 +4906,7 @@ namespace
             return false;
         memset(Memory, 0, ElementSize);
 
-        auto NewLevel =
-            static_cast<FAdditionalLevelStreamed*>(Memory);
+        auto NewLevel = static_cast<FAdditionalLevelStreamed*>(Memory);
         FName MutableLevelName = LevelName;
         NewLevel->LevelName = MutableLevelName;
         NewLevel->bIsServerOnly = bServerOnly;
@@ -6538,95 +4917,60 @@ namespace
         return true;
     }
 
-    bool MaintainManagedPlaylistLevels(
-        AFortGameStateAthena* GameState,
-        const UFortPlaylistAthena* Playlist,
-        bool bForceRequest)
+    bool MaintainManagedPlaylistLevels(AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist, bool bForceRequest)
     {
         UWorld* World = UWorld::GetWorld();
         if (!World || !GameState || !Playlist)
             return false;
 
-        auto ValidateSoftLevelArray =
-            [](const TArray<TSoftObjectPtr<UWorld>>& Levels)
+        auto ValidateSoftLevelArray = [](const TArray<TSoftObjectPtr<UWorld>>& Levels)
             {
-                return IsSaneReflectedArray(
-                    Levels.Data,
-                    Levels.Num(),
-                    Levels.Max(),
-                    static_cast<int32>(FSoftObjectPtr::Size()),
-                    128);
+                return IsSaneReflectedArray(Levels.Data, Levels.Num(), Levels.Max(),
+                    static_cast<int32>(FSoftObjectPtr::Size()), 128);
             };
 
-        const bool bHasClientLevels =
-            Playlist->HasAdditionalLevels();
-        const bool bHasServerLevels =
-            Playlist->HasAdditionalLevelsServerOnly();
-        if ((bHasClientLevels &&
-             !ValidateSoftLevelArray(
-                 Playlist->AdditionalLevels)) ||
-            (bHasServerLevels &&
-             !ValidateSoftLevelArray(
-                 Playlist->AdditionalLevelsServerOnly)))
+        const bool bHasClientLevels = Playlist->HasAdditionalLevels();
+        const bool bHasServerLevels = Playlist->HasAdditionalLevelsServerOnly();
+        if ((bHasClientLevels && !ValidateSoftLevelArray(Playlist->AdditionalLevels)) ||
+            (bHasServerLevels && !ValidateSoftLevelArray(Playlist->AdditionalLevelsServerOnly)))
         {
             return false;
         }
 
-        const int32 ClientLevelCount =
-            bHasClientLevels
-                ? Playlist->AdditionalLevels.Num()
+        const int32 ClientLevelCount = bHasClientLevels ? Playlist->AdditionalLevels.Num() : 0;
+        const int32 ServerLevelCount = bHasServerLevels ? Playlist->AdditionalLevelsServerOnly.Num()
                 : 0;
-        const int32 ServerLevelCount =
-            bHasServerLevels
-                ? Playlist->AdditionalLevelsServerOnly.Num()
-                : 0;
-        const int32 DeclaredLevelCount =
-            ClientLevelCount + ServerLevelCount;
+        const int32 DeclaredLevelCount = ClientLevelCount + ServerLevelCount;
         if (DeclaredLevelCount == 0)
             return true;
 
         const TArray<FPlaylistStreamedLevelData>* Tracker = nullptr;
         int32 TrackerElementSize = 0;
-        const bool bHasNativeTracker =
-            GetInternalPlaylistStreamingTracker(
+        const bool bHasNativeTracker = GetInternalPlaylistStreamingTracker(
                 GameState, &Tracker, &TrackerElementSize);
 
-        const bool bNewPlaylist =
-            GManagedPlaylistStreamingState.World != World ||
+        const bool bNewPlaylist = GManagedPlaylistStreamingState.World != World ||
             GManagedPlaylistStreamingState.Playlist != Playlist;
         if (bNewPlaylist)
         {
             GManagedPlaylistStreamingState = {};
             GManagedPlaylistStreamingState.World = World;
             GManagedPlaylistStreamingState.Playlist = Playlist;
-            GManagedPlaylistStreamingState.FirstObservedTimeMs =
-                GetTickCount64();
+            GManagedPlaylistStreamingState.FirstObservedTimeMs = GetTickCount64();
         }
 
         const ULONGLONG CurrentTimeMs = GetTickCount64();
-        const bool bAllowExternalFallback =
-            std::fabs(
-                VersionInfo.FortniteVersion - 27.11) < 0.001;
-        const bool bFallbackGraceExpired =
-            CurrentTimeMs >=
-                GManagedPlaylistStreamingState
+        const bool bAllowExternalFallback = std::fabs(VersionInfo.FortniteVersion - 27.11) < 0.001;
+        const bool bFallbackGraceExpired = CurrentTimeMs >= GManagedPlaylistStreamingState
                     .FirstObservedTimeMs + 8000ULL;
-        const bool bMayRequest =
-            bAllowExternalFallback &&
-            bFallbackGraceExpired &&
-            (bForceRequest ||
-             CurrentTimeMs >=
-                 GManagedPlaylistStreamingState
-                     .NextRetryTimeMs);
-        if (!bHasNativeTracker &&
-            !GManagedPlaylistStreamingState.bLoggedInvalidTracker)
+        const bool bMayRequest = bAllowExternalFallback && bFallbackGraceExpired &&
+            (bForceRequest || CurrentTimeMs >= GManagedPlaylistStreamingState.NextRetryTimeMs);
+        if (!bHasNativeTracker && !GManagedPlaylistStreamingState.bLoggedInvalidTracker)
         {
             GManagedPlaylistStreamingState.bLoggedInvalidTracker = true;
-            SDK::DbgLog(
-                "[PlaylistLevels] native tracker unavailable; "
-                "%s\n",
-                bAllowExternalFallback
-                    ? "waiting before isolated 27.11 fallback"
+            SDK::DbgLog("[PlaylistLevels] native tracker unavailable; "
+                "%s\n", bAllowExternalFallback ? "waiting before isolated 27.11 fallback"
                     : "leaving playlist streaming to Fortnite");
         }
         bool bNeedsRetry = false;
@@ -6634,12 +4978,9 @@ namespace
         bool bAllRequestsReady = true;
         int32 TrackerIndex = 0;
 
-        auto MaintainLevel =
-            [&](TSoftObjectPtr<UWorld>& Level,
-                bool bServerOnly)
+        auto MaintainLevel = [&](TSoftObjectPtr<UWorld>& Level, bool bServerOnly)
             {
-                const size_t MappingIndex =
-                    static_cast<size_t>(TrackerIndex++);
+                const size_t MappingIndex = static_cast<size_t>(TrackerIndex++);
                 FName LevelName;
                 if (!TryGetPlaylistLevelName(Level, LevelName))
                 {
@@ -6648,34 +4989,25 @@ namespace
                     return;
                 }
 
-                if (GManagedPlaylistStreamingState
-                        .LevelNamesByTrackerIndex.size() <= MappingIndex)
+                if (GManagedPlaylistStreamingState.LevelNamesByTrackerIndex.size() <= MappingIndex)
                 {
                     GManagedPlaylistStreamingState
                         .LevelNamesByTrackerIndex.resize(MappingIndex + 1);
-                    GManagedPlaylistStreamingState
-                        .StreamingObjectsByTrackerIndex.resize(
+                    GManagedPlaylistStreamingState.StreamingObjectsByTrackerIndex.resize(
                             MappingIndex + 1, nullptr);
                 }
-                auto& TrackedLevelName =
-                    GManagedPlaylistStreamingState
+                auto& TrackedLevelName = GManagedPlaylistStreamingState
                         .LevelNamesByTrackerIndex[MappingIndex];
-                auto& ManagedStreamingLevel =
-                    GManagedPlaylistStreamingState
+                auto& ManagedStreamingLevel = GManagedPlaylistStreamingState
                         .StreamingObjectsByTrackerIndex[MappingIndex];
-                if (!TrackedLevelName.IsValid() ||
-                    TrackedLevelName != LevelName)
+                if (!TrackedLevelName.IsValid() || TrackedLevelName != LevelName)
                 {
-                    // This is DLL-owned fallback state only. Never clear or
-                    // repurpose Fortnite's engine-owned tracker entry.
                     TrackedLevelName = LevelName;
                     ManagedStreamingLevel = nullptr;
                 }
 
-                const UClass* StreamingClass =
-                    ULevelStreamingDynamic::StaticClass();
-                if (ManagedStreamingLevel &&
-                    (!StreamingClass ||
+                const UClass* StreamingClass = ULevelStreamingDynamic::StaticClass();
+                if (ManagedStreamingLevel && (!StreamingClass ||
                      !IsSaneObject(ManagedStreamingLevel) ||
                      !ManagedStreamingLevel->IsA(StreamingClass)))
                 {
@@ -6683,55 +5015,36 @@ namespace
                 }
 
                 ULevelStreamingDynamic* NativeStreamingLevel = nullptr;
-                if (bHasNativeTracker &&
-                    MappingIndex <
-                        static_cast<size_t>(Tracker->Num()))
+                if (bHasNativeTracker && MappingIndex <static_cast<size_t>(Tracker->Num()))
                 {
-                    const auto& NativeEntry =
-                        Tracker->Get(
-                            static_cast<int32>(MappingIndex),
+                    const auto& NativeEntry = Tracker->Get(static_cast<int32>(MappingIndex),
                             TrackerElementSize);
                     auto Candidate = NativeEntry.StreamingLevel;
-                    if (Candidate && StreamingClass &&
-                        IsSaneObject(Candidate) &&
+                    if (Candidate && StreamingClass && IsSaneObject(Candidate) &&
                         Candidate->IsA(StreamingClass))
                     {
                         NativeStreamingLevel = Candidate;
                     }
                 }
 
-                auto StreamingLevel = NativeStreamingLevel
-                    ? NativeStreamingLevel
+                auto StreamingLevel = NativeStreamingLevel ? NativeStreamingLevel
                     : ManagedStreamingLevel;
                 if (!StreamingLevel && bMayRequest)
                 {
-                    if (!GManagedPlaylistStreamingState
-                             .bLoggedExternalFallback)
+                    if (!GManagedPlaylistStreamingState.bLoggedExternalFallback)
                     {
-                        GManagedPlaylistStreamingState
-                            .bLoggedExternalFallback = true;
-                        SDK::DbgLog(
-                            "[PlaylistLevels] using isolated 27.11 "
+                        GManagedPlaylistStreamingState.bLoggedExternalFallback = true;
+                        SDK::DbgLog("[PlaylistLevels] using isolated 27.11 "
                             "streaming fallback after native grace period\n");
                     }
                     bool bSuccess = false;
-                    StreamingLevel =
-                        ULevelStreamingDynamic::
-                            LoadLevelInstanceBySoftObjectPtr(
-                                World,
-                                Level,
-                                FVector(),
-                                FRotator(),
-                                &bSuccess,
-                                FString(),
-                                nullptr);
-                    if (!bSuccess || !StreamingLevel ||
-                        !IsSaneObject(StreamingLevel))
+                    StreamingLevel = ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(World,
+                                Level, FVector(), FRotator(), &bSuccess, FString(), nullptr);
+                    if (!bSuccess || !StreamingLevel || !IsSaneObject(StreamingLevel))
                     {
                         StreamingLevel = nullptr;
                         bNeedsRetry = true;
-                        SDK::DbgLog(
-                            "[PlaylistLevels] request failed: %s\n",
+                        SDK::DbgLog("[PlaylistLevels] request failed: %s\n",
                             LevelName.ToString().c_str());
                     }
                     ManagedStreamingLevel = StreamingLevel;
@@ -6739,10 +5052,6 @@ namespace
 
                 if (!StreamingLevel)
                 {
-                    // 18.40 and loader-backed legacy events stay entirely on
-                    // Fortnite's native/Blueprint pipeline. If a native entry
-                    // exists, the read-only visibility pass below will hold
-                    // readiness; otherwise event startup retries its actors.
                     if (bAllowExternalFallback)
                     {
                         bAllRequestsReady = false;
@@ -6754,11 +5063,7 @@ namespace
                 if (!NativeStreamingLevel)
                 {
                     bool bAdded = false;
-                    if (!EnsureReplicatedPlaylistLevel(
-                            GameState,
-                            LevelName,
-                            bServerOnly,
-                            &bAdded))
+                    if (!EnsureReplicatedPlaylistLevel(GameState, LevelName, bServerOnly, &bAdded))
                     {
                         bAllRequestsReady = false;
                         bNeedsRetry = true;
@@ -6781,10 +5086,7 @@ namespace
             for (int32 Index = 0;
                  Index < ClientLevelCount; ++Index)
             {
-                auto& Level =
-                    Playlist->AdditionalLevels.Get(
-                        Index,
-                        FSoftObjectPtr::Size());
+                auto& Level = Playlist->AdditionalLevels.Get(Index, FSoftObjectPtr::Size());
                 MaintainLevel(Level, false);
             }
         }
@@ -6793,32 +5095,25 @@ namespace
             for (int32 Index = 0;
                  Index < ServerLevelCount; ++Index)
             {
-                auto& Level =
-                    Playlist->AdditionalLevelsServerOnly.Get(
-                        Index,
+                auto& Level = Playlist->AdditionalLevelsServerOnly.Get(Index,
                         FSoftObjectPtr::Size());
                 MaintainLevel(Level, true);
             }
         }
 
-
-        GManagedPlaylistStreamingState
-            .LevelNamesByTrackerIndex.resize(
+        GManagedPlaylistStreamingState.LevelNamesByTrackerIndex.resize(
                 static_cast<size_t>(DeclaredLevelCount));
-        GManagedPlaylistStreamingState
-            .StreamingObjectsByTrackerIndex.resize(
+        GManagedPlaylistStreamingState.StreamingObjectsByTrackerIndex.resize(
                 static_cast<size_t>(DeclaredLevelCount));
 
         if (bAddedReplicatedLevel)
             GameState->ForceNetUpdate();
         if (bNeedsRetry && bMayRequest)
         {
-            GManagedPlaylistStreamingState.NextRetryTimeMs =
-                CurrentTimeMs + 1000ULL;
+            GManagedPlaylistStreamingState.NextRetryTimeMs = CurrentTimeMs + 1000ULL;
         }
         return bAllRequestsReady;
     }
-
 }
 
 void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Ret)
@@ -6842,28 +5137,16 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         *Ret = false;
         return;
     }
-	auto World = UWorld::GetWorld();
+    auto World = UWorld::GetWorld();
 
-	// A reused UWorld has no second listen boundary. Its lifecycle tick keeps
-	// retrying the same strict moving-zone preflight while this native readiness
-	// hook holds the restarted match in pregame for visible editor correction.
-	// Scope the latch to the exact world/GameMode/GameState generation so travel
-	// can never inherit a rejected restart's hold.
-	if (CustomSafeZoneRuntime::IsMatchRestartPreflightPending(World))
-	{
-		*Ret = false;
-		return;
-	}
+    if (CustomSafeZoneRuntime::IsMatchRestartPreflightPending(World))
+    {
+        *Ret = false;
+        return;
+    }
 
-    // Pumped here as well as from TickFlush: this runs from the moment the
-    // athena game mode has a game state, so the Calendar tab's snow value is
-    // already being applied through warmup rather than only once the net
-    // driver starts ticking.
     Calendar::TickSnow();
 
-    // Apply before native match setup can create or schedule a drop. The same
-    // helper is also ticked later so suppression stays enforced on builds with
-    // component-owned or mutator-owned scheduling.
     TickSupplyDropSuppression();
 
     static bool setup = false;
@@ -6873,17 +5156,14 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     static ULONGLONG MovingZonePreflightPendingSinceMs = 0;
     if (SetupWorld.Get() != World)
     {
-        SetupWorld = World
-            ? TWeakObjectPtr<UWorld>(World)
-            : TWeakObjectPtr<UWorld>{};
+        SetupWorld = World ? TWeakObjectPtr<UWorld>(World) : TWeakObjectPtr<UWorld>{};
         setup = false;
         bListenSucceeded = false;
         NextListenRetryTimeMs = 0;
         MovingZonePreflightPendingSinceMs = 0;
     }
 
-    auto InitializeListenDriver =
-        [&](UNetDriver* NetDriver) -> bool
+    auto InitializeListenDriver = [&](UNetDriver* NetDriver) -> bool
     {
         if (!World || !NetDriver)
             return false;
@@ -6897,29 +5177,23 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         NetDriver->NetDriverName = NetDriverName;
         NetDriver->World = World;
 
-        if (VersionInfo.EngineVersion >= 5.3 &&
-            FConfiguration::bEnableIris)
+        if (VersionInfo.EngineVersion >= 5.3 && FConfiguration::bEnableIris)
         {
             *(bool*)(__int64(&NetDriver->ReplicationDriver) + 0x11) = true;
         }
 
-        const int32 LevelCollectionCount =
-            World->LevelCollections.Num();
+        const int32 LevelCollectionCount = World->LevelCollections.Num();
         for (int32 Index = 0;
             Index < LevelCollectionCount && Index < 64;
             ++Index)
         {
-            auto& LevelCollection =
-                World->LevelCollections.Get(
-                    Index, FLevelCollection::Size());
+            auto& LevelCollection = World->LevelCollections.Get(Index, FLevelCollection::Size());
             LevelCollection.NetDriver = NetDriver;
         }
 
-        auto InitListen =
-            (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&))
+        auto InitListen = (bool (*)(UNetDriver*, UWorld*, FURL*, bool, FString&))
                 FindInitListen();
-        auto SetWorld =
-            (void (*)(UNetDriver*, UWorld*))FindSetWorld();
+        auto SetWorld = (void (*)(UNetDriver*, UWorld*))FindSetWorld();
         if (!InitListen || !SetWorld)
             return false;
 
@@ -6930,18 +5204,13 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         if (!URL)
             return false;
         memset((PBYTE)URL, 0, URLSize);
-        URL->Port =
-            FConfiguration::Port.load(std::memory_order_relaxed);
+        URL->Port = FConfiguration::Port.load(std::memory_order_relaxed);
 
-        SDK::DbgLog(
-            "[GameMode] Listen: InitListen=%p SetWorld=%p Port=%d\n",
-            (void*)InitListen,
-            (void*)SetWorld,
-            FConfiguration::Port.load(std::memory_order_relaxed));
+        SDK::DbgLog("[GameMode] Listen: InitListen=%p SetWorld=%p Port=%d\n", (void*)InitListen,
+            (void*)SetWorld, FConfiguration::Port.load(std::memory_order_relaxed));
         SetWorld(NetDriver, World);
         FString Err;
-        const bool bInitialized =
-            InitListen(NetDriver, World, URL, false, Err);
+        const bool bInitialized = InitListen(NetDriver, World, URL, false, Err);
         free(URL);
         if (bInitialized)
             SetWorld(NetDriver, World);
@@ -6960,86 +5229,57 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
             else
             {
-                // Some native InitListen failure paths remove the partially
-                // initialized driver. Re-enter creation instead of leaving
-                // this world permanently stuck behind the setup sentinel.
                 setup = false;
             }
             NextListenRetryTimeMs = CurrentListenTimeMs + 2000ULL;
-            SDK::DbgLog(
-                "[GameMode] Listen retry returned %d recreate=%d\n",
-                (int)bListenSucceeded,
+            SDK::DbgLog("[GameMode] Listen retry returned %d recreate=%d\n", (int)bListenSucceeded,
                 (int)!setup);
         }
     }
 
-    // Do not use WarmupRequiredPlayerCount as a setup sentinel. Newer builds
-    // can initialize it to one natively, which skipped server creation forever.
+    // Do not use WarmupRequiredPlayerCount as a setup sentinel: newer builds natively initialize it to one.
     if (!setup && CurrentListenTimeMs >= NextListenRetryTimeMs)
     {
-		// An exact phase capacity does not exist in the frontend. Validate against
-		// the live Athena map and playlist here, before a NetDriver is created or
-		// any native phase geometry is touched. Invalid drafts return control to
-		// the still-live editor; pending MapInfo simply retries next frame.
-		if (!FConfiguration::bReadyToStart.load(
-				std::memory_order_acquire))
-		{
-			*Ret = false;
-			return;
-		}
-		if (CustomSafeZoneRuntime::IsMovingModeRequested())
-		{
-			auto AthenaGameState = GameState &&
-				GameState->IsA(
-					AFortGameStateAthena::StaticClass())
-				? (AFortGameStateAthena*)GameState
-				: nullptr;
-			auto MapInfo = AthenaGameState &&
-				AthenaGameState->HasMapInfo()
-					? AthenaGameState->MapInfo
-					: nullptr;
-			if (MovingZonePreflightPendingSinceMs == 0)
-			{
-				MovingZonePreflightPendingSinceMs =
-					CurrentListenTimeMs;
-			}
-			const bool bPreflightTimedOut =
-				MovingZonePreflightPendingSinceMs != 0 &&
-				CurrentListenTimeMs -
-					MovingZonePreflightPendingSinceMs >= 15000ULL;
-			const int32 PhaseCapacity = MapInfo
-				? AFortGameMode::ResolveMovingSafeZonePreflightCapacity(
-					GameMode, MapInfo)
-				: 0;
-			const auto Preflight =
-				CustomSafeZoneRuntime::PreflightForServerStart(
-					World, GameMode, MapInfo, PhaseCapacity,
-					bPreflightTimedOut);
-			if (Preflight ==
-				ECustomSafeZonePreflightResult::Pending)
-			{
-				*Ret = false;
-				return;
-			}
-			if (Preflight ==
-				ECustomSafeZonePreflightResult::Invalid)
-			{
-				// Travel, playlist, and transport settings are already committed.
-				// Keep that launch transaction intact; the GUI selectively unlocks
-				// only this sequence until the next preflight succeeds.
-				*Ret = false;
-				return;
-			}
-			MovingZonePreflightPendingSinceMs = 0;
-		}
-		else
-		{
-			MovingZonePreflightPendingSinceMs = 0;
-		}
+        if (!FConfiguration::bReadyToStart.load(std::memory_order_acquire))
+        {
+            *Ret = false;
+            return;
+        }
+        if (CustomSafeZoneRuntime::IsMovingModeRequested())
+        {
+            auto AthenaGameState = GameState && GameState->IsA(AFortGameStateAthena::StaticClass())
+                ? (AFortGameStateAthena*)GameState : nullptr;
+            auto MapInfo = AthenaGameState && AthenaGameState->HasMapInfo()
+                    ? AthenaGameState->MapInfo : nullptr;
+            if (MovingZonePreflightPendingSinceMs == 0)
+            {
+                MovingZonePreflightPendingSinceMs = CurrentListenTimeMs;
+            }
+            const bool bPreflightTimedOut = MovingZonePreflightPendingSinceMs != 0 &&
+                CurrentListenTimeMs - MovingZonePreflightPendingSinceMs >= 15000ULL;
+            const int32 PhaseCapacity = MapInfo
+                ? AFortGameMode::ResolveMovingSafeZonePreflightCapacity(GameMode, MapInfo) : 0;
+            const auto Preflight = CustomSafeZoneRuntime::PreflightForServerStart(
+                    World, GameMode, MapInfo, PhaseCapacity, bPreflightTimedOut);
+            if (Preflight == ECustomSafeZonePreflightResult::Pending)
+            {
+                *Ret = false;
+                return;
+            }
+            if (Preflight == ECustomSafeZonePreflightResult::Invalid)
+            {
+                *Ret = false;
+                return;
+            }
+            MovingZonePreflightPendingSinceMs = 0;
+        }
+        else
+        {
+            MovingZonePreflightPendingSinceMs = 0;
+        }
 
         setup = true;
 
-        //if (!FindListenCall())
         {
             SDK::DbgLog("[GameMode] ReadyToStart Listen: ENTER setup=%d\n", (int)setup);
             auto Engine = UEngine::GetEngine();
@@ -7048,8 +5288,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             if (!World || !Engine)
             {
                 setup = false;
-                NextListenRetryTimeMs =
-                    CurrentListenTimeMs + 2000ULL;
+                NextListenRetryTimeMs = CurrentListenTimeMs + 2000ULL;
                 *Ret = false;
                 return;
             }
@@ -7060,41 +5299,33 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             UNetDriver* NetDriver = nullptr;
             if (VersionInfo.FortniteVersion >= 16.00)
             {
-                auto GetWorldContext =
-                    (void* (*)(UEngine*, UWorld*))FindGetWorldContext();
-                auto CreateNetDriver =
-                    (UNetDriver * (*)(UEngine*, void*, FName, int))
+                auto GetWorldContext = (void* (*)(UEngine*, UWorld*))FindGetWorldContext();
+                auto CreateNetDriver = (UNetDriver * (*)(UEngine*, void*, FName, int))
                         FindCreateNetDriverWorldContext();
                 SDK::DbgLog("[GameMode] Listen: GetWorldContext=%p CreateNetDriver=%p\n",
                     (void*)GetWorldContext, (void*)CreateNetDriver);
-                void* WorldCtx = GetWorldContext
-                    ? GetWorldContext(Engine, World)
-                    : nullptr;
+                void* WorldCtx = GetWorldContext ? GetWorldContext(Engine, World) : nullptr;
                 if (WorldCtx && CreateNetDriver)
                 {
-                    World->NetDriver = NetDriver =
-                        CreateNetDriver(
+                    World->NetDriver = NetDriver = CreateNetDriver(
                             Engine, WorldCtx, NetDriverName, 0);
                 }
                 SDK::DbgLog("[GameMode] Listen: WorldCtx=%p NetDriver=%p\n", WorldCtx, (void*)NetDriver);
             }
             else
             {
-                auto CreateNetDriver =
-                    (UNetDriver * (*)(UEngine*, UWorld*, FName))
+                auto CreateNetDriver = (UNetDriver * (*)(UEngine*, UWorld*, FName))
                         FindCreateNetDriver();
                 if (CreateNetDriver)
                 {
-                    World->NetDriver = NetDriver =
-                        CreateNetDriver(Engine, World, NetDriverName);
+                    World->NetDriver = NetDriver = CreateNetDriver(Engine, World, NetDriverName);
                 }
             }
             if (!NetDriver)
             {
                 SDK::DbgLog("[GameMode] Listen: NetDriver NULL, abort\n");
                 setup = false;
-                NextListenRetryTimeMs =
-                    CurrentListenTimeMs + 2000ULL;
+                NextListenRetryTimeMs = CurrentListenTimeMs + 2000ULL;
                 *Ret = false;
                 return;
             }
@@ -7118,7 +5349,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         if (GameMode->HasWarmupRequiredPlayerCount())
             GameMode->WarmupRequiredPlayerCount = 1;
 
-        if (VersionInfo.FortniteVersion > 4.0 /*&& (VersionInfo.EngineVersion != 4.25)*/)
+        if (VersionInfo.FortniteVersion > 4.0 )
             SetupPlaylist(GameMode, GameState);
 
         auto Playlist = FindObject<UFortPlaylistAthena>(FConfiguration::Playlist);
@@ -7134,29 +5365,15 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             auto AdditionalPlaylistLevelsStreamed__Off = GameState->GetOffset("AdditionalPlaylistLevelsStreamed");
             auto AdditionalLevelStruct = FAdditionalLevelStreamed::StaticStruct();
 
-            bHeistPlaylist =
-                FFortAthenaHeistCompatibility::
-                    IsHeistPlaylist(Playlist);
-            bNative1040LTMPlaylist =
-                FFortAthenaNativeLTMCompatibility::
-                    IsTargetPlaylist(Playlist);
+            bHeistPlaylist = FFortAthenaHeistCompatibility::IsHeistPlaylist(Playlist);
+            bNative1040LTMPlaylist = FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(Playlist);
             if (bNative1040LTMPlaylist)
             {
-                // The requested 10.40 assets declare no AdditionalLevels.
-                // Their reflected field is directly TArray<FName>; the
-                // generic legacy branch below subtracts 0x10 and would free
-                // unrelated GameState memory on this build. Playlist data
-                // publication owns this empty native array instead.
+                // Here AdditionalLevels is directly a TArray<FName>; the generic branch subtracts 0x10 and would free unrelated memory.
             }
             else if (bHeistPlaylist)
             {
-                // The guarded Heist loader owns both normal and server-only
-                // level arrays for 5.40-6.00. A failed first attempt is
-                // retried from Tick; still publish the current (possibly
-                // empty) list instead of falling into the legacy branch that
-                // does not actually request its levels.
-                if (!FFortAthenaHeistCompatibility::
-                        LoadAdditionalPlaylistLevels(
+                if (!FFortAthenaHeistCompatibility::LoadAdditionalPlaylistLevels(
                             GameState, Playlist))
                 {
                     GameState->OnRep_AdditionalPlaylistLevelsStreamed();
@@ -7169,7 +5386,8 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                     for (auto& Level : Playlist->AdditionalLevels)
                     {
                         bool Success = false;
-                        ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
+                        ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(),
+                            Level, FVector(), FRotator(), &Success, FString(), nullptr);
                         if (AdditionalLevelStruct)
                         {
                             auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
@@ -7190,11 +5408,11 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                     for (auto& Level : Playlist->AdditionalLevelsServerOnly)
                     {
                         bool Success = false;
-                        ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(), Level, FVector(), FRotator(), &Success, FString(), nullptr);
+                        ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(),
+                            Level, FVector(), FRotator(), &Success, FString(), nullptr);
 
                         if (AdditionalLevelStruct)
                         {
-
                             auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
                             memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
                             level->bIsServerOnly = true;
@@ -7264,8 +5482,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
         }
 
-        if (!FConfiguration::IsKnownS27CustomMapPlaylist() &&
-            !bHeistPlaylist &&
+        if (!FConfiguration::IsKnownS27CustomMapPlaylist() && !bHeistPlaylist &&
             !bManagedPlaylistStreamingSetup)
             GameState->OnRep_AdditionalPlaylistLevelsStreamed();
 
@@ -7338,11 +5555,8 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         if (VersionInfo.FortniteVersion == 7.30 && !bEvent)
             ShowFoundation(FindObject<ABuildingFoundation>("/Game/Athena/Maps/Athena_POI_Foundations.Athena_POI_Foundations.PersistentLevel.PleasentParkDefault"));
 
-
         if (VersionInfo.FortniteVersion == 17.50)
         {
-            //ShowFoundation(FindObject<ABuildingFoundation>(L"/Game/Athena/Apollo/Maps/Apollo_Mother.Apollo_Mother.PersistentLevel.farmbase_2"));
-            //ShowFoundation(FindObject<ABuildingFoundation>(L"/Game/Athena/Apollo/Maps/Apollo_Mother.Apollo_Mother.PersistentLevel.Farm_Phase_03"));
         }
 
         if (VersionInfo.EngineVersion >= 4.27 && std::floor(VersionInfo.FortniteVersion) != 20) // on 20 it does some weird stuff
@@ -7359,10 +5573,10 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
             auto GeyserClass = FindObject<UClass>(UEAllocatedWString(L"/Game/Athena/Environments/Blueprints/DudeBro/BGA_DudeBro_Mini.BGA_DudeBro_Mini_C"));
 
-            if (!GeyserClass) 
+            if (!GeyserClass)
                 return;
 
-            std::vector<FVector> GeyserLocations = 
+            std::vector<FVector> GeyserLocations =
             {
                 FVector(89883.523438, 2428.856934, 1721.958008),   // 1: Lazy lagoon mountain
                 FVector(61597.550781, 16848.650391, -0.744186),   // 2: Volcano 1
@@ -7469,26 +5683,13 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
             if (MissionInfo)
             {
-                MissionInfo->bStartPlayingOnLoad = true; // bad hack, we should find a better way to do this later
+                MissionInfo->bStartPlayingOnLoad = true;
                 // startplayingmission
 
                 UFortMissionLibrary::LoadMission(UWorld::GetWorld(), MissionInfo);
             }
             // we need to spawn bluglo manager too?
         }
-
-        /* if (VersionInfo.EngineVersion == 4.16)
-         {
-             if (!UWorld::GetWorld()->NavigationSystem)
-             {
-                 UWorld::GetWorld()->NavigationSystem = UGameplayStatics::SpawnObject(FindClass("FortNavSystem"), UWorld::GetWorld());
-                 auto OnWorldInitDone = (void(*)(UObject*, char))(ImageBase + 0x1f6fc40);
-                 OnWorldInitDone(UWorld::GetWorld()->NavigationSystem, 1);
-             }
-         }*/
-
-         //if (!GameMode->HasWarmupRequiredPlayerCount())
-         //    UWorld::SpawnActor(FindClass("FortPlayerStart"), FVector{0, 0, 3000});
 
         *Ret = false;
         return;
@@ -7511,9 +5712,7 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
         TArray<AFortAthenaMapInfo*> AllMapInfos;
         Utils::GetAll<AFortAthenaMapInfo>(AllMapInfos);
 
-        // HasMapInfo() must guard the property read. A missing reflected property
-        // is represented by offset -1, so reading MapInfo unconditionally would
-        // dereference one byte before GameState and crash during world startup.
+        // A missing reflected property is offset -1, so HasMapInfo() has to guard the read.
         const bool bMapInfoPending =
             AllMapInfos.Num() > 0 && GameState->HasMapInfo() && !GameState->MapInfo;
         AllMapInfos.Free();
@@ -7523,12 +5722,9 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             return;
         }
 
-        if (const auto Native1040Playlist =
-                GetPublishedPlaylist(GameState);
-            FFortAthenaNativeLTMCompatibility::
-                IsTargetPlaylist(Native1040Playlist) &&
-            !PublishNative1040Playlist(
-                GameState, Native1040Playlist))
+        if (const auto Native1040Playlist = GetPublishedPlaylist(GameState);
+            FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(Native1040Playlist) &&
+            !PublishNative1040Playlist(GameState, Native1040Playlist))
         {
             *Ret = false;
             return;
@@ -7543,20 +5739,20 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
             if (GamePhaseLogic)
             {
-                auto InitializeFlightPath = (void(*)(AFortAthenaMapInfo*, AFortGameStateAthena*, UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, bool, double, float, float)) FindInitializeFlightPath();
+                auto InitializeFlightPath = (void(*)(AFortAthenaMapInfo*, AFortGameStateAthena*,
+                    UFortGameStateComponent_BattleRoyaleGamePhaseLogic*, bool, double, float,
+                    float)) FindInitializeFlightPath();
                 if (InitializeFlightPath)
-                    InitializeFlightPath(GameState->MapInfo, GameState, GamePhaseLogic, false, 0.f, 0.f, 360.f);
+                    InitializeFlightPath(GameState->MapInfo, GameState, GamePhaseLogic, false, 0.f,
+                        0.f, 360.f);
                 UFortGameStateComponent_BattleRoyaleGamePhaseLogic::GenerateStormCircles(GameState->MapInfo);
             }
         }
 
         UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bEnableZones = true;
 
-        const auto Playlist =
-            VersionInfo.FortniteVersion >= 3.5 &&
-            GameMode->HasWarmupRequiredPlayerCount()
-                ? ResolveActivePlaylist(GameState)
-                : nullptr;
+        const auto Playlist = VersionInfo.FortniteVersion >= 3.5 &&
+            GameMode->HasWarmupRequiredPlayerCount() ? ResolveActivePlaylist(GameState) : nullptr;
 
         if (Playlist && Playlist->HasbSkipWarmup())
             UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bSkipWarmup = Playlist->bSkipWarmup;
@@ -7565,7 +5761,6 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
         if (Playlist && Playlist->HasGameplayTagContainer())
         {
-
             for (int i = 0; i < Playlist->GameplayTagContainer.GameplayTags.Num(); i++)
             {
                 auto& PlaylistTag = Playlist->GameplayTagContainer.GameplayTags.Get(i, FGameplayTag::Size());
@@ -7579,19 +5774,13 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                         if (Event.EventVersion != VersionInfo.FortniteVersion)
                             continue;
 
-                        // Use the same reflected, idempotent loader lifecycle
-                        // as the Start Event request. Calling the loader here
-                        // and again from the GUI used to race the streamed
-                        // Cattus level on 9.41.
                         Events::PrepareEventContent();
 
                         UFortGameStateComponent_BattleRoyaleGamePhaseLogic::bEnableZones = false;
                         SDK::DbgLog(
                             "[Events] preserving native safe-zone locations count=%d FN=%.2f\n",
-                            GameMode->HasSafeZoneLocations()
-                                ? GameMode->SafeZoneLocations.Num()
-                                : -1,
-                            VersionInfo.FortniteVersion);
+                            GameMode->HasSafeZoneLocations() ? GameMode->SafeZoneLocations.Num()
+                                : -1, VersionInfo.FortniteVersion);
                         break;
                     }
 
@@ -7668,18 +5857,6 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 }
             }
 
-
-        /*if (floor(VersionInfo.FortniteVersion) != 20)
-        {
-            UFortLootPackage::SpawnFloorLootForContainer(FindObject<UClass>(L"/Game/Athena/Environments/Blueprints/Tiered_Athena_FloorLoot_Warmup.Tiered_Athena_FloorLoot_Warmup_C"));
-            UFortLootPackage::SpawnFloorLootForContainer(FindObject<UClass>(L"/Game/Athena/Environments/Blueprints/Tiered_Athena_FloorLoot_01.Tiered_Athena_FloorLoot_01_C"));
-        }
-
-        auto ConsumableSpawners = Utils::GetAll<ABGAConsumableSpawner>();
-
-        for (auto& Spawner : ConsumableSpawners)
-            UFortLootPackage::SpawnConsumableActor(Spawner);*/
-
         if (VersionInfo.EngineVersion >= 4.27)
         {
             if (GameState->HasDefaultParachuteDeployTraceForGroundDistance())
@@ -7733,21 +5910,29 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 for (int i = 0; i < 6; i++)
                 {
                     float Weight;
-                    UDataTableFunctionLibrary::EvaluateCurveTableRow(GameState->MapInfo->VendingMachineRarityCount.Curve.CurveTable, GameState->MapInfo->VendingMachineRarityCount.Curve.RowName, (float)i, nullptr, &Weight, FString());
+                    UDataTableFunctionLibrary::EvaluateCurveTableRow(
+                        GameState->MapInfo->VendingMachineRarityCount.Curve.CurveTable,
+                        GameState->MapInfo->VendingMachineRarityCount.Curve.RowName, (float)i,
+                        nullptr, &Weight, FString());
 
                     WeightMap[i] = Weight;
                     Sum += Weight;
                 }
 
-                UDataTableFunctionLibrary::EvaluateCurveTableRow(GameState->MapInfo->VendingMachineRarityCount.Curve.CurveTable, GameState->MapInfo->VendingMachineRarityCount.Curve.RowName, 0.f, nullptr, &Weight, FString());
+                UDataTableFunctionLibrary::EvaluateCurveTableRow(
+                    GameState->MapInfo->VendingMachineRarityCount.Curve.CurveTable,
+                    GameState->MapInfo->VendingMachineRarityCount.Curve.RowName, 0.f, nullptr,
+                    &Weight, FString());
 
                 TotalWeight = std::accumulate(WeightMap.begin(), WeightMap.end(), 0.0f, [&](float acc, const std::pair<int, float>& p)
                     { return acc + p.second; });
             }
 
-            if (VersionInfo.FortniteVersion >= 3.3 && VersionInfo.FortniteVersion < 17 && GameState->MapInfo->LlamaClass)
+            if (VersionInfo.FortniteVersion >= 3.3 && VersionInfo.FortniteVersion < 17 &&
+                GameState->MapInfo->LlamaClass)
             {
-                auto PickSupplyDropLocation = (FVector * (*)(AFortAthenaMapInfo*, FVector*, FVector*, float, bool, float, float)) FindPickSupplyDropLocation();
+                auto PickSupplyDropLocation = (FVector * (*)(AFortAthenaMapInfo*, FVector*,
+                    FVector*, float, bool, float, float)) FindPickSupplyDropLocation();
 
                 if (PickSupplyDropLocation)
                 {
@@ -7773,7 +5958,8 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                             FRotator Rot{};
                             Rot.Yaw = (float)rand() * 0.010986663f;
 
-                            auto NewLlama = UWorld::SpawnActorUnfinished(GameState->MapInfo->LlamaClass, Loc, Rot);
+                            auto NewLlama = UWorld::SpawnActorUnfinished(
+                                GameState->MapInfo->LlamaClass, Loc, Rot);
 
                             static auto FindGroundLocationAt = NewLlama->GetFunction("FindGroundLocationAt");
                             auto GroundLoc = NewLlama->Call<FVector>(FindGroundLocationAt, Loc);
@@ -7837,14 +6023,17 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             ss << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
             char version[6];
 
-            sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
+            sprintf_s(version,
+                VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f",
+                VersionInfo.FortniteVersion);
             ss << "Fortnite Version: " << version << "\n\n";
 
             auto RarityEnum = EFortRarity::StaticEnum();
             for (int i = 0; i < TUObjectArray::Num(); i++)
             {
                 auto Object = TUObjectArray::GetObjectByIndex(i);
-                if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortWorldItemDefinition>())
+                if (!Object || !Object->Class || Object->IsDefaultObject() ||
+                    !Object->IsA<UFortWorldItemDefinition>())
                     continue;
                 auto Item = (UFortWorldItemDefinition*)Object;
 
@@ -7883,13 +6072,16 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             ss2 << "Generated by Erbium (https://github.com/plooshi/Erbium)\n";
             char version2[6];
 
-            sprintf_s(version2, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
+            sprintf_s(version2,
+                VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f",
+                VersionInfo.FortniteVersion);
             ss2 << "Fortnite Version: " << version2 << "\n\n";
 
             for (int i = 0; i < TUObjectArray::Num(); i++)
             {
                 auto Object = TUObjectArray::GetObjectByIndex(i);
-                if (!Object || !Object->Class || Object->IsDefaultObject() || !Object->IsA<UFortPlaylistAthena>())
+                if (!Object || !Object->Class || Object->IsDefaultObject() ||
+                    !Object->IsA<UFortPlaylistAthena>())
                     continue;
                 auto Playlist = (UFortPlaylistAthena*)Object;
 
@@ -7919,7 +6111,9 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
             char version[6];
 
-            sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
+            sprintf_s(version,
+                VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f",
+                VersionInfo.FortniteVersion);
 
             auto payload = UEAllocatedString("{\"embeds\": [{\"title\": \"Server is joinable!\", \"fields\": [{\"name\":\"Version\",\"value\":\"") + version + "\"}, {\"name\":\"Playlist\",\"value\":\"" + (Playlist ? Playlist->PlaylistName.ToString() : "Playlist_DefaultSolo") + "\"}], \"color\": " + "\"7237230\", \"footer\": {\"text\":\"Magnesium\", \"icon_url\":\"https://cdn.discordapp.com/attachments/1341168629378584698/1436803905119064105/L0WnFa.png.png?ex=6910ef69&is=690f9de9&hm=01a0888b46647959b38ee58df322048ab49e2a5a678e52d4502d9c5e3978d805&\"}, \"timestamp\":\"" + iso8601() + "\"}] }";
 
@@ -7930,7 +6124,6 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             curl_easy_cleanup(curl);
         }
 
-        // for some reason it doesnt like when u do it earlier
         if (!Playlist && VersionInfo.FortniteVersion <= 4)
             if (GameMode->GameSession->HasMaxPlayers())
                 GameMode->GameSession->MaxPlayers = 100;
@@ -7942,11 +6135,9 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
     if (VersionInfo.EngineVersion >= 4.24 && GameMode->IsA<AFortGameModeAthena>())
     {
         int ReadyPlayers = 0;
-        std::array<AFortPlayerControllerAthena*, 256>
-            CountedReadyControllers{};
+        std::array<AFortPlayerControllerAthena*, 256> CountedReadyControllers{};
         size_t CountedReadyControllerCount = 0;
-        auto CountReadyController =
-            [&](AFortPlayerControllerAthena* PlayerController)
+        auto CountReadyController = [&](AFortPlayerControllerAthena* PlayerController)
         {
             if (!PlayerController || !PlayerController->PlayerState)
                 return;
@@ -7957,35 +6148,24 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 if (CountedReadyControllers[Index] == PlayerController)
                     return;
             }
-            if (CountedReadyControllerCount <
-                CountedReadyControllers.size())
+            if (CountedReadyControllerCount <CountedReadyControllers.size())
             {
-                CountedReadyControllers[
-                    CountedReadyControllerCount++] =
-                        PlayerController;
+                CountedReadyControllers[CountedReadyControllerCount++] = PlayerController;
             }
             auto PlayerState = PlayerController->PlayerState;
-            if (!PlayerState->bIsSpectator && PlayerController->bReadyToStartMatch)
-                ++ReadyPlayers;
+            if (!PlayerState->bIsSpectator && PlayerController->bReadyToStartMatch) ++ReadyPlayers;
         };
         if (GameMode->HasAlivePlayers())
         {
             for (auto Actor : GameMode->AlivePlayers)
             {
-                CountReadyController(
-                    Actor
-                        ? Actor->Cast<
-                            AFortPlayerControllerAthena>()
-                        : nullptr);
+                CountReadyController(Actor ? Actor->Cast<AFortPlayerControllerAthena>() : nullptr);
             }
         }
-        auto ReadinessNetDriver = World
-            ? static_cast<UNetDriver*>(World->NetDriver)
-            : nullptr;
+        auto ReadinessNetDriver = World ? static_cast<UNetDriver*>(World->NetDriver) : nullptr;
         if (ReadinessNetDriver)
         {
-            for (auto Connection :
-                ReadinessNetDriver->ClientConnections)
+            for (auto Connection : ReadinessNetDriver->ClientConnections)
             {
                 if (!Connection)
                     continue;
@@ -8000,117 +6180,61 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
 
         auto VolumeManager = GameState->HasVolumeManager() ? GameState->VolumeManager : nullptr;
 
-        const UFortPlaylistAthena* ReadinessPlaylist =
-            GetPublishedPlaylist(GameState);
-        const UFortPlaylistAthena* ActiveReadinessPlaylist =
-            ReadinessPlaylist
-                ? ReadinessPlaylist
+        const UFortPlaylistAthena* ReadinessPlaylist = GetPublishedPlaylist(GameState);
+        const UFortPlaylistAthena* ActiveReadinessPlaylist = ReadinessPlaylist ? ReadinessPlaylist
                 : ResolveActivePlaylist(GameState);
-        const bool bUsesManagedPlaylistStreaming =
-            ReadinessPlaylist &&
-            !FConfiguration::IsKnownS27CustomMapPlaylist() &&
-            !FFortAthenaHeistCompatibility::
-                IsHeistPlaylist(ReadinessPlaylist) &&
-            !FFortAthenaNativeLTMCompatibility::
+        const bool bUsesManagedPlaylistStreaming = ReadinessPlaylist &&
+            !FConfiguration::IsKnownS27CustomMapPlaylist() && !FFortAthenaHeistCompatibility::
+                IsHeistPlaylist(ReadinessPlaylist) && !FFortAthenaNativeLTMCompatibility::
                 IsTargetPlaylist(ReadinessPlaylist);
-        const bool bManagedRequestsReady =
-            !bUsesManagedPlaylistStreaming ||
-            MaintainManagedPlaylistLevels(
-                GameState, ReadinessPlaylist, false);
-        // MaintainManagedPlaylistLevels already verifies every level declared
-        // by the selected playlist.  Do not also require every entry in the
-        // engine's process-lifetime tracker: stale/unrelated entries can stay
-        // unloaded forever and used to leave an otherwise valid server stuck
-        // in "Setting up".
-        const bool bAllLevelsFinishedStreaming =
-            bManagedRequestsReady;
+        const bool bManagedRequestsReady = !bUsesManagedPlaylistStreaming ||
+            MaintainManagedPlaylistLevels(GameState, ReadinessPlaylist, false);
+        const bool bAllLevelsFinishedStreaming = bManagedRequestsReady;
 
         static auto WaitingToStart = FName(L"WaitingToStart");
-        const bool bPlaylistReady =
-            GameState->HasbPlaylistDataIsLoaded()
-                ? GameState->bPlaylistDataIsLoaded
-                : true;
-        const bool bStartupSpawning =
-            VolumeManager &&
-            (VolumeManager->HasbInSpawningStartup()
-                ? VolumeManager->bInSpawningStartup
-                : GameState->bInSpawningStartup);
-        const bool bServerJoinable =
-            bListenSucceeded &&
-            Misc::bHookedAll &&
-            GameMode->bWorldIsReady &&
-            ActiveReadinessPlaylist != nullptr &&
+        const bool bPlaylistReady = GameState->HasbPlaylistDataIsLoaded()
+                ? GameState->bPlaylistDataIsLoaded : true;
+        const bool bStartupSpawning = VolumeManager && (VolumeManager->HasbInSpawningStartup()
+                ? VolumeManager->bInSpawningStartup : GameState->bInSpawningStartup);
+        const bool bServerJoinable = bListenSucceeded && Misc::bHookedAll &&
+            GameMode->bWorldIsReady && ActiveReadinessPlaylist != nullptr &&
             GameMode->MatchState == WaitingToStart;
 
         if (bServerJoinable)
             GUI::MarkServerJoinable();
 
-        *Ret =
-            bListenSucceeded &&
-            GameMode->bWorldIsReady &&
-            bPlaylistReady &&
-            GameMode->MatchState == WaitingToStart &&
-            bAllLevelsFinishedStreaming &&
-            !bStartupSpawning &&
-            ReadyPlayers >=
-                (GameMode->HasWarmupRequiredPlayerCount()
-                    ? GameMode->WarmupRequiredPlayerCount
-                    : 1);
+        *Ret = bListenSucceeded && GameMode->bWorldIsReady && bPlaylistReady &&
+            GameMode->MatchState == WaitingToStart && bAllLevelsFinishedStreaming &&
+            !bStartupSpawning && ReadyPlayers >= (GameMode->HasWarmupRequiredPlayerCount()
+                    ? GameMode->WarmupRequiredPlayerCount : 1);
     }
     else
     {
-        *Ret = callOGWithRet(
-            GameMode,
-            Stack.GetCurrentNativeFunction(),
-            ReadyToStartMatch);
+        *Ret = callOGWithRet(GameMode, Stack.GetCurrentNativeFunction(), ReadyToStartMatch);
 
-        const auto Native1040Playlist =
-            GetPublishedPlaylist(GameState);
-        const bool bNative1040LTMReady =
-            FFortAthenaNativeLTMCompatibility::
-                IsReadyForMatch(
+        const auto Native1040Playlist = GetPublishedPlaylist(GameState);
+        const bool bNative1040LTMReady = FFortAthenaNativeLTMCompatibility::IsReadyForMatch(
                     GameState, Native1040Playlist);
         if (!bNative1040LTMReady)
         {
-            // Always call the 4.23 original first so the shipped playlist
-            // pipeline gets its normal initialization opportunity. Cattus
-            // content is owned solely by its idempotent Blueprint loader;
-            // duplicating it through the generic level-instance API crashes
-            // the native async loader.
             *Ret = false;
         }
 
         static auto WaitingToStartLegacy = FName(L"WaitingToStart");
-        // A listening 4.23 server is joinable before the native match-start
-        // predicate becomes true: that predicate normally waits for a client.
-        // Requiring *Ret here creates a circular wait (the GUI remains in
-        // "Setting up", so no client can join to make *Ret true).
-        if (bNative1040LTMReady &&
-            bListenSucceeded &&
-            Misc::bHookedAll &&
-            GameMode->bWorldIsReady &&
-            GameMode->MatchState == WaitingToStartLegacy)
+        // A listening 4.23 server is joinable before the native match-start predicate is true, so requiring *Ret deadlocks.
+        if (bNative1040LTMReady && bListenSucceeded && Misc::bHookedAll &&
+            GameMode->bWorldIsReady && GameMode->MatchState == WaitingToStartLegacy)
         {
             GUI::MarkServerJoinable();
         }
     }
 
-    if (VersionInfo.FortniteVersion < 25.20 &&
-        IsAuthoritativeBusPolicySelection() &&
-        (!*Ret ||
+    if (VersionInfo.FortniteVersion < 25.20 && IsAuthoritativeBusPolicySelection() && (!*Ret ||
             VersionInfo.FortniteVersion < 11.00))
     {
         auto Time = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
-        // Legacy GameMode-driven seasons do not pass through the newer
-        // GamePhaseLogic warmup policy. Mirror that policy here: disabling
-        // Auto Bus Start must hold the native countdown until Start Bus Early
-        // explicitly replaces these timestamps.
-        float WarmupDuration =
-            FConfiguration::bAutoBusStart.load()
-                ? std::clamp(
-                    FConfiguration::BusStartDelay.load(),
-                    0.f, 300.f)
-                : 99999999.0f;
+        float WarmupDuration = FConfiguration::bAutoBusStart.load() ? std::clamp(
+                    FConfiguration::BusStartDelay.load(), 0.f, 300.f) : 99999999.0f;
 
         if (GameState->HasWarmupCountdownEndTime()) // gamephaselogic builds
         {
@@ -8121,21 +6245,15 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
                 GameMode->WarmupCountdownDuration = WarmupDuration;
             if (GameMode->HasWarmupEarlyCountdownDuration())
             {
-                GameMode->WarmupEarlyCountdownDuration =
-                    WarmupDuration;
+                GameMode->WarmupEarlyCountdownDuration = WarmupDuration;
             }
         }
     }
 
-    // Older native ReadyToStartMatch implementations populate the runtime
-    // schedule during the original call above. Force one post-native discovery
-    // for each GameState, then leave the normal throttled tick to maintain it.
-    static TWeakObjectPtr<AFortGameStateAthena>
-        ForcedSupplyDropDiscoveryGameState;
+    static TWeakObjectPtr<AFortGameStateAthena> ForcedSupplyDropDiscoveryGameState;
     if (ForcedSupplyDropDiscoveryGameState.Get() != GameState)
     {
-        ForcedSupplyDropDiscoveryGameState =
-            TWeakObjectPtr<AFortGameStateAthena>(GameState);
+        ForcedSupplyDropDiscoveryGameState = TWeakObjectPtr<AFortGameStateAthena>(GameState);
         TickSupplyDropSuppression(true);
     }
     return;
@@ -8168,39 +6286,33 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
 
     auto GameState = GameMode->GameState;
     AFortPlayerPawnAthena* Pawn = nullptr;
-   
-    Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(GameMode->GetDefaultPawnClassForController(NewPlayer), StartSpot->GetTransform(), NewPlayer, 3);
+
+    Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(
+        GameMode->GetDefaultPawnClassForController(NewPlayer), StartSpot->GetTransform(), NewPlayer,
+        3);
 
     while (!Pawn)
     {
         auto PlayerStart = FConfiguration::IsKnownS27CustomMapPlaylist() ? GameMode->ChoosePlayerStart() : GameMode->ChoosePlayerStart(NewPlayer);
         if (PlayerStart)
-            Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(GameMode->GetDefaultPawnClassForController(NewPlayer), PlayerStart->GetTransform(), NewPlayer, 3);
+            Pawn = (AFortPlayerPawnAthena*)UWorld::SpawnActor(
+                GameMode->GetDefaultPawnClassForController(NewPlayer), PlayerStart->GetTransform(),
+                NewPlayer, 3);
     }
-
-    // they only stripped it on athena for some reason
-    /*static auto FortGMSpawnDefaultPawnFor = (AFortPlayerPawnAthena * (*)(AFortGameMode*, AFortPlayerControllerAthena*, AActor*)) DefaultObjImpl("FortGameMode")->Vft[SpawnDefaultPawnForIdx];
-    Pawn = FortGMSpawnDefaultPawnFor(GameMode, NewPlayer, StartSpot);
-
-    if (!Pawn)
-    {
-        auto Transform = StartSpot->GetTransform();
-        Transform.Translation.Z += 200.f;
-        Pawn = GameMode->SpawnDefaultPawnAtTransform(NewPlayer, Transform);
-    }*/
 
     *Ret = Pawn;
 
     auto Num = NewPlayer->WorldInventory ? NewPlayer->WorldInventory->Inventory.ReplicatedEntries.Num() : 0;
     if (Num == 0)
     {
-        if (VersionInfo.FortniteVersion <= 1.91 && VersionInfo.FortniteVersion != 1.1 && VersionInfo.FortniteVersion != 1.11 && NewPlayer->HasStrongMyHero())
+        if (VersionInfo.FortniteVersion <= 1.91 && VersionInfo.FortniteVersion != 1.1 &&
+            VersionInfo.FortniteVersion != 1.11 && NewPlayer->HasStrongMyHero())
         {
             static auto HeroCharPartsOffset = NewPlayer->StrongMyHero->GetOffset("CharacterParts");
             auto& HeroCharParts = GetFromOffset<TArray<UObject*>>(NewPlayer->StrongMyHero, HeroCharPartsOffset);
             static auto CharacterPartsOffset = NewPlayer->PlayerState->GetOffset("CharacterParts");
             auto& CharacterParts = GetFromOffset<const UObject * [0x6]>(NewPlayer->PlayerState, CharacterPartsOffset);
-            
+
             if (HeroCharParts.Num() > 0)
             {
                 for (auto& Part : HeroCharParts)
@@ -8211,7 +6323,6 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
             }
             else
             {
-
                 static auto Head = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Heads/F_Med_Head1.F_Med_Head1");
                 static auto Body = FindObject<UObject>(L"/Game/Characters/CharacterParts/Female/Medium/Bodies/F_Med_Soldier_01.F_Med_Soldier_01");
                 static auto Backpack = FindObject<UObject>(L"/Game/Characters/CharacterParts/Backpacks/NoBackpack.NoBackpack");
@@ -8245,15 +6356,15 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
                     NewPlayer->PlayerState->OnRep_SeasonLevelUIDisplay();
                 }
             }
-            //NewPlayer->XPComponent->OnProfileUpdated();
         }
 
         const UObject* BattleBusDef = nullptr;
         const UClass* SupplyDropClass = nullptr;
         if (VersionInfo.FortniteVersion == 18.40)
             BattleBusDef = FindObject<UObject>(L"/Game/Athena/Items/Cosmetics/BattleBuses/BBID_HeadbandBus.BBID_HeadbandBus");
-        else if (VersionInfo.FortniteVersion == 1.11 || VersionInfo.FortniteVersion == 7.30 || VersionInfo.FortniteVersion == 11.31 || VersionInfo.FortniteVersion == 15.10 || VersionInfo.FortniteVersion == 19.01 ||
-                 VersionInfo.FortniteVersion == 28.01)
+        else if (VersionInfo.FortniteVersion == 1.11 || VersionInfo.FortniteVersion == 7.30 ||
+            VersionInfo.FortniteVersion == 11.31 || VersionInfo.FortniteVersion == 15.10 ||
+            VersionInfo.FortniteVersion == 19.01 || VersionInfo.FortniteVersion == 28.01)
         {
             BattleBusDef = FindObject<UObject>(L"/Game/Athena/Items/Cosmetics/BattleBuses/BBID_WinterBus.BBID_WinterBus");
 
@@ -8267,8 +6378,9 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
             BattleBusDef = FindObject<UObject>(L"/Game/Athena/Items/Cosmetics/BattleBuses/BBID_BattleBus_Booster_Winter.BBID_BattleBus_Booster_Winter");
             SupplyDropClass = FindObject<UClass>(L"/Game/Athena/SupplyDrops/AthenaSupplyDrop_Holiday.AthenaSupplyDrop_Holiday_C");
         }
-        else if (VersionInfo.FortniteVersion == 5.10 || VersionInfo.FortniteVersion == 9.41 || VersionInfo.FortniteVersion == 14.20 || VersionInfo.FortniteVersion == 18.00 || VersionInfo.FortniteVersion == 22.00 ||
-                 VersionInfo.FortniteVersion == 26.20)
+        else if (VersionInfo.FortniteVersion == 5.10 || VersionInfo.FortniteVersion == 9.41 ||
+            VersionInfo.FortniteVersion == 14.20 || VersionInfo.FortniteVersion == 18.00 ||
+            VersionInfo.FortniteVersion == 22.00 || VersionInfo.FortniteVersion == 26.20)
         {
             if (VersionInfo.FortniteVersion == 5.10)
                 BattleBusDef = FindObject<UObject>(L"/Game/Athena/Items/Cosmetics/BattleBuses/BBID_BirthdayBus.BBID_BirthdayBus");
@@ -8285,7 +6397,9 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
 
             SupplyDropClass = FindObject<UClass>(L"/Game/Athena/SupplyDrops/AthenaSupplyDrop_BDay.AthenaSupplyDrop_BDay_C");
         }
-        else if (VersionInfo.FortniteVersion == 6.20 || VersionInfo.FortniteVersion == 6.21 || VersionInfo.FortniteVersion == 11.10 || VersionInfo.FortniteVersion == 14.40 || VersionInfo.FortniteVersion == 18.21)
+        else if (VersionInfo.FortniteVersion == 6.20 || VersionInfo.FortniteVersion == 6.21 ||
+            VersionInfo.FortniteVersion == 11.10 || VersionInfo.FortniteVersion == 14.40 ||
+            VersionInfo.FortniteVersion == 18.21)
             BattleBusDef = FindObject<UObject>(L"/Game/Athena/Items/Cosmetics/BattleBuses/BBID_HalloweenBus.BBID_HalloweenBus");
         else if (VersionInfo.FortniteVersion == 26.30)
             BattleBusDef = FindObject<UObject>(L"/Game/Athena/Items/Cosmetics/BattleBuses/BBID_HalloweenBus_Booster.BBID_HalloweenBus_Booster");
@@ -8342,29 +6456,13 @@ void AFortGameMode::SpawnDefaultPawnFor(UObject* Context, FFrame& Stack, AActor*
     }
     else
     {
-        //NewPlayer->WorldInventory->Inventory.ReplicatedEntries.ResetNum();
-        //NewPlayer->WorldInventory->Inventory.ItemInstances.ResetNum();
-
-        /*for (int i = 0; i < NewPlayer->WorldInventory->Inventory.ItemInstances.Num(); i++)
-        {
-            auto& Entry = NewPlayer->WorldInventory->Inventory.ItemInstances[i]->ItemEntry;
-
-            if (AFortInventory::IsPrimaryQuickbar(Entry.ItemDefinition) || Entry.ItemDefinition->IsA(AmmoClass) || Entry.ItemDefinition->IsA(ResourceClass))
-            {
-                NewPlayer->WorldInventory->Inventory.ItemInstances.Remove(i);
-                i--;
-            }
-        }
-
-        NewPlayer->WorldInventory->Update(nullptr);*/
     }
 }
 
-
 static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source)
 {
-	if (!GameMode || !GameMode->SafeZoneIndicator ||
-		!FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone)
+    if (!GameMode || !GameMode->SafeZoneIndicator ||
+        !FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone)
         return;
 
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
@@ -8372,15 +6470,10 @@ static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source
         GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
 
     AFortSafeZoneIndicator* Indicator = GameMode->SafeZoneIndicator;
-    const auto LegacyCustomZone =
-        FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+    const auto LegacyCustomZone = FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
     FVector Center(LegacyCustomZone.Center);
     float Radius = LegacyCustomZone.RadiusCm;
 
-    // Old native storm code interpolates Last/Previous -> Next, while newer
-    // versions also replicate NextNext (and sometimes a separate current
-    // Radius). Keep every representation on the chosen circle so a generated
-    // phase cannot pull the visible zone away during a transition.
     if (Indicator->HasLastCenter()) Indicator->LastCenter = Center;
     if (Indicator->HasPreviousCenter()) Indicator->PreviousCenter = Center;
     if (Indicator->HasNextCenter()) Indicator->NextCenter = Center;
@@ -8399,8 +6492,6 @@ static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source
             Indicator->FutureReplicator->NextNextRadius = Radius;
     }
 
-    // If this build exposes its phase array, update it as well. This makes the
-    // override persistent instead of having to repair every later transition.
     if (Indicator->HasSafeZonePhases())
     {
         auto& SafeZonePhases = Indicator->SafeZonePhases;
@@ -8418,22 +6509,16 @@ static void ApplyCustomSafeZoneState(AFortGameMode* GameMode, const char* source
     const int phase = Indicator->HasCurrentPhase() ? Indicator->CurrentPhase : -1;
     SDK::DbgLog(
         "[SafeZoneMap] active custom zone source=%s phase=%d center=(%.1f, %.1f, %.1f) radius=%.1f\n",
-        source ? source : "unknown", phase,
-        Center.X, Center.Y, Center.Z, Radius);
+        source ? source : "unknown", phase, Center.X, Center.Y, Center.Z, Radius);
 }
 
-// Chapter 1 uses a native indicator with separate live-wall and white-preview
-// fields. Wait until fast-forward reaches the requested phase, then keep every
-// representation on the same custom circle. Native timers still advance, but
-// equal current/preview/future geometry makes those countdowns stationary.
 static UWorld* GLegacyCustomZoneAppliedWorld = nullptr;
 static AFortSafeZoneIndicator* GLegacyCustomZoneAppliedIndicator = nullptr;
 static int GLegacyCustomZoneAppliedPhase = -1;
-static void ApplyLegacyCustomSafeZoneAtTargetPhase(AFortGameMode* GameMode,
-	int SafeZonePhase)
+static void ApplyLegacyCustomSafeZoneAtTargetPhase(AFortGameMode* GameMode, int SafeZonePhase)
 {
-	if (!GameMode || VersionInfo.FortniteVersion >= 7.00 ||
-		!FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone ||
+    if (!GameMode || VersionInfo.FortniteVersion >= 7.00 ||
+        !FConfiguration::bLateGame || !FConfiguration::bCustomSafeZone ||
         SafeZonePhase < FConfiguration::LateGameZone || !GameMode->SafeZoneIndicator)
     {
         return;
@@ -8452,14 +6537,11 @@ static void ApplyLegacyCustomSafeZoneAtTargetPhase(AFortGameMode* GameMode,
         GLegacyCustomZoneAppliedPhase == SafeZonePhase)
         return;
 
-    auto GameState = GameMode->GameState
-        ? (AFortGameStateAthena*)GameMode->GameState
-        : nullptr;
+    auto GameState = GameMode->GameState ? (AFortGameStateAthena*)GameMode->GameState : nullptr;
     if (GameState && GameState->HasMapInfo() && GameState->MapInfo)
         GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
 
-    const auto LegacyCustomZone =
-        FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+    const auto LegacyCustomZone = FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
     FVector Center(LegacyCustomZone.Center);
     float Radius = LegacyCustomZone.RadiusCm;
     if (!std::isfinite(Center.X) || !std::isfinite(Center.Y) ||
@@ -8470,28 +6552,20 @@ static void ApplyLegacyCustomSafeZoneAtTargetPhase(AFortGameMode* GameMode,
         return;
     }
 
-    const float PreviousPreviewRadius = Indicator->HasNextRadius()
-        ? Indicator->NextRadius
-        : Radius;
+    const float PreviousPreviewRadius = Indicator->HasNextRadius() ? Indicator->NextRadius : Radius;
 
-    // This native setter updates the physical wall/material as well as the
-    // reflected live radius. It exists in 2.5-6.21; 1.x uses the field fallback.
+    // This native setter also updates the wall material. It exists in 2.5-6.21; 1.x uses the field fallback.
     bool bUsedNativeSetter = false;
-    bUsedNativeSetter =
-        Indicator->TrySetSafeZoneRadiusAndCenter(
-            Radius, Center);
+    bUsedNativeSetter = Indicator->TrySetSafeZoneRadiusAndCenter(Radius, Center);
 
-    ApplyCustomSafeZoneState(
-        GameMode, "legacy-native-phase");
+    ApplyCustomSafeZoneState(GameMode, "legacy-native-phase");
     GLegacyCustomZoneAppliedIndicator = Indicator;
     GLegacyCustomZoneAppliedPhase = SafeZonePhase;
 
     SDK::DbgLog(
         "[SafeZoneMap] activated stationary lower custom circle phase=%d center=(%.1f, %.1f, %.1f) radius=%.1f oldPreview=%.1f finalPreview=%.1f setter=%d\n",
-        SafeZonePhase, Center.X, Center.Y, Center.Z, Radius,
-        PreviousPreviewRadius,
-        Indicator->HasNextRadius() ? Indicator->NextRadius : -1.f,
-        (int)bUsedNativeSetter);
+        SafeZonePhase, Center.X, Center.Y, Center.Z, Radius, PreviousPreviewRadius,
+        Indicator->HasNextRadius() ? Indicator->NextRadius : -1.f, (int)bUsedNativeSetter);
 }
 
 void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
@@ -8517,10 +6591,6 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
         bLoggedTarget = false;
     };
 
-    // These two releases do not resolve Erbium's native
-    // HandlePostSafeZonePhaseChanged hook. Without that callback, LateGameZone
-    // moves the bus but never fast-forwards the actual storm beyond phase 0.
-    // Keep the workaround exact-version and self-disable if a finder succeeds.
     const bool bAffectedVersion =
         VersionInfo.FortniteVersion == 2.50 || VersionInfo.FortniteVersion == 7.30;
     if (!bAffectedVersion || GHasNativeLateGameSafeZonePhaseHook)
@@ -8535,20 +6605,15 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
     auto World = UWorld::GetWorld();
     auto GameMode = World ? (AFortGameMode*)World->AuthorityGameMode : nullptr;
     auto GameState = World ? (AFortGameStateAthena*)World->GameState : nullptr;
-    auto Indicator = GameMode && GameMode->HasSafeZoneIndicator()
-        ? GameMode->SafeZoneIndicator
+    auto Indicator = GameMode && GameMode->HasSafeZoneIndicator() ? GameMode->SafeZoneIndicator
         : nullptr;
 
-    // Other transient/demo net drivers must not reset the active world's
-    // one-shot target state between real server ticks.
     if (World && Driver != World->NetDriver)
         return;
 
     if (!World || !GameMode || !GameState || !Indicator ||
-        !GameState->HasGamePhase() || GameState->GamePhase != 4 ||
-        !GameMode->HasSafeZonePhase() ||
-        !Indicator->HasSafeZoneStartShrinkTime() ||
-        !Indicator->HasSafeZoneFinishShrinkTime())
+        !GameState->HasGamePhase() || GameState->GamePhase != 4 || !GameMode->HasSafeZonePhase() ||
+        !Indicator->HasSafeZoneStartShrinkTime() || !Indicator->HasSafeZoneFinishShrinkTime())
     {
         ResetState();
         return;
@@ -8574,12 +6639,8 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
         return;
 
     const float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(World);
-    const bool bPaused =
-        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused();
+    const bool bPaused = UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused();
 
-    // The pause sync runs before and after this compatibility tick. Do not let
-    // any custom/legacy alignment writer replace the frozen snapshot between
-    // those two passes; it will be applied normally after the user resumes.
     if (bPaused)
         return;
 
@@ -8600,41 +6661,28 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
             Indicator->LastCenter = SafeZoneLoc;
     };
 
-    // Original Erbium reapplies its fallback anchor after every native phase
-    // change, including phases after the selected starting phase.
-	if (CurrentPhase != LastAlignedPhase)
-	{
-		const bool bMovingCustomZone =
-			CustomSafeZoneRuntime::IsMovingModeRequested();
-		const int32 CustomAlignmentPhase = bMovingCustomZone
-			? CustomSafeZoneRuntime::ResolveRuntimeStartPhase() - 1
-			: TargetPhase;
-		if (FConfiguration::bCustomSafeZone &&
-			CurrentPhase >= CustomAlignmentPhase)
-		{
-			auto ActiveMapInfo =
-				GameState->HasMapInfo()
-					? GameState->MapInfo
-					: nullptr;
-			bool bMovingApplied = false;
-			if (bMovingCustomZone)
-			{
-				bMovingApplied = CustomSafeZoneRuntime::ApplyNativePhase(
-					GameMode, ActiveMapInfo, CurrentPhase,
-					TimeSeconds,
-					"late-game-phase-fallback", true);
-			}
-			if (!bMovingApplied &&
-				VersionInfo.FortniteVersion < 7.00)
-			{
-                ApplyLegacyCustomSafeZoneAtTargetPhase(
-                    GameMode, CurrentPhase);
+    if (CurrentPhase != LastAlignedPhase)
+    {
+        const bool bMovingCustomZone = CustomSafeZoneRuntime::IsMovingModeRequested();
+        const int32 CustomAlignmentPhase = bMovingCustomZone
+            ? CustomSafeZoneRuntime::ResolveRuntimeStartPhase() - 1 : TargetPhase;
+        if (FConfiguration::bCustomSafeZone && CurrentPhase >= CustomAlignmentPhase)
+        {
+            auto ActiveMapInfo = GameState->HasMapInfo() ? GameState->MapInfo : nullptr;
+            bool bMovingApplied = false;
+            if (bMovingCustomZone)
+            {
+                bMovingApplied = CustomSafeZoneRuntime::ApplyNativePhase(
+                    GameMode, ActiveMapInfo, CurrentPhase, TimeSeconds,
+                    "late-game-phase-fallback", true);
+            }
+            if (!bMovingApplied && VersionInfo.FortniteVersion < 7.00)
+            {
+                ApplyLegacyCustomSafeZoneAtTargetPhase(GameMode, CurrentPhase);
             }
             else if (!bMovingApplied)
             {
-                ApplyCustomSafeZoneState(
-                    GameMode,
-                    "late-game-phase-fallback");
+                ApplyCustomSafeZoneState(GameMode, "late-game-phase-fallback");
             }
         }
         else
@@ -8646,15 +6694,9 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
 
     if (CurrentPhase < TargetPhase)
     {
-        // A spawned indicator in the SafeZones game phase is active. 7.30 can
-        // miss this native gate together with the phase callback, which would
-        // otherwise make expired timestamps inert.
         if (GameMode->HasbSafeZoneActive() && !GameMode->bSafeZoneActive)
             GameMode->bSafeZoneActive = true;
 
-        // Mirror Erbium's native hook exactly: start a short, real shrink once
-        // per observed phase. Expiring both timestamps immediately advances the
-        // counter without giving Radius/LastRadius a frame to interpolate.
         if (CurrentPhase == LastAcceleratedPhase)
             return;
 
@@ -8665,8 +6707,7 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
         SDK::DbgLog(
             "[SafeZone] fallback fast-forward version=%.2f phase=%d -> target=%d start=%.2f finish=%.2f radius=%.1f last=%.1f next=%.1f\n",
             VersionInfo.FortniteVersion, CurrentPhase, TargetPhase,
-            Indicator->SafeZoneStartShrinkTime,
-            Indicator->SafeZoneFinishShrinkTime,
+            Indicator->SafeZoneStartShrinkTime, Indicator->SafeZoneFinishShrinkTime,
             Indicator->HasRadius() ? Indicator->Radius : -1.f,
             Indicator->HasLastRadius() ? Indicator->LastRadius : -1.f,
             Indicator->HasNextRadius() ? Indicator->NextRadius : -1.f);
@@ -8678,8 +6719,7 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
         bTargetActionApplied = true;
         if (FConfiguration::bLateGameLongZone)
         {
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-                SetSafeZonePaused(true);
+            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(true);
         }
     }
 
@@ -8705,12 +6745,10 @@ void AFortGameMode::TickLateGameSafeZonePhaseFallback(UNetDriver* Driver)
 
 namespace
 {
-    bool IsSaneLegacySafeZoneDurationArrayHeader(
-        const TArray<float>& Durations)
+    bool IsSaneLegacySafeZoneDurationArrayHeader(const TArray<float>& Durations)
     {
         constexpr int32 MaxSafeZonePhaseCount = 32;
-        if (Durations.Num() < 0 ||
-            Durations.Max() < Durations.Num() ||
+        if (Durations.Num() < 0 || Durations.Max() < Durations.Num() ||
             Durations.Max() > MaxSafeZonePhaseCount)
         {
             return false;
@@ -8718,29 +6756,21 @@ namespace
 
         if (Durations.Num() == 0)
         {
-            return Durations.Max() == 0
-                ? Durations.Data == nullptr
-                : Durations.Data && SDK::MemReadable(
-                    Durations.Data,
+            return Durations.Max() == 0 ? Durations.Data == nullptr
+                : Durations.Data && SDK::MemReadable(Durations.Data,
                     sizeof(float) * (size_t)Durations.Max());
         }
 
-        return Durations.Data && SDK::MemReadable(
-            Durations.Data,
+        return Durations.Data && SDK::MemReadable(Durations.Data,
             sizeof(float) * (size_t)Durations.Num());
     }
 
-    bool HydrateLegacyNativeSafeZoneDurations(
-        AFortGameMode* GameMode,
+    bool HydrateLegacyNativeSafeZoneDurations(AFortGameMode* GameMode,
         AFortGameStateAthena* GameState)
     {
-        // 13.00-20.x caches its phase wait/shrink curves in two native arrays
-        // inside SafeZoneDefinition. Native transitions can receive empty
-        // arrays on a listen server, leaving every deadline already expired.
-        if (VersionInfo.FortniteVersion < 13.00 ||
-            VersionInfo.FortniteVersion >= 21.10 ||
-            !GameMode || !GameState ||
-            !GameState->HasMapInfo() || !GameState->MapInfo ||
+        // 13.00-20.x caches its wait/shrink curves in SafeZoneDefinition, and a listen server can receive them empty.
+        if (VersionInfo.FortniteVersion < 13.00 || VersionInfo.FortniteVersion >= 21.10 ||
+            !GameMode || !GameState || !GameState->HasMapInfo() || !GameState->MapInfo ||
             !GameState->MapInfo->HasSafeZoneDefinition())
         {
             return false;
@@ -8753,32 +6783,23 @@ namespace
             ShrinkDurationsOffset = 0x1f8;
 
         constexpr int32 HoldDurationsDelta = 0x10;
-        const int32 HoldDurationsOffset =
-            ShrinkDurationsOffset - HoldDurationsDelta;
+        const int32 HoldDurationsOffset = ShrinkDurationsOffset - HoldDurationsDelta;
 
         auto DefinitionStruct = FFortSafeZoneDefinition::StaticStruct();
         if (!DefinitionStruct)
             return false;
 
-        const int32 DefinitionSize =
-            DefinitionStruct->GetPropertiesSize();
-        if (DefinitionSize <
-                ShrinkDurationsOffset +
-                    (int32)sizeof(TArray<float>) ||
+        const int32 DefinitionSize = DefinitionStruct->GetPropertiesSize();
+        if (DefinitionSize <ShrinkDurationsOffset + (int32)sizeof(TArray<float>) ||
             DefinitionSize > 0x1000)
         {
             return false;
         }
 
         auto MapInfo = GameState->MapInfo;
-        auto DefinitionBytes =
-            reinterpret_cast<uint8*>(&MapInfo->SafeZoneDefinition);
-        if (!SDK::MemReadable(
-                DefinitionBytes + HoldDurationsOffset,
-                sizeof(TArray<float>)) ||
-            !SDK::MemReadable(
-                DefinitionBytes + ShrinkDurationsOffset,
-                sizeof(TArray<float>)))
+        auto DefinitionBytes = reinterpret_cast<uint8*>(&MapInfo->SafeZoneDefinition);
+        if (!SDK::MemReadable(DefinitionBytes + HoldDurationsOffset, sizeof(TArray<float>)) ||
+            !SDK::MemReadable(DefinitionBytes + ShrinkDurationsOffset, sizeof(TArray<float>)))
         {
             return false;
         }
@@ -8793,8 +6814,7 @@ namespace
             return false;
         }
 
-        if (!FFortSafeZoneDefinition::HasCount() ||
-            !FFortSafeZoneDefinition::HasWaitTime() ||
+        if (!FFortSafeZoneDefinition::HasCount() || !FFortSafeZoneDefinition::HasWaitTime() ||
             !FFortSafeZoneDefinition::HasShrinkTime())
         {
             return false;
@@ -8813,56 +6833,38 @@ namespace
         const int32 PhaseCount = (int32)RoundedPhaseCount;
         const int32 ShrinkCount = PhaseCount;
         const int32 HoldCount = PhaseCount;
-        std::vector<float> EvaluatedShrinkDurations(
-            (size_t)ShrinkCount);
-        std::vector<float> EvaluatedHoldDurations(
-            (size_t)HoldCount);
+        std::vector<float> EvaluatedShrinkDurations((size_t)ShrinkCount);
+        std::vector<float> EvaluatedHoldDurations((size_t)HoldCount);
 
-        const auto EvaluateDurations = [](
-            FScalableFloat& Source,
-            std::vector<float>& OutDurations)
+        const auto EvaluateDurations = [](FScalableFloat& Source, std::vector<float>& OutDurations)
         {
             for (int32 Index = 0;
                 Index < (int32)OutDurations.size(); ++Index)
             {
-                const float EvaluatedDuration =
-                    Source.Evaluate((float)Index);
-                if (!std::isfinite(EvaluatedDuration) ||
-                    EvaluatedDuration < 0.f)
+                const float EvaluatedDuration = Source.Evaluate((float)Index);
+                if (!std::isfinite(EvaluatedDuration) || EvaluatedDuration < 0.f)
                 {
                     return false;
                 }
 
-                OutDurations[(size_t)Index] =
-                    EvaluatedDuration;
+                OutDurations[(size_t)Index] = EvaluatedDuration;
             }
 
             return true;
         };
 
-        // Evaluate everything before mutating native state. A missing curve row
-        // must not leave half of either schedule updated.
-        if (!EvaluateDurations(
-                Definition.ShrinkTime,
-                EvaluatedShrinkDurations) ||
-            !EvaluateDurations(
-                Definition.WaitTime,
-                EvaluatedHoldDurations))
+        if (!EvaluateDurations(Definition.ShrinkTime, EvaluatedShrinkDurations) ||
+            !EvaluateDurations(Definition.WaitTime, EvaluatedHoldDurations))
         {
-            SDK::DbgLog(
-                "[SafeZone] native duration hydration failed "
-                "version=%.2f phases=%d/%d\n",
-                VersionInfo.FortniteVersion,
-                HoldCount, ShrinkCount);
+            SDK::DbgLog("[SafeZone] native duration hydration failed "
+                "version=%.2f phases=%d/%d\n", VersionInfo.FortniteVersion, HoldCount, ShrinkCount);
             return false;
         }
 
-        const auto CommitDurations = [](
-            TArray<float>& NativeDurations,
+        const auto CommitDurations = [](TArray<float>& NativeDurations,
             const std::vector<float>& EvaluatedDurations)
         {
-            if (NativeDurations.Num() !=
-                (int32)EvaluatedDurations.size())
+            if (NativeDurations.Num() != (int32)EvaluatedDurations.size())
             {
                 NativeDurations.ResetNum();
             }
@@ -8877,68 +6879,48 @@ namespace
                 for (int32 Index = 0;
                     Index < NativeDurations.Num(); ++Index)
                 {
-                    NativeDurations[Index] =
-                        EvaluatedDurations[(size_t)Index];
+                    NativeDurations[Index] = EvaluatedDurations[(size_t)Index];
                 }
             }
         };
 
-        CommitDurations(
-            ShrinkDurations, EvaluatedShrinkDurations);
-        CommitDurations(
-            HoldDurations, EvaluatedHoldDurations);
+        CommitDurations(ShrinkDurations, EvaluatedShrinkDurations);
+        CommitDurations(HoldDurations, EvaluatedHoldDurations);
         if (!IsSaneLegacySafeZoneDurationArrayHeader(HoldDurations) ||
             !IsSaneLegacySafeZoneDurationArrayHeader(ShrinkDurations) ||
-            HoldDurations.Num() != HoldCount ||
-            ShrinkDurations.Num() != ShrinkCount)
+            HoldDurations.Num() != HoldCount || ShrinkDurations.Num() != ShrinkCount)
         {
             return false;
         }
 
-        const int32 ProbePhase = std::clamp(
-            FConfiguration::LateGameZone.load(),
-            0,
-            (std::min)(
-                ShrinkDurations.Num(),
-                HoldDurations.Num()) - 1);
+        const int32 ProbePhase = std::clamp(FConfiguration::LateGameZone.load(), 0, (std::min)(
+                ShrinkDurations.Num(), HoldDurations.Num()) - 1);
         static UWorld* LastLoggedWorld = nullptr;
         static AFortAthenaMapInfo* LastLoggedMapInfo = nullptr;
         auto World = UWorld::GetWorld();
-        if (LastLoggedWorld != World ||
-            LastLoggedMapInfo != MapInfo)
+        if (LastLoggedWorld != World || LastLoggedMapInfo != MapInfo)
         {
             LastLoggedWorld = World;
             LastLoggedMapInfo = MapInfo;
-            SDK::DbgLog(
-                "[SafeZone] hydrated native phase durations "
+            SDK::DbgLog("[SafeZone] hydrated native phase durations "
                 "version=%.2f offsets=0x%X/0x%X phases=%d/%d "
-                "target=%d wait=%.2f shrink=%.2f\n",
-                VersionInfo.FortniteVersion,
+                "target=%d wait=%.2f shrink=%.2f\n", VersionInfo.FortniteVersion,
                 HoldDurationsOffset, ShrinkDurationsOffset,
-                HoldDurations.Num(), ShrinkDurations.Num(),
-                ProbePhase,
-                HoldDurations[ProbePhase],
+                HoldDurations.Num(), ShrinkDurations.Num(), ProbePhase, HoldDurations[ProbePhase],
                 ShrinkDurations[ProbePhase]);
         }
         return true;
     }
 
-    bool TryEvaluateLegacySafeZonePhaseDurations(
-        AFortGameStateAthena* GameState,
-        int32 Phase,
-        float& OutWaitDuration,
-        float& OutShrinkDuration)
+    bool TryEvaluateLegacySafeZonePhaseDurations(AFortGameStateAthena* GameState, int32 Phase,
+        float& OutWaitDuration, float& OutShrinkDuration)
     {
         OutWaitDuration = 0.f;
         OutShrinkDuration = 0.f;
-        if (VersionInfo.FortniteVersion < 13.00 ||
-            VersionInfo.FortniteVersion >= 21.10 ||
-            !GameState || !GameState->HasMapInfo() ||
-            !GameState->MapInfo ||
-            !GameState->MapInfo->HasSafeZoneDefinition() ||
-            !FFortSafeZoneDefinition::HasCount() ||
-            !FFortSafeZoneDefinition::HasWaitTime() ||
-            !FFortSafeZoneDefinition::HasShrinkTime())
+        if (VersionInfo.FortniteVersion < 13.00 || VersionInfo.FortniteVersion >= 21.10 ||
+            !GameState || !GameState->HasMapInfo() || !GameState->MapInfo ||
+            !GameState->MapInfo->HasSafeZoneDefinition() || !FFortSafeZoneDefinition::HasCount() ||
+            !FFortSafeZoneDefinition::HasWaitTime() || !FFortSafeZoneDefinition::HasShrinkTime())
         {
             return false;
         }
@@ -8956,16 +6938,12 @@ namespace
 
         OutWaitDuration = Definition.WaitTime.Evaluate((float)Phase);
         OutShrinkDuration = Definition.ShrinkTime.Evaluate((float)Phase);
-        return std::isfinite(OutWaitDuration) &&
-            std::isfinite(OutShrinkDuration) &&
+        return std::isfinite(OutWaitDuration) && std::isfinite(OutShrinkDuration) &&
             OutWaitDuration >= 0.f && OutShrinkDuration >= 0.f;
     }
 
-    int32 ResolveLegacySafeZonePhaseAfterTransition(
-        AFortGameMode* GameMode,
-        AFortGameStateAthena* GameState,
-        AFortSafeZoneIndicator* Indicator,
-        int32 RequestedPhase)
+    int32 ResolveLegacySafeZonePhaseAfterTransition(AFortGameMode* GameMode,
+        AFortGameStateAthena* GameState, AFortSafeZoneIndicator* Indicator, int32 RequestedPhase)
     {
         struct FPhaseFallbackState
         {
@@ -8978,8 +6956,7 @@ namespace
         static FPhaseFallbackState State;
 
         auto World = UWorld::GetWorld();
-        if (State.World != World || State.GameMode != GameMode ||
-            State.Indicator != Indicator)
+        if (State.World != World || State.GameMode != GameMode || State.Indicator != Indicator)
         {
             State = {};
             State.World = World;
@@ -8999,15 +6976,13 @@ namespace
             if (IsSanePhase(Candidate))
                 Phase = Candidate;
         }
-        if (!IsSanePhase(Phase) &&
-            GameState && GameState->HasSafeZonePhase())
+        if (!IsSanePhase(Phase) && GameState && GameState->HasSafeZonePhase())
         {
             const int32 Candidate = GameState->SafeZonePhase;
             if (IsSanePhase(Candidate))
                 Phase = Candidate;
         }
-        if (!IsSanePhase(Phase) &&
-            Indicator && Indicator->HasCurrentPhase())
+        if (!IsSanePhase(Phase) && Indicator && Indicator->HasCurrentPhase())
         {
             const int32 Candidate = Indicator->CurrentPhase;
             if (IsSanePhase(Candidate))
@@ -9042,123 +7017,83 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
         return;
     }
 
-    // Restore the native curve cache before it calculates this phase. Keep the
-    // native transition as the sole owner of geometry; any missing absolute
-    // countdown is repaired only after this callback so 15.30 cannot have its
-    // native schedule replaced before its geometry transition.
     HydrateLegacyNativeSafeZoneDurations(GameMode, GameState);
     HandlePostSafeZonePhaseChangedOG(GameMode, NewSafeZonePhase_Inp);
 
-    const int32 ActiveSafeZonePhase =
-        ResolveLegacySafeZonePhaseAfterTransition(
-            GameMode, GameState, GameMode->SafeZoneIndicator,
-            NewSafeZonePhase_Inp);
-	float TimeSeconds =
-		(float)UGameplayStatics::GetTimeSeconds(GameState);
-	auto ActiveMapInfo = GameState && GameState->HasMapInfo()
-		? GameState->MapInfo
-		: nullptr;
-	const auto TryPublishMovingZone = [&]()
-	{
-		return CustomSafeZoneRuntime::IsMovingModeRequested() &&
-			CustomSafeZoneRuntime::ApplyNativePhase(
-				GameMode, ActiveMapInfo, ActiveSafeZonePhase,
-				TimeSeconds, "native-phase-change", true);
-	};
-	bool bMovingCustomZone = false;
+    const int32 ActiveSafeZonePhase = ResolveLegacySafeZonePhaseAfterTransition(
+            GameMode, GameState, GameMode->SafeZoneIndicator, NewSafeZonePhase_Inp);
+    float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(GameState);
+    auto ActiveMapInfo = GameState && GameState->HasMapInfo() ? GameState->MapInfo : nullptr;
+    const auto TryPublishMovingZone = [&]()
+    {
+        return CustomSafeZoneRuntime::IsMovingModeRequested() &&
+            CustomSafeZoneRuntime::ApplyNativePhase(GameMode, ActiveMapInfo, ActiveSafeZonePhase,
+                TimeSeconds, "native-phase-change", true);
+    };
+    bool bMovingCustomZone = false;
 
-    if (FConfiguration::bLateGame &&
-        ActiveSafeZonePhase >= 0 &&
+    if (FConfiguration::bLateGame && ActiveSafeZonePhase >= 0 &&
         ActiveSafeZonePhase < FConfiguration::LateGameZone)
     {
         GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = TimeSeconds;
         GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + 0.15f;
         GameMode->SafeZoneIndicator->ForceNetUpdate();
-		bMovingCustomZone = TryPublishMovingZone();
-		if (!bMovingCustomZone &&
-			VersionInfo.FortniteVersion >= 7.00 &&
-			FConfiguration::bLateGame &&
-			FConfiguration::bCustomSafeZone)
-		{
-			ApplyCustomSafeZoneState(
-				GameMode, "native-phase-change-fallback");
-		}
+        bMovingCustomZone = TryPublishMovingZone();
+        if (!bMovingCustomZone && VersionInfo.FortniteVersion >= 7.00 &&
+            FConfiguration::bLateGame && FConfiguration::bCustomSafeZone)
+        {
+            ApplyCustomSafeZoneState(GameMode, "native-phase-change-fallback");
+        }
         return;
     }
 
-    // The native 13.00-20.x callback advances phase/geometry but does not arm
-    // the indicator's absolute countdown on a listen server. The previous
-    // fast-forward deadline would otherwise remain expired at the target and
-    // cascade through every remaining phase in the same tick. Arm the new
-    // phase once, after native geometry has settled, using the map's own timing
-    // curves so playlist and LTM overrides remain intact.
-    if (ActiveSafeZonePhase >= 0 &&
-        (!FConfiguration::bLateGame ||
+    if (ActiveSafeZonePhase >= 0 && (!FConfiguration::bLateGame ||
             ActiveSafeZonePhase >= FConfiguration::LateGameZone))
     {
         auto Indicator = GameMode->SafeZoneIndicator;
-        const bool bHasNativeFutureDeadline =
-            Indicator->HasSafeZoneStartShrinkTime() &&
+        const bool bHasNativeFutureDeadline = Indicator->HasSafeZoneStartShrinkTime() &&
             Indicator->HasSafeZoneFinishShrinkTime() &&
             std::isfinite(Indicator->SafeZoneStartShrinkTime) &&
             std::isfinite(Indicator->SafeZoneFinishShrinkTime) &&
             Indicator->SafeZoneFinishShrinkTime > TimeSeconds &&
-            Indicator->SafeZoneFinishShrinkTime >=
-                Indicator->SafeZoneStartShrinkTime;
+            Indicator->SafeZoneFinishShrinkTime >= Indicator->SafeZoneStartShrinkTime;
         if (!bHasNativeFutureDeadline)
         {
             float WaitDuration = 0.f;
             float ShrinkDuration = 0.f;
-            if (TryEvaluateLegacySafeZonePhaseDurations(
-                    GameState, ActiveSafeZonePhase,
+            if (TryEvaluateLegacySafeZonePhaseDurations(GameState, ActiveSafeZonePhase,
                     WaitDuration, ShrinkDuration))
             {
-                Indicator->SafeZoneStartShrinkTime =
-                    TimeSeconds + WaitDuration;
+                Indicator->SafeZoneStartShrinkTime = TimeSeconds + WaitDuration;
                 Indicator->SafeZoneFinishShrinkTime =
                     Indicator->SafeZoneStartShrinkTime + ShrinkDuration;
                 Indicator->ForceNetUpdate();
-                SDK::DbgLog(
-                    "[SafeZone] armed missing native countdown "
+                SDK::DbgLog("[SafeZone] armed missing native countdown "
                     "version=%.2f phase=%d wait=%.2f shrink=%.2f "
-                    "start=%.2f finish=%.2f\n",
-                    VersionInfo.FortniteVersion, ActiveSafeZonePhase,
-                    WaitDuration, ShrinkDuration,
-                    Indicator->SafeZoneStartShrinkTime,
+                    "start=%.2f finish=%.2f\n", VersionInfo.FortniteVersion, ActiveSafeZonePhase,
+                    WaitDuration, ShrinkDuration, Indicator->SafeZoneStartShrinkTime,
                     Indicator->SafeZoneFinishShrinkTime);
             }
         }
     }
 
-	// Native timing is now known (or repaired). Overlay explicit authored zero
-	// and non-zero edge durations only after this point so repair cannot erase
-	// them, while omitted values inherit the native schedule.
-	bMovingCustomZone = TryPublishMovingZone();
-	if (!bMovingCustomZone &&
-		VersionInfo.FortniteVersion >= 7.00 &&
-		FConfiguration::bLateGame &&
-		FConfiguration::bCustomSafeZone)
-	{
-		ApplyCustomSafeZoneState(
-			GameMode, "native-phase-change-fallback");
-	}
+    bMovingCustomZone = TryPublishMovingZone();
+    if (!bMovingCustomZone && VersionInfo.FortniteVersion >= 7.00 && FConfiguration::bLateGame &&
+        FConfiguration::bCustomSafeZone)
+    {
+        ApplyCustomSafeZoneState(GameMode, "native-phase-change-fallback");
+    }
 
-    // Original Erbium applies the selected late-game center only after the
-    // native fast-forward reaches its target phase. Applying it to each skipped
-    // phase makes the old client's current and preview circles disagree.
-	if (!bMovingCustomZone &&
-		VersionInfo.FortniteVersion < 7.00 && FConfiguration::bLateGame &&
+    if (!bMovingCustomZone && VersionInfo.FortniteVersion < 7.00 && FConfiguration::bLateGame &&
         FConfiguration::bCustomSafeZone)
     {
         ApplyLegacyCustomSafeZoneAtTargetPhase(GameMode, ActiveSafeZonePhase);
     }
-	else if (!bMovingCustomZone &&
-		VersionInfo.FortniteVersion < 7.00 &&
+    else if (!bMovingCustomZone && VersionInfo.FortniteVersion < 7.00 &&
         FConfiguration::bLateGame &&
         (SafeZoneLoc.X != 0 || SafeZoneLoc.Y != 0 || SafeZoneLoc.Z != 0))
     {
-        if (!ApplyLegacyFallbackSafeZonePlan(
-            GameMode, ActiveSafeZonePhase))
+        if (!ApplyLegacyFallbackSafeZonePlan(GameMode, ActiveSafeZonePhase))
         {
             if (GameMode->SafeZoneIndicator->HasNextCenter())
                 GameMode->SafeZoneIndicator->NextCenter = SafeZoneLoc;
@@ -9167,20 +7102,14 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
         }
     }
 
-    if (FConfiguration::bLateGame &&
-        ActiveSafeZonePhase == FConfiguration::LateGameZone &&
+    if (FConfiguration::bLateGame && ActiveSafeZonePhase == FConfiguration::LateGameZone &&
         FConfiguration::bLateGameLongZone)
     {
-        // Pause only after every custom/legacy geometry writer has finished so
-        // the resumable snapshot belongs to the circle the player actually sees.
-        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-            SetSafeZonePaused(true);
+        UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(true);
     }
 
-    if (ActiveSafeZonePhase >
-        (FConfiguration::bLateGame.load()
-            ? FConfiguration::LateGameZone.load()
-            : 1))
+    if (ActiveSafeZonePhase > (FConfiguration::bLateGame.load()
+            ? FConfiguration::LateGameZone.load() : 1))
     {
         for (auto& UncastedPlayer : GameMode->AlivePlayers)
         {
@@ -9192,7 +7121,6 @@ void AFortGameMode::HandlePostSafeZonePhaseChanged(AFortGameMode* GameMode, int 
     }
 }
 
-
 int16_t WorldPlayerId = 0;
 void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
 {
@@ -9202,26 +7130,17 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
     auto GameMode = (AFortGameMode*)Context;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
     AFortPlayerStateAthena* PlayerState = (AFortPlayerStateAthena*)NewPlayer->PlayerState;
-    const bool bIsBot = PlayerState && PlayerState->HasbIsABot() &&
-        PlayerState->bIsABot;
-    const bool bRepairLateSeasonTeam =
-        ShouldRepairLateSeasonTeams() && !bIsBot;
+    const bool bIsBot = PlayerState && PlayerState->HasbIsABot() && PlayerState->bIsABot;
+    const bool bRepairLateSeasonTeam = ShouldRepairLateSeasonTeams() && !bIsBot;
     uint8 ReservedLateSeasonTeam = 0;
 
     if (bRepairLateSeasonTeam)
     {
         auto Playlist = ResolveActivePlaylist(GameState);
-        ReservedLateSeasonTeam =
-            ReserveLateSeasonHumanTeam(
+        ReservedLateSeasonTeam = ReserveLateSeasonHumanTeam(
                 GameMode, NewPlayer, PlayerState, Playlist);
-        ApplyLateSeasonHumanTeam(
-            GameState,
-            NewPlayer,
-            PlayerState,
-            ReservedLateSeasonTeam,
-            GLateSeasonHumanTeams.FirstTeam,
-            false,
-            "pre-native");
+        ApplyLateSeasonHumanTeam(GameState, NewPlayer, PlayerState, ReservedLateSeasonTeam,
+            GLateSeasonHumanTeams.FirstTeam, false, "pre-native");
     }
 
     if (VersionInfo.FortniteVersion <= 2.5)
@@ -9250,8 +7169,9 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
 
         auto& NewMember = GameState->GameMemberInfoArray.Members.Add(*Member, FGameMemberInfo::Size());
         GameState->GameMemberInfoArray.MarkItemDirty(NewMember);
-        
-        auto NotifyGameMemberAdded = (void(*)(AFortGameStateAthena*, uint8_t, uint8_t, FUniqueNetIdRepl*)) NotifyGameMemberAdded_;
+
+        auto NotifyGameMemberAdded = (void(*)(AFortGameStateAthena*, uint8_t, uint8_t,
+            FUniqueNetIdRepl*)) NotifyGameMemberAdded_;
         if (NotifyGameMemberAdded)
             NotifyGameMemberAdded(GameState, Member->SquadId, Member->TeamIndex, &Member->MemberUniqueId);
 
@@ -9260,7 +7180,8 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
 
     if (!NewPlayer->WorldInventory)
     {
-        NewPlayer->WorldInventory = UWorld::SpawnActor<AFortInventory>(NewPlayer->WorldInventoryClass, FVector{}, FRotator{}, NewPlayer);
+        NewPlayer->WorldInventory = UWorld::SpawnActor<AFortInventory>(
+            NewPlayer->WorldInventoryClass, FVector{}, FRotator{}, NewPlayer);
         NewPlayer->WorldInventory->InventoryType = 0;
     }
 
@@ -9272,44 +7193,28 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
 
     callOG(GameMode, Stack.GetCurrentNativeFunction(), HandleStartingNewPlayer, NewPlayer);
 
-    // Native 17/18 startup does not consistently call the PickTeam routine
-    // Magnesium hooks. Reapply after it returns in case it restored a default
-    // PlayerTeam, then correct any GameMemberInfo entry it created.
-    if (bRepairLateSeasonTeam && IsSaneObject(NewPlayer) &&
-        NewPlayer->PlayerState)
+    if (bRepairLateSeasonTeam && IsSaneObject(NewPlayer) && NewPlayer->PlayerState)
     {
         GameState = (AFortGameStateAthena*)GameMode->GameState;
         PlayerState = (AFortPlayerStateAthena*)NewPlayer->PlayerState;
-        const bool bAppliedTeam = ApplyLateSeasonHumanTeam(
-            GameState,
-            NewPlayer,
-            PlayerState,
-            ReservedLateSeasonTeam,
-            GLateSeasonHumanTeams.FirstTeam,
-            true,
-            "post-native");
+        const bool bAppliedTeam = ApplyLateSeasonHumanTeam(GameState, NewPlayer, PlayerState,
+            ReservedLateSeasonTeam, GLateSeasonHumanTeams.FirstTeam, true, "post-native");
         if (bAppliedTeam)
         {
             UpsertLateSeasonGameMemberInfo(GameState, PlayerState);
             auto Playlist = ResolveActivePlaylist(GameState);
-            ApplyLateSeasonDBNOSettings(
-                GameMode, GameState, Playlist, "post-native");
+            ApplyLateSeasonDBNOSettings(GameMode, GameState, Playlist, "post-native");
         }
     }
 
     return;
 }
 
-
-bool AFortGameMode::AssignCheatBotIsolatedTeam(
-    AFortGameMode* GameMode,
-    AFortPlayerControllerAthena* BotController,
-    AActor* Instigator,
-    uint8& OutTeamIndex)
+bool AFortGameMode::AssignCheatBotIsolatedTeam(AFortGameMode* GameMode,
+    AFortPlayerControllerAthena* BotController, AActor* Instigator, uint8& OutTeamIndex)
 {
     OutTeamIndex = 0;
-    // Playlist-backed team graphs did not exist before FN 3.5. Let the
-    // caller use its established numeric-team compatibility path there.
+    // Playlist-backed team graphs did not exist before FN 3.5.
     if (VersionInfo.FortniteVersion < 3.5 ||
         !IsSaneObject(GameMode) || !IsSaneObject(BotController))
     {
@@ -9320,36 +7225,24 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
     if (!IsSaneObject(RawPlayerState))
         return false;
 
-    auto PlayerState =
-        RawPlayerState->Cast<AFortPlayerStateAthena>();
+    auto PlayerState = RawPlayerState->Cast<AFortPlayerStateAthena>();
     auto GameState = GameMode->GameState;
-    if (!IsSaneObject(PlayerState) || !IsSaneObject(GameState) ||
-        !PlayerState->HasTeamIndex())
+    if (!IsSaneObject(PlayerState) || !IsSaneObject(GameState) || !PlayerState->HasTeamIndex())
     {
         return false;
     }
 
-    // A cheat bot is intentionally not a squad member or revive partner. Find
-    // an existing playable team object unused by every other live controller;
-    // choosing from the native Teams graph also avoids requesting a team that
-    // this particular build never initialized.
     std::array<bool, 256> UsedTeams{};
-    auto MarkControllerTeam =
-        [&](AActor* Actor)
+    auto MarkControllerTeam = [&](AActor* Actor)
         {
-            if (!IsSaneObject(Actor) ||
-                (void*)Actor == (void*)BotController)
+            if (!IsSaneObject(Actor) || (void*)Actor == (void*)BotController)
             {
                 return;
             }
 
-            auto Controller =
-                Actor->Cast<AFortPlayerControllerAthena>();
-            auto RawState = IsSaneObject(Controller)
-                ? Controller->PlayerState
-                : nullptr;
-            auto State = IsSaneObject(RawState)
-                ? RawState->Cast<AFortPlayerStateAthena>()
+            auto Controller = Actor->Cast<AFortPlayerControllerAthena>();
+            auto RawState = IsSaneObject(Controller) ? Controller->PlayerState : nullptr;
+            auto State = IsSaneObject(RawState) ? RawState->Cast<AFortPlayerStateAthena>()
                 : nullptr;
             if (IsSaneObject(State) && State->HasTeamIndex())
                 UsedTeams[State->TeamIndex] = true;
@@ -9368,32 +7261,24 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
     {
         for (auto State : GameState->PlayerArray)
         {
-            if (IsSaneObject(State) && State != PlayerState &&
-                State->HasTeamIndex())
+            if (IsSaneObject(State) && State != PlayerState && State->HasTeamIndex())
             {
                 UsedTeams[State->TeamIndex] = true;
             }
         }
     }
 
-    // Resolve through the capability-checked shared path. In particular,
-    // never read CurrentPlaylistData merely because CurrentPlaylistInfo is
-    // absent: pre-playlist builds have neither property, and DEFINE_PROP's
-    // missing offset would otherwise manufacture a garbage pointer.
     auto Playlist = GetPublishedPlaylist(GameState);
     const uint8 FirstTeam = GetPlaylistFirstTeam(Playlist);
     int32 LastTeamExclusive = 250;
     bool bHasActiveTeamBound = false;
     if (Playlist)
     {
-        const int32 LastTeamOffset =
-            (int32)Playlist->GetOffset("DefaultLastTeam");
-        if (LastTeamOffset >= 0 && SDK::MemReadable(
-                (const uint8*)Playlist + LastTeamOffset,
+        const int32 LastTeamOffset = (int32)Playlist->GetOffset("DefaultLastTeam");
+        if (LastTeamOffset >= 0 && SDK::MemReadable((const uint8*)Playlist + LastTeamOffset,
                 sizeof(uint8)))
         {
-            const uint8 LastTeam = GetFromOffset<uint8>(
-                Playlist, LastTeamOffset);
+            const uint8 LastTeam = GetFromOffset<uint8>(Playlist, LastTeamOffset);
             if (LastTeam >= FirstTeam && LastTeam < 250)
             {
                 LastTeamExclusive = (int32)LastTeam + 1;
@@ -9402,84 +7287,61 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
         }
     }
 
-    int32 PlaylistTeamCount = GetLateSeasonIntProperty(
-        Playlist, "MaxTeamCount", 0);
-    int32 GameStateTeamCount = GetLateSeasonIntProperty(
-        GameState, "TeamCount", 0);
+    int32 PlaylistTeamCount = GetLateSeasonIntProperty(Playlist, "MaxTeamCount", 0);
+    int32 GameStateTeamCount = GetLateSeasonIntProperty(GameState, "TeamCount", 0);
     auto ApplyTeamCountBound = [&](int32 TeamCount)
         {
             if (TeamCount < 1 || TeamCount > 247)
                 return;
-            LastTeamExclusive = std::min<int32>(
-                LastTeamExclusive,
-                (int32)FirstTeam + TeamCount);
+            LastTeamExclusive = std::min<int32>(LastTeamExclusive, (int32)FirstTeam + TeamCount);
             bHasActiveTeamBound = true;
         };
     ApplyTeamCountBound(PlaylistTeamCount);
     ApplyTeamCountBound(GameStateTeamCount);
     if (!bHasActiveTeamBound && Playlist)
     {
-        int32 TeamSize = Playlist->HasMaxSquadSize()
-            ? Playlist->MaxSquadSize
-            : 1;
+        int32 TeamSize = Playlist->HasMaxSquadSize() ? Playlist->MaxSquadSize : 1;
         if (TeamSize < 1)
             TeamSize = 1;
         if (Playlist->HasMaxPlayers() && Playlist->MaxPlayers > 0)
         {
-            const int32 DerivedTeamCount =
-                (Playlist->MaxPlayers + TeamSize - 1) / TeamSize;
+            const int32 DerivedTeamCount = (Playlist->MaxPlayers + TeamSize - 1) / TeamSize;
             ApplyTeamCountBound(DerivedTeamCount);
         }
     }
-    if (!bHasActiveTeamBound ||
-        LastTeamExclusive <= FirstTeam)
+    if (!bHasActiveTeamBound || LastTeamExclusive <= FirstTeam)
     {
-        SDK::DbgLog(
-            "[SpawnBot] no validated active team range first=%u "
-            "playlistCount=%d gameStateCount=%d version=%.2f\n",
-            (unsigned)FirstTeam,
-            PlaylistTeamCount,
-            GameStateTeamCount,
-            VersionInfo.FortniteVersion);
+        SDK::DbgLog("[SpawnBot] no validated active team range first=%u "
+            "playlistCount=%d gameStateCount=%d version=%.2f\n", (unsigned)FirstTeam,
+            PlaylistTeamCount, GameStateTeamCount, VersionInfo.FortniteVersion);
         return false;
     }
 
     uint8 CandidateTeam = 0;
     UObject* CandidateTeamInfo = nullptr;
     const int32 TeamsOffset = (int32)GameState->GetOffset("Teams");
-    if (TeamsOffset >= 0 && SDK::MemReadable(
-            (const uint8*)GameState + TeamsOffset,
+    if (TeamsOffset >= 0 && SDK::MemReadable((const uint8*)GameState + TeamsOffset,
             sizeof(TArray<UObject*>)))
     {
-        auto& Teams = GetFromOffset<TArray<UObject*>>(
-            GameState,
-            TeamsOffset);
-        if (Teams.Num() > 0 && Teams.Num() <= 256 &&
-            SDK::MemReadable(
-                Teams.GetData(),
+        auto& Teams = GetFromOffset<TArray<UObject*>>(GameState, TeamsOffset);
+        if (Teams.Num() > 0 && Teams.Num() <= 256 && SDK::MemReadable(Teams.GetData(),
                 sizeof(UObject*) * Teams.Num()))
         {
             for (auto TeamInfo : Teams)
             {
                 if (!IsSaneObject(TeamInfo))
                     continue;
-                const int32 TeamOffset =
-                    (int32)TeamInfo->GetOffset("Team");
-                if (TeamOffset < 0 || !SDK::MemReadable(
-                        (const uint8*)TeamInfo + TeamOffset,
+                const int32 TeamOffset = (int32)TeamInfo->GetOffset("Team");
+                if (TeamOffset < 0 || !SDK::MemReadable((const uint8*)TeamInfo + TeamOffset,
                         sizeof(uint8)))
                 {
                     continue;
                 }
 
-                const uint8 Team =
-                    GetFromOffset<uint8>(TeamInfo, TeamOffset);
+                const uint8 Team = GetFromOffset<uint8>(TeamInfo, TeamOffset);
                 auto Members = GetLateSeasonTeamMembers(TeamInfo);
-                if (Team >= FirstTeam &&
-                    Team < LastTeamExclusive &&
-                    !UsedTeams[Team] && Members &&
-                    Members->Num() == 0 &&
-                    (!CandidateTeam || Team < CandidateTeam))
+                if (Team >= FirstTeam && Team < LastTeamExclusive && !UsedTeams[Team] && Members &&
+                    Members->Num() == 0 && (!CandidateTeam || Team < CandidateTeam))
                 {
                     CandidateTeam = Team;
                     CandidateTeamInfo = TeamInfo;
@@ -9496,8 +7358,7 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
         bool bWeak = false;
     };
 
-    auto ResolveObjectReferenceField =
-        [](UObject* Owner, const char* Name,
+    auto ResolveObjectReferenceField = [](UObject* Owner, const char* Name,
             FObjectReferenceField& OutField)
         {
             OutField = {};
@@ -9507,8 +7368,7 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             }
 
             auto Property = Owner->GetProperty(Name, 0x8010000);
-            if (!Property || !SDK::MemReadable(
-                    Property, std::max<size_t>(
+            if (!Property || !SDK::MemReadable(Property, std::max<size_t>(
                         Offsets::Offset_Internal + sizeof(uint32),
                         Offsets::ElementSize + sizeof(uint32))))
             {
@@ -9518,15 +7378,12 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             uint64 FieldFlags = 0;
             if (VersionInfo.FortniteVersion >= 12.10)
             {
-                if (!SDK::MemReadable(
-                        (const uint8*)Property + 0x8,
-                        sizeof(void*)))
+                if (!SDK::MemReadable((const uint8*)Property + 0x8, sizeof(void*)))
                 {
                     return false;
                 }
                 auto FieldClass = GetFromOffset<void*>(Property, 0x8);
-                if (!FieldClass || !SDK::MemReadable(
-                        (const uint8*)FieldClass + 0x10,
+                if (!FieldClass || !SDK::MemReadable((const uint8*)FieldClass + 0x10,
                         sizeof(uint64)))
                 {
                     return false;
@@ -9535,8 +7392,7 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             }
             else
             {
-                if (!Property->Class || !SDK::MemReadable(
-                        Property->Class, sizeof(UClass)))
+                if (!Property->Class || !SDK::MemReadable(Property->Class, sizeof(UClass)))
                 {
                     return false;
                 }
@@ -9548,75 +7404,56 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             if (!(FieldFlags & ObjectReferenceFlags))
                 return false;
 
-            const uint32 Offset = SDK::ReadPropertyOffset(
-                GetFromOffset<uint32>(
+            const uint32 Offset = SDK::ReadPropertyOffset(GetFromOffset<uint32>(
                     Property, Offsets::Offset_Internal));
-            const uint32 ElementSize = GetFromOffset<uint32>(
-                Property, Offsets::ElementSize);
+            const uint32 ElementSize = GetFromOffset<uint32>(Property, Offsets::ElementSize);
             const int32 OwnerSize = Owner->Class->GetPropertiesSize();
-            if (Offset == uint32(-1) ||
-                ElementSize != sizeof(void*) ||
-                (OwnerSize > 0 &&
-                    Offset + sizeof(void*) > (uint32)OwnerSize) ||
-                !SDK::MemReadable(
-                    (const uint8*)Owner + Offset,
-                    sizeof(void*)))
+            if (Offset == uint32(-1) || ElementSize != sizeof(void*) || (OwnerSize > 0 &&
+                    Offset + sizeof(void*) > (uint32)OwnerSize) || !SDK::MemReadable(
+                    (const uint8*)Owner + Offset, sizeof(void*)))
             {
                 return false;
             }
 
             OutField.Offset = Offset;
-            OutField.bWeak =
-                (FieldFlags & WeakObjectPropertyFlag) != 0;
+            OutField.bWeak = (FieldFlags & WeakObjectPropertyFlag) != 0;
             return true;
         };
 
-    auto ReadObjectReference =
-        [](UObject* Owner, const FObjectReferenceField& Field,
+    auto ReadObjectReference = [](UObject* Owner, const FObjectReferenceField& Field,
             UObject*& OutObject)
         {
             OutObject = nullptr;
-            if (!IsSaneObject(Owner) ||
-                Field.Offset == uint32(-1) ||
-                !SDK::MemReadable(
-                    (const uint8*)Owner + Field.Offset,
-                    sizeof(void*)))
+            if (!IsSaneObject(Owner) || Field.Offset == uint32(-1) || !SDK::MemReadable(
+                    (const uint8*)Owner + Field.Offset, sizeof(void*)))
             {
                 return false;
             }
 
             if (Field.bWeak)
             {
-                const auto Weak =
-                    GetFromOffset<TWeakObjectPtr<UObject>>(
-                        Owner, Field.Offset);
+                const auto Weak = GetFromOffset<TWeakObjectPtr<UObject>>(Owner, Field.Offset);
                 OutObject = Weak.Get();
             }
             else
             {
-                OutObject = GetFromOffset<UObject*>(
-                    Owner, Field.Offset);
+                OutObject = GetFromOffset<UObject*>(Owner, Field.Offset);
             }
             return !OutObject || IsSaneObject(OutObject);
         };
 
-    auto WriteObjectReference =
-        [](UObject* Owner, const FObjectReferenceField& Field,
+    auto WriteObjectReference = [](UObject* Owner, const FObjectReferenceField& Field,
             UObject* Value)
         {
-            if (!IsSaneObject(Owner) ||
-                Field.Offset == uint32(-1) ||
-                !SDK::MemReadable(
-                    (const uint8*)Owner + Field.Offset,
-                    sizeof(void*)))
+            if (!IsSaneObject(Owner) || Field.Offset == uint32(-1) || !SDK::MemReadable(
+                    (const uint8*)Owner + Field.Offset, sizeof(void*)))
             {
                 return false;
             }
 
             if (Field.bWeak)
             {
-                GetFromOffset<TWeakObjectPtr<UObject>>(
-                    Owner, Field.Offset) =
+                GetFromOffset<TWeakObjectPtr<UObject>>(Owner, Field.Offset) =
                     TWeakObjectPtr<UObject>(Value);
             }
             else
@@ -9631,37 +7468,23 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
         PlayerState, "PlayerTeam", PlayerTeamField);
     FObjectReferenceField PlayerTeamPrivateField{};
     FObjectReferenceField TeamPrivateInfoField{};
-    const bool bCanReadPlayerTeamPrivate =
-        ResolveObjectReferenceField(
-            PlayerState, "PlayerTeamPrivate",
-            PlayerTeamPrivateField);
-    const bool bCanReadTeamPrivateInfo =
-        ResolveObjectReferenceField(
-            CandidateTeamInfo, "PrivateInfo",
-            TeamPrivateInfoField);
+    const bool bCanReadPlayerTeamPrivate = ResolveObjectReferenceField(
+            PlayerState, "PlayerTeamPrivate", PlayerTeamPrivateField);
+    const bool bCanReadTeamPrivateInfo = ResolveObjectReferenceField(
+            CandidateTeamInfo, "PrivateInfo", TeamPrivateInfoField);
     UObject* OriginalPlayerTeam = nullptr;
-    const bool bReadOriginalPlayerTeam = bCanReadPlayerTeam &&
-        ReadObjectReference(
+    const bool bReadOriginalPlayerTeam = bCanReadPlayerTeam && ReadObjectReference(
             PlayerState, PlayerTeamField, OriginalPlayerTeam);
     UObject* OriginalPlayerTeamPrivate = nullptr;
-    const bool bReadOriginalPlayerTeamPrivate =
-        bCanReadPlayerTeamPrivate &&
-        ReadObjectReference(
-            PlayerState, PlayerTeamPrivateField,
-            OriginalPlayerTeamPrivate);
+    const bool bReadOriginalPlayerTeamPrivate = bCanReadPlayerTeamPrivate && ReadObjectReference(
+            PlayerState, PlayerTeamPrivateField, OriginalPlayerTeamPrivate);
     UObject* CandidatePrivateInfo = nullptr;
-    const bool bReadCandidatePrivateInfo =
-        bCanReadTeamPrivateInfo &&
-        ReadObjectReference(
-            CandidateTeamInfo, TeamPrivateInfoField,
-            CandidatePrivateInfo) &&
+    const bool bReadCandidatePrivateInfo = bCanReadTeamPrivateInfo && ReadObjectReference(
+            CandidateTeamInfo, TeamPrivateInfoField, CandidatePrivateInfo) &&
         IsSaneObject(CandidatePrivateInfo);
     const uint8 OriginalTeamIndex = PlayerState->TeamIndex;
-    const uint8 OriginalSquadId = PlayerState->HasSquadId()
-        ? PlayerState->SquadId
-        : 0;
-    auto OriginalTeamMembers =
-        GetLateSeasonTeamMembers(OriginalPlayerTeam);
+    const uint8 OriginalSquadId = PlayerState->HasSquadId() ? PlayerState->SquadId : 0;
+    auto OriginalTeamMembers = GetLateSeasonTeamMembers(OriginalPlayerTeam);
     const bool bWasInOriginalTeam = OriginalTeamMembers &&
         OriginalTeamMembers->Contains((AActor*)BotController);
     auto OriginalPlayerState = PlayerState;
@@ -9669,22 +7492,16 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
 
     auto TeamGraphMatches = [&]()
         {
-            if (!IsSaneObject(BotController) ||
-                BotController->Pawn != OriginalPawn ||
-                !IsSaneObject(OriginalPawn) ||
-                BotController->PlayerState != OriginalPlayerState)
+            if (!IsSaneObject(BotController) || BotController->Pawn != OriginalPawn ||
+                !IsSaneObject(OriginalPawn) || BotController->PlayerState != OriginalPlayerState)
             {
                 return false;
             }
 
-            PlayerState = BotController->PlayerState
-                ->Cast<AFortPlayerStateAthena>();
-            auto Members =
-                GetLateSeasonTeamMembers(CandidateTeamInfo);
-            if (!IsSaneObject(PlayerState) ||
-                !PlayerState->HasTeamIndex() ||
-                PlayerState->TeamIndex != CandidateTeam ||
-                !Members ||
+            PlayerState = BotController->PlayerState->Cast<AFortPlayerStateAthena>();
+            auto Members = GetLateSeasonTeamMembers(CandidateTeamInfo);
+            if (!IsSaneObject(PlayerState) || !PlayerState->HasTeamIndex() ||
+                PlayerState->TeamIndex != CandidateTeam || !Members ||
                 !Members->Contains((AActor*)BotController))
             {
                 return false;
@@ -9693,22 +7510,17 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             if (bCanReadPlayerTeam)
             {
                 UObject* CurrentPlayerTeam = nullptr;
-                if (!ReadObjectReference(
-                        PlayerState, PlayerTeamField,
-                        CurrentPlayerTeam) ||
+                if (!ReadObjectReference(PlayerState, PlayerTeamField, CurrentPlayerTeam) ||
                     CurrentPlayerTeam != CandidateTeamInfo)
                 {
                     return false;
                 }
             }
-            if (bReadCandidatePrivateInfo &&
-                bCanReadPlayerTeamPrivate)
+            if (bReadCandidatePrivateInfo && bCanReadPlayerTeamPrivate)
             {
                 UObject* CurrentPlayerTeamPrivate = nullptr;
-                if (!ReadObjectReference(
-                        PlayerState, PlayerTeamPrivateField,
-                        CurrentPlayerTeamPrivate) ||
-                    CurrentPlayerTeamPrivate !=
+                if (!ReadObjectReference(PlayerState, PlayerTeamPrivateField,
+                        CurrentPlayerTeamPrivate) || CurrentPlayerTeamPrivate !=
                         CandidatePrivateInfo)
                 {
                     return false;
@@ -9719,41 +7531,31 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
 
     auto TeamGraphChanged = [&]()
         {
-            if (!IsSaneObject(BotController) ||
-                BotController->PlayerState != OriginalPlayerState ||
+            if (!IsSaneObject(BotController) || BotController->PlayerState != OriginalPlayerState ||
                 BotController->Pawn != OriginalPawn)
             {
                 return true;
             }
-            PlayerState = BotController->PlayerState
-                ->Cast<AFortPlayerStateAthena>();
-            if (!IsSaneObject(PlayerState) ||
-                !PlayerState->HasTeamIndex() ||
+            PlayerState = BotController->PlayerState->Cast<AFortPlayerStateAthena>();
+            if (!IsSaneObject(PlayerState) || !PlayerState->HasTeamIndex() ||
                 PlayerState->TeamIndex != OriginalTeamIndex)
             {
                 return true;
             }
-            auto Members =
-                GetLateSeasonTeamMembers(CandidateTeamInfo);
-            if (Members &&
-                Members->Contains((AActor*)BotController))
+            auto Members = GetLateSeasonTeamMembers(CandidateTeamInfo);
+            if (Members && Members->Contains((AActor*)BotController))
             {
                 return true;
             }
-            auto CurrentOriginalMembers =
-                GetLateSeasonTeamMembers(OriginalPlayerTeam);
-            const bool bCurrentlyInOriginalTeam =
-                CurrentOriginalMembers &&
-                CurrentOriginalMembers->Contains(
-                    (AActor*)BotController);
+            auto CurrentOriginalMembers = GetLateSeasonTeamMembers(OriginalPlayerTeam);
+            const bool bCurrentlyInOriginalTeam = CurrentOriginalMembers &&
+                CurrentOriginalMembers->Contains((AActor*)BotController);
             if (bCurrentlyInOriginalTeam != bWasInOriginalTeam)
                 return true;
             if (bReadOriginalPlayerTeam)
             {
                 UObject* CurrentPlayerTeam = nullptr;
-                if (!ReadObjectReference(
-                        PlayerState, PlayerTeamField,
-                        CurrentPlayerTeam) ||
+                if (!ReadObjectReference(PlayerState, PlayerTeamField, CurrentPlayerTeam) ||
                     CurrentPlayerTeam != OriginalPlayerTeam)
                 {
                     return true;
@@ -9762,10 +7564,8 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             if (bReadOriginalPlayerTeamPrivate)
             {
                 UObject* CurrentPlayerTeamPrivate = nullptr;
-                if (!ReadObjectReference(
-                        PlayerState, PlayerTeamPrivateField,
-                        CurrentPlayerTeamPrivate) ||
-                    CurrentPlayerTeamPrivate !=
+                if (!ReadObjectReference(PlayerState, PlayerTeamPrivateField,
+                        CurrentPlayerTeamPrivate) || CurrentPlayerTeamPrivate !=
                         OriginalPlayerTeamPrivate)
                 {
                     return true;
@@ -9779,10 +7579,7 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             if (!TeamGraphMatches())
                 return false;
 
-            // Native team changes are moves. Discard any stale membership the
-            // implementation retained in the old team before publication.
-            RemoveLateSeasonMemberFromOtherTeams(
-                GameState, CandidateTeamInfo,
+            RemoveLateSeasonMemberFromOtherTeams(GameState, CandidateTeamInfo,
                 (AActor*)BotController);
             if (!TeamGraphMatches())
                 return false;
@@ -9790,28 +7587,19 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             if (PlayerState->HasSquadId())
             {
                 PlayerState->SquadId = CandidateTeam >= FirstTeam
-                    ? (uint8)(CandidateTeam - FirstTeam)
-                    : 0;
+                    ? (uint8)(CandidateTeam - FirstTeam) : 0;
                 PlayerState->OnRep_SquadId();
-                VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-                    PlayerState, L"SquadId");
+                VersionFeatureAdapter::MarkReplicatedPropertyDirty(PlayerState, L"SquadId");
             }
-            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-                PlayerState, L"TeamIndex");
-            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-                PlayerState, L"PlayerTeam");
-            VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-                PlayerState, L"PlayerTeamPrivate");
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(PlayerState, L"TeamIndex");
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(PlayerState, L"PlayerTeam");
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(PlayerState, L"PlayerTeamPrivate");
             PlayerState->ForceNetUpdate();
             BotController->ForceNetUpdate();
             GameState->ForceNetUpdate();
             OutTeamIndex = CandidateTeam;
-            SDK::DbgLog(
-                "[SpawnBot] isolated team assigned bot=%p team=%u "
-                "method=%s version=%.2f\n",
-                (void*)BotController,
-                (unsigned)CandidateTeam,
-                Method,
+            SDK::DbgLog("[SpawnBot] isolated team assigned bot=%p team=%u "
+                "method=%s version=%.2f\n", (void*)BotController, (unsigned)CandidateTeam, Method,
                 VersionInfo.FortniteVersion);
             return true;
         };
@@ -9819,22 +7607,16 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
     constexpr uint64 CPF_Parm = 0x80;
     constexpr uint64 CPF_OutParm = 0x100;
     constexpr uint64 CPF_ReturnParm = 0x400;
-    auto IsInputParam =
-        [&](const UFunction::ParamNamed* Param,
-            uint32 Offset, uint32 Size)
+    auto IsInputParam = [&](const UFunction::ParamNamed* Param, uint32 Offset, uint32 Size)
         {
-            return Param && Param->Offset == Offset &&
-                Param->ElementSize == Size &&
-                (Param->PropertyFlags & CPF_Parm) &&
-                !(Param->PropertyFlags &
+            return Param && Param->Offset == Offset && Param->ElementSize == Size &&
+                (Param->PropertyFlags & CPF_Parm) && !(Param->PropertyFlags &
                     (CPF_OutParm | CPF_ReturnParm));
         };
 
     constexpr uint32 ChangeTeamParamsSize = 0x38;
     auto Library = UFortKismetLibrary::GetDefaultObj();
-    auto ChangeTeamFunction =
-        IsSaneObject((UObject*)Library)
-            ? Library->GetFunction("ChangeTeam")
+    auto ChangeTeamFunction = IsSaneObject((UObject*)Library) ? Library->GetFunction("ChangeTeam")
             : nullptr;
     bool bChangeTeamSchemaValid = false;
     if (ChangeTeamFunction)
@@ -9855,69 +7637,42 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             else if (Param.Name == "ChangeTeamTags")
                 TagsParam = &Param;
         }
-        bChangeTeamSchemaValid =
-            Params.NameOffsetMap.size() == 4 &&
+        bChangeTeamSchemaValid = Params.NameOffsetMap.size() == 4 &&
             IsInputParam(PlayerParam, 0x00, sizeof(AActor*)) &&
             IsInputParam(InstigatorParam, 0x08, sizeof(AActor*)) &&
-            IsInputParam(TeamParam, 0x10, sizeof(uint8)) &&
-            IsInputParam(
-                TagsParam, 0x18,
-                sizeof(FGameplayTagContainer)) &&
-            Params.Size == ChangeTeamParamsSize &&
-            ChangeTeamFunction->GetPropertiesSize() ==
-                ChangeTeamParamsSize;
+            IsInputParam(TeamParam, 0x10, sizeof(uint8)) && IsInputParam(TagsParam, 0x18,
+                sizeof(FGameplayTagContainer)) && Params.Size == ChangeTeamParamsSize &&
+            ChangeTeamFunction->GetPropertiesSize() == ChangeTeamParamsSize;
         if (!bChangeTeamSchemaValid)
         {
-            SDK::DbgLog(
-                "[SpawnBot] native ChangeTeam schema rejected "
-                "function=%p size=0x%X fields=%d version=%.2f\n",
-                (void*)ChangeTeamFunction,
-                Params.Size,
-                (int)Params.NameOffsetMap.size(),
-                VersionInfo.FortniteVersion);
+            SDK::DbgLog("[SpawnBot] native ChangeTeam schema rejected "
+                "function=%p size=0x%X fields=%d version=%.2f\n", (void*)ChangeTeamFunction,
+                Params.Size, (int)Params.NameOffsetMap.size(), VersionInfo.FortniteVersion);
         }
     }
 
-    auto InvokeChangeTeam = [&](AActor* PlayerToSwitch,
-        const char* TargetKind)
+    auto InvokeChangeTeam = [&](AActor* PlayerToSwitch, const char* TargetKind)
         {
-            if (!bChangeTeamSchemaValid ||
-                !IsSaneObject(PlayerToSwitch))
+            if (!bChangeTeamSchemaValid || !IsSaneObject(PlayerToSwitch))
             {
                 return false;
             }
 
             std::array<uint8, ChangeTeamParamsSize> ParamMemory{};
-            AActor* ChangeInstigator = IsSaneObject(Instigator)
-                ? Instigator
-                : PlayerToSwitch;
-            memcpy(ParamMemory.data() + 0x00,
-                &PlayerToSwitch, sizeof(PlayerToSwitch));
-            memcpy(ParamMemory.data() + 0x08,
-                &ChangeInstigator, sizeof(ChangeInstigator));
-            memcpy(ParamMemory.data() + 0x10,
-                &CandidateTeam, sizeof(CandidateTeam));
-            Library->ProcessEvent(
-                ChangeTeamFunction, ParamMemory.data());
+            AActor* ChangeInstigator = IsSaneObject(Instigator) ? Instigator : PlayerToSwitch;
+            memcpy(ParamMemory.data() + 0x00, &PlayerToSwitch, sizeof(PlayerToSwitch));
+            memcpy(ParamMemory.data() + 0x08, &ChangeInstigator, sizeof(ChangeInstigator));
+            memcpy(ParamMemory.data() + 0x10, &CandidateTeam, sizeof(CandidateTeam));
+            Library->ProcessEvent(ChangeTeamFunction, ParamMemory.data());
             const bool bApplied = TeamGraphMatches();
-            SDK::DbgLog(
-                "[SpawnBot] native ChangeTeam target=%s bot=%p "
-                "requested=%u applied=%d mutated=%d version=%.2f\n",
-                TargetKind,
-                (void*)BotController,
-                (unsigned)CandidateTeam,
-                (int)bApplied,
-                (int)TeamGraphChanged(),
-                VersionInfo.FortniteVersion);
+            SDK::DbgLog("[SpawnBot] native ChangeTeam target=%s bot=%p "
+                "requested=%u applied=%d mutated=%d version=%.2f\n", TargetKind,
+                (void*)BotController, (unsigned)CandidateTeam, (int)bApplied,
+                (int)TeamGraphChanged(), VersionInfo.FortniteVersion);
             return bApplied;
         };
 
-    // TeamInfo membership is controller-based on every inspected layout. Try
-    // the canonical controller actor again now that the synthetic identity is
-    // ready and the candidate is an actually empty, active team. The previous
-    // FN30 call happened before readiness and targeted the highest team (102).
-    auto BotPawn = BotController->Pawn
-        ? BotController->Pawn->Cast<AFortPlayerPawnAthena>()
+    auto BotPawn = BotController->Pawn ? BotController->Pawn->Cast<AFortPlayerPawnAthena>()
         : nullptr;
     bool bGraphMutated = false;
     if (InvokeChangeTeam((AActor*)BotController, "controller"))
@@ -9928,30 +7683,9 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
     }
     bGraphMutated = bGraphMutated || TeamGraphChanged();
 
-    // ServerSetTeam is deliberately NOT used here, even though it is the
-    // controller-native team path on the middle and modern layouts.
-    //
-    // It is a `WithValidation` client->server RPC, and a connectionless
-    // synthetic controller is exactly the state its checks reject. UE records
-    // that rejection in one process-global slot which FObjectReplicator reads
-    // after the *received* RPC currently being dispatched returns - and cheat
-    // commands are dispatched from the commanding client's own ServerCheat
-    // bunch, so the engine closes that player's connection. Observed on FN
-    // 7.40, 17.30 and 26.30: the spawning player is dropped and, if they were
-    // alone, the match immediately ends.
-    //
-    // Clearing the slot afterwards only works where it can be located, and it
-    // cannot be on every build (FN 7.40 has no discoverable reference to the
-    // validate-name literals), so the call itself has to go. Nothing is lost:
-    // it never once established the graph on any inspected build - the
-    // reflected path below is what actually assigns the team - and asking a
-    // controller with no client to request a team change was never meaningful.
+    // ServerSetTeam is a WithValidation client->server RPC, and it rejects a connectionless synthetic controller.
 
-    // ChangeTeam accepts a generic actor and several builds resolve that actor
-    // through its possessed pawn. Preserve the pawn variant as the last native
-    // attempt, again only after a proven no-op.
-    if (!bGraphMutated &&
-        InvokeChangeTeam((AActor*)BotPawn, "pawn"))
+    if (!bGraphMutated && InvokeChangeTeam((AActor*)BotPawn, "pawn"))
     {
         if (FinalizeTeamAssignment("ChangeTeam(pawn)"))
             return true;
@@ -9961,83 +7695,61 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
 
     auto ApplyReflectedTeamGraph = [&]()
         {
-            if (!IsSaneObject(BotController) ||
-                BotController->PlayerState != OriginalPlayerState ||
-                BotController->Pawn != OriginalPawn ||
-                !IsSaneObject(OriginalPlayerState) ||
-                !IsSaneObject(OriginalPawn) ||
-                !bCanReadPlayerTeam ||
-                !bReadOriginalPlayerTeam ||
-                !bCanReadPlayerTeamPrivate ||
-                !bReadOriginalPlayerTeamPrivate ||
+            if (!IsSaneObject(BotController) || BotController->PlayerState != OriginalPlayerState ||
+                BotController->Pawn != OriginalPawn || !IsSaneObject(OriginalPlayerState) ||
+                !IsSaneObject(OriginalPawn) || !bCanReadPlayerTeam || !bReadOriginalPlayerTeam ||
+                !bCanReadPlayerTeamPrivate || !bReadOriginalPlayerTeamPrivate ||
                 !bReadCandidatePrivateInfo)
             {
                 return false;
             }
 
-            auto CandidateMembers =
-                GetLateSeasonTeamMembers(CandidateTeamInfo);
+            auto CandidateMembers = GetLateSeasonTeamMembers(CandidateTeamInfo);
             if (!CandidateMembers)
                 return false;
 
-            RemoveLateSeasonMemberFromOtherTeams(
-                GameState, CandidateTeamInfo,
+            RemoveLateSeasonMemberFromOtherTeams(GameState, CandidateTeamInfo,
                 (AActor*)BotController);
             PlayerState->TeamIndex = CandidateTeam;
             if (PlayerState->HasSquadId())
             {
                 PlayerState->SquadId = CandidateTeam >= FirstTeam
-                    ? (uint8)(CandidateTeam - FirstTeam)
-                    : 0;
+                    ? (uint8)(CandidateTeam - FirstTeam) : 0;
             }
-            const bool bWroteTeam = WriteObjectReference(
-                PlayerState, PlayerTeamField,
+            const bool bWroteTeam = WriteObjectReference(PlayerState, PlayerTeamField,
                 CandidateTeamInfo);
-            const bool bWrotePrivate = WriteObjectReference(
-                PlayerState, PlayerTeamPrivateField,
+            const bool bWrotePrivate = WriteObjectReference(PlayerState, PlayerTeamPrivateField,
                 CandidatePrivateInfo);
-            if (!CandidateMembers->Contains(
-                    (AActor*)BotController))
+            if (!CandidateMembers->Contains((AActor*)BotController))
             {
                 CandidateMembers->Add((AActor*)BotController);
             }
 
-            bool bApplied = bWroteTeam && bWrotePrivate &&
-                TeamGraphMatches();
+            bool bApplied = bWroteTeam && bWrotePrivate && TeamGraphMatches();
             if (!bApplied)
             {
-                RemoveLateSeasonMemberFromOtherTeams(
-                    GameState, nullptr,
-                    (AActor*)BotController);
+                RemoveLateSeasonMemberFromOtherTeams(GameState, nullptr, (AActor*)BotController);
                 PlayerState->GetTeamIndex() = OriginalTeamIndex;
                 if (PlayerState->HasSquadId())
                     PlayerState->GetSquadId() = OriginalSquadId;
-                WriteObjectReference(
-                    PlayerState, PlayerTeamField,
-                    OriginalPlayerTeam);
-                WriteObjectReference(
-                    PlayerState, PlayerTeamPrivateField,
+                WriteObjectReference(PlayerState, PlayerTeamField, OriginalPlayerTeam);
+                WriteObjectReference(PlayerState, PlayerTeamPrivateField,
                     OriginalPlayerTeamPrivate);
-                if (bWasInOriginalTeam && OriginalTeamMembers &&
-                    !OriginalTeamMembers->Contains(
+                if (bWasInOriginalTeam && OriginalTeamMembers && !OriginalTeamMembers->Contains(
                         (AActor*)BotController))
                 {
-                    OriginalTeamMembers->Add(
-                        (AActor*)BotController);
+                    OriginalTeamMembers->Add((AActor*)BotController);
                 }
                 return false;
             }
 
-            auto CallNoParameterRepNotify =
-                [&](const char* FunctionName)
+            auto CallNoParameterRepNotify = [&](const char* FunctionName)
                 {
-                    auto Function =
-                        PlayerState->GetFunction(FunctionName);
+                    auto Function = PlayerState->GetFunction(FunctionName);
                     if (!Function)
                         return;
                     const auto Params = Function->GetParamsNamed();
-                    if (Params.NameOffsetMap.empty() &&
-                        Params.Size == 0 &&
+                    if (Params.NameOffsetMap.empty() && Params.Size == 0 &&
                         Function->GetPropertiesSize() == 0)
                     {
                         PlayerState->ProcessEvent(Function, nullptr);
@@ -10046,85 +7758,55 @@ bool AFortGameMode::AssignCheatBotIsolatedTeam(
             CallNoParameterRepNotify("OnRep_PlayerTeam");
             CallNoParameterRepNotify("OnRep_PlayerTeamPrivate");
 
-            auto OnRepTeamIndex =
-                PlayerState->GetFunction("OnRep_TeamIndex");
+            auto OnRepTeamIndex = PlayerState->GetFunction("OnRep_TeamIndex");
             if (OnRepTeamIndex)
             {
-                const auto Params =
-                    OnRepTeamIndex->GetParamsNamed();
-                if (Params.NameOffsetMap.empty() &&
-                    Params.Size == 0 &&
+                const auto Params = OnRepTeamIndex->GetParamsNamed();
+                if (Params.NameOffsetMap.empty() && Params.Size == 0 &&
                     OnRepTeamIndex->GetPropertiesSize() == 0)
                 {
-                    PlayerState->ProcessEvent(
-                        OnRepTeamIndex, nullptr);
+                    PlayerState->ProcessEvent(OnRepTeamIndex, nullptr);
                 }
-                else if (Params.NameOffsetMap.size() == 1 &&
-                    IsInputParam(
-                        &Params.NameOffsetMap[0], 0,
-                        sizeof(uint8)) &&
-                    Params.Size == sizeof(uint8) &&
-                    OnRepTeamIndex->GetPropertiesSize() ==
+                else if (Params.NameOffsetMap.size() == 1 && IsInputParam(
+                        &Params.NameOffsetMap[0], 0, sizeof(uint8)) &&
+                    Params.Size == sizeof(uint8) && OnRepTeamIndex->GetPropertiesSize() ==
                         sizeof(uint8))
                 {
                     uint8 PreviousTeam = OriginalTeamIndex;
-                    PlayerState->ProcessEvent(
-                        OnRepTeamIndex, &PreviousTeam);
+                    PlayerState->ProcessEvent(OnRepTeamIndex, &PreviousTeam);
                 }
             }
             return TeamGraphMatches();
         };
 
-    // Manual repair starts only from the exact pre-native snapshot. A partial
-    // native mutation is intentionally failed closed; layering raw writes over
-    // an in-progress engine transition can publish a mixed team generation.
-    if (!bGraphMutated && ApplyReflectedTeamGraph() &&
-        FinalizeTeamAssignment("reflected graph"))
+    if (!bGraphMutated && ApplyReflectedTeamGraph() && FinalizeTeamAssignment("reflected graph"))
     {
         return true;
     }
 
-    RemoveLateSeasonMemberFromOtherTeams(
-        GameState, nullptr, (AActor*)BotController);
-    SDK::DbgLog(
-        "[SpawnBot] isolated team assignment failed bot=%p "
-        "requested=%u nativeMutated=%d version=%.2f\n",
-        (void*)BotController,
-        (unsigned)CandidateTeam,
-        (int)bGraphMutated,
-        VersionInfo.FortniteVersion);
+    RemoveLateSeasonMemberFromOtherTeams(GameState, nullptr, (AActor*)BotController);
+    SDK::DbgLog("[SpawnBot] isolated team assignment failed bot=%p "
+        "requested=%u nativeMutated=%d version=%.2f\n", (void*)BotController,
+        (unsigned)CandidateTeam, (int)bGraphMutated, VersionInfo.FortniteVersion);
     return false;
 }
 
-
-uint8_t AFortGameMode::PickTeam(AFortGameMode* GameMode, uint8_t PreferredTeam, AFortPlayerControllerAthena* Controller)
+uint8_t AFortGameMode::PickTeam(AFortGameMode* GameMode, uint8_t PreferredTeam,
+    AFortPlayerControllerAthena* Controller)
 {
     if (!GameMode->HasWarmupRequiredPlayerCount())
         return 0;
 
-    auto Playlist =
-        VersionInfo.FortniteVersion >= 3.5 &&
-            GameMode->HasWarmupRequiredPlayerCount()
-        ? GetPublishedPlaylist(
-            (AFortGameStateAthena*)GameMode->GameState)
-        : nullptr;
+    auto Playlist = VersionInfo.FortniteVersion >= 3.5 && GameMode->HasWarmupRequiredPlayerCount()
+        ? GetPublishedPlaylist((AFortGameStateAthena*)GameMode->GameState) : nullptr;
 
-    // FN17/18's native human join path can bypass this hook. Route any later
-    // direct PickTeam call (notably `spawnbot`) through the same idempotent
-    // allocator so every participant consumes the correct squad slot.
-    if (ShouldRepairLateSeasonTeams() && Controller &&
-        Controller->PlayerState)
+    if (ShouldRepairLateSeasonTeams() && Controller && Controller->PlayerState)
     {
-        auto PlayerState =
-            (AFortPlayerStateAthena*)Controller->PlayerState;
+        auto PlayerState = (AFortPlayerStateAthena*)Controller->PlayerState;
         const uint8 AssignedTeam = ReserveLateSeasonHumanTeam(
             GameMode, Controller, PlayerState, Playlist);
-        printf(
-            "Picked repaired team %d %d\n",
-            AssignedTeam,
-            Playlist && Playlist->HasMaxSquadSize()
-                ? Playlist->MaxSquadSize
-                : 1);
+        printf("Picked repaired team %d %d\n", AssignedTeam, Playlist && Playlist->HasMaxSquadSize()
+                ? Playlist->MaxSquadSize : 1);
         return AssignedTeam;
     }
 
@@ -10160,44 +7842,26 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
 {
     auto World = UWorld::GetWorld();
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-    const uint8 PreviousGamePhase =
-        GameState ? GameState->GamePhase : 0;
-    const auto PolicyPlaylist =
-        ResolveSupplyDropPlaylist(World);
-    const bool bSkipAircraft =
-        PolicyPlaylist &&
-        PolicyPlaylist->HasbSkipAircraft() &&
+    const uint8 PreviousGamePhase = GameState ? GameState->GamePhase : 0;
+    const auto PolicyPlaylist = ResolveSupplyDropPlaylist(World);
+    const bool bSkipAircraft = PolicyPlaylist && PolicyPlaylist->HasbSkipAircraft() &&
         PolicyPlaylist->bSkipAircraft;
-    const bool bBeforeAircraft =
-        !GameState || !GameState->HasGamePhase() ||
-        GameState->GamePhase <
+    const bool bBeforeAircraft = !GameState || !GameState->HasGamePhase() || GameState->GamePhase <
             (uint8)EAthenaGamePhase::Aircraft;
-    const bool bChapterOnePolicyManagedStart =
-        VersionInfo.FortniteVersion < 11.00 &&
-        bBeforeAircraft &&
-        !bSkipAircraft &&
-        IsAuthoritativeBusPolicySelection();
+    const bool bChapterOnePolicyManagedStart = VersionInfo.FortniteVersion < 11.00 &&
+        bBeforeAircraft && !bSkipAircraft && IsAuthoritativeBusPolicySelection();
 
-    // Chapter 1's native GameMode can call this directly without consulting
-    // the replicated warmup timestamps. Permit that transition only after the
-    // game-thread bus policy reaches the configured automatic/manual deadline.
-    // Skip-aircraft and hidden event/custom-map phase flows retain native
-    // ownership.
     if (bChapterOnePolicyManagedStart)
     {
-        auto& State =
-            GGameplayConfigurationPolicyState;
-        const bool bAuthorized =
-            State.World.Get() == World &&
-            State.GameState.Get() == GameState &&
+        auto& State = GGameplayConfigurationPolicyState;
+        const bool bAuthorized = State.World.Get() == World && State.GameState.Get() == GameState &&
             State.bAircraftStartRequested;
         if (!bAuthorized)
         {
             if (!State.bLoggedBlockedAircraftStart)
             {
                 State.bLoggedBlockedAircraftStart = true;
-                SDK::DbgLog(
-                    "[GameplayPolicy] blocked premature "
+                SDK::DbgLog("[GameplayPolicy] blocked premature "
                     "Chapter 1 aircraft start\n");
             }
             return false;
@@ -10215,95 +7879,53 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
     if (FConfiguration::bCustomSafeZone && GameState && GameState->HasMapInfo() && GameState->MapInfo)
         GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
 
-    // This must precede the original: early Athena reads the array while
-    // StartAircraftPhase is creating/configuring its native safe-zone actor.
     EnsureLegacyLateGameSafeZoneLocations(GameMode);
-    // 13.00-20.x can enter the first native storm update from inside the
-    // original aircraft transition. Populate its cached wait/shrink curves
-    // before that update starts; repairing them only from the phase callback is
-    // too late when an empty schedule makes every phase expire in one tick.
     HydrateLegacyNativeSafeZoneDurations(GameMode, GameState);
     TickSupplyDropSuppression();
 
-    if (GameState &&
-        PreviousGamePhase <
-            (uint8)EAthenaGamePhase::Aircraft)
+    if (GameState && PreviousGamePhase <(uint8)EAthenaGamePhase::Aircraft)
     {
-        // Establish this match's one-shot cleanup epoch before native
-        // StartAircraftPhase can invoke EnterAircraft for each passenger.
-        AFortPlayerControllerAthena::
-            BeginAircraftInventoryCleanupForMatch(
-                GameState);
+        AFortPlayerControllerAthena::BeginAircraftInventoryCleanupForMatch(GameState);
 
         for (auto& Player : GameMode->AlivePlayers)
         {
-            AFortPlayerControllerAthena::
-                ClearWarmupShieldForAircraft(
-                    (AFortPlayerControllerAthena*)Player,
-                    "legacy-phase-before");
+            AFortPlayerControllerAthena::ClearWarmupShieldForAircraft(
+                    (AFortPlayerControllerAthena*)Player, "legacy-phase-before");
         }
     }
 
     auto Ret = StartAircraftPhaseOG(GameMode, a2);
 
-    // A legacy console dispatch can be dropped or native setup can reject a
-    // transient attempt. Do not publish StartedMatch or consume the release
-    // until the original reports success or the authoritative phase actually
-    // advances; the policy tick will retry after its short backoff.
-    const bool bAircraftPhaseObserved =
-        GameState &&
-        GameState->GamePhase >=
+    const bool bAircraftPhaseObserved = GameState && GameState->GamePhase >=
             (uint8)EAthenaGamePhase::Aircraft;
-    if (bChapterOnePolicyManagedStart &&
-        !Ret &&
-        !bAircraftPhaseObserved)
+    if (bChapterOnePolicyManagedStart && !Ret && !bAircraftPhaseObserved)
     {
-        GGameplayConfigurationPolicyState
-            .bAircraftStartRequested = false;
-        SDK::DbgLog(
-            "[GameplayPolicy] Chapter 1 aircraft start "
+        GGameplayConfigurationPolicyState.bAircraftStartRequested = false;
+        SDK::DbgLog("[GameplayPolicy] Chapter 1 aircraft start "
             "was not accepted; retrying\n");
         return Ret;
     }
 
-    // EnterAircraft is a private native call and its signature/finder varies
-    // between seasons. Once the authoritative GameState confirms that the
-    // aircraft phase actually began, clear every real passenger's warmup loot
-    // from the controller-owned inventory. This remains valid even though the
-    // native call may already have destroyed the spawn-island pawn.
-    if (GameState &&
-        GameState->GamePhase ==
-            (uint8)EAthenaGamePhase::Aircraft)
+    if (GameState && GameState->GamePhase == (uint8)EAthenaGamePhase::Aircraft)
     {
         for (auto& Player : GameMode->AlivePlayers)
         {
-            auto PlayerController =
-                (AFortPlayerControllerAthena*)Player;
+            auto PlayerController = (AFortPlayerControllerAthena*)Player;
 
-            AFortPlayerControllerAthena::
-                ClearWarmupShieldForAircraft(
-                    PlayerController,
+            AFortPlayerControllerAthena::ClearWarmupShieldForAircraft(PlayerController,
                     "legacy-phase-after");
-            AFortPlayerControllerAthena::
-                ClearDroppableInventoryForAircraft(
-                    PlayerController,
+            AFortPlayerControllerAthena::ClearDroppableInventoryForAircraft(PlayerController,
                     "legacy-phase");
         }
     }
 
     TickSupplyDropSuppression(true);
 
-    // Some 4.x/5.x native implementations regenerate this array inside the
-    // original call and do not expose bSafeZoneLocationsInitialized. Repair the
-    // source again before aircraft placement and later phase callbacks consume it.
     if (VersionInfo.FortniteVersion < 7.00 && FConfiguration::bCustomSafeZone)
         EnsureLegacyLateGameSafeZoneLocations(GameMode);
-    
-    const auto Playlist =
-        VersionInfo.FortniteVersion >= 3.5 &&
-        GameMode->HasWarmupRequiredPlayerCount()
-            ? ResolveActivePlaylist(GameState)
-            : nullptr;
+
+    const auto Playlist = VersionInfo.FortniteVersion >= 3.5 &&
+        GameMode->HasWarmupRequiredPlayerCount() ? ResolveActivePlaylist(GameState) : nullptr;
     if constexpr (FConfiguration::WebhookURL && *FConfiguration::WebhookURL)
     {
         auto curl = curl_easy_init();
@@ -10314,7 +7936,9 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
 
         char version[6];
 
-        sprintf_s(version, VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f", VersionInfo.FortniteVersion);
+        sprintf_s(version,
+            VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? "%.2f" : "%.1f",
+            VersionInfo.FortniteVersion);
 
         auto payload = UEAllocatedString("{\"embeds\": [{\"title\": \"Match has started!\", \"fields\": [{\"name\":\"Version\",\"value\":\"") + version + "\"}, {\"name\":\"Playlist\",\"value\":\"" + (Playlist ? Playlist->PlaylistName.ToString() : "Playlist_DefaultSolo") + "\"},{\"name\":\"Players\",\"value\":\"" + std::to_string(GameMode->AlivePlayers.Num()).c_str() + "\"}], \"color\": " + "\"7237230\", \"footer\": {\"text\":\"Magnesium\", \"icon_url\":\"https://cdn.discordapp.com/attachments/1341168629378584698/1436803905119064105/L0WnFa.png.png?ex=6910ef69&is=690f9de9&hm=01a0888b46647959b38ee58df322048ab49e2a5a678e52d4502d9c5e3978d805&\"}, \"timestamp\":\"" + iso8601() + "\"}] }";
 
@@ -10346,20 +7970,13 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             return Ret;
 
         FVector Loc;
-        const int AnchorIndex =
-            CustomSafeZoneRuntime::ResolveRuntimeStartPhase() - 1;
+        const int AnchorIndex = CustomSafeZoneRuntime::ResolveRuntimeStartPhase() - 1;
         const int PreviewIndex = AnchorIndex + 1;
-        const bool bHasAnchorLocation =
-            GameMode->SafeZoneLocations.IsValidIndex(
-                AnchorIndex);
+        const bool bHasAnchorLocation = GameMode->SafeZoneLocations.IsValidIndex(AnchorIndex);
 
         if (!bHasAnchorLocation)
         {
-            // Never move the pre-S6 indicator after native aircraft setup. If
-            // the early initialization could not find a center, leaving the
-            // native state untouched is safer than creating two storm centers.
-            if (VersionInfo.FortniteVersion < 6.00 &&
-                !UsesLegacySafeZoneLocFallback())
+            if (VersionInfo.FortniteVersion < 6.00 && !UsesLegacySafeZoneLocFallback())
             {
                 SDK::DbgLog("[SafeZone] pre-S6 aircraft started without four native locations\n");
                 return Ret;
@@ -10368,67 +7985,44 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
             if (!FindLegacyLateGameSafeZoneCenter(Loc))
                 return Ret;
             SafeZoneLoc = Loc;
-            if (!FConfiguration::bCustomSafeZone &&
-                VersionInfo.FortniteVersion < 7.00)
+            if (!FConfiguration::bCustomSafeZone && VersionInfo.FortniteVersion < 7.00)
             {
-                BuildLegacyFallbackSafeZonePlan(
-                    GameMode, Loc);
+                BuildLegacyFallbackSafeZonePlan(GameMode, Loc);
             }
-
-            //FConfiguration::bLateGame = false;
-            //printf("LateGame is not supported on this version!\n");
-            //return Ret;
         }
         else
         {
-            Loc = GameMode->SafeZoneLocations.Get(
-                AnchorIndex, FVector::Size());
+            Loc = GameMode->SafeZoneLocations.Get(AnchorIndex, FVector::Size());
 
-            // A few exact early builds can publish the selected current
-            // circle without the following white-preview entry. Preserve
-            // their real anchor and synthesize only the missing future chain.
-            if (!FConfiguration::bCustomSafeZone &&
-                VersionInfo.FortniteVersion < 7.00 &&
-                !GameMode->SafeZoneLocations.IsValidIndex(
-                    PreviewIndex))
+            if (!FConfiguration::bCustomSafeZone && VersionInfo.FortniteVersion < 7.00 &&
+                !GameMode->SafeZoneLocations.IsValidIndex(PreviewIndex))
             {
                 SafeZoneLoc = Loc;
-                BuildLegacyFallbackSafeZonePlan(
-                    GameMode, Loc);
+                BuildLegacyFallbackSafeZonePlan(GameMode, Loc);
             }
         }
 
-		if (FConfiguration::bCustomSafeZone)
-		{
-			const auto LegacyCustomZone =
-				FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
-			Loc = FVector(LegacyCustomZone.Center);
-			if (CustomSafeZoneRuntime::IsMovingModeRequested())
-			{
-				float SourceRadius = 0.f;
-				CustomSafeZoneRuntime::TryGetSourceCircle(
-					World,
-					GameState && GameState->HasMapInfo()
-						? GameState->MapInfo
-						: nullptr,
-					Loc, SourceRadius,
-					GameMode->SafeZoneLocations.Num(),
-					VersionInfo.FortniteVersion >= 21.10 ||
-						HasNativeMovingSafeZonePhasePublisher());
-			}
-			// Lower builds consume the pre-seeded native array and the
-            // phase-aware custom-radius path. Keeping this fallback clear
-            // prevents it from fighting the native current/preview state.
+        if (FConfiguration::bCustomSafeZone)
+        {
+            const auto LegacyCustomZone = FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+            Loc = FVector(LegacyCustomZone.Center);
+            if (CustomSafeZoneRuntime::IsMovingModeRequested())
+            {
+                float SourceRadius = 0.f;
+                CustomSafeZoneRuntime::TryGetSourceCircle(World,
+                    GameState && GameState->HasMapInfo() ? GameState->MapInfo : nullptr,
+                    Loc, SourceRadius, GameMode->SafeZoneLocations.Num(),
+                    VersionInfo.FortniteVersion >= 21.10 ||
+                        HasNativeMovingSafeZonePhasePublisher());
+            }
             if (VersionInfo.FortniteVersion >= 7.00)
                 SafeZoneLoc = Loc;
         }
 
         SDK::DbgLog(
             "[LateGame] aircraft zone anchor version=%.2f phase=%d loc=(%.1f, %.1f, %.1f) locations=%d fallback=%d custom=%d\n",
-            VersionInfo.FortniteVersion,
-            FConfiguration::LateGameZone.load(),
-            Loc.X, Loc.Y, Loc.Z, GameMode->SafeZoneLocations.Num(),
-            (int)!SafeZoneLoc.IsZero(),
+            VersionInfo.FortniteVersion, FConfiguration::LateGameZone.load(),
+            Loc.X, Loc.Y, Loc.Z, GameMode->SafeZoneLocations.Num(), (int)!SafeZoneLoc.IsZero(),
             (int)FConfiguration::bCustomSafeZone.load());
 
         if (FConfiguration::bMovingBus)
@@ -10447,8 +8041,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
                 Aircraft->FlightInfo.FlightSpeed /= IsSmallZone ? 10 : 5;
                 Aircraft->FlightInfo.TimeTillFlightEnd = 10.f;
                 Aircraft->FlightInfo.TimeTillDropStart = 0.f;
-                Aircraft->FlightInfo.TimeTillDropEnd = 10.f /*-= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2)*/;
-
+                Aircraft->FlightInfo.TimeTillDropEnd = 10.f ;
             }
             else
             {
@@ -10460,7 +8053,7 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
                 if (Aircraft->HasTimeTillFlightEnd())
                 {
                     Aircraft->TimeTillFlightEnd = 10.f;
-                    Aircraft->TimeTillDropEnd = 10.f /*-= ((Aircraft->FlightInfo.TimeTillDropEnd - Aircraft->FlightInfo.TimeTillDropStart) / 2)*/;
+                    Aircraft->TimeTillDropEnd = 10.f ;
                     Aircraft->TimeTillDropStart = 0.f;
                 }
             }
@@ -10503,12 +8096,10 @@ bool AFortGameMode::StartAircraftPhase(AFortGameMode* GameMode, char a2)
         Aircraft->DropEndTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 7.f;
         Aircraft->FlightStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld());
         Aircraft->FlightEndTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 7.f;
-        //GameState->SafeZonesStartTime = (float)UGameplayStatics::GetTimeSeconds(UWorld::GetWorld()) + 7.6f;
     }
 
     return Ret;
 }
-
 
 void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
 {
@@ -10519,18 +8110,12 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
     auto GameMode = (AFortGameMode*)Context;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-    // A passenger that never sent the jump RPC is about to be ejected by the
-    // native drop-zone path. Restrict this fallback to controllers still
-    // aboard so players who jumped early and already looted are never wiped.
     for (auto& Player : GameMode->AlivePlayers)
     {
-        auto PlayerController =
-            (AFortPlayerControllerAthena*)Player;
-        if (PlayerController &&
-            PlayerController->IsInAircraft())
+        auto PlayerController = (AFortPlayerControllerAthena*)Player;
+        if (PlayerController && PlayerController->IsInAircraft())
         {
-            AFortPlayerControllerAthena::
-                ClearDroppableInventoryForAircraft(
+            AFortPlayerControllerAthena::ClearDroppableInventoryForAircraft(
                     PlayerController, "drop-zone-exit", true);
         }
     }
@@ -10561,9 +8146,7 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
         }
     }
 
-    // Through Season 6, native OnAircraftExitedDropZone must observe the
-    // Aircraft phase so it can run StartSafeZonesPhase and arm the recurring
-    // SafeZoneInsideChecks timer. Newer Erbium paths retain their old ordering.
+    // Through Season 6 the native OnAircraftExitedDropZone must see the Aircraft phase to arm SafeZoneInsideChecks.
     const bool bDeferLegacyLateGamePhase =
         FConfiguration::bLateGame && VersionInfo.FortniteVersion < 7.00;
     const auto PreviousGamePhase = GameState->GamePhase;
@@ -10575,15 +8158,9 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
         GameState->OnRep_GamePhase(3);
     }
 
-    // This native call starts the safe-zone scheduler on affected builds.
-    // Refresh immediately beforehand as well as during aircraft setup so a
-    // playlist/map initialization pass cannot leave a zero-duration cache.
     HydrateLegacyNativeSafeZoneDurations(GameMode, GameState);
     callOG(GameMode, Stack.GetCurrentNativeFunction(), OnAircraftExitedDropZone, Aircraft);
 
-    // Normally the old native transition reaches SafeZones itself.  Retain the
-    // late-game fallback only for a build that did not transition, and do it
-    // after native setup so its timer/effect lifecycle cannot be skipped.
     if (bDeferLegacyLateGamePhase && GameState->GamePhase != 4)
     {
         GameState->GamePhase = 4;
@@ -10592,9 +8169,6 @@ void AFortGameMode::OnAircraftExitedDropZone_(UObject* Context, FFrame& Stack)
 
     if (bDeferLegacyLateGamePhase)
     {
-        // Native lower-season playlists otherwise retain their ordinary
-        // roughly 60-second first-zone delay.  Override only after the native
-        // aircraft-exit path has initialized its indicator/timers.
         GameState->GamePhaseStep = 7;
         float SafeZonesStartTime = -1.f;
         if (GameState->HasSafeZonesStartTime())
@@ -10625,28 +8199,22 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
         {
             if (FConfiguration::bCustomSafeZone && GameState->HasMapInfo())
                 GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
-            const auto LegacyCustomZone =
-                FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+            const auto LegacyCustomZone = FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
             FFortSafeZoneDefinition& SafeZoneDefinition = GameState->MapInfo->SafeZoneDefinition;
             float SafeZoneCount = SafeZoneDefinition.Count.Evaluate();
 
             auto& Array = SafeZoneIndicator->HasSafeZonePhases() ? SafeZoneIndicator->SafeZonePhases : Phases;
-			const bool bUsesStableProcessArray = &Array == &Phases;
-			// Setup is the sole producer of the fallback array. Clear its tag
-			// while rebuilding so preflight cannot consume partial or stale data.
-			GManagedSafeZonePhasesWorld = TWeakObjectPtr<UWorld>{};
-			GManagedSafeZonePhasesMapInfo =
-				TWeakObjectPtr<AFortAthenaMapInfo>{};
-
+            const bool bUsesStableProcessArray = &Array == &Phases;
+            GManagedSafeZonePhasesWorld = TWeakObjectPtr<UWorld>{};
+            GManagedSafeZonePhasesMapInfo = TWeakObjectPtr<AFortAthenaMapInfo>{};
 
             if (Array.IsValid())
                 Array.Free();
 
             const float Time = (float)UGameplayStatics::GetTimeSeconds(GameState);
 
-			const bool bMovingCustomZone =
-				CustomSafeZoneRuntime::IsMovingModeRequested();
-			for (float i = 0; i < SafeZoneCount; i++)
+            const bool bMovingCustomZone = CustomSafeZoneRuntime::IsMovingModeRequested();
+            for (float i = 0; i < SafeZoneCount; i++)
             {
                 auto PhaseInfo = (FFortSafeZonePhaseInfo*)malloc(FFortSafeZonePhaseInfo::Size());
                 memset((PBYTE)PhaseInfo, 0, FFortSafeZonePhaseInfo::Size());
@@ -10656,7 +8224,9 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
                 PhaseInfo->ShrinkTime = SafeZoneDefinition.ShrinkTime.Evaluate(i);
                 PhaseInfo->PlayerCap = (int)SafeZoneDefinition.PlayerCapSolo.Evaluate(i);
 
-                UDataTableFunctionLibrary::EvaluateCurveTableRow(GameState->AthenaGameDataTable, FName(L"Default.SafeZone.Damage"), i, nullptr, &PhaseInfo->DamageInfo.Damage, FString());
+                UDataTableFunctionLibrary::EvaluateCurveTableRow(GameState->AthenaGameDataTable,
+                    FName(L"Default.SafeZone.Damage"), i, nullptr, &PhaseInfo->DamageInfo.Damage,
+                    FString());
                 if (i == 0.f)
                     PhaseInfo->DamageInfo.Damage = 0.01f;
                 PhaseInfo->DamageInfo.bPercentageBasedDamage = true;
@@ -10672,9 +8242,8 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
                 if (GameMode->SafeZoneLocations.GetData() && GameMode->SafeZoneLocations.Num() > i)
                     PhaseInfo->Center = GameMode->SafeZoneLocations.Get((int)i, FVector::Size());
 
-				if (FConfiguration::bLateGame &&
-					FConfiguration::bCustomSafeZone &&
-					!bMovingCustomZone)
+                if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone &&
+                    !bMovingCustomZone)
                 {
                     PhaseInfo->Center = FVector(LegacyCustomZone.Center);
                     PhaseInfo->Radius = float(LegacyCustomZone.RadiusCm);
@@ -10687,41 +8256,33 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
                 Array.Add(*PhaseInfo, FFortSafeZonePhaseInfo::Size());
                 free(PhaseInfo);
 
-				SafeZoneIndicator->PhaseCount++;
-			}
-			if (bUsesStableProcessArray)
-			{
-				GManagedSafeZonePhasesWorld =
-					TWeakObjectPtr<UWorld>(UWorld::GetWorld());
-				GManagedSafeZonePhasesMapInfo =
-					TWeakObjectPtr<AFortAthenaMapInfo>(GameState->MapInfo);
-			}
+                SafeZoneIndicator->PhaseCount++;
+            }
+            if (bUsesStableProcessArray)
+            {
+                GManagedSafeZonePhasesWorld = TWeakObjectPtr<UWorld>(UWorld::GetWorld());
+                GManagedSafeZonePhasesMapInfo =
+                    TWeakObjectPtr<AFortAthenaMapInfo>(GameState->MapInfo);
+            }
 
-			bool bMovingCustomZoneApplied = false;
-			if (bMovingCustomZone)
-			{
-				bMovingCustomZoneApplied =
-					CustomSafeZoneRuntime::ApplyToPhaseArray(
-					UWorld::GetWorld(), GameState->MapInfo,
-					SafeZoneIndicator, Array,
-					"gamemode-managed-setup",
-					bUsesStableProcessArray);
-			}
-			if (bMovingCustomZone && !bMovingCustomZoneApplied &&
-				FConfiguration::bLateGame &&
-				FConfiguration::bCustomSafeZone)
-			{
-				for (int32 PhaseIndex = 0;
-					PhaseIndex < Array.Num(); ++PhaseIndex)
-				{
-					auto& PhaseInfo = Array.Get(
-						PhaseIndex, FFortSafeZonePhaseInfo::Size());
-					PhaseInfo.Center =
-						FVector(LegacyCustomZone.Center);
-					PhaseInfo.Radius =
-						float(LegacyCustomZone.RadiusCm);
-				}
-			}
+            bool bMovingCustomZoneApplied = false;
+            if (bMovingCustomZone)
+            {
+                bMovingCustomZoneApplied = CustomSafeZoneRuntime::ApplyToPhaseArray(
+                    UWorld::GetWorld(), GameState->MapInfo, SafeZoneIndicator, Array,
+                    "gamemode-managed-setup", bUsesStableProcessArray);
+            }
+            if (bMovingCustomZone && !bMovingCustomZoneApplied && FConfiguration::bLateGame &&
+                FConfiguration::bCustomSafeZone)
+            {
+                for (int32 PhaseIndex = 0;
+                    PhaseIndex < Array.Num(); ++PhaseIndex)
+                {
+                    auto& PhaseInfo = Array.Get(PhaseIndex, FFortSafeZonePhaseInfo::Size());
+                    PhaseInfo.Center = FVector(LegacyCustomZone.Center);
+                    PhaseInfo.Radius = float(LegacyCustomZone.RadiusCm);
+                }
+            }
 
             SafeZoneIndicator->OnRep_PhaseCount();
 
@@ -10743,11 +8304,10 @@ AFortSafeZoneIndicator* SetupSafeZoneIndicator(AFortGameMode* GameMode)
 void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool bInitial = false)
 {
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
-	float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(GameState);
-	auto& Array = GameMode->SafeZoneIndicator->HasSafeZonePhases() ? GameMode->SafeZoneIndicator->SafeZonePhases : Phases;
-	const bool bMovingCustomZoneRequested =
-		CustomSafeZoneRuntime::IsMovingModeRequested();
-	bool bMovingCustomZone = bMovingCustomZoneRequested;
+    float TimeSeconds = (float)UGameplayStatics::GetTimeSeconds(GameState);
+    auto& Array = GameMode->SafeZoneIndicator->HasSafeZonePhases() ? GameMode->SafeZoneIndicator->SafeZonePhases : Phases;
+    const bool bMovingCustomZoneRequested = CustomSafeZoneRuntime::IsMovingModeRequested();
+    bool bMovingCustomZone = bMovingCustomZoneRequested;
 
     if (Array.IsValidIndex(NewSafeZonePhase))
     {
@@ -10760,14 +8320,11 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
         }
 
         auto& PhaseInfo = Array.Get(NewSafeZonePhase, FFortSafeZonePhaseInfo::Size());
-		if (FConfiguration::bLateGame &&
-			FConfiguration::bCustomSafeZone &&
-			!bMovingCustomZone)
+        if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone && !bMovingCustomZone)
         {
             if (GameState->HasMapInfo() && GameState->MapInfo)
                 GUI::ResolveCustomSafeZoneForMap(GameState->MapInfo);
-            const auto LegacyCustomZone =
-                FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
+            const auto LegacyCustomZone = FConfiguration::GetLegacyCustomSafeZoneNodeSnapshot();
             PhaseInfo.Center = FVector(LegacyCustomZone.Center);
             PhaseInfo.Radius = float(LegacyCustomZone.RadiusCm);
         }
@@ -10783,14 +8340,12 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
             if (GameMode->SafeZoneIndicator->HasFutureReplicator() &&
                 GameMode->SafeZoneIndicator->FutureReplicator)
             {
-                if (GameMode->SafeZoneIndicator->FutureReplicator
-                    ->HasNextNextCenter())
+                if (GameMode->SafeZoneIndicator->FutureReplicator->HasNextNextCenter())
                 {
                     GameMode->SafeZoneIndicator->FutureReplicator
                         ->NextNextCenter = NextPhaseInfo.Center;
                 }
-                if (GameMode->SafeZoneIndicator->FutureReplicator
-                    ->HasNextNextRadius())
+                if (GameMode->SafeZoneIndicator->FutureReplicator->HasNextNextRadius())
                 {
                     GameMode->SafeZoneIndicator->FutureReplicator
                         ->NextNextRadius = NextPhaseInfo.Radius;
@@ -10799,38 +8354,27 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
 
             GameMode->SafeZoneIndicator->NextNextCenter = NextPhaseInfo.Center;
             GameMode->SafeZoneIndicator->NextNextRadius = NextPhaseInfo.Radius;
-			GameMode->SafeZoneIndicator->NextNextMegaStormGridCellThickness = NextPhaseInfo.MegaStormGridCellThickness;
-		}
+            GameMode->SafeZoneIndicator->NextNextMegaStormGridCellThickness = NextPhaseInfo.MegaStormGridCellThickness;
+        }
 
-		if (bMovingCustomZoneRequested)
-		{
-			bMovingCustomZone =
-				CustomSafeZoneRuntime::PublishManagedPhase(
-				UWorld::GetWorld(),
-				GameState && GameState->HasMapInfo()
-					? GameState->MapInfo
-					: nullptr,
-				GameMode->SafeZoneIndicator,
-				NewSafeZonePhase,
-				"gamemode-managed-phase-start",
-				&Array,
-				&Array == &Phases);
-		}
+        if (bMovingCustomZoneRequested)
+        {
+            bMovingCustomZone = CustomSafeZoneRuntime::PublishManagedPhase(UWorld::GetWorld(),
+                GameState && GameState->HasMapInfo() ? GameState->MapInfo : nullptr,
+                GameMode->SafeZoneIndicator, NewSafeZonePhase, "gamemode-managed-phase-start",
+                &Array, &Array == &Phases);
+        }
 
         GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime = TimeSeconds + PhaseInfo.WaitTime;
         GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime = GameMode->SafeZoneIndicator->SafeZoneStartShrinkTime + PhaseInfo.ShrinkTime;
-		if (bMovingCustomZone)
-		{
-			VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-				GameMode->SafeZoneIndicator,
-				L"SafeZoneStartShrinkTime");
-			VersionFeatureAdapter::MarkReplicatedPropertyDirty(
-				GameMode->SafeZoneIndicator,
-				L"SafeZoneFinishShrinkTime");
-			// Publish after both deadlines have been assigned. ForceNetUpdate alone
-			// is insufficient for unmarked push-model/Iris properties.
-			GameMode->SafeZoneIndicator->ForceNetUpdate();
-		}
+        if (bMovingCustomZone)
+        {
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(GameMode->SafeZoneIndicator,
+                L"SafeZoneStartShrinkTime");
+            VersionFeatureAdapter::MarkReplicatedPropertyDirty(GameMode->SafeZoneIndicator,
+                L"SafeZoneFinishShrinkTime");
+            GameMode->SafeZoneIndicator->ForceNetUpdate();
+        }
 
         GameMode->SafeZoneIndicator->CurrentDamageInfo = PhaseInfo.DamageInfo;
         GameMode->SafeZoneIndicator->OnRep_CurrentDamageInfo();
@@ -10847,16 +8391,12 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
         if (GameMode->SafeZoneIndicator->HasSafezoneStateChangedDelegate())
             GameMode->SafeZoneIndicator->SafezoneStateChangedDelegate.Process(GameMode->SafeZoneIndicator, 2);
 
-		if (FConfiguration::bLateGame &&
-			FConfiguration::bCustomSafeZone &&
-			!bMovingCustomZone)
+        if (FConfiguration::bLateGame && FConfiguration::bCustomSafeZone && !bMovingCustomZone)
             ApplyCustomSafeZoneState(GameMode, "managed-phase-start");
 
-        if (FConfiguration::bLateGame &&
-            FConfiguration::bLateGameLongZone)
+        if (FConfiguration::bLateGame && FConfiguration::bLateGameLongZone)
         {
-            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::
-                SetSafeZonePaused(true);
+            UFortGameStateComponent_BattleRoyaleGamePhaseLogic::SetSafeZonePaused(true);
         }
 
         if (!bInitial)
@@ -10873,34 +8413,28 @@ void StartNewSafeZonePhase(AFortGameMode* GameMode, int NewSafeZonePhase, bool b
 void (*SpawnInitialSafeZoneOG)(AFortGameMode* GameMode);
 void SpawnInitialSafeZone(AFortGameMode* GameMode)
 {
-    //return;
     GameMode->bSafeZoneActive = true;
     auto SafeZoneIndicator = SetupSafeZoneIndicator(GameMode);
 
     SafeZoneIndicator->OnSafeZonePhaseChanged.Bind(GameMode, FName(L"HandlePostSafeZonePhaseChanged"));
     GameMode->OnSafeZoneIndicatorSpawned.Process(SafeZoneIndicator);
 
-    StartNewSafeZonePhase(
-        GameMode,
-        FConfiguration::bLateGame
-            ? CustomSafeZoneRuntime::ResolveRuntimeStartPhase()
-            : 1,
-        true);
-
-
-    //return SpawnInitialSafeZoneOG(GameMode);
+    StartNewSafeZonePhase(GameMode, FConfiguration::bLateGame
+            ? CustomSafeZoneRuntime::ResolveRuntimeStartPhase() : 1, true);
 }
 
 void (*UpdateSafeZonesPhaseOG)(AFortGameMode* GameMode);
 void UpdateSafeZonesPhase(AFortGameMode* GameMode)
 {
     auto& Array = GameMode->SafeZoneIndicator && GameMode->SafeZoneIndicator->HasSafeZonePhases() ? GameMode->SafeZoneIndicator->SafeZonePhases : Phases;
-    if (GameMode->bSafeZoneActive && UGameplayStatics::GetTimeSeconds(GameMode) >= GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime && !UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused() && Array.IsValidIndex(GameMode->SafeZoneIndicator->CurrentPhase + 1))
+    if (GameMode->bSafeZoneActive &&
+        UGameplayStatics::GetTimeSeconds(GameMode) >= GameMode->SafeZoneIndicator->SafeZoneFinishShrinkTime &&
+        !UFortGameStateComponent_BattleRoyaleGamePhaseLogic::IsSafeZonePaused() &&
+        Array.IsValidIndex(GameMode->SafeZoneIndicator->CurrentPhase + 1))
         StartNewSafeZonePhase(GameMode, GameMode->SafeZoneIndicator->CurrentPhase + 1);
 
     return UpdateSafeZonesPhaseOG(GameMode);
 }
-
 
 void GetPhaseInfo(UObject* Context, FFrame& Stack, bool* Ret)
 {
@@ -10932,24 +8466,6 @@ void (*OnWorldInitDoneOG)(UNavigationSystem* NavSys, char Mode);
 void OnWorldInitDone(UNavigationSystem* NavSys, char Mode)
 {
     printf("OnWorldInitDone\n");
-    /*NavSys->bAutoCreateNavigationData = true;
-    NavSys->bAllowClientSideNavigation = true;
-    NavSys->bSupportRebuilding = true;
-
-    OnWorldInitDoneOG(NavSys, Mode);
-
-    auto AllBounds = Utils::GetAll(FindClass("NavMeshBoundsVolume"));
-    auto AllNavmeshes = Utils::GetAll<AFortNavMesh>();
-    auto HotSpotMgr = TUObjectArray::FindFirstObject("FortAIHotSpotManager");
-
-    //auto Test = (void(*)(UNavigationSystem*)) (ImageBase + 0x1F5C290);
-    //Test(NavSys);
-
-    NavSys->OnNavigationBoundsUpdated(AllBounds[0]);
-    AllNavmeshes[0]->HotSpotManager = HotSpotMgr;
-    //printf("NavGraphData: %llx, AllBounds.Num() = %d\n", NavSys->NavGraphData, AllBounds.Num());
-    AllBounds.Free();
-    AllNavmeshes.Free();*/
 }
 
 void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* WorldManager)
@@ -10957,26 +8473,18 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
     auto GameMode = (AFortGameModeAthena*)_this;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
 
-    //if (VersionInfo.EngineVersion == 4.25)
-    //    SetupPlaylist(GameMode, GameState);
-
-    SDK::DbgLog("[GameMode] FinishWorldInitialization entered (this=%p GameState=%p) pre-OG\n", (void*)_this, (void*)GameState);
+    SDK::DbgLog("[GameMode] FinishWorldInitialization entered (this=%p GameState=%p) pre-OG\n",
+        (void*)_this, (void*)GameState);
     FinishWorldInitializationOG(_this, WorldManager);
     SDK::DbgLog("[GameMode] FinishWorldInitialization post-OG\n");
 
-    if (GameState && VersionInfo.EngineVersion >= 4.22 &&
-        VersionInfo.EngineVersion < 4.26)
+    if (GameState && VersionInfo.EngineVersion >= 4.22 && VersionInfo.EngineVersion < 4.26)
     {
         const auto Playlist = GetPublishedPlaylist(GameState);
-        if (FFortAthenaNativeLTMCompatibility::
-                IsTargetPlaylist(Playlist))
+        if (FFortAthenaNativeLTMCompatibility::IsTargetPlaylist(Playlist))
         {
-            // The exact 10.40 LTM path was already published once after
-            // MapInfo became available. This idempotent call also covers the
-            // unlikely case where FinishWorldInitialization got there first.
             PublishNative1040Playlist(GameState, Playlist);
-            SDK::DbgLog(
-                "[NativeLTM] skipped duplicate post-world playlist "
+            SDK::DbgLog("[NativeLTM] skipped duplicate post-world playlist "
                 "callback\n");
         }
         else
@@ -10984,7 +8492,6 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
             GameState->OnRep_CurrentPlaylistInfo();
         }
     }
-
 
     auto AddToTierData = [&](const UDataTable* Table, TArray<FFortLootTierData*>& TempArr)
         {
@@ -11042,7 +8549,8 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
             }
         };
 
-    auto AddToPackages = [&](const UDataTable* Table, std::unordered_map<int32, FFortLootPackageData*>& TempArr)
+    auto AddToPackages = [&](const UDataTable* Table, std::unordered_map<int32,
+        FFortLootPackageData*>& TempArr)
         {
             if (!Table)
                 return;
@@ -11131,10 +8639,6 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
                     {
                         if (VersionInfo.EngineVersion >= 5.3)
                         {
-                            /*for (auto& Tag : Playlist->GameplayTagContainer.GameplayTags)
-                                for (auto& Override : PlaylistOverrideLootTableDataUE52)
-                                    if (Tag.TagName.ComparisonIndex == Override.First)
-                                        AddToTierData(Override.Second.LootTierData.Get(), LTDTempData);*/
                         }
                         else if (VersionInfo.FortniteVersion < 20.00)
                         {
@@ -11149,9 +8653,6 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
                                     if (Tag.TagName.ComparisonIndex == Override.First)
                                         AddToTierData(Override.Second.LootTierData.Get(), LTDTempData);
                     }
-
-                    //for (auto& [_, Val] : LTDTempData)
-                    //    TierDataAllGroups.Add(Val);
 
                     for (auto& Val : LTDTempData)
                         TierDataMap[Val->TierGroup.ComparisonIndex].Add(Val);
@@ -11167,10 +8668,6 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
                     {
                         if (VersionInfo.EngineVersion >= 5.3)
                         {
-                            /*for (auto& Tag : Playlist->GameplayTagContainer.GameplayTags)
-                                for (auto& Override : PlaylistOverrideLootTableDataUE52)
-                                    if (Tag.TagName.ComparisonIndex == Override.First)
-                                        AddToPackages(Override.Second.LootPackageData.Get(), LPTempData);*/
                         }
                         else if (VersionInfo.FortniteVersion < 20.00)
                         {
@@ -11185,7 +8682,6 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
                                     if (Tag.TagName.ComparisonIndex == Override.First)
                                         AddToPackages(Override.Second.LootPackageData.Get(), LPTempData);
                     }
-
 
                     for (auto& [_, Val] : LPTempData)
                         LootPackageMap[Val->LootPackageID.ComparisonIndex].Add(Val);
@@ -11210,11 +8706,6 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
 
     ConsumableSpawners.Free();
 
-    // FN30 streams its Living World vehicle providers asynchronously. On
-    // some starts UpdateVehicleSpawns runs around eleven seconds after this
-    // callback, so a one-shot scan permanently misses every source. Begin a
-    // delayed, sparse, per-source-idempotent discovery window after streaming
-    // settles instead of sweeping the whole world throughout server startup.
     BeginDeferredVehicleSpawnDiscovery();
 
     if (VersionInfo.FortniteVersion > 3.4)
@@ -11225,8 +8716,7 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
         {
             if (Sum > Weight)
             {
-            PickNum:
-                auto RandomNum = (float)rand() / (RAND_MAX / TotalWeight);
+            PickNum: auto RandomNum = (float)rand() / (RAND_MAX / TotalWeight);
 
                 int Rarity = 0;
                 bool found = false;
@@ -11274,7 +8764,8 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
 
                     TArray<FFortItemEntry*> LootDrops{};
 
-                    UFortLootPackage::ChooseLootForContainer(LootDrops, CollectorActor->DefaultItemLootTierGroupName, Rarity);
+                    UFortLootPackage::ChooseLootForContainer(LootDrops,
+                        CollectorActor->DefaultItemLootTierGroupName, Rarity);
 
                     if (Collection.OutputItemEntry.Num() > 0)
                     {
@@ -11309,9 +8800,10 @@ void AFortGameMode::FinishWorldInitialization(AFortGameMode* _this, AActor* Worl
         }
         Collectors.Free();
 
-        Utils::ExecHook((UFunction*)FindObject<UFunction>(L"/Game/Athena/Items/Gameplay/VendingMachine/B_Athena_VendingMachine.B_Athena_VendingMachine_C:VendWobble__FinishedFunc"), VendWobble__FinishedFunc, VendWobble__FinishedFuncOG);
+        Utils::ExecHook(
+            (UFunction*)FindObject<UFunction>(L"/Game/Athena/Items/Gameplay/VendingMachine/B_Athena_VendingMachine.B_Athena_VendingMachine_C:VendWobble__FinishedFunc"),
+            VendWobble__FinishedFunc, VendWobble__FinishedFuncOG);
     }
-    //Utils::ExecHook((UFunction*)FindObject<UFunction>(L"/Game/Athena/Items/Consumables/Parents/GA_Athena_MedConsumable_Parent.GA_Athena_MedConsumable_Parent_C:Triggered_4C02BFB04B18D9E79F84848FFE6D2C32"), AFortPlayerPawnAthena::Athena_MedConsumable_Triggered, AFortPlayerPawnAthena::Athena_MedConsumable_TriggeredOG);
 }
 
 void PlayerCanRestart(UObject* Context, FFrame& Stack, bool* Ret)
@@ -11327,12 +8819,11 @@ void PlayerCanRestart(UObject* Context, FFrame& Stack, bool* Ret)
 void AFortGameMode::Hook()
 {
     auto _rtsmFn = GetDefaultObj()->GetFunction("ReadyToStartMatch");
-    SDK::DbgLog("[GameMode] Hook: ReadyToStartMatch UFunction=%p (CDO=%p)\n", (void*)_rtsmFn, (void*)GetDefaultObj());
+    SDK::DbgLog("[GameMode] Hook: ReadyToStartMatch UFunction=%p (CDO=%p)\n", (void*)_rtsmFn,
+        (void*)GetDefaultObj());
     Utils::ExecHook(_rtsmFn, ReadyToStartMatch_, ReadyToStartMatch_OG);
     SDK::DbgLog("[GameMode] Hook: FindFinishWorldInitialization=%p\n", (void*)FindFinishWorldInitialization());
     Utils::Hook(FindFinishWorldInitialization(), FinishWorldInitialization, FinishWorldInitializationOG);
-    //if (VersionInfo.EngineVersion == 4.16)
-    //    Utils::Hook(Memcury::Scanner::FindPattern("40 55 53 56 41 56 48 8D 6C 24 ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 ? 48 8B 01 48 8B F1").Get(), OnWorldInitDone, OnWorldInitDoneOG);
 }
 
 void AFortGameMode::PostLoadHook()
@@ -11344,15 +8835,12 @@ void AFortGameMode::PostLoadHook()
     SpawnDefaultPawnForIdx = spdf->GetVTableIndex();
 
     Utils::ExecHook(spdf, SpawnDefaultPawnFor);
-    Utils::ExecHook(GetDefaultObj()->GetFunction("HandleStartingNewPlayer"), HandleStartingNewPlayer_, HandleStartingNewPlayer_OG);
+    Utils::ExecHook(GetDefaultObj()->GetFunction("HandleStartingNewPlayer"),
+        HandleStartingNewPlayer_, HandleStartingNewPlayer_OG);
     Utils::Hook(FindPickTeam(), PickTeam, PickTeamOG);
     if (FFortAthenaHeistCompatibility::IsSupportedBuild())
     {
-        // Seven local 5.41 dumps traced to the supplemental end-game
-        // trampoline. Leave the native function untouched; Getaway gameplay
-        // does not require the teammate notification bridge to run.
-        SDK::DbgLog(
-            "[Heist] native StartEndGamePhase left unhooked\n");
+        SDK::DbgLog("[Heist] native StartEndGamePhase left unhooked\n");
     }
     if (VersionInfo.FortniteVersion < 25.20)
     {
@@ -11367,8 +8855,7 @@ void AFortGameMode::PostLoadHook()
                 HandlePostSafeZonePhaseChangedAddress >= ModuleEnd ||
                 !SDK::MemReadable((void*)HandlePostSafeZonePhaseChangedAddress, 6))
             {
-                SDK::DbgLog(
-                    "[SafeZone] rejected invalid native phase handler address=%p\n",
+                SDK::DbgLog("[SafeZone] rejected invalid native phase handler address=%p\n",
                     (void*)HandlePostSafeZonePhaseChangedAddress);
                 HandlePostSafeZonePhaseChangedAddress = 0;
             }
@@ -11387,49 +8874,34 @@ void AFortGameMode::PostLoadHook()
                 VersionInfo.FortniteVersion);
         }
     }
-    Utils::ExecHook(AFortGameModeAthena::GetDefaultObj()->GetFunction("OnAircraftExitedDropZone"), OnAircraftExitedDropZone_, OnAircraftExitedDropZone_OG);
+    Utils::ExecHook(AFortGameModeAthena::GetDefaultObj()->GetFunction("OnAircraftExitedDropZone"),
+        OnAircraftExitedDropZone_, OnAircraftExitedDropZone_OG);
 
     if (VersionInfo.FortniteVersion >= 21.10)
     {
         if (VersionInfo.FortniteVersion < 25.20)
         {
-            const auto SpawnInitialSafeZoneAddress =
-                FindSpawnInitialSafeZone();
-            const auto UpdateSafeZonesPhaseAddress =
-                FindUpdateSafeZonesPhase();
-            Utils::Hook(
-                SpawnInitialSafeZoneAddress,
-                SpawnInitialSafeZone,
-                SpawnInitialSafeZoneOG);
-            Utils::Hook(
-                UpdateSafeZonesPhaseAddress,
-                UpdateSafeZonesPhase,
-                UpdateSafeZonesPhaseOG);
-            GHasManagedMovingSafeZonePhaseHooks =
-                SpawnInitialSafeZoneAddress != 0 &&
-                UpdateSafeZonesPhaseAddress != 0 &&
-                SpawnInitialSafeZoneOG != nullptr &&
+            const auto SpawnInitialSafeZoneAddress = FindSpawnInitialSafeZone();
+            const auto UpdateSafeZonesPhaseAddress = FindUpdateSafeZonesPhase();
+            Utils::Hook(SpawnInitialSafeZoneAddress, SpawnInitialSafeZone, SpawnInitialSafeZoneOG);
+            Utils::Hook(UpdateSafeZonesPhaseAddress, UpdateSafeZonesPhase, UpdateSafeZonesPhaseOG);
+            GHasManagedMovingSafeZonePhaseHooks = SpawnInitialSafeZoneAddress != 0 &&
+                UpdateSafeZonesPhaseAddress != 0 && SpawnInitialSafeZoneOG != nullptr &&
                 UpdateSafeZonesPhaseOG != nullptr;
             if (!GHasManagedMovingSafeZonePhaseHooks)
             {
-                SDK::DbgLog(
-                    "[CustomSafeZonePlan] managed phase owner unavailable "
+                SDK::DbgLog("[CustomSafeZonePlan] managed phase owner unavailable "
                     "version=%.2f spawn=%p update=%p spawnOG=%p updateOG=%p\n",
-                    VersionInfo.FortniteVersion,
-                    (void*)SpawnInitialSafeZoneAddress,
-                    (void*)UpdateSafeZonesPhaseAddress,
-                    (void*)SpawnInitialSafeZoneOG,
+                    VersionInfo.FortniteVersion, (void*)SpawnInitialSafeZoneAddress,
+                    (void*)UpdateSafeZonesPhaseAddress, (void*)SpawnInitialSafeZoneOG,
                     (void*)UpdateSafeZonesPhaseOG);
             }
         }
         Utils::ExecHook(L"/Script/FortniteGame.FortSafeZoneIndicator.GetPhaseInfo", GetPhaseInfo);
     }
 
-    const bool bHasAuthoritativeMovingZonePublisher =
-        VersionInfo.FortniteVersion >= 25.20
-            ? true
-            : (VersionInfo.FortniteVersion >= 21.10
-                ? GHasManagedMovingSafeZonePhaseHooks
+    const bool bHasAuthoritativeMovingZonePublisher = VersionInfo.FortniteVersion >= 25.20 ? true
+            : (VersionInfo.FortniteVersion >= 21.10 ? GHasManagedMovingSafeZonePhaseHooks
                 : HasNativeMovingSafeZonePhasePublisher());
     ECustomSafeZoneLegacyPhaseOwnerPath LegacyOwnerPath =
         ECustomSafeZoneLegacyPhaseOwnerPath::Unavailable;
@@ -11437,20 +8909,14 @@ void AFortGameMode::PostLoadHook()
     {
         if (GHasNativeLateGameSafeZonePhaseHook)
         {
-            LegacyOwnerPath =
-                ECustomSafeZoneLegacyPhaseOwnerPath::NativePhaseHook;
+            LegacyOwnerPath = ECustomSafeZoneLegacyPhaseOwnerPath::NativePhaseHook;
         }
-        else if (VersionInfo.FortniteVersion == 2.50 ||
-            VersionInfo.FortniteVersion == 7.30)
+        else if (VersionInfo.FortniteVersion == 2.50 || VersionInfo.FortniteVersion == 7.30)
         {
-            LegacyOwnerPath =
-                ECustomSafeZoneLegacyPhaseOwnerPath::DeadlineFallback;
+            LegacyOwnerPath = ECustomSafeZoneLegacyPhaseOwnerPath::DeadlineFallback;
         }
     }
     CustomSafeZoneRuntime::SetLegacyPhaseOwnerPath(LegacyOwnerPath);
     CustomSafeZoneRuntime::SetAuthoritativePhasePublisherAvailable(
         bHasAuthoritativeMovingZonePublisher);
-
-    //if (VersionInfo.FortniteVersion >= 15)
-//    Utils::ExecHook(AFortGameModeAthena::GetDefaultObj()->GetFunction("PlayerCanRestart"), PlayerCanRestart);
 }

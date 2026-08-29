@@ -18,7 +18,7 @@ class UCompositeDataTable : public UObject
 {
 public:
     UCLASS_COMMON_MEMBERS(UCompositeDataTable);
-    
+
     DEFINE_PROP(ParentTables, TArray<UDataTable*>);
 };
 

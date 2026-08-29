@@ -10,14 +10,8 @@
 
 enum class EMovementMode : uint8_t
 {
-    MOVE_None = 0,
-    MOVE_Walking = 1,
-    MOVE_NavWalking = 2,
-    MOVE_Falling = 3,
-    MOVE_Swimming = 4,
-    MOVE_Flying = 5,
-    MOVE_Custom = 6,
-    MOVE_MAX = 7,
+    MOVE_None = 0, MOVE_Walking = 1, MOVE_NavWalking = 2, MOVE_Falling = 3, MOVE_Swimming = 4,
+    MOVE_Flying = 5, MOVE_Custom = 6, MOVE_MAX = 7,
 };
 
 class UAthenaPickaxeItemDefinition : public UFortItemDefinition
@@ -62,11 +56,7 @@ public:
 
 enum class EFortCustomGender : uint8
 {
-    Invalid = 0,
-    Male = 1,
-    Female = 2,
-    Both = 3,
-    EFortCustomGender_MAX = 4,
+    Invalid = 0, Male = 1, Female = 2, Both = 3, EFortCustomGender_MAX = 4,
 };
 
 class UAthenaCharacterItemDefinition : public UFortItemDefinition
@@ -74,9 +64,6 @@ class UAthenaCharacterItemDefinition : public UFortItemDefinition
 public:
     UCLASS_COMMON_MEMBERS(UAthenaCharacterItemDefinition);
 
-    // Modern builds expose the outfit's directly authored parts here. Older
-    // builds omit the property and continue to resolve parts through the hero
-    // specializations below.
     DEFINE_PROP(BaseCharacterParts, TArray<TSoftObjectPtr<UCustomCharacterPart>>);
     DEFINE_PROP(HeroDefinition, UFortHeroType*);
     DEFINE_PROP(Gender, EFortCustomGender);
@@ -370,14 +357,10 @@ public:
     UCLASS_COMMON_MEMBERS(AController);
 };
 
-// ModType argument of AFortPlayerController::ServerModifyStat. Resolve the
-// reflected enum at runtime when possible because its ordering can vary.
+// ModType for AFortPlayerController::ServerModifyStat. Its ordering can vary, so prefer the reflected enum.
 enum class EStatMod : uint8
 {
-    Delta = 0,
-    Set = 1,
-    Maximum = 2,
-    EStatMod_MAX = 3
+    Delta = 0, Set = 1, Maximum = 2, EStatMod_MAX = 3
 };
 
 uint8 ResolveStatMod(EStatMod Mod);
@@ -388,12 +371,8 @@ class AFortPlayerControllerAthena : public AActor
 public:
     UCLASS_COMMON_MEMBERS(AFortPlayerControllerAthena);
 
-    // Named waypoint commands share one server-session dictionary. Preset
-    // persistence calls these helpers only from the game thread; returning and
-    // replacing by value keeps Unreal object pointers out of the saved state.
     using FWaypointHistory = std::vector<FVector>;
-    using FWaypointMap =
-        std::unordered_map<std::string, FWaypointHistory>;
+    using FWaypointMap = std::unordered_map<std::string, FWaypointHistory>;
     static FWaypointMap SnapshotWaypoints();
     static void ReplaceWaypoints(FWaypointMap NewWaypoints);
 
@@ -402,8 +381,6 @@ public:
     DEFINE_PROP(LastSpectatorSyncLocation, FVector);
     DEFINE_PROP(LastSpectatorSyncRotation, FRotator);
     DEFINE_PROP(PlayerState, AFortPlayerStateAthena*);
-    // Native elimination credit candidate retained by FortPlayerController.
-    // Reflected on the tested supported layouts.
     DEFINE_PROP(LastDamager, AActor*);
     DEFINE_PROP(MyFortPawn, AFortPlayerPawnAthena*);
     DEFINE_PROP(Pawn, AFortPlayerPawnAthena*);
@@ -454,8 +431,6 @@ public:
     DEFINE_PROP(SwappingItemDefinition, FFortItemEntry*); // scuffness
     DEFINE_PROP(QuickBars, AFortQuickBars*);
     DEFINE_PROP(XPComponent, UFortPlayerControllerAthenaXPComponent*);
-    // Native match-stat storage can lag behind controller construction. Quest
-    // dispatch treats a reflected-but-null manager as not ready.
     DEFINE_PROP(StatManager, UObject*);
     DEFINE_PROP(CheatManager, UFortCheatManager*);
     DEFINE_PROP(CheatClass, TSubclassOf<UObject>);
@@ -486,7 +461,7 @@ public:
     DEFINE_BITFIELD_PROP(bIsCreativeQuickbarEnabled);
     DEFINE_BITFIELD_PROP(bIsCreativeQuickmenuEnabled);
     DEFINE_PROP(PlayerToSpectateOnDeath, AActor*);
-	DEFINE_PROP(IndicatedActorManagementComponent, UFortIndicatedActorManagementComponent*);
+    DEFINE_PROP(IndicatedActorManagementComponent, UFortIndicatedActorManagementComponent*);
 
     DEFINE_FUNC(GetViewTarget, AActor*);
     DEFINE_FUNC(SetViewTargetWithBlend, void);
@@ -549,38 +524,19 @@ public:
     DEFINE_FUNC(ServerModifyStat, void);
     DEFINE_FUNC(GetStatValue, int32);
 
-    bool TryModifyStat(
-        const wchar_t* StatName,
-        int32 Amount,
-        EStatMod ModType = EStatMod::Set,
+    bool TryModifyStat(const wchar_t* StatName, int32 Amount, EStatMod ModType = EStatMod::Set,
         bool bForceStatSave = true) const;
-    // Republishes the kill count that reactive cosmetics watch. Callers that
-    // already hold the pawn (possession, before MyFortPawn is guaranteed
-    // rebound) should pass it rather than let the lookup race.
-    static bool SyncReactiveKillStat(
-        AFortPlayerControllerAthena* PlayerController,
+    static bool SyncReactiveKillStat(AFortPlayerControllerAthena* PlayerController,
         AFortPlayerPawnAthena* PawnOverride = nullptr);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
-    // Removes spawn-island loot while retaining the harvesting/building tools
-    // that are intentionally non-droppable. Safe to call at several aircraft
-    // lifecycle checkpoints; later calls become no-ops.
-    static void BeginAircraftInventoryCleanupForMatch(
-        UObject* MatchToken);
-    static bool ClearWarmupShieldForAircraft(
-        AFortPlayerControllerAthena* PlayerController,
-        const char* Source,
-        bool bRequireAircraftPassenger = false);
-    static int32 ClearDroppableInventoryForAircraft(
-        AFortPlayerControllerAthena* PlayerController,
-        const char* Source,
-        bool bRequireAircraftPassenger = false);
-    // Resolves the newest connected human from Unreal's native player lists.
-    // Connectionless bots are ignored automatically.
-    static bool IsLastJoinedPlayer(
-        AFortPlayerControllerAthena* PlayerController);
-    DefHookOg(bool, ClientStreamingReadiness,
-        AFortPlayerControllerAthena*);
+    static void BeginAircraftInventoryCleanupForMatch(UObject* MatchToken);
+    static bool ClearWarmupShieldForAircraft(AFortPlayerControllerAthena* PlayerController,
+        const char* Source, bool bRequireAircraftPassenger = false);
+    static int32 ClearDroppableInventoryForAircraft(AFortPlayerControllerAthena* PlayerController,
+        const char* Source, bool bRequireAircraftPassenger = false);
+    static bool IsLastJoinedPlayer(AFortPlayerControllerAthena* PlayerController);
+    DefHookOg(bool, ClientStreamingReadiness, AFortPlayerControllerAthena*);
     DefHookOg(void, GetPlayerViewPoint, AFortPlayerControllerAthena*, FVector&, FRotator&);
     DefHookOg(void, ServerAttemptAircraftJump_, UObject*, FFrame&);
     static void ServerExecuteInventoryItem_(UObject*, FFrame&);
@@ -594,30 +550,17 @@ public:
     static void ServerPlayEmoteItem_(UObject*, FFrame&);
     static void PlayEmoteInternal(AFortPlayerControllerAthena* PC, UObject* Asset);
     static void ServerClientIsReadyToRespawn(UObject*, FFrame&);
-    // Clears camera generations that belong to a completed match when the
-    // engine reuses the same UWorld for a manual restart.
     static void ResetRespawnCameraForMatchRestart();
     static void CaptureLandingItemBeforeNativeEnd(
         AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
     static void FinalizeRespawnAfterLanding(AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
     static void RestoreVehicleLoadoutAfterExit(AFortPlayerControllerAthena*);
-    // Catches the exits the RPC above cannot see, so a temporary vehicle weapon
-    // never outlives the ride. Call once per server tick.
     static void TickVehicleLoadoutReconcile();
-    // Requests one authoritative native self-death transaction. Prefer the
-    // controller suicide pipeline and use pawn suicide/ForceKill only as
-    // mutually exclusive, schema-validated capability fallbacks.
-    static bool TryEliminatePlayer(
-        AFortPlayerControllerAthena* PlayerController);
+    static bool TryEliminatePlayer(AFortPlayerControllerAthena* PlayerController);
     static void ServerCheat(UObject*, FFrame&);
     static int TeleportAllPlayersTo(AFortPlayerControllerAthena* TargetPlayer, bool bSendMessage = true);
-    // Exact membership in the synthetic `cheat spawnbot` lifecycle. This does
-    // not include wildlife or native playlist bots.
-    static bool IsCheatSpawnedBotController(
-        AFortPlayerControllerAthena* PlayerController);
+    static bool IsCheatSpawnedBotController(AFortPlayerControllerAthena* PlayerController);
     static void TickNukeRockets(float DeltaSeconds);
-    // Runs on the server/game thread and keeps an explicitly selected
-    // respawn policy authoritative after playlist/mutator initialization.
     static void ApplyConfiguredRespawnPolicy();
     static void TickPendingVictoryCrownNotifications();
     DefHookOg(void, ClientOnPawnDied, AFortPlayerControllerAthena*, FFortPlayerDeathReport&);
@@ -650,7 +593,6 @@ public:
     DefUHookOg(ComponentRemoveActorFromStenciledList);
     DefUHookOg(ComponentRemoveGroupFromIndicatedList);
     DefUHookOg(ComponentRemoveGroupFromStenciledList);
-    // Shakedown: reveal a downed player's surviving squad to the interrogator (and their squad).
     static void RevealInterrogatedTeam(AFortPlayerControllerAthena* Interrogator, AActor* DBNOPlayer);
     DefUHookOg(ServerAwardVehicleTrickPoints_);
     static void ServerOnMaterialSelection(UObject*, FFrame&);

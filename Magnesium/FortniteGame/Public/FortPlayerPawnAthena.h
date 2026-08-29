@@ -8,9 +8,7 @@ class UFortItemDefinition;
 
 enum class ETryExitVehicleBehavior : uint8
 {
-    DoNotForce = 0,
-    ForceOnBlocking = 1,
-    ForceAlways = 2
+    DoNotForce = 0, ForceOnBlocking = 1, ForceAlways = 2
 };
 
 class UCharacterMovementComponent : public UObject
@@ -79,14 +77,9 @@ public:
     DEFINE_PROP(Health, FFortGameplayAttributeData);
     DEFINE_PROP(MaxHealth, FFortGameplayAttributeData);
 
-    // Naming trap: on the builds that need the fallback path in
-    // AFortPlayerPawnAthena, "Shield" is the MAX shield attribute and
-    // "CurrentShield" is the current one - not the other way around.
-    // Inverting these gives you a full shield bar that dies instantly.
     DEFINE_PROP(Shield, FFortGameplayAttributeData);
     DEFINE_PROP(CurrentShield, FFortGameplayAttributeData);
-    // Newer builds (Ch1 S5+) use "Shield" for current and "MaxShield" for max,
-    // instead of the early "Shield"(max)/"CurrentShield"(current) pair.
+    // Ch1 S5+ uses "Shield"/"MaxShield"; earlier builds use "Shield" for max and "CurrentShield" for current.
     DEFINE_PROP(MaxShield, FFortGameplayAttributeData);
 
     DEFINE_FUNC(OnRep_Health, void);
@@ -147,8 +140,6 @@ public:
     DEFINE_PROP(AIControllerClass, TSubclassOf<AActor>);
     DEFINE_PROP(PlayerState, AActor*);
     DEFINE_PROP(BaseEyeHeight, float);
-    // Native guided-missile control stores the character camera here so it can
-    // be restored when possession returns from FortRemoteControlledPawnAthena.
     DEFINE_PROP(StoredControlRotation, FRotator);
     DEFINE_PROP(OnHeldObjectPickedUp, TMulticastInlineDelegate<void(AActor*)>);
     DEFINE_PROP(OnHeldObjectDropped, TMulticastInlineDelegate<void(AActor*)>);
@@ -163,9 +154,6 @@ public:
     DEFINE_PROP(MoveSoundStimulusBroadcastInterval, uint16_t);
     DEFINE_PROP(Damagers, TArray<FDamagerInfo>);
     DEFINE_PROP(ClientObservedStats, FFortClientObservedStatArray);
-    // Native damage timestamp inherited from FortPawn. The health-state
-    // watchdog uses it to distinguish a lethal hit from scripted zero-health
-    // possession/form transitions.
     DEFINE_PROP(LastDamagedTime, float);
     DEFINE_PROP(LastReplicatedEmoteExecuted, UObject*);
     DEFINE_PROP(Mesh, UActorComponent*);
@@ -175,8 +163,7 @@ public:
     DEFINE_BITFIELD_PROP(bIsSkydiving);
     DEFINE_BITFIELD_PROP(bIsSkydivingFromBus);
     DEFINE_PROP(GliderRedeployAllowedRow, FScalableFloat);
-    DEFINE_PROP(
-        GliderRedeployLateralVelocityMultiplierRow, FScalableFloat);
+    DEFINE_PROP(GliderRedeployLateralVelocityMultiplierRow, FScalableFloat);
     DEFINE_PROP(GliderRedeployHeighLimitRow, FScalableFloat);
     DEFINE_PROP(RegisteredMovementModeExtentionLogic, TMap<uint32, UObject*>);
     DEFINE_PROP(VehicleInputComponent, UObject*);
@@ -194,41 +181,7 @@ public:
 
     DEFINE_FUNC(BeginSkydiving, void);
 
-    // ---------------------------------------------------------------------
-    // Health / shield
-    //
-    // Early builds (roughly S1-S4) ship without the native SetShield and
-    // SetMaxShield UFunctions. UObject::Call returns silently when the
-    // UFunction is missing, so on those builds every shield write - god,
-    // regen, lategame, bot shield, respawn, the cheat commands - did
-    // nothing at all, with no crash and no log.
-    //
-    // So each setter probes for its native UFunction and writes the
-    // attribute set directly when it isn't there. This is a capability
-    // probe rather than a version number on purpose: builds nobody has
-    // tested still degrade correctly, and the fallback can never engage on
-    // a build where the native setter exists.
-    //
-    // The fallback needs all three of these or it looks broken:
-    //   1. BaseValue AND CurrentValue - the ASC aggregator recomputes from
-    //      whichever one you left stale and stomps the write.
-    //   2. The server-side OnRep - runs the game's own attribute-changed
-    //      broadcast and clamping that a raw memory write skips. Without
-    //      it the server value is right but the client HUD never updates.
-    //      GAS repnotifies apply (NewBase - OldValue.Base) to the live
-    //      aggregator. The old value must therefore be captured BEFORE the
-    //      direct write. Supplying a zero old value works for the first spawn,
-    //      but adds the requested amount again when a persistent PlayerState
-    //      ASC is rebound during respawn (for example 32 + 100 = 132 health).
-    //      Supplying the already-written value produces a zero delta. The real
-    //      pre-write snapshot handles both cases exactly.
-    //   3. ForceNetUpdate on the PAWN, not the attribute set - the set
-    //      replicates as a subobject of the pawn's actor channel, so the
-    //      pawn is what has to be dirtied.
-    // ---------------------------------------------------------------------
-    // A missing native setter AND a missing property means the write is
-    // dropped, which is exactly the silent failure this whole path exists to
-    // fix - so say so once instead of failing quietly a second way.
+    // Roughly S1-S4 ship without native SetShield/SetMaxShield, and UObject::Call returns silently when one is missing.
     static void WarnMissingAttributeOnce(bool& bWarned, const char* AttributeName)
     {
         if (bWarned)
@@ -238,8 +191,6 @@ public:
         SDK::DbgLog("  [HealthSet] no native setter and no '%s' property on this build - writes will not apply\n", AttributeName);
     }
 
-    // Direct setters must keep the raw/unclamped GAS values coherent too.
-    // Otherwise a later aggregator recompute can restore the stale value.
     static void WriteDirectAttributeValue(FFortGameplayAttributeData& Attribute, float NewValue)
     {
         Attribute.BaseValue = NewValue;
@@ -251,11 +202,9 @@ public:
             Attribute.UnclampedCurrentValue = NewValue;
     }
 
-    static std::vector<uint8_t> SnapshotDirectAttribute(
-        const FFortGameplayAttributeData& Attribute)
+    static std::vector<uint8_t> SnapshotDirectAttribute(const FFortGameplayAttributeData& Attribute)
     {
-        const uint32 AttributeSize =
-            FFortGameplayAttributeData::Size();
+        const uint32 AttributeSize = FFortGameplayAttributeData::Size();
         if (AttributeSize == 0 || AttributeSize > 0x400)
             return {};
 
@@ -264,13 +213,8 @@ public:
         return Snapshot;
     }
 
-    // Marshal the reflected OldValue parameter when this build exposes it.
-    // Some very early repnotifies have no parameter at all; those retain their
-    // native no-argument path. Never use UObject::Call's one-argument fast path
-    // here because FFortGameplayAttributeData has a runtime-reflected size.
-    static bool NotifyDirectAttributeRep(
-        UFortHealthSet* Set,
-        const char* FunctionName,
+    // Never use UObject::Call's one-argument fast path here: FFortGameplayAttributeData has a runtime-reflected size.
+    static bool NotifyDirectAttributeRep(UFortHealthSet* Set, const char* FunctionName,
         const std::vector<uint8_t>& PreviousValue)
     {
         if (!Set || !FunctionName)
@@ -285,17 +229,12 @@ public:
         {
             if (Parameters.Size != 0)
             {
-                SDK::DbgLog(
-                    "  [HealthSet] refused parameterless dispatch for %s "
-                    "with nonzero buffer size=%u\n",
-                    FunctionName, Parameters.Size);
+                SDK::DbgLog("  [HealthSet] refused parameterless dispatch for %s "
+                    "with nonzero buffer size=%u\n", FunctionName, Parameters.Size);
                 return false;
             }
 
-            // FN 1.7.2/2.50 expose genuine zero-parameter repnotifies. Their
-            // known-good Core path writes the nonnegative absolute attribute
-            // first and invokes the no-argument bridge. Runtime reflection
-            // still has to validate ParmsSize because text dumps omit it.
+            // FN 1.7.2 and 2.50 expose genuine zero-parameter repnotifies, and text dumps omit ParmsSize.
             Set->ProcessEvent(Function, nullptr);
             return true;
         }
@@ -308,10 +247,8 @@ public:
         for (int32 Index = 0;
             Index < Parameters.NameOffsetMap.size(); ++Index)
         {
-            const auto& Parameter =
-                Parameters.NameOffsetMap[Index];
-            if (!(Parameter.PropertyFlags & CPF_Parm) ||
-                (Parameter.PropertyFlags & CPF_ReturnParm))
+            const auto& Parameter = Parameters.NameOffsetMap[Index];
+            if (!(Parameter.PropertyFlags & CPF_Parm) || (Parameter.PropertyFlags & CPF_ReturnParm))
             {
                 continue;
             }
@@ -330,26 +267,18 @@ public:
         }
 
         const uint32 BufferSize = Parameters.Size;
-        if (InputParameterCount != 1 ||
-            OldValueParameterIndex < 0 || PreviousValue.empty() ||
+        if (InputParameterCount != 1 || OldValueParameterIndex < 0 || PreviousValue.empty() ||
             BufferSize == 0 || BufferSize > 0x1000 ||
-            Parameters.NameOffsetMap[OldValueParameterIndex].Offset >
-                BufferSize ||
-            PreviousValue.size() >
-                BufferSize - Parameters.NameOffsetMap[
+            Parameters.NameOffsetMap[OldValueParameterIndex].Offset > BufferSize ||
+            PreviousValue.size() > BufferSize - Parameters.NameOffsetMap[
                     OldValueParameterIndex].Offset)
         {
-            // A nonzero unknown parameter layout cannot safely be invoked with
-            // nullptr. Log and fail closed instead of asking ProcessEvent to
-            // dereference a missing parameter buffer.
             static UFunction* WarnedFunction = nullptr;
             if (WarnedFunction != Function)
             {
                 WarnedFunction = Function;
-                SDK::DbgLog(
-                    "  [HealthSet] could not marshal real OldValue for %s; "
-                    "notification skipped\n",
-                    FunctionName);
+                SDK::DbgLog("  [HealthSet] could not marshal real OldValue for %s; "
+                    "notification skipped\n", FunctionName);
             }
             return false;
         }
@@ -358,30 +287,16 @@ public:
         if (!Memory)
             return false;
         memset(Memory, 0, BufferSize);
-        memcpy(
-            (PBYTE)Memory + Parameters.NameOffsetMap[
-                OldValueParameterIndex].Offset,
+        memcpy((PBYTE)Memory + Parameters.NameOffsetMap[OldValueParameterIndex].Offset,
             PreviousValue.data(), PreviousValue.size());
         Set->ProcessEvent(Function, Memory);
         FMemory::Free(Memory);
         return true;
     }
 
-    // Uses the early GAS container's native Override operation so the live
-    // damage aggregator and the replicated HealthSet agree after respawn.
-    // Implemented in the .cpp and capability-gated to the Season 1/2 family.
-    bool ApplyLegacyShieldAggregatorOverride(
-        float NewMaxShield,
-        float NewShield) const;
+    bool ApplyLegacyShieldAggregatorOverride(float NewMaxShield, float NewShield) const;
 
-    // Pre-Season-3 RestartPlayer reuses a PlayerState-owned ASC. Use the
-    // pawn's native health setters plus the ASC container's native attribute
-    // override for shield; raw HealthSet values alone can look full while the
-    // damage aggregator still contains zero.
-    bool SetLegacyRespawnAttributesExact(
-        float NewMaxHealth,
-        float NewHealth,
-        float NewMaxShield,
+    bool SetLegacyRespawnAttributesExact(float NewMaxHealth, float NewHealth, float NewMaxShield,
         float NewShield) const
     {
         auto Set = HasHealthSet() ? HealthSet : nullptr;
@@ -392,11 +307,9 @@ public:
         auto NativeSetHealth = GetFunction("SetHealth");
         if (!NativeSetMaxHealth || !NativeSetHealth)
         {
-            SDK::DbgLog(
-                "  [HealthSet] legacy respawn refused without native "
+            SDK::DbgLog("  [HealthSet] legacy respawn refused without native "
                 "health setters pawn=%p maxFn=%p healthFn=%p FN=%.2f\n",
-                (void*)this, (void*)NativeSetMaxHealth,
-                (void*)NativeSetHealth,
+                (void*)this, (void*)NativeSetMaxHealth, (void*)NativeSetHealth,
                 VersionInfo.FortniteVersion);
             return false;
         }
@@ -404,14 +317,9 @@ public:
         Call<void>(NativeSetMaxHealth, NewMaxHealth);
         Call<void>(NativeSetHealth, NewHealth);
 
-        // The early PlayerState-owned ASC requires its native aggregate
-        // mutation. Applying raw values/OnRep first would run callbacks twice
-        // and was the path that could produce a full-looking but inert bar.
         if (VersionInfo.FortniteVersion <= 2.50)
         {
-            const bool bApplied =
-                ApplyLegacyShieldAggregatorOverride(
-                    NewMaxShield, NewShield);
+            const bool bApplied = ApplyLegacyShieldAggregatorOverride(NewMaxShield, NewShield);
             ForceNetUpdate();
             return bApplied;
         }
@@ -419,60 +327,36 @@ public:
         const float PreviousLiveMaxShield = GetMaxShield();
         const float PreviousLiveShield = GetShield();
 
-        auto ApplyShieldExact = [Set](
-            FFortGameplayAttributeData& Attribute,
-            const char* OnRepName,
-            float NewValue,
-            float PreviousLiveValue,
-            bool bSetMaximum)
+        auto ApplyShieldExact = [Set](FFortGameplayAttributeData& Attribute, const char* OnRepName,
+            float NewValue, float PreviousLiveValue, bool bSetMaximum)
             {
                 const float PreviousCurrentValue = PreviousLiveValue;
-                const auto PreviousValue =
-                    SnapshotDirectAttribute(Attribute);
+                const auto PreviousValue = SnapshotDirectAttribute(Attribute);
                 WriteDirectAttributeValue(Attribute, NewValue);
-                if (bSetMaximum &&
-                    FFortGameplayAttributeData::HasMaximum())
+                if (bSetMaximum && FFortGameplayAttributeData::HasMaximum())
                 {
                     Attribute.Maximum = NewValue;
                 }
 
-                const bool bNotificationSafe =
-                    FPlatformMath::IsFinite(PreviousCurrentValue) &&
-                    FPlatformMath::IsFinite(NewValue) &&
-                    NewValue >= 0.f && NewValue <= 10000.f &&
-                    NotifyDirectAttributeRep(
-                        Set, OnRepName, PreviousValue);
-                // Do not repaint the raw struct after OnRep. On the earliest
-                // GAS builds that callback synchronizes (and may recompute)
-                // the authoritative aggregator used by damage. Rewriting the
-                // display-facing values here can make verification report 100
-                // shield while the aggregator correctly remained at zero.
+                const bool bNotificationSafe = FPlatformMath::IsFinite(PreviousCurrentValue) &&
+                    FPlatformMath::IsFinite(NewValue) && NewValue >= 0.f && NewValue <= 10000.f &&
+                    NotifyDirectAttributeRep(Set, OnRepName, PreviousValue);
                 return bNotificationSafe;
             };
 
         bool bShieldSynchronized = true;
-        // Legacy naming: Shield is capacity and CurrentShield is current. If
-        // capacity is moving downward, first clamp current shield beneath that
-        // new ceiling. This follows Core's absolute fallback and never exposes
-        // a transient negative capacity to native listeners.
         bool bCurrentShieldAppliedBeforeCapacity = false;
         if (Set->HasShield() && Set->HasCurrentShield() &&
-            FPlatformMath::IsFinite(PreviousLiveShield) &&
-            PreviousLiveShield > NewMaxShield &&
+            FPlatformMath::IsFinite(PreviousLiveShield) && PreviousLiveShield > NewMaxShield &&
             NewMaxShield >= 0.f)
         {
-            const float PreCapacityShield =
-                (std::min)(NewShield, NewMaxShield);
+            const float PreCapacityShield = (std::min)(NewShield, NewMaxShield);
             const bool bPreCapacityClampSynchronized = ApplyShieldExact(
                 Set->CurrentShield, "OnRep_CurrentShield",
                 PreCapacityShield, PreviousLiveShield, false);
             bShieldSynchronized &= bPreCapacityClampSynchronized;
             if (!bPreCapacityClampSynchronized)
             {
-                // The capacity listener may clamp/re-enter through the current
-                // value. If its prerequisite notification could not be safely
-                // marshalled, leave capacity unchanged and retry later rather
-                // than exposing an invalid current-over-maximum transition.
                 ForceNetUpdate();
                 return false;
             }
@@ -480,15 +364,12 @@ public:
         }
         if (Set->HasShield())
         {
-            bShieldSynchronized &= ApplyShieldExact(
-                Set->Shield, "OnRep_Shield",
+            bShieldSynchronized &= ApplyShieldExact(Set->Shield, "OnRep_Shield",
                 NewMaxShield, PreviousLiveMaxShield, true);
         }
-        if (Set->HasCurrentShield() &&
-            !bCurrentShieldAppliedBeforeCapacity)
+        if (Set->HasCurrentShield() && !bCurrentShieldAppliedBeforeCapacity)
         {
-            bShieldSynchronized &= ApplyShieldExact(
-                Set->CurrentShield, "OnRep_CurrentShield",
+            bShieldSynchronized &= ApplyShieldExact(Set->CurrentShield, "OnRep_CurrentShield",
                 NewShield, PreviousLiveShield, false);
         }
         ForceNetUpdate();
@@ -497,20 +378,13 @@ public:
 
     void SetHealth(float NewValue) const
     {
-        // Clamp custom direct writers only while our explicit "god min"
-        // policy is active. Some modern attribute layouts default Minimum to
-        // 1 even while their native clamp-state bookkeeping is disabled.
         auto Set = HasHealthSet() ? HealthSet : nullptr;
-        if (HasMinimumHealthGodMode(this) &&
-            Set && Set->HasHealth() &&
-            FFortGameplayAttributeData::StaticStruct() &&
-            FFortGameplayAttributeData::HasMinimum())
+        if (HasMinimumHealthGodMode(this) && Set && Set->HasHealth() &&
+            FFortGameplayAttributeData::StaticStruct() && FFortGameplayAttributeData::HasMinimum())
         {
             const float Minimum = Set->Health.Minimum;
-            if (FPlatformMath::IsFinite(NewValue) &&
-                FPlatformMath::IsFinite(Minimum) &&
-                Minimum > 0.f &&
-                NewValue < Minimum)
+            if (FPlatformMath::IsFinite(NewValue) && FPlatformMath::IsFinite(Minimum) &&
+                Minimum > 0.f && NewValue < Minimum)
             {
                 NewValue = Minimum;
             }
@@ -535,9 +409,7 @@ public:
         const auto PreviousValue = SnapshotDirectAttribute(Attribute);
         WriteDirectAttributeValue(Attribute, NewValue);
 
-        NotifyDirectAttributeRep(
-            Set, "OnRep_Health", PreviousValue);
-        // Re-apply after the OnRep recompute (see SetShield for why).
+        NotifyDirectAttributeRep(Set, "OnRep_Health", PreviousValue);
         WriteDirectAttributeValue(Attribute, NewValue);
 
         ForceNetUpdate();
@@ -567,9 +439,7 @@ public:
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
-        NotifyDirectAttributeRep(
-            Set, "OnRep_MaxHealth", PreviousValue);
-        // Re-apply after the OnRep recompute (see SetShield for why).
+        NotifyDirectAttributeRep(Set, "OnRep_MaxHealth", PreviousValue);
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
@@ -578,21 +448,10 @@ public:
 
     void SetShield(float NewValue) const
     {
-        // Shield is never a signed resource. Keep every server-authored write
-        // inside the lower bound before either the native setter or the legacy
-        // attribute fallback sees it. In particular, cosmetic gameplay effects
-        // may be compensated by subtracting their grant from a zero-shield pawn.
         if (!FPlatformMath::IsFinite(NewValue) || NewValue < 0.f)
             NewValue = 0.f;
 
-        // Shield is the one attribute a capability probe gets WRONG. Early builds
-        // (<= 5.0) DO ship a SetShield UFunction, but it does not actually apply
-        // current shield - so "the function exists, call it" left the bar at 0
-        // even though it reported success. Core gates this purely by version for
-        // this exact reason. So: native only above 5.0 (and only if present);
-        // 5.0 and below always take the direct attribute write. SetMaxShield is a
-        // separate, working function on those builds, which is why max shield
-        // applied while current shield did not.
+        // Builds <= 5.0 do ship SetShield, but it never applies current shield - so gate by version, not by capability.
         static auto Fn = GetFunction("SetShield");
 
         if (Fn && VersionInfo.FortniteVersion > 5.0)
@@ -610,13 +469,9 @@ public:
             return;
         }
 
-        // When the GE path is used it adds a flat +1, so positive values are
-        // pre-subtracted by 1. An exact clear must skip that GE entirely;
-        // applying it after a zero write is what leaves 1 shield on the HUD.
         const bool bUsesShieldGE = ShieldAbsorbUsesGE();
         const bool bClearingShield = NewValue <= 0.f;
-        float Target = bClearingShield ? 0.f :
-            (bUsesShieldGE ? (NewValue - 1.f) : NewValue);
+        float Target = bClearingShield ? 0.f : (bUsesShieldGE ? (NewValue - 1.f) : NewValue);
         if (Target < 0.f)
             Target = 0.f;
 
@@ -624,19 +479,11 @@ public:
         const auto PreviousValue = SnapshotDirectAttribute(Attribute);
         WriteDirectAttributeValue(Attribute, Target);
 
-        // OnRep is what makes damage read the shield on the earliest builds
-        // (1.7.2) - exactly Core's path. On S4+ the same OnRep recomputes current
-        // from a GAS aggregator seeded at 0 and wipes it, so we re-write after.
-        NotifyDirectAttributeRep(
-            Set, "OnRep_CurrentShield", PreviousValue);
+        // On S4+ this OnRep recomputes current from a GAS aggregator seeded at 0, so re-write afterwards.
+        NotifyDirectAttributeRep(Set, "OnRep_CurrentShield", PreviousValue);
         WriteDirectAttributeValue(Attribute, Target);
 
-        // The raw write only ABSORBS on the earliest builds. By S4 the shield
-        // lives in the ability-system aggregator that native damage reads, and a
-        // struct write never reaches it. ActivateShieldAbsorb applies the game's
-        // own shield GE (which does reach the aggregator) - it syncs the
-        // aggregator from the value we wrote and adds its flat +1, landing on
-        // NewValue. No-op on 1.7.2. Defined in the .cpp.
+        // By S4 the shield lives in the ability-system aggregator native damage reads, which a struct write never reaches.
         if (bUsesShieldGE && !bClearingShield)
             ActivateShieldAbsorb();
 
@@ -645,13 +492,11 @@ public:
 
     // Applies the shield GE so the written value absorbs on S4+ (see .cpp).
     void ActivateShieldAbsorb() const;
-    // Whether SetShield will route through the GE (which adds a flat +1).
     bool ShieldAbsorbUsesGE() const;
 
     void SetMaxShield(float NewValue) const
     {
-        // Same story as SetShield but the native SetMaxShield came back a little
-        // earlier, so Core's threshold is 3.0 rather than 5.0.
+        // Same as SetShield, except native SetMaxShield came back earlier, so the threshold is 3.0.
         static auto Fn = GetFunction("SetMaxShield");
 
         if (Fn && VersionInfo.FortniteVersion > 3.0)
@@ -669,15 +514,12 @@ public:
             return;
         }
 
-        // "Shield" is the max-shield attribute on these builds.
         auto& Attribute = Set->Shield;
         const auto PreviousValue = SnapshotDirectAttribute(Attribute);
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
-        NotifyDirectAttributeRep(
-            Set, "OnRep_Shield", PreviousValue);
-        // Re-apply after the OnRep recompute (see SetShield for why).
+        NotifyDirectAttributeRep(Set, "OnRep_Shield", PreviousValue);
         WriteDirectAttributeValue(Attribute, NewValue);
         Attribute.Maximum = NewValue;
 
@@ -728,36 +570,16 @@ public:
         return (Set && Set->HasShield()) ? Set->Shield.CurrentValue : 0.f;
     }
 
-    // ---------------------------------------------------------------------
-    // Reactive cosmetics
-    //
-    // A reactive item names what it watches in its cosmetic definition's
-    // ObservedPlayerStats - "StatManager.AthenaKills" for the Candy Axe -
-    // and does the reacting entirely on the client. The only thing the
-    // server owes it is this pawn's replicated mirror of those values:
-    // ClientObservedStats, a fast array of {StatName, StatValue}.
-    //
-    // ServerModifyStat does not get there on its own. It updates the
-    // controller's StatManager, which only forwards into this array for
-    // stats the pawn registered during the native cosmetic setup a custom
-    // server never runs, so the value lands somewhere the client never
-    // reads. Writing the fast array is what actually lights the lights.
-    //
-    // Returns false when the build has no ClientObservedStats (every access
-    // below is reflected, so the whole path is skipped rather than guessed).
+    // A reactive item names what it watches in ObservedPlayerStats - "StatManager.AthenaKills" for the Candy Axe - and reacts client-side.
     bool SetClientObservedStat(FName StatName, int32 StatValue) const;
-    // Current replicated value, or DefaultValue when the stat is absent.
-    int32 GetClientObservedStat(
-        FName StatName, int32 DefaultValue = -1) const;
+    int32 GetClientObservedStat(FName StatName, int32 DefaultValue = -1) const;
 
     DEFINE_FUNC(EquipWeaponDefinition, AActor*);
     DEFINE_FUNC(LaunchCharacterJump, void);
     DEFINE_FUNC(OnCapsuleBeginOverlap, void);
     DEFINE_FUNC(ServerHandlePickup, void);
     DEFINE_FUNC(IsDBNO, bool);
-    // These are reflected BoolProperty fields on legacy Athena builds (not
-    // callable functions). Treating them as UFunctions leaves a respawned pawn
-    // authoritatively in its death state.
+    // These are reflected BoolProperty fields on legacy Athena builds, not callable functions.
     DEFINE_BITFIELD_PROP(bIsDying);
     DEFINE_BITFIELD_PROP(bPlayedDying);
     DEFINE_FUNC(PickUpActor, void);
@@ -781,28 +603,12 @@ public:
     DEFINE_FUNC(ServerInterrogateDBNOPlayer, void);
     DEFINE_FUNC(GetVehicleActor, AActor*);
 
-    // Performs the native same-pawn DBNO transition. Reviving is deliberately
-    // separate from the death/respawn pipeline: starting a respawn here leaves
-    // the revived pawn behind and creates a duplicate at the configured spawn.
-    static bool ReviveFromDBNOCompat(
-        AFortPlayerPawnAthena* Pawn,
-        AController* EventInstigator,
-        // Set only after a normal interaction already invoked the native
-        // transition and a later game-thread verification still found DBNO.
-        // This prevents the fallback from replaying the same native entry.
+    static bool ReviveFromDBNOCompat(AFortPlayerPawnAthena* Pawn, AController* EventInstigator,
         bool bNativeTransitionAlreadyAttempted = false);
 
-    // Adds and configures Fortnite's native replicated map component for a
-    // possessed player pawn. The implementation probes reflected capabilities
-    // so the same call works from the earliest Athena builds through UE5.
-    static bool EnsurePlayerMapIcon(
-        AFortPlayerControllerAthena* Controller,
-        AFortPlayerPawnAthena* Pawn,
-        const UObject* PreferredCharacterDefinition = nullptr);
+    static bool EnsurePlayerMapIcon(AFortPlayerControllerAthena* Controller,
+        AFortPlayerPawnAthena* Pawn, const UObject* PreferredCharacterDefinition = nullptr);
 
-    // Polls portrait loads queued by EnsurePlayerMapIcon and replaces the
-    // immediate generic marker once the selected skin's texture is resident.
-    // Must run on the game thread.
     static void TickPendingPlayerMapIcons();
 
     DefUHookOg(ServerHandlePickup_);
@@ -821,45 +627,19 @@ public:
     DefUHookOg(ServerThrowCarriedPlayer_);
     DefUHookOg(ServerInterrogateDBNOPlayer_);
 
-    // Repairs native damage outcomes that leave a possessed pawn with an
-    // invalid shield or at zero health without entering DBNO/death.
     static void TickHealthStateRepair(UNetDriver* Driver);
 
-    static bool PlayCommandGrantPickupAnimation(
-        AFortPlayerPawnAthena* Pawn,
-        const UFortItemDefinition* ItemDefinition,
-        int32 Count,
-        int32 LoadedAmmo,
-        int32 Level);
+    static bool PlayCommandGrantPickupAnimation(AFortPlayerPawnAthena* Pawn,
+        const UFortItemDefinition* ItemDefinition, int32 Count, int32 LoadedAmmo, int32 Level);
 
-    // "god min" remains controller-scoped so it survives pawn replacement.
-    // The active pawn still receives a real Health.Minimum of 1, allowing
-    // shields and health to take damage normally without entering death.
-    static bool SetMinimumHealthGodMode(
-        AFortPlayerControllerAthena* Controller,
-        bool bEnabled);
-    static bool HasMinimumHealthGodMode(
-        const AFortPlayerControllerAthena* Controller);
-    static bool HasMinimumHealthGodMode(
-        const AFortPlayerPawnAthena* Pawn);
-    // Full God is ownership tracked as well: disabling it restores only the
-    // exact flag/floor that Magnesium changed and leaves authored immunity
-    // alone. Unlike minimum God, it remains attached to this pawn generation.
-    static bool SetFullHealthGodMode(
-        AFortPlayerControllerAthena* Controller,
-        AFortPlayerPawnAthena* Pawn,
-        bool bEnabled);
-    static bool HasFullHealthGodMode(
-        const AFortPlayerControllerAthena* Controller);
-    // Observational overload used only when callers need to identify any
-    // full-immunity shape, including policies not owned by Magnesium.
-    static bool HasFullHealthGodMode(
-        const AFortPlayerPawnAthena* Pawn);
-    // Removes every God-mode mechanism Magnesium can apply. This is kept as
-    // one operation so a minimum-health grant and a full-immunity grant can
-    // never leave each other hidden behind a misleading "disabled" state.
-    static bool DisableGodModes(
-        AFortPlayerControllerAthena* Controller,
+    static bool SetMinimumHealthGodMode(AFortPlayerControllerAthena* Controller, bool bEnabled);
+    static bool HasMinimumHealthGodMode(const AFortPlayerControllerAthena* Controller);
+    static bool HasMinimumHealthGodMode(const AFortPlayerPawnAthena* Pawn);
+    static bool SetFullHealthGodMode(AFortPlayerControllerAthena* Controller,
+        AFortPlayerPawnAthena* Pawn, bool bEnabled);
+    static bool HasFullHealthGodMode(const AFortPlayerControllerAthena* Controller);
+    static bool HasFullHealthGodMode(const AFortPlayerPawnAthena* Pawn);
+    static bool DisableGodModes(AFortPlayerControllerAthena* Controller,
         AFortPlayerPawnAthena* Pawn);
 
     InitPostLoadHooks;

@@ -19,52 +19,35 @@ namespace
         ULONGLONG DueMs = 0;
     };
 
-    std::unordered_map<AFortMinigame*, FPendingMinigameSetState>
-        GPendingMinigameSetStates;
+    std::unordered_map<AFortMinigame*, FPendingMinigameSetState> GPendingMinigameSetStates;
     constexpr size_t MaxPendingMinigameSetStates = 64;
 
-    void QueueMinigameSetState(
-        AFortMinigame* Minigame, uint8 State)
+    void QueueMinigameSetState(AFortMinigame* Minigame, uint8 State)
     {
         if (!Minigame || !Minigame->HasCurrentState())
             return;
 
         const ULONGLONG DueMs = GetTickCount64() + 1000;
-        const uint8 ExpectedCurrentState =
-            Minigame->CurrentState;
+        const uint8 ExpectedCurrentState = Minigame->CurrentState;
         auto Existing = GPendingMinigameSetStates.find(Minigame);
         if (Existing != GPendingMinigameSetStates.end())
         {
-            // Repeated notifications must not postpone the first safe
-            // game-thread forward indefinitely.
-            Existing->second.Minigame =
-                TWeakObjectPtr<AFortMinigame>(Minigame);
+            Existing->second.Minigame = TWeakObjectPtr<AFortMinigame>(Minigame);
             Existing->second.State = State;
-            Existing->second.ExpectedCurrentState =
-                ExpectedCurrentState;
-            Existing->second.DueMs =
-                (std::min)(Existing->second.DueMs, DueMs);
+            Existing->second.ExpectedCurrentState = ExpectedCurrentState;
+            Existing->second.DueMs = (std::min)(Existing->second.DueMs, DueMs);
             return;
         }
 
-        if (GPendingMinigameSetStates.size() >=
-            MaxPendingMinigameSetStates)
+        if (GPendingMinigameSetStates.size() >= MaxPendingMinigameSetStates)
         {
-            SDK::DbgLog(
-                "[CreativeMinigame] delayed SetState queue full; "
-                "dropping minigame=%p state=%d\n",
-                Minigame,
-                (int)State);
+            SDK::DbgLog("[CreativeMinigame] delayed SetState queue full; "
+                "dropping minigame=%p state=%d\n", Minigame, (int)State);
             return;
         }
 
-        GPendingMinigameSetStates.emplace(
-            Minigame,
-            FPendingMinigameSetState{
-                TWeakObjectPtr<AFortMinigame>(Minigame),
-                State,
-                ExpectedCurrentState,
-                DueMs });
+        GPendingMinigameSetStates.emplace(Minigame, FPendingMinigameSetState{
+                TWeakObjectPtr<AFortMinigame>(Minigame), State, ExpectedCurrentState, DueMs });
     }
 
     void TickPendingMinigameSetStates()
@@ -90,22 +73,18 @@ namespace
         for (const auto& Pending : Due)
         {
             auto Minigame = Pending.Minigame.Get();
-            if (!AFortMinigame::SetStateOG ||
-                !VersionFeatureAdapter::IsLiveActor(Minigame) ||
-                !Minigame->HasCurrentState() ||
-                Minigame->CurrentState !=
+            if (!AFortMinigame::SetStateOG || !VersionFeatureAdapter::IsLiveActor(Minigame) ||
+                !Minigame->HasCurrentState() || Minigame->CurrentState !=
                     Pending.ExpectedCurrentState)
             {
                 continue;
             }
 
-            AFortMinigame::SetStateOG(
-                Minigame, Pending.State);
+            AFortMinigame::SetStateOG(Minigame, Pending.State);
         }
     }
 
-    AFortPlayerControllerAthena* GetLiveParticipantController(
-        AFortPlayerStateAthena* PlayerState)
+    AFortPlayerControllerAthena* GetLiveParticipantController(AFortPlayerStateAthena* PlayerState)
     {
         if (!VersionFeatureAdapter::IsLiveActor(PlayerState))
             return nullptr;
@@ -114,11 +93,8 @@ namespace
         if (!VersionFeatureAdapter::IsLiveObject(Owner))
             return nullptr;
 
-        auto Controller =
-            Owner->Cast<AFortPlayerControllerAthena>();
-        return VersionFeatureAdapter::IsLiveActor(Controller)
-            ? Controller
-            : nullptr;
+        auto Controller = Owner->Cast<AFortPlayerControllerAthena>();
+        return VersionFeatureAdapter::IsLiveActor(Controller) ? Controller : nullptr;
     }
 }
 
@@ -137,19 +113,15 @@ void AFortMinigame::SetState(AFortMinigame* Minigame, uint8 NewState)
         for (int i = 0; i < Players.Num(); i++)
         {
             AFortPlayerStateAthena* PlayerState = Players[i];
-            auto Controller =
-                GetLiveParticipantController(PlayerState);
-            if (Controller &&
-                VersionFeatureAdapter::IsLiveActor(
-                    Controller->MyFortPawn))
+            auto Controller = GetLiveParticipantController(PlayerState);
+            if (Controller && VersionFeatureAdapter::IsLiveActor(Controller->MyFortPawn))
             {
                 if (Minigame->NumTeams == 0)
                     Controller->ServerSetTeam(i + 3);
                 else
                     Controller->ServerSetTeam((i % Minigame->NumTeams) + 3);
 
-                Minigame->OnPlayerPawnPossessedDuringTransition(
-                    Controller->MyFortPawn);
+                Minigame->OnPlayerPawnPossessedDuringTransition(Controller->MyFortPawn);
             }
         }
 
@@ -160,8 +132,7 @@ void AFortMinigame::SetState(AFortMinigame* Minigame, uint8 NewState)
     {
         for (int i = 0; i < Players.Num(); i++)
         {
-            auto Controller =
-                GetLiveParticipantController(Players[i]);
+            auto Controller = GetLiveParticipantController(Players[i]);
             if (!Controller)
                 continue;
             auto Pawn = Controller->MyFortPawn;
@@ -171,8 +142,6 @@ void AFortMinigame::SetState(AFortMinigame* Minigame, uint8 NewState)
             Minigame->OnClientFinishTeleportingForMinigame(Pawn);
         }
 
-        // Preserve the original one-second delay, but forward from the server
-        // game thread and retain a serial-checked weak reference while waiting.
         QueueMinigameSetState(Minigame, NewState);
     }
     else if (NewState == EFortMinigameState::GetPostGameReset())
@@ -180,8 +149,7 @@ void AFortMinigame::SetState(AFortMinigame* Minigame, uint8 NewState)
         SetStateOG(Minigame, NewState);
         for (int i = 0; i < Players.Num(); i++)
         {
-            auto Controller =
-                GetLiveParticipantController(Players[i]);
+            auto Controller = GetLiveParticipantController(Players[i]);
             if (!Controller)
                 continue;
             auto Pawn = Controller->MyFortPawn;
@@ -202,7 +170,6 @@ void AFortMinigame::SetState(AFortMinigame* Minigame, uint8 NewState)
 
 namespace
 {
-    // One entry per live AFortMinigame; rebuilt as minigames come and go.
     struct FMinigameWatch
     {
         uint8 LastState = 0xFF;
@@ -215,10 +182,7 @@ namespace
 
     std::unordered_map<AFortMinigame*, FMinigameWatch> GMinigameWatches;
 
-    // Kept free of unwindable C++ objects so faults inside a version-specific
-    // native implementation can be contained by SEH.
-    bool ProcessMinigameEventGuarded(
-        const UObject* Object, UFunction* Function, void* Parameters)
+    bool ProcessMinigameEventGuarded(const UObject* Object, UFunction* Function, void* Parameters)
     {
         ++GGuardedNativeCallDepth;
         bool bSucceeded = false;
@@ -236,27 +200,21 @@ namespace
         return bSucceeded;
     }
 
-    // Legacy UFunction child lists expose parameters in build-dependent
-    // order. Pack this two-parameter call by exact reflected name so a pointer
-    // can never be copied into bForceSpawn (or vice versa).
-    bool TryAddMinigamePlayer(
-        AFortMinigame* Minigame,
-        AFortPlayerStateAthena* PlayerState,
+    // Legacy UFunction child lists expose parameters in build-dependent order, so pack by exact reflected name.
+    bool TryAddMinigamePlayer(AFortMinigame* Minigame, AFortPlayerStateAthena* PlayerState,
         bool bForceSpawn)
     {
         if (!VersionFeatureAdapter::IsLiveActor(Minigame) ||
             !VersionFeatureAdapter::IsLiveActor(PlayerState))
             return false;
 
-        UFunction* Function =
-            Minigame->GetFunction("AddMinigamePlayer");
+        UFunction* Function = Minigame->GetFunction("AddMinigamePlayer");
         if (!Function)
             return false;
 
         const auto Parameters = Function->GetParamsNamed();
         constexpr uint32 MaxParameterBytes = 0x40;
-        if (Parameters.Size == 0 ||
-            Parameters.Size > MaxParameterBytes ||
+        if (Parameters.Size == 0 || Parameters.Size > MaxParameterBytes ||
             Parameters.NameOffsetMap.size() != 2)
         {
             return false;
@@ -270,8 +228,7 @@ namespace
 
         for (const auto& Parameter : Parameters.NameOffsetMap)
         {
-            if (!(Parameter.PropertyFlags & CPF_Parm) ||
-                (Parameter.PropertyFlags &
+            if (!(Parameter.PropertyFlags & CPF_Parm) || (Parameter.PropertyFlags &
                     (CPF_OutParm | CPF_ReturnParm)))
             {
                 return false;
@@ -294,8 +251,7 @@ namespace
                 return false;
             }
 
-            if (*DestinationOffset != UINT32_MAX ||
-                Parameter.ElementSize != ExpectedSize ||
+            if (*DestinationOffset != UINT32_MAX || Parameter.ElementSize != ExpectedSize ||
                 Parameter.Offset > Parameters.Size ||
                 ExpectedSize > Parameters.Size - Parameter.Offset)
             {
@@ -305,27 +261,18 @@ namespace
             *DestinationOffset = Parameter.Offset;
         }
 
-        if (PlayerStateOffset == UINT32_MAX ||
-            ForceSpawnOffset == UINT32_MAX ||
-            (PlayerStateOffset < ForceSpawnOffset + sizeof(bool) &&
-                ForceSpawnOffset <
+        if (PlayerStateOffset == UINT32_MAX || ForceSpawnOffset == UINT32_MAX ||
+            (PlayerStateOffset < ForceSpawnOffset + sizeof(bool) && ForceSpawnOffset <
                     PlayerStateOffset + sizeof(PlayerState)))
         {
             return false;
         }
 
         alignas(void*) uint8 ParameterMemory[MaxParameterBytes]{};
-        memcpy(
-            ParameterMemory + PlayerStateOffset,
-            &PlayerState,
-            sizeof(PlayerState));
-        memcpy(
-            ParameterMemory + ForceSpawnOffset,
-            &bForceSpawn,
-            sizeof(bForceSpawn));
+        memcpy(ParameterMemory + PlayerStateOffset, &PlayerState, sizeof(PlayerState));
+        memcpy(ParameterMemory + ForceSpawnOffset, &bForceSpawn, sizeof(bForceSpawn));
 
-        return ProcessMinigameEventGuarded(
-            Minigame, Function, ParameterMemory);
+        return ProcessMinigameEventGuarded(Minigame, Function, ParameterMemory);
     }
 
     const char* MinigameStateName(uint8 State)
@@ -347,8 +294,6 @@ namespace
         }
     }
 
-    // The volume's owning players, used when the native path never registered
-    // anyone with the minigame it is about to start.
     void AddVolumePlayersToMinigame(AFortMinigame* Minigame)
     {
         if (!Minigame->HasVolume() || !Minigame->Volume)
@@ -361,38 +306,29 @@ namespace
         {
             auto Controller = Controllers[i];
             if (!VersionFeatureAdapter::IsLiveActor(Controller) ||
-                !VersionFeatureAdapter::IsLiveActor(
-                    Controller->PlayerState))
+                !VersionFeatureAdapter::IsLiveActor(Controller->PlayerState))
                 continue;
             if (!Controller->HasCreativePlotLinkedVolume() ||
                 (AActor*)Controller->CreativePlotLinkedVolume != Minigame->Volume)
                 continue;
 
-            if (TryAddMinigamePlayer(
-                    Minigame, Controller->PlayerState, false))
+            if (TryAddMinigamePlayer(Minigame, Controller->PlayerState, false))
             {
-                SDK::DbgLog(
-                    "[CreativeMinigame] added %s to minigame %p "
-                    "(volume %p)\n",
-                    Controller->Name.ToString().c_str(),
-                    Minigame,
+                SDK::DbgLog("[CreativeMinigame] added %s to minigame %p "
+                    "(volume %p)\n", Controller->Name.ToString().c_str(), Minigame,
                     Minigame->Volume);
             }
             else
             {
-                SDK::DbgLog(
-                    "[CreativeMinigame] skipped adding %s to minigame %p; "
+                SDK::DbgLog("[CreativeMinigame] skipped adding %s to minigame %p; "
                     "AddMinigamePlayer schema unavailable or call faulted\n",
-                    Controller->Name.ToString().c_str(),
-                    Minigame);
+                    Controller->Name.ToString().c_str(), Minigame);
             }
         }
 
         Controllers.Free();
     }
 
-    // Replays the two client acknowledgements the native start sequence waits
-    // on, then hands the state machine forward.
     void NudgeMinigame(AFortMinigame* Minigame, uint8 State, int64 Transitioning, int64 WaitingForCameras)
     {
         TArray<AFortPlayerStateAthena*> Players;
@@ -400,8 +336,7 @@ namespace
 
         for (int i = 0; i < Players.Num(); i++)
         {
-            auto Controller =
-                GetLiveParticipantController(Players[i]);
+            auto Controller = GetLiveParticipantController(Players[i]);
             if (!Controller)
                 continue;
 
@@ -415,20 +350,14 @@ namespace
                 Minigame->OnClientFinishTeleportingForMinigame(Pawn);
         }
 
-        SDK::DbgLog(
-            "[CreativeMinigame] %p stalled in %s with %d player(s); advancing\n",
-            Minigame,
-            MinigameStateName(State),
-            Players.Num());
+        SDK::DbgLog("[CreativeMinigame] %p stalled in %s with %d player(s); advancing\n", Minigame,
+            MinigameStateName(State), Players.Num());
 
         Players.Free();
 
         Minigame->AdvanceState();
     }
 
-    // PostGameReset does its own island/player cleanup but never schedules the
-    // hop back to PreGame, so the island stays in the HUD-less post-game screen
-    // forever. Hand the pawns back and close the loop ourselves.
     void ResetMinigameToPreGame(AFortMinigame* Minigame, int64 PreGame)
     {
         TArray<AFortPlayerStateAthena*> Players;
@@ -436,8 +365,7 @@ namespace
 
         for (int i = 0; i < Players.Num(); i++)
         {
-            auto Controller =
-                GetLiveParticipantController(Players[i]);
+            auto Controller = GetLiveParticipantController(Players[i]);
             if (!Controller)
                 continue;
 
@@ -448,11 +376,8 @@ namespace
             Minigame->OnPlayerPawnPossessedDuringTransition(Pawn);
         }
 
-        SDK::DbgLog(
-            "[CreativeMinigame] %p stalled in PostGameReset with %d player(s); "
-            "returning to PreGame\n",
-            Minigame,
-            Players.Num());
+        SDK::DbgLog("[CreativeMinigame] %p stalled in PostGameReset with %d player(s); "
+            "returning to PreGame\n", Minigame, Players.Num());
 
         Players.Free();
 
@@ -463,12 +388,8 @@ namespace
 
 void AFortMinigame::TickCreativeMinigames()
 {
-    // The 18.x SetState hook queues its delayed original forwards here so all
-    // UObject work remains on the game thread.
     TickPendingMinigameSetStates();
 
-    // The watchdog is solely for the pre-18 Creative implementation. Modern
-    // builds own their native minigame state machine without intervention.
     if (VersionInfo.FortniteVersion >= 18.00 || !GetDefaultObj())
         return;
 
@@ -476,11 +397,8 @@ void AFortMinigame::TickCreativeMinigames()
     if (!World)
         return;
 
-    // Creative only — CreativePortalManager is null on Battle Royale playlists,
-    // which keeps the actor sweep below off the hot path there.
     auto GameState = (AFortGameStateAthena*)World->GameState;
-    if (!GameState || !GameState->HasCreativePortalManager() ||
-        !GameState->CreativePortalManager)
+    if (!GameState || !GameState->HasCreativePortalManager() || !GameState->CreativePortalManager)
         return;
 
     static ULONGLONG NextScanMs = 0;
@@ -528,11 +446,8 @@ void AFortMinigame::TickCreativeMinigames()
         {
             SDK::DbgLog(
                 "[CreativeMinigame] %p %s -> %s volume=%p spawnPads=%d spawnMode=%d teams=%d\n",
-                Minigame,
-                MinigameStateName(Watch.LastState),
-                MinigameStateName(State),
-                Minigame->HasVolume() ? Minigame->Volume : nullptr,
-                StartCount,
+                Minigame, MinigameStateName(Watch.LastState), MinigameStateName(State),
+                Minigame->HasVolume() ? Minigame->Volume : nullptr, StartCount,
                 Minigame->HasSpawnLocationSetting() ? (int)Minigame->SpawnLocationSetting : -1,
                 Minigame->HasNumTeams() ? Minigame->NumTeams : -1);
 
@@ -542,9 +457,6 @@ void AFortMinigame::TickCreativeMinigames()
             Watch.AddPlayerAttempts = 0;
         }
 
-        // An island with no spawn pads can never resolve a player start, and the
-        // native start sequence then blocks forever waiting for a teleport that
-        // is never issued. Keep the setting in sync with what the island has.
         if ((int64)State == PreGame && SpawnPads >= 0 && CurrentLocation >= 0 &&
             StartCount >= 0 && Minigame->HasSpawnLocationSetting())
         {
@@ -554,31 +466,23 @@ void AFortMinigame::TickCreativeMinigames()
             {
                 Minigame->SpawnLocationSetting = (uint8)CurrentLocation;
                 Watch.bPatchedSpawnSetting = true;
-                SDK::DbgLog(
-                    "[CreativeMinigame] %p has no spawn pads; "
-                    "spawn location setting -> CurrentLocation\n",
-                    Minigame);
+                SDK::DbgLog("[CreativeMinigame] %p has no spawn pads; "
+                    "spawn location setting -> CurrentLocation\n", Minigame);
             }
-            else if (StartCount > 0 && Watch.bPatchedSpawnSetting &&
-                     Setting == CurrentLocation)
+            else if (StartCount > 0 && Watch.bPatchedSpawnSetting && Setting == CurrentLocation)
             {
                 Minigame->SpawnLocationSetting = (uint8)SpawnPads;
                 Watch.bPatchedSpawnSetting = false;
-                SDK::DbgLog(
-                    "[CreativeMinigame] %p now has %d spawn pad(s); "
-                    "spawn location setting -> SpawnPads\n",
-                    Minigame,
-                    StartCount);
+                SDK::DbgLog("[CreativeMinigame] %p now has %d spawn pad(s); "
+                    "spawn location setting -> SpawnPads\n", Minigame, StartCount);
             }
 
             continue;
         }
 
         const ULONGLONG StalledMs = NowMs - Watch.StateEnteredMs;
-        const bool bStartSequence =
-            (Setup >= 0 && (int64)State == Setup) ||
-            (int64)State == Transitioning ||
-            (int64)State == WaitingForCameras;
+        const bool bStartSequence = (Setup >= 0 && (int64)State == Setup) ||
+            (int64)State == Transitioning || (int64)State == WaitingForCameras;
         const bool bWarmup = Warmup >= 0 && (int64)State == Warmup;
         const bool bPostGameReset =
             PreGame >= 0 && PostGameReset >= 0 && (int64)State == PostGameReset;
@@ -591,23 +495,17 @@ void AFortMinigame::TickCreativeMinigames()
         if (!bStartSequence && !bWarmup && !bPostGameReset && !bPostGame)
             continue;
 
-        // Warmup owns a real countdown and the post-game states own the winner
-        // and scoreboard displays, so only treat those as stalled well past the
-        // configured durations.
         ULONGLONG StallLimitMs = 3000;
         if (bWarmup)
         {
-            const float Duration =
-                Minigame->HasWarmupDuration() ? Minigame->WarmupDuration : 0.f;
-            StallLimitMs =
-                8000ULL + (Duration > 0.f ? (ULONGLONG)(Duration * 1000.f) : 0ULL);
+            const float Duration = Minigame->HasWarmupDuration() ? Minigame->WarmupDuration : 0.f;
+            StallLimitMs = 8000ULL + (Duration > 0.f ? (ULONGLONG)(Duration * 1000.f) : 0ULL);
         }
         else if (bPostGame)
         {
             const float Delay =
                 Minigame->HasPostGameResetDelay() ? Minigame->PostGameResetDelay : 0.f;
-            StallLimitMs =
-                10000ULL + (Delay > 0.f ? (ULONGLONG)(Delay * 1000.f) : 0ULL);
+            StallLimitMs = 10000ULL + (Delay > 0.f ? (ULONGLONG)(Delay * 1000.f) : 0ULL);
         }
 
         if (StalledMs < StallLimitMs || NowMs - Watch.LastNudgeMs < 2000)
@@ -628,8 +526,6 @@ void AFortMinigame::TickCreativeMinigames()
             const int32 PlayerCount = Players.Num();
             Players.Free();
 
-            // Nobody registered with the minigame: try to enrol the plot's
-            // owners, but give up after a few passes rather than looping here.
             if (PlayerCount == 0 && Watch.AddPlayerAttempts < 3)
             {
                 ++Watch.AddPlayerAttempts;
@@ -645,8 +541,7 @@ void AFortMinigame::TickCreativeMinigames()
 
     for (auto It = GMinigameWatches.begin(); It != GMinigameWatches.end();)
     {
-        if (It->second.bSeen)
-            ++It;
+        if (It->second.bSeen) ++It;
         else
             It = GMinigameWatches.erase(It);
     }

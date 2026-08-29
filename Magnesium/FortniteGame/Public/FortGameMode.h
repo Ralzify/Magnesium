@@ -10,9 +10,7 @@
 
 enum class EEvaluateCurveTableResult : uint8
 {
-    RowFound = 0,
-    RowNotFound = 1,
-    EEvaluateCurveTableResult_MAX = 2,
+    RowFound = 0, RowNotFound = 1, EEvaluateCurveTableResult_MAX = 2,
 };
 
 class UNetDriver;
@@ -40,8 +38,7 @@ public:
     DEFINE_STRUCT_PROP(SpawnedFortSpawnActors, TArray<AActor*>);
 };
 
-// Supply-drop runtime element layouts and ownership change between releases,
-// but their reflected arrays retain Unreal's 0x10 script-array header.
+// Element layouts change between releases, but the reflected arrays keep Unreal's 0x10 script-array header.
 struct FSupplyDropSpawnDataArrayHeader
 {
     void* Data = nullptr;
@@ -49,8 +46,7 @@ struct FSupplyDropSpawnDataArrayHeader
     int32 MaxElements = 0;
 };
 
-static_assert(
-    sizeof(FSupplyDropSpawnDataArrayHeader) == 0x10,
+static_assert(sizeof(FSupplyDropSpawnDataArrayHeader) == 0x10,
     "Supply-drop array header must match Unreal's TArray header");
 
 class AFortGameMode : public AActor
@@ -128,26 +124,16 @@ public:
     DefHookOg(void, FinishWorldInitialization, AFortGameMode*, AActor*);
     static int GetLateSafeZoneIndex();
     static bool ProbeMovingSafeZonePhasePublisher();
-    // Returns only exact live/map/playlist evidence; it never uses the legacy
-    // synthetic 12-phase construction fallback.
-    static int32 ResolveMovingSafeZonePreflightCapacity(
-        AFortGameMode* GameMode,
+    static int32 ResolveMovingSafeZonePreflightCapacity(AFortGameMode* GameMode,
         AFortAthenaMapInfo* MapInfo);
     static void TickLateGameSafeZonePhaseFallback(UNetDriver* Driver);
     static void TickPendingVehicleSpawns();
     static void TickSupplyDropSuppression(bool bForceDiscovery = false);
     static void TickGameplayConfigurationPolicy(float DeltaSeconds);
-    static const UFortPlaylistAthena* GetActivePlaylist(
-        AFortGameStateAthena* GameState);
-    // Cheat-spawned controllers must never become revive partners. On modern
-    // builds this uses the engine's native team graph rather than changing only
-    // the replicated numeric fields.
-    static bool AssignCheatBotIsolatedTeam(
-        AFortGameMode* GameMode,
-        AFortPlayerControllerAthena* BotController,
-        AActor* Instigator,
-        uint8& OutTeamIndex);
-    
+    static const UFortPlaylistAthena* GetActivePlaylist(AFortGameStateAthena* GameState);
+    static bool AssignCheatBotIsolatedTeam(AFortGameMode* GameMode,
+        AFortPlayerControllerAthena* BotController, AActor* Instigator, uint8& OutTeamIndex);
+
     InitHooks;
     InitPostLoadHooks;
 };

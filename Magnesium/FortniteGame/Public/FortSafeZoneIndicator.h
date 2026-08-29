@@ -44,11 +44,7 @@ class AFortSafeZoneIndicator : public AActor
 public:
     UCLASS_COMMON_MEMBERS(AFortSafeZoneIndicator);
 
-    // Packs the native function by reflected parameter name. Its linked-list
-    // order differs from its ABI order on several legacy builds, so positional
-    // UObject::Call arguments are unsafe here.
-    bool TrySetSafeZoneRadiusAndCenter(
-        float InRadius, const FVector& InLocation) const;
+    bool TrySetSafeZoneRadiusAndCenter(float InRadius, const FVector& InLocation) const;
 
     DEFINE_PROP(SafeZoneStartShrinkTime, float);
     DEFINE_PROP(SafeZoneFinishShrinkTime, float);

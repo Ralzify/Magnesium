@@ -28,10 +28,11 @@ public:
     static inline uint64 SafeZoneTickHookTarget = 0;
     static inline std::atomic<bool> bServerGetMaxTickRateActive{ false };
     static uint32 CheckCheckpointHeartBeat();
-    DefHookOg(void, ApplyHomebaseEffectsOnPlayerSetup, __int64*, __int64, __int64, __int64, UObject*, char, unsigned __int8);
+    DefHookOg(void, ApplyHomebaseEffectsOnPlayerSetup, __int64*, __int64, __int64, __int64,
+        UObject*, char, unsigned __int8);
     static void InitClient();
     static const std::unordered_map<std::string, std::string> ItemNames;
-	static const std::unordered_map<std::string, std::string> ObjectNames;
+    static const std::unordered_map<std::string, std::string> ObjectNames;
 
     InitHooks;
 };
@@ -55,7 +56,10 @@ namespace LoadoutManager
         return GetLoadoutDirectory() + "\\savedloadout.json";
     }
 
-    inline bool SaveLoadout(const char* Primary, int PrimaryAmount, const char* Secondary, int SecondaryAmount, const char* Tertiary, int TertiaryAmount, const char* Quaternary, int QuaternaryAmount, const char* Quinary, int QuinaryAmount, const char* Traps, int TrapsAmount)
+    inline bool SaveLoadout(const char* Primary, int PrimaryAmount, const char* Secondary,
+        int SecondaryAmount, const char* Tertiary, int TertiaryAmount, const char* Quaternary,
+        int QuaternaryAmount, const char* Quinary, int QuinaryAmount, const char* Traps,
+        int TrapsAmount)
     {
         try
         {
@@ -90,7 +94,9 @@ namespace LoadoutManager
         return false;
     }
 
-    inline bool LoadLoadout(char* Primary, int& PrimaryAmount, char* Secondary, int& SecondaryAmount, char* Tertiary, int& TertiaryAmount, char* Quaternary, int& QuaternaryAmount, char* Quinary, int& QuinaryAmount, char* Traps, int& TrapsAmount)
+    inline bool LoadLoadout(char* Primary, int& PrimaryAmount, char* Secondary,
+        int& SecondaryAmount, char* Tertiary, int& TertiaryAmount, char* Quaternary,
+        int& QuaternaryAmount, char* Quinary, int& QuinaryAmount, char* Traps, int& TrapsAmount)
     {
         try
         {
