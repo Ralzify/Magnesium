@@ -293,6 +293,7 @@ static bool TryGetReactiveStatValue(
 
 static void LogReactiveStatState(
 	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* Pawn,
 	int32 ExpectedValue)
 {
 	if (!PlayerController)
@@ -306,7 +307,6 @@ static void LogReactiveStatState(
 	TryGetReactiveStatValue(
 		PlayerController, StatName, static_cast<uint8>(6),
 		PersistentValue);
-	auto Pawn = PlayerController->MyFortPawn;
 
 	int32 ObservedNum = -1;
 	int32 ObservedKills = -1;
@@ -318,22 +318,9 @@ static void LogReactiveStatState(
 			bHasManager = Observed.MyStatManager ? 1 : 0;
 
 		if (FFortClientObservedStatArray::HasObservedStats())
-		{
-			auto& Stats = Observed.ObservedStats;
-			ObservedNum = Stats.Num();
-			const FName WantedName(GReactiveKillStatName);
-			for (int32 i = 0; i < Stats.Num(); ++i)
-			{
-				auto& Entry = Stats.Get(
-					i, FFortClientObservedStat::Size());
-				if (Entry.StatName.ComparisonIndex ==
-					WantedName.ComparisonIndex)
-				{
-					ObservedKills = Entry.StatValue;
-					break;
-				}
-			}
-		}
+			ObservedNum = Observed.ObservedStats.Num();
+
+		ObservedKills = Pawn->GetClientObservedStat(StatName);
 	}
 
 	SDK::DbgLog(
@@ -352,7 +339,8 @@ static void LogReactiveStatState(
 }
 
 bool AFortPlayerControllerAthena::SyncReactiveKillStat(
-	AFortPlayerControllerAthena* PlayerController)
+	AFortPlayerControllerAthena* PlayerController,
+	AFortPlayerPawnAthena* PawnOverride)
 {
 	if (!PlayerController || !PlayerController->PlayerState)
 		return false;
@@ -365,6 +353,23 @@ bool AFortPlayerControllerAthena::SyncReactiveKillStat(
 		EStatMod::Set,
 		true);
 
+	// The stat push above only reaches the controller's StatManager, which is
+	// where quests and the match report read from. Reactive cosmetics read the
+	// pawn's replicated ClientObservedStats mirror instead, and nothing on a
+	// custom server bridges the two - so publish there as well. This is the
+	// half the Candy Axe actually watches.
+	auto Pawn = PawnOverride;
+	if (!IsUsableDeathObject(Pawn))
+	{
+		Pawn = PlayerController->HasMyFortPawn()
+			? PlayerController->MyFortPawn
+			: nullptr;
+	}
+
+	const bool bObserved = IsUsableDeathObject(Pawn) &&
+		Pawn->SetClientObservedStat(
+			FName(GReactiveKillStatName), KillCount);
+
 	static UWorld* TrackedWorld = nullptr;
 	static std::unordered_set<AFortPlayerControllerAthena*>
 		LoggedControllers;
@@ -375,13 +380,20 @@ bool AFortPlayerControllerAthena::SyncReactiveKillStat(
 		LoggedControllers.clear();
 	}
 
-	if (!bPushed && LoggedControllers.insert(PlayerController).second)
+	// bObserved is the one that decides whether a reactive cosmetic can see
+	// anything, so warn on that rather than on the StatManager push - a build
+	// can perfectly well have no ServerModifyStat and still light up.
+	if (!bObserved && LoggedControllers.insert(PlayerController).second)
 	{
 		SDK::DbgLog(
-			"[ReactiveCosmetics] stat push unavailable controller=%p "
-			"func=%p statManager=%d kills=%d FN=%.2f\n",
+			"[ReactiveCosmetics] observed-stat push unavailable "
+			"controller=%p pawn=%p observedStats=%d modifyStatFn=%p "
+			"statPushed=%d statManager=%d kills=%d FN=%.2f\n",
 			(void*)PlayerController,
+			(void*)Pawn,
+			Pawn ? (Pawn->HasClientObservedStats() ? 1 : 0) : -1,
 			(void*)ServerModifyStat__Ptr,
+			bPushed ? 1 : 0,
 			PlayerController->HasStatManager()
 				? (PlayerController->StatManager ? 1 : 0)
 				: -1,
@@ -399,12 +411,12 @@ bool AFortPlayerControllerAthena::SyncReactiveKillStat(
 		LoggedSuccessWorld = World;
 		LoggedSuccessfulControllers.clear();
 	}
-	if (bPushed &&
+	if ((bPushed || bObserved) &&
 		LoggedSuccessfulControllers.insert(PlayerController).second)
 	{
-		LogReactiveStatState(PlayerController, KillCount);
+		LogReactiveStatState(PlayerController, Pawn, KillCount);
 	}
-	return bPushed;
+	return bPushed || bObserved;
 }
 
 int32 AFortPlayerStateAthena::GetEffectiveKillScore() const
@@ -7851,9 +7863,11 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 				PlayerController, true);
 	}
 
-	// Reactive cosmetics observe stats replicated by the possessed pawn, so
-	// republish the current kill count whenever a new pawn is ready.
-	SyncReactiveKillStat(PlayerController);
+	// Reactive cosmetics observe stats replicated by the possessed pawn, and a
+	// new pawn starts with an empty array - so republish the current kill count
+	// onto this exact pawn whenever one becomes ready. Without this a player who
+	// respawns mid-match loses the lights they had already earned.
+	SyncReactiveKillStat(PlayerController, FortPawn);
 
 	// This player is now genuinely in the world, which is the first point a
 	// snow change can reach them. Re-send the Calendar tab's value; the push

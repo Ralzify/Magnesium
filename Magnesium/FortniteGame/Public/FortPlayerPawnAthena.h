@@ -727,6 +727,29 @@ public:
         auto Set = HasHealthSet() ? HealthSet : nullptr;
         return (Set && Set->HasShield()) ? Set->Shield.CurrentValue : 0.f;
     }
+
+    // ---------------------------------------------------------------------
+    // Reactive cosmetics
+    //
+    // A reactive item names what it watches in its cosmetic definition's
+    // ObservedPlayerStats - "StatManager.AthenaKills" for the Candy Axe -
+    // and does the reacting entirely on the client. The only thing the
+    // server owes it is this pawn's replicated mirror of those values:
+    // ClientObservedStats, a fast array of {StatName, StatValue}.
+    //
+    // ServerModifyStat does not get there on its own. It updates the
+    // controller's StatManager, which only forwards into this array for
+    // stats the pawn registered during the native cosmetic setup a custom
+    // server never runs, so the value lands somewhere the client never
+    // reads. Writing the fast array is what actually lights the lights.
+    //
+    // Returns false when the build has no ClientObservedStats (every access
+    // below is reflected, so the whole path is skipped rather than guessed).
+    bool SetClientObservedStat(FName StatName, int32 StatValue) const;
+    // Current replicated value, or DefaultValue when the stat is absent.
+    int32 GetClientObservedStat(
+        FName StatName, int32 DefaultValue = -1) const;
+
     DEFINE_FUNC(EquipWeaponDefinition, AActor*);
     DEFINE_FUNC(LaunchCharacterJump, void);
     DEFINE_FUNC(OnCapsuleBeginOverlap, void);

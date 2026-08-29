@@ -554,8 +554,12 @@ public:
         int32 Amount,
         EStatMod ModType = EStatMod::Set,
         bool bForceStatSave = true) const;
+    // Republishes the kill count that reactive cosmetics watch. Callers that
+    // already hold the pawn (possession, before MyFortPawn is guaranteed
+    // rebound) should pass it rather than let the lookup race.
     static bool SyncReactiveKillStat(
-        AFortPlayerControllerAthena* PlayerController);
+        AFortPlayerControllerAthena* PlayerController,
+        AFortPlayerPawnAthena* PawnOverride = nullptr);
 
     static void ServerAcknowledgePossession(UObject*, FFrame&);
     // Removes spawn-island loot while retaining the harvesting/building tools

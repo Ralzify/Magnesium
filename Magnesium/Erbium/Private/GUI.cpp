@@ -60,6 +60,76 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 
+// The client size the launcher layout is built for, in physical pixels. Fixed
+// once in GUI::Init from the DPI of the monitor the window is created on, then
+// held across monitor changes - see ApplyFixedClientSize.
+static int g_ClientWidth = 0;
+static int g_ClientHeight = 0;
+
+// Resizes hWnd so its CLIENT area is exactly g_ClientWidth x g_ClientHeight.
+//
+// Two things make this necessary. CreateWindow and SetWindowPos take the OUTER
+// window rect, so passing the desired client size there silently loses the
+// title bar and border to it. And under per-monitor DPI awareness Windows
+// rescales the non-client area when the window crosses to a monitor with a
+// different DPI, which changes the client size - and therefore the swap chain
+// and io.DisplaySize - out from under a layout that never asked to be resized.
+//
+// Dpi should be the new DPI from WM_DPICHANGED, because GetDpiForWindow still
+// reports the old one while that message is being handled. Pass 0 otherwise.
+// MoveTo repositions the window as well; pass null to resize in place.
+static void ApplyFixedClientSize(
+    HWND hWnd, UINT Dpi = 0, const POINT* MoveTo = nullptr)
+{
+    if (!hWnd || g_ClientWidth <= 0 || g_ClientHeight <= 0)
+        return;
+
+    const DWORD Style = (DWORD)GetWindowLongPtrW(hWnd, GWL_STYLE);
+    const DWORD ExStyle = (DWORD)GetWindowLongPtrW(hWnd, GWL_EXSTYLE);
+    RECT Rect{ 0, 0, g_ClientWidth, g_ClientHeight };
+
+    // The per-DPI variants are Windows 10 1607+. Resolve them dynamically so
+    // this still does the right thing (just without per-monitor non-client
+    // metrics) anywhere older.
+    bool bAdjusted = false;
+    if (auto User32 = GetModuleHandleW(L"user32.dll"))
+    {
+        using FAdjustForDpi =
+            BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+        using FGetDpiForWindow = UINT(WINAPI*)(HWND);
+
+        auto AdjustForDpi = (FAdjustForDpi)GetProcAddress(
+            User32, "AdjustWindowRectExForDpi");
+        auto GetDpi = (FGetDpiForWindow)GetProcAddress(
+            User32, "GetDpiForWindow");
+
+        if (AdjustForDpi)
+        {
+            const UINT EffectiveDpi =
+                Dpi ? Dpi : (GetDpi ? GetDpi(hWnd) : 0);
+            if (EffectiveDpi)
+            {
+                bAdjusted = AdjustForDpi(
+                    &Rect, Style, FALSE, ExStyle, EffectiveDpi) != FALSE;
+            }
+        }
+    }
+    if (!bAdjusted)
+        AdjustWindowRectEx(&Rect, Style, FALSE, ExStyle);
+
+    UINT Flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    if (!MoveTo)
+        Flags |= SWP_NOMOVE;
+
+    SetWindowPos(
+        hWnd, nullptr,
+        MoveTo ? MoveTo->x : 0,
+        MoveTo ? MoveTo->y : 0,
+        Rect.right - Rect.left,
+        Rect.bottom - Rect.top,
+        Flags);
+}
+
 static std::atomic<ULONGLONG> GServerJoinableAtMs{ 0 };
 static unsigned int GPreferenceEditorGeneration = 0;
 static bool GAutoHostPausedBySafeZoneValidation = false;
@@ -7825,6 +7895,17 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_ResizeWidth = (UINT)LOWORD(lParam);
         g_ResizeHeight = (UINT)HIWORD(lParam);
         return 0;
+    case WM_DPICHANGED:
+    {
+        // Dragging onto a monitor with a different DPI. Take the position
+        // Windows suggests so the window keeps following the cursor, but not
+        // its size: the layout is authored in fixed pixels, so re-asserting our
+        // own client size is what makes the move a no-op instead of a reflow.
+        const RECT* Suggested = (const RECT*)lParam;
+        const POINT MoveTo{ Suggested->left, Suggested->top };
+        ApplyFixedClientSize(hWnd, HIWORD(wParam), &MoveTo);
+        return 0;
+    }
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU)
             return 0;
@@ -11354,6 +11435,14 @@ void GUI::Init()
     swprintf_s(buffer, VersionInfo.EngineVersion >= 5.0 ? L"Magnesium (FN %.2f, UE %.1f)" : (VersionInfo.FortniteVersion >= 5.00 || VersionInfo.FortniteVersion < 1.2 ? L"Magnesium (FN %.2f, UE %.2f)" : L"Magnesium (FN %.1f, UE %.2f)"), VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
     auto hWnd = CreateWindow(wc.lpszClassName, buffer, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME, 100, 100, (int)(WindowWidth * main_scale), (int)(WindowHeight * main_scale), nullptr, nullptr, nullptr, nullptr);
 
+    // Those CreateWindow dimensions are the outer rect, so the client area came
+    // out a title bar and two borders short of what the layout is written
+    // against. Fix it before the swap chain sizes itself off this window, and
+    // record the result as the size to hold on to across monitor changes.
+    g_ClientWidth = (int)(WindowWidth * main_scale);
+    g_ClientHeight = (int)(WindowHeight * main_scale);
+    ApplyFixedClientSize(hWnd);
+
     IDXGISwapChain* g_pSwapChain = nullptr;
     ID3D11Device* g_pd3dDevice = nullptr;
     ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -11479,7 +11568,12 @@ void GUI::Init()
     ImGui_ImplWin32_Init(hWnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    // Dear ImGui's example clear colour is a light blue. The launcher window
+    // covers the whole back buffer so it should never be visible, but matching
+    // it to ImGuiCol_WindowBg means a frame where it briefly is - during a
+    // resize, before the first frame - reads as the window rather than as a
+    // flash of blue.
+    ImVec4 clear_color = col[ImGuiCol_WindowBg];
     bool done = false;
     bool g_SwapChainOccluded = false;
 
@@ -11577,9 +11671,17 @@ void GUI::Init()
         if (gsStatus != Joinable)
             bStartBusEarlyDismissed = false;
 
-        main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
-        ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(WindowWidth * main_scale, WindowHeight * main_scale), ImGuiCond_Always);
+        // Fill exactly what is being presented. This used to size the window
+        // from WindowWidth * a DPI scale re-read every frame from the PRIMARY
+        // monitor - never the monitor the window was actually on - while the
+        // swap chain and io.DisplaySize followed the real client rect. Any
+        // disagreement between the two showed up directly: the layout clipped
+        // when the ImGui window was larger, and the swap chain's clear colour
+        // showed through as a blue border when it was smaller, which is what
+        // dragging to a monitor with a different DPI produced.
+        const ImGuiViewport* Viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(Viewport->Pos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(Viewport->Size, ImGuiCond_Always);
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
         ImGui::Begin("Magnesium", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -11633,13 +11735,11 @@ void GUI::Init()
             ImGui::TextUnformatted("v2.6.2");
             ImGui::PopStyleColor();
 
-            // FN / UE versions on the right, aligned to the visible viewport so they
-            // never run off the window edge.
+            // FN / UE versions on the right.
             char ver[48];
             snprintf(ver, sizeof(ver), "FN %.2f  \xC2\xB7  UE %.2f", VersionInfo.FortniteVersion, VersionInfo.EngineVersion);
             const float verW = ImGui::CalcTextSize(ver).x;
-            const float rightEdge = ImGui::GetIO().DisplaySize.x;
-            ImGui::SetCursorPos(ImVec2(rightEdge - verW - 18.f, TitleY));
+            ImGui::SetCursorPos(ImVec2(W - verW - 18.f, TitleY));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.54f, 0.56f, 0.62f, 0.92f));
             ImGui::TextUnformatted(ver);
             ImGui::PopStyleColor();
@@ -11721,11 +11821,8 @@ void GUI::Init()
                 const bool bSafeZoneStartValid =
                     ValidateCustomMovingZoneForStart(
                         SafeZoneStartError);
-                // Anchor to the visible viewport height (the window is taller than the
-                // actual client area, so using H would push this off-screen).
-                const float visH = ImGui::GetIO().DisplaySize.y;
                 const float buttonY =
-                    (visH - TopBarH) - bH - bMargin;
+                    (H - TopBarH) - bH - bMargin;
                 if (!bSafeZoneStartValid)
                 {
                     const ImVec2 errorSize = ImGui::CalcTextSize(
@@ -11839,19 +11936,12 @@ void GUI::Init()
 
         // ---- Content panel (inset; transparent so the #32703b background shows) ----
         const float ContentPadX = 22.f;
-        const ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
-        const float VisibleWindowW = (std::max)(
-            1.f,
-            (std::min)(W, DisplaySize.x - wp.x));
-        const float VisibleWindowH = (std::max)(
-            1.f,
-            (std::min)(H, DisplaySize.y - wp.y));
         const float ContentChildW = (std::max)(
             1.f,
-            (VisibleWindowW - SidebarW) - ContentPadX);
+            (W - SidebarW) - ContentPadX);
         const float ContentChildH = (std::max)(
             1.f,
-            (VisibleWindowH - TopBarH) - 26.f);
+            (H - TopBarH) - 26.f);
         ImGui::SetCursorPos(ImVec2(SidebarW + ContentPadX, TopBarH + 14.f));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.f, 0.f, 0.f, 0.f));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));

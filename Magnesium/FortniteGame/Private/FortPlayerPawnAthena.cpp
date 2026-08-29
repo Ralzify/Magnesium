@@ -5447,6 +5447,117 @@ void AFortPlayerPawnAthena::ActivateShieldAbsorb() const
 	ASC->BP_ApplyGameplayEffectToSelf(ShieldGE, 0.f, Context);
 }
 
+// ---------------------------------------------------------------------------
+// Reactive cosmetics: AFortPlayerPawn::ClientObservedStats
+//
+// See the header for why the pawn array is the half that matters. Everything
+// here is reflected, including the element size: sizeof() on the C++ shell is
+// only the FFastArraySerializerItem header (12 bytes) because the two real
+// members are __declspec(property) accessors, while the script struct is 0x20.
+// Passing the reflected size to every TArray call is what keeps the stride
+// right.
+// ---------------------------------------------------------------------------
+namespace
+{
+	// Resolves the reflected element size once the whole struct chain is known
+	// to exist. Returns 0 when this build cannot carry observed stats, which is
+	// the caller's signal to skip rather than guess a layout.
+	int32 ResolveObservedStatElementSize()
+	{
+		if (!FFortClientObservedStatArray::StaticStruct() ||
+			!FFortClientObservedStat::StaticStruct() ||
+			!FFortClientObservedStatArray::HasObservedStats() ||
+			!FFortClientObservedStat::HasStatName() ||
+			!FFortClientObservedStat::HasStatValue())
+		{
+			return 0;
+		}
+
+		// Size() dereferences StaticStruct(), so it may only be called after the
+		// checks above. A struct smaller than the fast-array header or wildly
+		// larger than the known 0x20 means the reflection is not what we think.
+		const int32 ElementSize = FFortClientObservedStat::Size();
+		return (ElementSize >= (int32)sizeof(FFastArraySerializerItem) &&
+			ElementSize <= 0x100) ? ElementSize : 0;
+	}
+}
+
+bool AFortPlayerPawnAthena::SetClientObservedStat(
+	FName StatName, int32 StatValue) const
+{
+	if (!this || !StatName.IsValid() || !HasClientObservedStats())
+		return false;
+
+	const int32 ElementSize = ResolveObservedStatElementSize();
+	if (!ElementSize)
+		return false;
+
+	auto& Observed = ClientObservedStats;
+	auto& Stats = Observed.ObservedStats;
+
+	for (int32 Index = 0; Index < Stats.Num(); ++Index)
+	{
+		auto& Entry = Stats.Get(Index, ElementSize);
+		if (Entry.StatName != StatName)
+			continue;
+
+		// Re-dirtying an unchanged value costs a replication slot and tells the
+		// client nothing, and the client reacts to the delta rather than the
+		// absolute, so leave it alone.
+		if (Entry.StatValue == StatValue)
+			return true;
+
+		Entry.StatValue = StatValue;
+		Observed.MarkItemDirty(Entry);
+		ForceNetUpdate();
+		return true;
+	}
+
+	// A freshly spawned pawn starts with an empty array, so the first push after
+	// a spawn or respawn is always an add. Build the item in a reflected-size
+	// buffer for the same stride reason as above, plus slack: the SDK's FName is
+	// always 8 bytes in C++ while the game's is 4 on builds that outline the
+	// number, so assigning one can write past the field it was resolved for. The
+	// slack keeps that spill inside our own buffer, and Add copies only
+	// ElementSize bytes into the array.
+	std::vector<uint8> Buffer(ElementSize + sizeof(FName), 0);
+	auto& NewStat =
+		*reinterpret_cast<FFortClientObservedStat*>(Buffer.data());
+	NewStat.ReplicationID = -1;
+	NewStat.ReplicationKey = -1;
+	NewStat.MostRecentArrayReplicationKey = -1;
+	// Order matters for the same reason: StatValue follows StatName, so it has
+	// to be written second or the name's spill would clobber it.
+	NewStat.StatName = StatName;
+	NewStat.StatValue = StatValue;
+
+	auto& Added = Stats.Add(NewStat, ElementSize);
+	Observed.MarkItemDirty(Added);
+	ForceNetUpdate();
+	return true;
+}
+
+int32 AFortPlayerPawnAthena::GetClientObservedStat(
+	FName StatName, int32 DefaultValue) const
+{
+	if (!this || !StatName.IsValid() || !HasClientObservedStats())
+		return DefaultValue;
+
+	const int32 ElementSize = ResolveObservedStatElementSize();
+	if (!ElementSize)
+		return DefaultValue;
+
+	auto& Stats = ClientObservedStats.ObservedStats;
+	for (int32 Index = 0; Index < Stats.Num(); ++Index)
+	{
+		auto& Entry = Stats.Get(Index, ElementSize);
+		if (Entry.StatName == StatName)
+			return Entry.StatValue;
+	}
+
+	return DefaultValue;
+}
+
 void AFortPlayerPawnAthena::ServerHandlePickup_(UObject* Context, FFrame& Stack)
 {
 	AFortPickupAthena* Pickup;
