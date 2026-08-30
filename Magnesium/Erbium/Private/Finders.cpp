@@ -4037,7 +4037,7 @@ void FindNullsAndRetTrues()
             RetTrueFuncs.push_back(Memcury::Scanner::FindPattern("4C 89 4C 24 20 55 56 57 41 56 48 8D 6C 24 D1").Get());
         else
         {
-            bool bHasStutter = VersionInfo.FortniteVersion >= 9.00 && VersionInfo.FortniteVersion <= 13.40;
+            bool bHasStutter = VersionInfo.FortniteVersion >= 9.00 && VersionInfo.FortniteVersion <= 13.40; // 16.50 removes it, but our abilities are #broken!!
 
             if (!bHasStutter)
             {

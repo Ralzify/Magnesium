@@ -5381,49 +5381,48 @@ void AFortGameMode::ReadyToStartMatch_(UObject* Context, FFrame& Stack, bool* Re
             }
             else if (FConfiguration::IsKnownS27CustomMapPlaylist())
             {
-                if (Playlist->HasAdditionalLevels())
-                {
-                    for (auto& Level : Playlist->AdditionalLevels)
+                auto StreamCustomMapLevel = [&](TSoftObjectPtr<UWorld>& Level, bool bServerOnly)
                     {
+                        FName LevelName;
+                        if (!TryGetPlaylistLevelName(Level, LevelName))
+                        {
+                            SDK::DbgLog("[PlaylistLevels] custom map level has no "
+                                "resolvable name; skipped\n");
+                            return;
+                        }
+
                         bool Success = false;
                         ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(),
                             Level, FVector(), FRotator(), &Success, FString(), nullptr);
-                        if (AdditionalLevelStruct)
+
+                        if (!AdditionalLevelStruct)
                         {
-                            auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
-                            memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
-                            level->bIsServerOnly = false;
-                            level->LevelName = Level.ObjectID.AssetPathName;
-                            if (Success)
-                                GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
-                            free(level);
+                            GetFromOffset<TArray<FName>>(GameState,
+                                AdditionalPlaylistLevelsStreamed__Off).Add(LevelName);
+                            return;
                         }
-                        else
-                            GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
-                    }
+
+                        auto level = (FAdditionalLevelStreamed*)malloc(
+                            FAdditionalLevelStreamed::Size());
+                        memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
+                        level->bIsServerOnly = bServerOnly;
+                        level->LevelName = LevelName;
+                        if (Success)
+                            GameState->AdditionalPlaylistLevelsStreamed.Add(*level,
+                                FAdditionalLevelStreamed::Size());
+                        free(level);
+                    };
+
+                if (Playlist->HasAdditionalLevels())
+                {
+                    for (auto& Level : Playlist->AdditionalLevels)
+                        StreamCustomMapLevel(Level, false);
                 }
 
                 if (Playlist->HasAdditionalLevelsServerOnly())
                 {
                     for (auto& Level : Playlist->AdditionalLevelsServerOnly)
-                    {
-                        bool Success = false;
-                        ULevelStreamingDynamic::LoadLevelInstanceBySoftObjectPtr(UWorld::GetWorld(),
-                            Level, FVector(), FRotator(), &Success, FString(), nullptr);
-
-                        if (AdditionalLevelStruct)
-                        {
-                            auto level = (FAdditionalLevelStreamed*)malloc(FAdditionalLevelStreamed::Size());
-                            memset((PBYTE)level, 0, FAdditionalLevelStreamed::Size());
-                            level->bIsServerOnly = true;
-                            level->LevelName = Level.ObjectID.AssetPathName;
-                            if (Success)
-                                GameState->AdditionalPlaylistLevelsStreamed.Add(*level, FAdditionalLevelStreamed::Size());
-                            free(level);
-                        }
-                        else
-                            GetFromOffset<TArray<FName>>(GameState, AdditionalPlaylistLevelsStreamed__Off).Add(Level.ObjectID.AssetPathName);
-                    }
+                        StreamCustomMapLevel(Level, true);
                 }
             }
             else if (AdditionalPlaylistLevelsStreamed__Off != -1)

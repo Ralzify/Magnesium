@@ -554,7 +554,7 @@ public:
     static void CaptureLandingItemBeforeNativeEnd(
         AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
     static void FinalizeRespawnAfterLanding(AFortPlayerControllerAthena*, AFortPlayerPawnAthena*);
-    static void RestoreVehicleLoadoutAfterExit(AFortPlayerControllerAthena*);
+    static void RestoreVehicleLoadoutAfterExit(AFortPlayerControllerAthena*, bool bForce = false);
     static void TickVehicleLoadoutReconcile();
     static bool TryEliminatePlayer(AFortPlayerControllerAthena* PlayerController);
     static void ServerCheat(UObject*, FFrame&);

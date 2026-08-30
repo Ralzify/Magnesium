@@ -20,6 +20,8 @@ public:
 
     DEFINE_STRUCT_PROP(SeatIndex, int32);
     DEFINE_STRUCT_PROP(VehicleWeapon, UFortWeaponItemDefinition*);
+    DEFINE_STRUCT_PROP(VehicleWeaponOverride, UFortWeaponItemDefinition*);
+    DEFINE_STRUCT_PROP(LastEquippedVehicleWeapon, UFortWeaponItemDefinition*);
 };
 
 struct FAthenaCarPlayerSlot
@@ -37,6 +39,10 @@ public:
 
     DEFINE_PROP(WeaponSeatDefinitions, TArray<FWeaponSeatDefinition>);
     DEFINE_PROP(ActiveSeatIdx, int32);
+    DEFINE_NEWOBJ_PROP(CachedWeapon, AActor);
+    DEFINE_PROP(CachedWeaponDef, UFortWeaponItemDefinition*);
+    DEFINE_BITFIELD_PROP(bWeaponEquipped);
+
     DEFINE_FUNC(EquipVehicleWeapon, void);
 };
 
@@ -221,12 +227,14 @@ public:
     DEFINE_PROP(NetTowhookAimDir, FVector);
     DEFINE_PROP(ReplicatedAttachState, FNetTowhookAttachState);
     DEFINE_PROP(LocalAttachState, FNetTowhookAttachState);
+    DEFINE_NEWOBJ_PROP(TowHookProjectile, AActor);
 
     DEFINE_FUNC(OnRep_NetTowhookAimDir, void);
     DEFINE_FUNC(OnRep_ReplicatedAttachState, void);
     DEFINE_FUNC(BreakTowhook, void);
 
     static void ServerUpdateTowhook(UObject*, FFrame&);
+    static void TickTowhookAttachments();
 };
 
 class AFortSpaghettiVehicle : public AFortPhysicsPawn
