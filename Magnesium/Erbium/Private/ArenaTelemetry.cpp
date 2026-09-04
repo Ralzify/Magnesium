@@ -55,6 +55,12 @@ namespace ArenaTelemetry
         constexpr uint64_t kCastClassStructProperty = 0x100000;
         constexpr char kDefaultBackendUrl[] = "http://127.0.0.1:3551";
 
+        bool IsArenaRuntimeSupported() noexcept
+        {
+            return ArenaTelemetryPolicy::FortniteVersionHundredths(
+                VersionInfo.FortniteVersion) >= 820;
+        }
+
         // Release globally elides SDK::DbgLog because that logger opens and
         // flushes a file at more than a thousand call sites. Arena visual
         // diagnosis needs only a tiny number of lines, so write those directly
@@ -3668,7 +3674,7 @@ namespace ArenaTelemetry
         AFortGameMode* GameMode,
         AFortGameStateAthena* GameState) noexcept
     {
-        if (!GameMode || !GameState)
+        if (!IsArenaRuntimeSupported() || !GameMode || !GameState)
             return false;
         const auto* Playlist =
             AFortGameMode::GetActivePlaylist(GameState);
@@ -3690,7 +3696,7 @@ namespace ArenaTelemetry
         static uint32 SuccessLogs = 0;
 
         const bool IsCanonicalArena = GSession.Active;
-        if (!KillerPlayerState ||
+        if (!IsArenaRuntimeSupported() || !KillerPlayerState ||
             !ArenaTelemetryPolicy::IsTournamentRuntimeEffectEnabled(
                 ArenaTelemetryPolicy::ETournamentRuntimeEffect::
                     SessionLocalPresentation,
@@ -3802,7 +3808,7 @@ namespace ArenaTelemetry
     {
         if (DedicatedRpcExpected)
             *DedicatedRpcExpected = false;
-        if (!PlayerController ||
+        if (!IsArenaRuntimeSupported() || !PlayerController ||
             !ArenaTelemetryPolicy::IsTournamentRuntimeEffectEnabled(
                 ArenaTelemetryPolicy::ETournamentRuntimeEffect::
                     SessionLocalPresentation,
@@ -3900,7 +3906,8 @@ namespace ArenaTelemetry
         AFortGameMode* GameMode,
         AFortPlayerControllerAthena* PlayerController) noexcept
     {
-        if (!IsGameThreadCall() || !GSession.Active ||
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall() ||
+            !GSession.Active ||
             GSession.Ending || GSession.Corrupted ||
             GameMode != GSession.GameMode || !PlayerController ||
             !IsCurrentCanonicalArenaSession() ||
@@ -3949,7 +3956,7 @@ namespace ArenaTelemetry
 
     void Tick() noexcept
     {
-        if (!IsGameThreadCall())
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall())
             return;
         EnsureServerInstanceId();
         EnsureWorkerStarted();
@@ -3995,7 +4002,8 @@ namespace ArenaTelemetry
         AFortGameMode* GameMode,
         AFortGameStateAthena* GameState) noexcept
     {
-        if (!IsGameThreadCall() || !GameMode || !GameState)
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall() ||
+            !GameMode || !GameState)
             return;
         EnsureServerInstanceId();
         EnsureWorkerStarted();
@@ -4035,7 +4043,8 @@ namespace ArenaTelemetry
         AFortGameMode* GameMode,
         AFortGameStateAthena* GameState) noexcept
     {
-        if (!IsGameThreadCall() || !GSession.Active)
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall() ||
+            !GSession.Active)
             return;
         if ((GameMode && GSession.GameMode != GameMode) ||
             (GameState && GSession.GameState != GameState))
@@ -4074,7 +4083,7 @@ namespace ArenaTelemetry
     void RegisterPlayer(
         AFortPlayerControllerAthena* PlayerController) noexcept
     {
-        if (!IsGameThreadCall() ||
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall() ||
             !GSession.Active ||
             !PlayerController)
         {
@@ -4095,7 +4104,7 @@ namespace ArenaTelemetry
         bool MatchWasLive,
         bool VictimWasAliveParticipant) noexcept
     {
-        if (!IsGameThreadCall() ||
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall() ||
             !GSession.Active ||
             GSession.Ending ||
             GSession.Corrupted ||
@@ -4284,7 +4293,7 @@ namespace ArenaTelemetry
         AFortPlayerControllerAthena* PlayerController,
         int PointsDelta) noexcept
     {
-        if (!IsGameThreadCall() ||
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall() ||
             !GSession.Active ||
             GSession.Ending ||
             GSession.Corrupted ||
@@ -4366,7 +4375,7 @@ namespace ArenaTelemetry
         bool IsFinalizedLiveDeath,
         bool UseFallbackPresentation) noexcept
     {
-        if (!IsGameThreadCall() ||
+        if (!IsArenaRuntimeSupported() || !IsGameThreadCall() ||
             !GSession.Active ||
             GSession.Ending ||
             GSession.Corrupted ||
