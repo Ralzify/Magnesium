@@ -7,6 +7,8 @@
 #include "../Public/BuildingSMActor.h"
 #include "../Public/FortKismetLibrary.h"
 #include "../../Erbium/Public/Calendar.h"
+#include "../../Erbium/Public/ArenaTelemetry.h"
+#include "../../Erbium/Private/ArenaTelemetryPolicy.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../Public/FortLootPackage.h"
 #include "../../Erbium/Public/Events.h"
@@ -5380,6 +5382,8 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
 
     auto GameMode = (AFortGameMode*)UWorld::GetWorld()->AuthorityGameMode;
     auto GameState = (AFortGameStateAthena*)GameMode->GameState;
+    const bool bCanonicalArenaMatch =
+        ArenaTelemetry::IsCanonicalArenaMatch(GameMode, GameState);
 
     if (wcsstr(FConfiguration::Playlist, L"/Game/Gav/Levels/GM_1v1/Playlist_Arena_DefaultSolo_Respawn.Playlist_Arena_DefaultSolo_Respawn") && VersionInfo.FortniteVersion == 27.11)
     {
@@ -6074,7 +6078,7 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
                 GLegacyAircraftSkydivingObserved.erase(PlayerController);
             }
 
-            if (GUI::IsArenaPlaylist() && FConfiguration::RandomizeArenaPoints &&
+            if (bCanonicalArenaMatch && FConfiguration::RandomizeArenaPoints &&
                 !FConfiguration::bForceRespawns)
             {
                 std::random_device rd;
@@ -6083,11 +6087,14 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
                 std::uniform_int_distribution<int> RandomAmount(6732, 14684);
 
                 int AlivePlayers = GameMode->AlivePlayers.Num();
+                const int Points = RandomAmount(rng);
 
-                PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
+                ArenaTelemetry::NotifyTournamentPlacementVisual(PlayerController, AlivePlayers, Points);
+                ArenaTelemetry::RecordPointsAdjustment(GameMode, PlayerController, Points);
             }
 
-            if (GUI::IsTournamentPlaylist() && FConfiguration::RandomizeArenaPoints &&
+            if (!bCanonicalArenaMatch && GUI::IsTournamentPlaylist() &&
+                FConfiguration::RandomizeArenaPoints &&
                 !FConfiguration::bForceRespawns)
             {
                 std::random_device rd;
@@ -6096,8 +6103,10 @@ void AFortPlayerControllerAthena::ServerAcknowledgePossession(UObject* Context, 
                 std::uniform_int_distribution<int> RandomAmount(30, 120);
 
                 int AlivePlayers = GameMode->AlivePlayers.Num();
+                const int TournamentPoints = RandomAmount(rng);
 
-                PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, RandomAmount(rng));
+                ArenaTelemetry::NotifyTournamentPlacementVisual(
+                    PlayerController, AlivePlayers, TournamentPoints);
             }
 
             if (FConfiguration::RandomizeKills)
@@ -6504,6 +6513,11 @@ void AFortPlayerControllerAthena::ServerAttemptAircraftJump_(UObject* Context, F
     }
 
     ApplyAutoGodModeOnAircraftJump(PlayerController);
+    if (ArenaTelemetry::IsCanonicalArenaMatch(GameMode, GameState))
+    {
+        ArenaTelemetry::OnMatchStarted(GameMode, GameState);
+    }
+    ArenaTelemetry::NotifyArenaBusFareVisual(GameMode, PlayerController);
 }
 
 static bool IsCreativePhoneDefinition(const UFortItemDefinition* ItemDefinition)
@@ -13056,6 +13070,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
     if (!GameMode || !GameState || !PlayerState)
         return ClientOnPawnDiedOG(PlayerController, DeathReport);
     const ULONGLONG DeathPipelineStartMs = GetTickCount64();
+    const bool bCanonicalArenaMatch =
+        ArenaTelemetry::IsCanonicalArenaMatch(GameMode, GameState);
+    const bool bUseArenaFallbackPresentation = bCanonicalArenaMatch &&
+        FFortAthenaTournamentStatsCompatibility::ShouldUseFallbackPresentation(GameState);
 
     const bool bSpawnedCommandBotVictim = IsTrackedSpawnedBotController(PlayerController);
     auto ManagedBotEliminatedPawn = (AFortPlayerPawnAthena*)PlayerController->Pawn;
@@ -13072,6 +13090,20 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
                 bVictimWasAliveParticipant = true;
                 break;
             }
+        }
+    }
+
+    const int ArenaPlayersBeforeDeath = GameMode->HasAlivePlayers()
+        ? GameMode->AlivePlayers.Num() : 0;
+    uint64 ArenaVictimLifeId = 0;
+    if (IsUsableDeathObject(ManagedBotEliminatedPawn))
+    {
+        TWeakObjectPtr<AFortPlayerPawnAthena> WeakVictimLife(ManagedBotEliminatedPawn);
+        if (WeakVictimLife.Get() == ManagedBotEliminatedPawn &&
+            WeakVictimLife.ObjectIndex >= 0 && WeakVictimLife.ObjectSerialNumber != 0)
+        {
+            ArenaVictimLifeId = ((uint64)(uint32)WeakVictimLife.ObjectIndex << 32) |
+                (uint32)WeakVictimLife.ObjectSerialNumber;
         }
     }
 
@@ -13439,13 +13471,6 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
                         KillerPlayerState, PlayerController, PlayerState, (AFortPlayerPawnAthena*)
                             PlayerController->Pawn);
             }
-
-        if (IsUsableDeathObject(KillerPlayerState) &&
-            (GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist()) &&
-            VersionInfo.FortniteVersion < 17.30) // crashes on 17.30, 18.40, 20.40, test other versions
-        {
-            KillerPlayerState->ClientReportTournamentStatUpdate();
-        }
 
         if (!bRespawnAllowed && !IsPawnDBNOForSpectating(PlayerController->Pawn) &&
             PlayerState->HasPlace())
@@ -13973,48 +13998,8 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
             }
         }
 
-        if (GUI::IsArenaPlaylist())
-        {
-            int PlayerCount = GameMode->AlivePlayers.Num();
-            auto AwardRequirement = PlayerCount == 50 || PlayerCount == 35 || PlayerCount == 30 ||
-                PlayerCount == 25 || PlayerCount == 20 || PlayerCount == 15 || PlayerCount == 10 ||
-                PlayerCount == 5 || PlayerCount == 3 || PlayerCount == 2 || PlayerCount == 1;
-
-            int Points = 10;
-
-            if (PlayerCount == 50)
-                Points = 10;
-            else if (PlayerCount == 35)
-                Points = 10;
-            else if (PlayerCount == 30)
-                Points = 10;
-            else if (PlayerCount == 25)
-                Points = 15;
-            else if (PlayerCount == 20)
-                Points = 10;
-            else if (PlayerCount == 15)
-                Points = 10;
-            else if (PlayerCount == 10)
-                Points = 15;
-            else if (PlayerCount == 5)
-                Points = 15;
-            else if (PlayerCount == 3)
-                Points = 10;
-            else if (PlayerCount == 2)
-                Points = 25;
-            else if (PlayerCount == 1)
-                Points = 50;
-
-            for (auto& Player : GameMode->AlivePlayers)
-            {
-                auto Controller = (AFortPlayerControllerAthena*)Player;
-
-                if (AwardRequirement && !Controller->IsInRespawnCountdown())
-                    Controller->ClientReportTournamentPlacementPointsScored(PlayerCount, Points);
-            }
-        }
-
-        if (GUI::IsTournamentPlaylist())
+        if (!ArenaTelemetry::IsCanonicalArenaMatch(GameMode, GameState) &&
+            GUI::IsTournamentPlaylist())
         {
             int PlayerCount = GameMode->AlivePlayers.Num();
             auto AwardRequirement = PlayerCount == 50 || PlayerCount == 35 || PlayerCount == 30 ||
@@ -14061,7 +14046,10 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
                 auto Controller = (AFortPlayerControllerAthena*)Player;
 
                 if (AwardRequirement && !Controller->IsInRespawnCountdown())
-                    Controller->ClientReportTournamentPlacementPointsScored(PlayerCount, Points);
+                {
+                    ArenaTelemetry::NotifyTournamentPlacementVisual(
+                        Controller, PlayerCount, Points);
+                }
             }
         }
     }
@@ -14156,9 +14144,24 @@ void AFortPlayerControllerAthena::ClientOnPawnDied(AFortPlayerControllerAthena* 
 
     if (KillerPlayerState && KillerPlayerState != PlayerState)
     {
+        ArenaTelemetry::RecordCreditedElimination(GameMode, KillerPlayerState, PlayerState,
+            ArenaVictimLifeId, bMatchWasLiveAtDeath, bVictimWasAliveParticipant);
+        const bool bUseStandaloneTournamentPresentation =
+            !bCanonicalArenaMatch && GUI::IsTournamentPlaylist();
+        if (ArenaTelemetryPolicy::ShouldDispatchDeathPipelineEliminationVisual(
+                bCanonicalArenaMatch, bUseStandaloneTournamentPresentation))
+        {
+            ArenaTelemetry::NotifyTournamentEliminationVisual(KillerPlayerController,
+                KillerPlayerState, GameMode->HasAlivePlayers() ? GameMode->AlivePlayers.Num() : 0);
+        }
+
         FFortAthenaScoreRoyaleCompatibility::HandleElimination(KillerPlayerState, PlayerState,
                 ScoreRoyaleKillerScoreBefore);
     }
+
+    ArenaTelemetry::RecordPlacementMilestone(GameMode, GameState, ArenaPlayersBeforeDeath,
+        bMatchWasLiveAtDeath && bVictimWasAliveParticipant && !bRespawnAllowed,
+        bUseArenaFallbackPresentation);
 
     // A solo host can eliminate themselves with nobody left to win, and legacy builds then leave MatchState in progress forever.
     const bool bNoAlivePlayers = IsUsableDeathObject(GameMode) && GameMode->HasAlivePlayers() &&
@@ -20633,12 +20636,20 @@ cheat shortcmds <items/objects> - Lists all short names for cheat give/spawn
                     catch (...) {}
                 }
 
-                if (GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist())
+                const bool bCanonicalArenaMatch =
+                    ArenaTelemetry::IsCanonicalArenaMatch(GameMode, GameState);
+                if (bCanonicalArenaMatch || GUI::IsTournamentPlaylist())
                 {
-                    PlayerController->ClientReportTournamentPlacementPointsScored(AlivePlayers, Points);
+                    ArenaTelemetry::NotifyTournamentPlacementVisual(
+                        PlayerController, AlivePlayers, Points);
+                    if (bCanonicalArenaMatch)
+                    {
+                        ArenaTelemetry::RecordPointsAdjustment(
+                            GameMode, PlayerController, Points);
+                    }
 
                     std::wstring PointsStr = std::to_wstring(Points) + L"!";
-                    FString Message = FString((L"Set your arena points to " + PointsStr + L"\n").c_str());
+                    FString Message = FString((L"Adjusted your arena points by " + PointsStr + L"\n").c_str());
                     PlayerController->ClientMessage(Message, FName(), 1.f);
                     PlayerController->ClientMessage(
                         FString(L"Use a negative number to take away points!"), FName(), 1.f);

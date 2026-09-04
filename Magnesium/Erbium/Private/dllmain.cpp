@@ -245,8 +245,29 @@ namespace
     }
 }
 
+static bool PinMagnesiumModule()
+{
+    HMODULE Module = nullptr;
+    return GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&PinMagnesiumModule),
+        &Module) != FALSE;
+}
+
 void Main()
 {
+    // Live hooks, detached GUI work, and process-lifetime hook state cannot
+    // be safely torn down by a mid-session FreeLibrary. Pin before any SDK,
+    // hook, GUI, or worker initialization so every callback target remains
+    // mapped until process exit.
+    if (!PinMagnesiumModule())
+    {
+        OutputDebugStringW(
+            L"Magnesium: Could not pin the module; initialization was stopped.\n");
+        return;
+    }
+
     if constexpr (!FConfiguration::bGUI)
         AllocConsole();
 
@@ -603,12 +624,29 @@ void Main()
     }
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved)
+static DWORD WINAPI MainBootstrap(LPVOID)
+{
+    Main();
+    return 0;
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule,
+    DWORD  ul_reason_for_call,
+    LPVOID lpReserved
+)
 {
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH:
-        std::thread(Main).detach();
+    {
+        DisableThreadLibraryCalls(hModule);
+        HANDLE Bootstrap = CreateThread(
+            nullptr, 0, &MainBootstrap, nullptr, 0, nullptr);
+        if (!Bootstrap)
+            return FALSE;
+        CloseHandle(Bootstrap);
+        break;
+    }
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
     case DLL_PROCESS_DETACH:

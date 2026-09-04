@@ -8,6 +8,8 @@
 #include "../Public/LevelStreamingDynamic.h"
 #include "../../Engine/Public/NetDriver.h"
 #include "../../Erbium/Public/Configuration.h"
+#include "../../Erbium/Public/ArenaTelemetry.h"
+#include "../../Erbium/Private/ArenaTelemetryPolicy.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -15285,6 +15287,338 @@ void AFortAthenaMutator_GiveItemsAtGamePhase::PostLoadHook()
         return;
 
     Utils::ExecHook(PhaseFunction, OnGamePhaseChanged, OnGamePhaseChangedOG);
+}
+
+namespace
+{
+    struct FTournamentStatsCompatibilityState
+    {
+        UWorld* World = nullptr;
+        AFortGameStateAthena* GameState = nullptr;
+        const UFortPlaylistAthena* Playlist = nullptr;
+        UFortGameplayModifierItemDefinition* Modifier = nullptr;
+        double NextAttemptTime = 0.0;
+        int32 LoadAttempts = 0;
+        ArenaTelemetryPolicy::FTournamentModifierActivationState
+            Activation{};
+        bool bLoggedUnavailable = false;
+        bool bLoggedLookupUnavailable = false;
+        bool bLoggedRegistrationUnavailable = false;
+        bool bLoggedNativeConfirmed = false;
+    };
+
+    FTournamentStatsCompatibilityState
+        GTournamentStatsCompatibilityState;
+
+    bool ContainsTournamentStats(const std::wstring& Value)
+    {
+        std::wstring Lower = Value;
+        std::transform(
+            Lower.begin(), Lower.end(), Lower.begin(),
+            [](wchar_t Character)
+            {
+                return static_cast<wchar_t>(
+                    std::towlower(Character));
+            });
+        return Lower.find(L"tournamentstats") !=
+            std::wstring::npos;
+    }
+
+    UFortGameplayModifierItemDefinition*
+        TryLoadTournamentStatsModifier(const wchar_t* Path)
+    {
+        if (!Path || !*Path)
+            return nullptr;
+
+        auto Modifier = const_cast<
+            UFortGameplayModifierItemDefinition*>(
+                FindObject<UFortGameplayModifierItemDefinition>(Path));
+        if (!Modifier && SDK::Offsets::StaticLoadObject)
+        {
+            __try
+            {
+                Modifier = static_cast<
+                    UFortGameplayModifierItemDefinition*>(
+                        const_cast<UObject*>(
+                            SDK::StaticLoadObject(
+                                Path,
+                                UFortGameplayModifierItemDefinition::
+                                    StaticClass())));
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                Modifier = nullptr;
+            }
+        }
+        return IsLiveObject(Modifier) ? Modifier : nullptr;
+    }
+
+    UFortGameplayModifierItemDefinition*
+        ResolveTournamentStatsModifier(
+            const UFortPlaylistAthena* Playlist)
+    {
+        if (!IsLiveObject(Playlist))
+            return nullptr;
+
+        if (Playlist->HasModifierList())
+        {
+            auto& Modifiers =
+                const_cast<UFortPlaylistAthena*>(Playlist)
+                    ->ModifierList;
+            if (IsSaneArray(Modifiers.Num(), Modifiers.Max(), 64) &&
+                IsReadableArrayStorage(
+                    Modifiers.Data,
+                    Modifiers.Num(),
+                    FSoftObjectPtr::Size()))
+            {
+                for (int32 Index = 0;
+                     Index < Modifiers.Num(); ++Index)
+                {
+                    auto& Reference = Modifiers.Get(
+                        Index, FSoftObjectPtr::Size());
+                    auto Modifier = const_cast<
+                        UFortGameplayModifierItemDefinition*>(
+                            Reference.Get());
+                    std::wstring Path;
+                    if (Reference.ObjectID.AssetPathName.IsValid())
+                    {
+                        const auto AllocatedPath =
+                            Reference.ObjectID.AssetPathName.ToWString();
+                        Path.assign(AllocatedPath.c_str());
+                    }
+                    std::wstring ModifierName;
+                    if (IsLiveObject(Modifier))
+                    {
+                        const auto AllocatedName =
+                            Modifier->Name.ToWString();
+                        ModifierName.assign(AllocatedName.c_str());
+                    }
+                    const bool bTournamentStats =
+                        ContainsTournamentStats(ModifierName) ||
+                        ContainsTournamentStats(Path);
+                    if (!bTournamentStats)
+                        continue;
+
+                    if (!IsLiveObject(Modifier) && !Path.empty())
+                    {
+                        Modifier = TryLoadTournamentStatsModifier(
+                            Path.c_str());
+                    }
+                    if (IsLiveObject(Modifier))
+                    {
+                        Modifier->AddToRoot();
+                        return Modifier;
+                    }
+                }
+            }
+        }
+
+        // Some stripped server registries retain the primary-asset name but
+        // lose its NameData entry. These are Epic virtual package paths, not
+        // host filesystem paths; probing them is safe and fails closed.
+        static constexpr const wchar_t* Paths[] = {
+            L"/Game/Athena/Items/Gameplay/DefaultModifiers/"
+                L"TournamentStats_Default.TournamentStats_Default",
+            L"/Game/Athena/Items/Gameplay/GameplayModifiers/"
+                L"TournamentStats_Default.TournamentStats_Default",
+            L"/Game/Athena/Items/Gameplay/GameplayModifier/"
+                L"TournamentStats_Default.TournamentStats_Default",
+            L"/Game/Athena/Items/Gameplay/"
+                L"TournamentStats_Default.TournamentStats_Default"
+        };
+        for (const auto Path : Paths)
+        {
+            if (auto Modifier =
+                    TryLoadTournamentStatsModifier(Path))
+            {
+                Modifier->AddToRoot();
+                return Modifier;
+            }
+        }
+        return nullptr;
+    }
+}
+
+bool FFortAthenaTournamentStatsCompatibility::IsSupportedBuild()
+{
+    const int VersionHundredths =
+        ArenaTelemetryPolicy::FortniteVersionHundredths(
+            VersionInfo.FortniteVersion);
+    return VersionHundredths >= 820 && VersionHundredths < 3100;
+}
+
+bool FFortAthenaTournamentStatsCompatibility::IsArenaPlaylist(
+    const UFortPlaylistAthena* Playlist)
+{
+    if (!IsSupportedBuild() || !IsLiveObject(Playlist))
+        return false;
+    const auto Name = Playlist->Name.ToString();
+    return ArenaTelemetry::ResolveCanonicalArenaPlaylist(
+        Name.c_str(), VersionInfo.FortniteVersion, nullptr);
+}
+
+void FFortAthenaTournamentStatsCompatibility::PreparePlaylist(
+    AFortGameStateAthena* GameState,
+    const UFortPlaylistAthena* Playlist)
+{
+    UWorld* World = UWorld::GetWorld();
+    if (!World || !IsLiveObject(GameState) ||
+        !IsArenaPlaylist(Playlist))
+    {
+        return;
+    }
+
+    auto& State = GTournamentStatsCompatibilityState;
+    if (State.World != World || State.GameState != GameState ||
+        State.Playlist != Playlist)
+    {
+        State = {};
+        State.World = World;
+        State.GameState = GameState;
+        State.Playlist = Playlist;
+    }
+
+    if (!IsLiveObject(State.Modifier))
+    {
+        if (State.LoadAttempts >= 3)
+            return;
+        ++State.LoadAttempts;
+        State.Modifier = ResolveTournamentStatsModifier(Playlist);
+        if (!State.Modifier)
+        {
+            // Resolving the authored modifier is part of the same bounded
+            // pre-ProcessEvent acquisition path as registration. A stripped
+            // build can reject every virtual package probe before there is a
+            // UObject to register; feed that definite failure into the
+            // existing ownership state so the third attempt enables the
+            // reflected presentation owner. No native ProcessEvent has begun
+            // here, so this cannot overlap an ambiguous/native delivery.
+            ArenaTelemetryPolicy::
+                CompleteTournamentModifierRegistrationDispatch(
+                    false, &State.Activation);
+            if (State.LoadAttempts >= 3 && !State.bLoggedUnavailable)
+            {
+                State.bLoggedUnavailable = true;
+                SDK::DbgLog(
+                    "[TournamentStats] authored gameplay modifier "
+                    "was not loadable for playlist=%s after bounded "
+                    "pre-dispatch attempts; reflected Arena "
+                    "presentation fallback now owns this match\n",
+                    Playlist->Name.ToString().c_str());
+            }
+            return;
+        }
+        SDK::DbgLog(
+            "[TournamentStats] resolved authored modifier=%s\n",
+            State.Modifier->Name.ToString().c_str());
+    }
+
+    const auto Lookup = FindActiveGameplayModifier(
+        GameState, State.Modifier);
+    const auto Presence =
+        Lookup == EActiveGameplayModifierLookup::Found
+            ? ArenaTelemetryPolicy::ETournamentModifierPresence::Found
+            : (Lookup == EActiveGameplayModifierLookup::Missing
+                ? ArenaTelemetryPolicy::ETournamentModifierPresence::Missing
+                : ArenaTelemetryPolicy::ETournamentModifierPresence::
+                    Unavailable);
+    const bool bWasNativeConfirmed =
+        State.Activation.NativePresentationConfirmed;
+
+    const auto Action =
+        ArenaTelemetryPolicy::ObserveTournamentModifier(
+            Presence, &State.Activation);
+
+    if (State.Activation.NativePresentationConfirmed)
+    {
+        if (!bWasNativeConfirmed && !State.bLoggedNativeConfirmed)
+        {
+            State.bLoggedNativeConfirmed = true;
+            SDK::DbgLog(
+                "[TournamentStats] native presentation owner confirmed "
+                "modifier=%s\n",
+                State.Modifier->Name.ToString().c_str());
+        }
+        return;
+    }
+    if (Presence ==
+            ArenaTelemetryPolicy::ETournamentModifierPresence::Unavailable)
+    {
+        if (!State.bLoggedLookupUnavailable)
+        {
+            State.bLoggedLookupUnavailable = true;
+            SDK::DbgLog(
+                "[TournamentStats] active modifier lookup unavailable; "
+                "presentation remains fail-closed to avoid duplicate "
+                "registration\n");
+        }
+        return;
+    }
+    if (Action != ArenaTelemetryPolicy::
+            ETournamentModifierAction::RequestRegistration)
+    {
+        return;
+    }
+
+    const bool bInvoked = InvokeRegisterGameplayModifier(
+        GameState, State.Modifier);
+    ArenaTelemetryPolicy::
+        CompleteTournamentModifierRegistrationDispatch(
+            bInvoked, &State.Activation);
+    SDK::DbgLog(
+        "[TournamentStats] authored modifier registration dispatch "
+        "invoked=%d failed_pre_dispatch=%u\n",
+        bInvoked ? 1 : 0,
+        static_cast<unsigned>(
+            State.Activation.FailedRegistrationDispatches));
+    if (State.Activation.RegistrationUnavailable &&
+        !State.bLoggedRegistrationUnavailable)
+    {
+        State.bLoggedRegistrationUnavailable = true;
+        SDK::DbgLog(
+            "[TournamentStats] registration was rejected before "
+            "ProcessEvent on every bounded attempt; reflected Arena "
+            "presentation fallback now owns this match\n");
+    }
+}
+
+bool FFortAthenaTournamentStatsCompatibility::
+    ShouldUseFallbackPresentation(
+        AFortGameStateAthena* GameState)
+{
+    auto& State = GTournamentStatsCompatibilityState;
+    if (!IsLiveObject(GameState) || State.GameState != GameState ||
+        State.World != UWorld::GetWorld())
+    {
+        return false;
+    }
+    const auto ActivePlaylist =
+        AFortGameMode::GetActivePlaylist(GameState);
+    return ActivePlaylist && State.Playlist == ActivePlaylist &&
+        ArenaTelemetryPolicy::ShouldUseSyntheticTournamentPresentation(
+            State.Activation);
+}
+
+void FFortAthenaTournamentStatsCompatibility::Tick(
+    UNetDriver* Driver,
+    float DeltaSeconds)
+{
+    (void)DeltaSeconds;
+    auto& State = GTournamentStatsCompatibilityState;
+    UWorld* World = UWorld::GetWorld();
+    if (!IsSupportedBuild() || !Driver || !World ||
+        Driver != World->NetDriver || State.World != World ||
+        !IsLiveObject(State.GameState) ||
+        !IsArenaPlaylist(State.Playlist))
+    {
+        return;
+    }
+
+    const double Now = UGameplayStatics::GetTimeSeconds(World);
+    if (Now < State.NextAttemptTime)
+        return;
+    State.NextAttemptTime = Now + 1.0;
+    PreparePlaylist(State.GameState, State.Playlist);
 }
 
 namespace

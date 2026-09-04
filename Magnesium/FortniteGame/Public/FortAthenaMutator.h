@@ -512,6 +512,27 @@ public:
     DEFINE_FUNC(OnGeneratorDestroyed, void);
 };
 
+// Restores the authored tournament-stat gameplay modifier when stripped
+// dedicated-server asset discovery leaves an Arena playlist without it.
+// Registration is deliberately limited to canonical Arena playlists and is
+// idempotent against GameState's active-modifier list.
+class FFortAthenaTournamentStatsCompatibility final
+{
+public:
+    static bool IsSupportedBuild();
+    static bool IsArenaPlaylist(
+        const UFortPlaylistAthena* Playlist);
+    static void PreparePlaylist(
+        AFortGameStateAthena* GameState,
+        const UFortPlaylistAthena* Playlist);
+    // True only when every bounded registration attempt failed before
+    // ProcessEvent began. A successful/ambiguous native dispatch never permits
+    // reflected fallback presentation for the same match.
+    static bool ShouldUseFallbackPresentation(
+        AFortGameStateAthena* GameState);
+    static void Tick(UNetDriver* Driver, float DeltaSeconds);
+};
+
 class AAthenaBigBaseWall : public AActor
 {
 public:

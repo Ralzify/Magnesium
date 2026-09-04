@@ -1,10 +1,12 @@
 #include "pch.h"
 #include "../Public/NetDriver.h"
 #include "../../Erbium/Public/AutoHosting.h"
+#include "../../Erbium/Public/ArenaTelemetry.h"
 #include "../../Erbium/Public/Calendar.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Public/Finders.h"
 #include "../../Erbium/Public/GUI.h"
+#include "../../Erbium/Public/HotfixReload.h"
 #include "../../FortniteGame/Public/BattleRoyaleGamePhaseLogic.h"
 #include "../../FortniteGame/Public/CustomSafeZoneRuntime.h"
 #include "../../FortniteGame/Public/FortGameMode.h"
@@ -38,6 +40,16 @@ namespace
         int32 ObjectIndex = -1;
         int32 ObjectSerialNumber = 0;
     };
+
+    constexpr bool UsesNetworkObjectInfoWithoutWeakActor(double FortniteVersion) noexcept
+    {
+        return FortniteVersion == 1.72 || FortniteVersion == 0.00;
+    }
+
+    static_assert(UsesNetworkObjectInfoWithoutWeakActor(1.72));
+    static_assert(UsesNetworkObjectInfoWithoutWeakActor(0.00));
+    static_assert(!UsesNetworkObjectInfoWithoutWeakActor(1.70));
+    static_assert(!UsesNetworkObjectInfoWithoutWeakActor(1.80));
 
     bool CaptureLiveReplicationObject(const UObject* Object,
         FReplicationObjectSnapshot& OutSnapshot)
@@ -94,26 +106,38 @@ namespace
             return false;
         }
 
-        const int32 ObjectIndex = NetworkActorInfo->WeakActor.ObjectIndex;
-        const int32 ObjectSerialNumber = NetworkActorInfo->WeakActor.ObjectSerialNumber;
-        if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
-            return false;
-
-        auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
-        constexpr int32 InvalidObjectFlags = 0x20;
-        if (!Item || (ObjectSerialNumber != 0 && Item->SerialRef() != ObjectSerialNumber) ||
-            (Item->GetFlags() & InvalidObjectFlags) || Item->GetObject() != NetworkActorInfo->Actor)
+        AActor* Actor = nullptr;
+        if (UsesNetworkObjectInfoWithoutWeakActor(VersionInfo.FortniteVersion))
         {
-            return false;
+            Actor = NetworkActorInfo->Actor;
+            if (!CaptureLiveReplicationObject(Actor, OutSnapshot))
+                return false;
+        }
+        else
+        {
+            const int32 ObjectIndex = NetworkActorInfo->WeakActor.ObjectIndex;
+            const int32 ObjectSerialNumber = NetworkActorInfo->WeakActor.ObjectSerialNumber;
+            if (ObjectIndex < 0 || ObjectIndex >= TUObjectArray::Num())
+                return false;
+
+            auto Item = TUObjectArray::GetItemByIndex(ObjectIndex);
+            constexpr int32 InvalidObjectFlags = 0x20;
+            if (!Item || (ObjectSerialNumber != 0 && Item->SerialRef() != ObjectSerialNumber) ||
+                (Item->GetFlags() & InvalidObjectFlags) ||
+                Item->GetObject() != NetworkActorInfo->Actor)
+            {
+                return false;
+            }
+
+            Actor = const_cast<AActor*>(static_cast<const AActor*>(Item->GetObject()));
+            OutSnapshot.Object = Actor;
+            OutSnapshot.ObjectIndex = ObjectIndex;
+            OutSnapshot.ObjectSerialNumber = Item->SerialRef();
         }
 
-        auto Actor = const_cast<AActor*>(static_cast<const AActor*>(Item->GetObject()));
         if (!Actor || !Actor->Class)
             return false;
 
-        OutSnapshot.Object = Actor;
-        OutSnapshot.ObjectIndex = ObjectIndex;
-        OutSnapshot.ObjectSerialNumber = Item->SerialRef();
         OutActor = Actor;
 
         const UObject* Outer = Actor->Outer;
@@ -1450,6 +1474,11 @@ namespace
             const bool bPreserveAutoHostEnd = (State.bEndLatched || bExplicitEndPending) &&
                 FConfiguration::bAutoHost.load(std::memory_order_acquire);
 
+            if (bHadGeneration && bPreviousGenerationActive && !State.bEndLatched)
+            {
+                ArenaTelemetry::OnMatchEnded(State.GameMode, State.GameState);
+            }
+
             State = {};
             State.World = World;
             State.GameMode = GameMode;
@@ -1463,6 +1492,8 @@ namespace
                     "[MatchLifecycle] New world/match generation detected; lifecycle reset\n");
             }
         }
+
+        ArenaTelemetry::Tick();
 
         static const FName WaitingPostMatchState(L"WaitingPostMatch");
         static const FName WaitingToStartState(L"WaitingToStart");
@@ -1598,11 +1629,16 @@ namespace
             }
         }
 
+        const bool bWasObservedLiveMatch = State.bObservedLiveMatch;
         const EGSStatus CurrentStatus = GUI::gsStatus.load(std::memory_order_acquire);
         if (CurrentStatus == StartedMatch || CurrentStatus == Ended || bMatchStateInProgress ||
             bPhaseLive)
         {
             State.bObservedLiveMatch = true;
+        }
+        if (!bWasObservedLiveMatch && State.bObservedLiveMatch)
+        {
+            ArenaTelemetry::OnMatchStarted(GameMode, GameState);
         }
 
         if (bNativeTerminal)
@@ -1615,6 +1651,7 @@ namespace
             State.bEndLatched = true;
             GUI::gsStatus.store(Ended, std::memory_order_release);
 
+            ArenaTelemetry::OnMatchEnded(GameMode, GameState);
             AutoHosting::OnAuthoritativeMatchEnded();
 
             const char* Source = bExplicitEnd ? "explicit winner path" : (bWaitingPostMatch
@@ -1635,6 +1672,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
         return;
     }
 
+    HotfixReload::Tick(ActiveWorld, Driver);
     GUI::SafeZoneMapGameTick();
     GUI::PlayerNamesGameTick();
     if (auto World = UWorld::GetWorld();
@@ -1654,6 +1692,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
     FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
     FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
     FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
+    FFortAthenaTournamentStatsCompatibility::Tick(Driver, DeltaSeconds);
     if (!CustomSafeZoneRuntime::IsMatchRestartPreflightPending(Driver ? Driver->World : nullptr))
     {
         SyncErbiumSafeZonePause(Driver);
@@ -1774,6 +1813,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
         return;
     }
 
+    HotfixReload::Tick(ActiveWorld, Driver);
     GUI::SafeZoneMapGameTick();
     GUI::PlayerNamesGameTick();
     if (auto World = UWorld::GetWorld();
@@ -1793,6 +1833,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
     FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
     FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
     FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
+    FFortAthenaTournamentStatsCompatibility::Tick(Driver, DeltaSeconds);
     if (!CustomSafeZoneRuntime::IsMatchRestartPreflightPending(Driver ? Driver->World : nullptr))
     {
         SyncErbiumSafeZonePause(Driver);
@@ -1955,6 +1996,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
         return;
     }
 
+    HotfixReload::Tick(ActiveWorld, Driver);
     GUI::SafeZoneMapGameTick();
     GUI::PlayerNamesGameTick();
     if (auto World = UWorld::GetWorld();
@@ -1974,6 +2016,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
     FFortAthenaHeistCompatibility::Tick(Driver, DeltaSeconds);
     FFortAthenaNativeLTMCompatibility::Tick(Driver, DeltaSeconds);
     FFortAthenaScoreRoyaleCompatibility::Tick(Driver, DeltaSeconds);
+    FFortAthenaTournamentStatsCompatibility::Tick(Driver, DeltaSeconds);
     if (!CustomSafeZoneRuntime::IsMatchRestartPreflightPending(Driver ? Driver->World : nullptr))
     {
         SyncErbiumSafeZonePause(Driver);

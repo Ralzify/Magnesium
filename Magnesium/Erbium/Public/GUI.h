@@ -85,6 +85,10 @@ public:
             Selected == static_cast<int>(Playlist::ArenaDuos) ||
             Selected == static_cast<int>(Playlist::ArenaTrios) ||
             Selected == static_cast<int>(Playlist::ArenaSquads) ||
+            Selected == static_cast<int>(Playlist::ArenaZBSolos) ||
+            Selected == static_cast<int>(Playlist::ArenaZBDuos) ||
+            Selected == static_cast<int>(Playlist::ArenaZBTrios) ||
+            Selected == static_cast<int>(Playlist::ArenaZBSquads) ||
             Selected == static_cast<int>(Playlist::Gav) ||
             Selected == static_cast<int>(Playlist::TiltedZW) ||
             Selected == static_cast<int>(Playlist::RetracWater);

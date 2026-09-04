@@ -11,6 +11,7 @@
 #include "../Public/FortSafeZoneIndicator.h"
 #include "../../Engine/Public/DataTableFunctionLibrary.h"
 #include "../../Erbium/Public/Calendar.h"
+#include "../../Erbium/Public/ArenaTelemetry.h"
 #include "../../Erbium/Public/Configuration.h"
 #include "../../Erbium/Support/Public/VersionFeatureAdapter.h"
 #include "../Public/FortLootPackage.h"
@@ -1695,6 +1696,8 @@ void SetupPlaylist(AFortGameMode* GameMode, AFortGameStateAthena* GameState)
 
         FFortAthenaHeistCompatibility::PreparePlaylist(GameState, Playlist);
         FFortAthenaScoreRoyaleCompatibility::PreparePlaylist(GameState, Playlist);
+        FFortAthenaTournamentStatsCompatibility::PreparePlaylist(
+            GameState, Playlist);
         if (bIsNative1040LTM)
             PublishNative1040Playlist(GameState, Playlist);
         FFortAthenaNativeLTMCompatibility::PreparePlaylist(GameState, Playlist);
@@ -7206,6 +7209,10 @@ void AFortGameMode::HandleStartingNewPlayer_(UObject* Context, FFrame& Stack)
             ApplyLateSeasonDBNOSettings(GameMode, GameState, Playlist, "post-native");
         }
     }
+
+    // Native startup and any late-season team repair are now complete, so the
+    // Arena reporter snapshots the final authoritative identity/team values.
+    ArenaTelemetry::RegisterPlayer(NewPlayer);
 
     return;
 }

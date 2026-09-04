@@ -364,3 +364,8 @@ MigrationBackup/
 FodyWeavers.xsd
 
 .idea
+/.verification/
+/Magnesium/.verification/
+/$out/
+*Tests.exe
+*Tests.obj

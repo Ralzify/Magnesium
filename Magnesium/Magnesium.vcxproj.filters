@@ -180,6 +180,27 @@
     <ClInclude Include="Erbium\Public\GUI.h">
       <Filter>Magnesium\Public</Filter>
     </ClInclude>
+    <ClInclude Include="Erbium\Public\ArenaTelemetry.h">
+      <Filter>Magnesium\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\Private\ArenaTelemetryWire.h">
+      <Filter>Magnesium\Private</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\Private\ArenaTelemetryPolicy.h">
+      <Filter>Magnesium\Private</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\Public\AssetHotfixRollback.h">
+      <Filter>Magnesium\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\Public\AssetHotfixBaselineSampler.h">
+      <Filter>Magnesium\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\Public\AssetHotfixRevisionPlanner.h">
+      <Filter>Magnesium\Public</Filter>
+    </ClInclude>
+    <ClInclude Include="Erbium\Public\HotfixReload.h">
+      <Filter>Magnesium\Public</Filter>
+    </ClInclude>
     <ClInclude Include="Erbium\Public\PlayerLoadout.h">
       <Filter>Magnesium\Public</Filter>
     </ClInclude>
@@ -293,6 +314,18 @@
     <ClCompile Include="Erbium\Private\dllmain.cpp">
       <Filter>Magnesium\Private</Filter>
     </ClCompile>
+    <ClCompile Include="Erbium\Private\ArenaTelemetry.cpp">
+      <Filter>Magnesium\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\Private\AssetHotfixRollback.cpp">
+      <Filter>Magnesium\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\Private\AssetHotfixBaselineSampler.cpp">
+      <Filter>Magnesium\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\Private\AssetHotfixRevisionPlanner.cpp">
+      <Filter>Magnesium\Private</Filter>
+    </ClCompile>
     <ClCompile Include="Erbium\Private\Misc.cpp">
       <Filter>Magnesium\Private</Filter>
     </ClCompile>
@@ -354,6 +387,9 @@
       <Filter>Magnesium\Private</Filter>
     </ClCompile>
     <ClCompile Include="Erbium\Private\GUI.cpp">
+      <Filter>Magnesium\Private</Filter>
+    </ClCompile>
+    <ClCompile Include="Erbium\Private\HotfixReload.cpp">
       <Filter>Magnesium\Private</Filter>
     </ClCompile>
     <ClCompile Include="Erbium\Private\PlayerLoadout.cpp">
