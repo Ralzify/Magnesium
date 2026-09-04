@@ -66,23 +66,19 @@ namespace
     {
         const UClass* (*MatchClass)();
         const char* ClassNameFragment;
-        // 0 applies to every build; anything else is behaviour a specific season introduced.
         double MinFortniteVersion;
         double ForwardScale;
         double VerticalScale;
         double MaxSpeed;
     };
 
-    // Ordered: first match wins.
     constexpr FBumpLaunchProfile BumpLaunchProfiles[] =
     {
-        // Baller from 27.00: roughly 300 m up and 800 m out, back-solved to v_z ~7670 and v_xy ~5110.
         { MatchOctopusVehicle, "octopus", 27.00, 2.56, 3.83, 9200.0 },
-        { nullptr,             "baller",  27.00, 2.56, 3.83, 9200.0 },
+        { nullptr, "baller", 27.00, 2.56, 3.83, 9200.0 },
 
-        // "Saucer" is Fortnite's internal name for the UFO. Solved against a top speed of roughly 1500 uu/s.
         { nullptr, "saucer", 0.0, 0.45, 4.20, 9000.0 },
-        { nullptr, "ufo",    0.0, 0.45, 4.20, 9000.0 },
+        { nullptr, "ufo", 0.0, 0.45, 4.20, 9000.0 },
 
         { nullptr, nullptr, 0.0, 0.25, 0.65, 3200.0 },
     };
@@ -139,7 +135,6 @@ namespace
     constexpr double BumpDefaultMinSpeedDamage = 15.0;
     constexpr double BumpDefaultMaxSpeedDamage = 90.0;
 
-    // Half-extents in the travel frame. A Fortnite car is roughly 550x250 and a pawn capsule adds about 42.
     constexpr double BumpHullFront = 320.0;
     constexpr double BumpHullRear = 130.0;
     constexpr double BumpHullSide = 165.0;
@@ -155,7 +150,6 @@ namespace
 
     constexpr ULONGLONG BumpDriverMoveGraceMs = 400;
 
-    // Samples closer together than this make the derived velocity mostly quantization noise.
     constexpr ULONGLONG BumpMinSampleIntervalMs = 60;
 
     constexpr ULONGLONG BumpMaxSampleIntervalMs = 500;
@@ -444,7 +438,6 @@ namespace
         if (GetRiddenVehicle(Pawn))
             return true;
 
-        // Use the vehicle's own FindSeatIndex: PlayerSlots storage differs across Chapter 5 vehicle subclasses.
         UFunction* FindSeatIndexFunction = Vehicle->GetFunction("FindSeatIndex");
 
         if (FindSeatIndexFunction && FindSeatIndexFunction->GetParamsNamed().Size == 0x10)
@@ -935,19 +928,6 @@ void AFortPhysicsPawn::ServerMove(UObject* Context, FFrame& Stack)
     FortVehicleBump::OnVehicleMoved(Pawn, Translation, LinearVelocity);
 }
 
-void AFortOctopusVehicle::ServerUpdateTowhook(UObject* Context, FFrame& Stack)
-{
-    FVector InNetTowhookAimDir;
-
-    Stack.StepCompiledIn(&InNetTowhookAimDir);
-    Stack.IncrementCode();
-    auto Vehicle = (AFortOctopusVehicle*)Context;
-
-    printf("ServerUpdateTowhook\n");
-    Vehicle->NetTowhookAimDir = InNetTowhookAimDir;
-    Vehicle->OnRep_NetTowhookAimDir();
-}
-
 void AFortSpaghettiVehicle::ServerUpdateTowhook(UObject* Context, FFrame& Stack)
 {
     FVector InNetTowhookAimDir;
@@ -978,6 +958,7 @@ public:
     USCRIPTSTRUCT_COMMON_MEMBERS(FAttachedInfo);
 
     DEFINE_STRUCT_PROP(Hit, FHitResult);
+    DEFINE_STRUCT_NEWOBJ_PROP(AttachedToActor, AActor);
 };
 
 class AFortOctopusTowhookAttachableProjectile : public AActor
@@ -991,43 +972,228 @@ public:
     DEFINE_FUNC(Kill, void);
 };
 
+static bool IsFiniteTowhookVector(const FVector& Value)
+{
+    return std::isfinite((double)Value.X) && std::isfinite((double)Value.Y) &&
+        std::isfinite((double)Value.Z);
+}
+
+struct FTowhookAttachment
+{
+    TWeakObjectPtr<AFortOctopusVehicle> Vehicle;
+    TWeakObjectPtr<AActor> Projectile;
+    TWeakObjectPtr<UActorComponent> Component;
+};
+
+static std::vector<FTowhookAttachment> GTowhookAttachments;
+
+static bool IsTowhookAttached(AFortOctopusVehicle* Vehicle)
+{
+    return FNetTowhookAttachState::HasComponent() && Vehicle->HasReplicatedAttachState() &&
+        Vehicle->ReplicatedAttachState.Component != nullptr;
+}
+
+static void WriteTowhookAttachState(AFortOctopusVehicle* Vehicle, UActorComponent* Component,
+    FVector LocalLocation, FVector LocalNormal)
+{
+    auto Write = [&](FNetTowhookAttachState& State)
+        {
+            if (FNetTowhookAttachState::HasComponent())
+                State.Component = Component;
+            if (FNetTowhookAttachState::HasLocalLocation())
+                State.LocalLocation = LocalLocation;
+            if (FNetTowhookAttachState::HasLocalNormal())
+                State.LocalNormal = LocalNormal;
+        };
+
+    if (Vehicle->HasReplicatedAttachState())
+        Write(Vehicle->ReplicatedAttachState);
+
+    Vehicle->OnRep_ReplicatedAttachState();
+
+    if (Vehicle->HasLocalAttachState())
+        Write(Vehicle->LocalAttachState);
+
+    Vehicle->ForceNetUpdate();
+}
+
+static void ClearTowhookAttachState(AFortOctopusVehicle* Vehicle)
+{
+    const bool bWasAttached = IsTowhookAttached(Vehicle);
+
+    WriteTowhookAttachState(Vehicle, nullptr, FVector(), FVector());
+
+    auto* BreakTowhookFunction = Vehicle->GetFunction("BreakTowhook");
+    if (bWasAttached && BreakTowhookFunction && BreakTowhookFunction->GetParamsNamed().Size == 0)
+        Vehicle->ProcessEvent(BreakTowhookFunction, nullptr);
+}
+
+static void ReleaseTowhookAttachment(AFortOctopusVehicle* Vehicle, const AActor* Projectile,
+    bool bReleaseMatching)
+{
+    for (auto Attachment = GTowhookAttachments.begin();
+        Attachment != GTowhookAttachments.end(); )
+    {
+        auto* AttachedVehicle = Attachment->Vehicle.Get();
+        if (!IsUsablePhysicsObject(AttachedVehicle))
+        {
+            Attachment = GTowhookAttachments.erase(Attachment);
+            continue;
+        }
+
+        if (AttachedVehicle != Vehicle ||
+            (Attachment->Projectile.Get() == Projectile) != bReleaseMatching)
+        {
+            ++Attachment;
+            continue;
+        }
+
+        Attachment = GTowhookAttachments.erase(Attachment);
+        ClearTowhookAttachState(AttachedVehicle);
+    }
+}
+
+static bool ApplyTowhookHit(AFortOctopusVehicle* Vehicle,
+    AFortOctopusTowhookAttachableProjectile* Projectile)
+{
+    auto* Comp = Projectile->AttachedInfo.Hit.Component.Get();
+    if (!Comp)
+        return false;
+
+    auto ComponentToWorld = Comp->K2_GetComponentToWorld();
+    auto HitLocation = CopyVector(Projectile->AttachedInfo.Hit.Location);
+    auto HitNormal = CopyVector(Projectile->AttachedInfo.Hit.Normal);
+    auto LocalLocation = UKismetMathLibrary::InverseTransformLocation(ComponentToWorld, HitLocation);
+    auto LocalNormal = UKismetMathLibrary::InverseTransformDirection(ComponentToWorld, HitNormal);
+
+    if (!IsFiniteTowhookVector(LocalLocation) || !IsFiniteTowhookVector(LocalNormal))
+        return false;
+
+    ReleaseTowhookAttachment(Vehicle, (AActor*)Projectile, false);
+    WriteTowhookAttachState(Vehicle, Comp, LocalLocation, LocalNormal);
+
+    FTowhookAttachment Attachment{};
+    Attachment.Vehicle = TWeakObjectPtr<AFortOctopusVehicle>(Vehicle);
+    Attachment.Projectile = TWeakObjectPtr<AActor>((AActor*)Projectile);
+    Attachment.Component = TWeakObjectPtr<UActorComponent>(Comp);
+    GTowhookAttachments.push_back(Attachment);
+
+    auto Owner = Comp->GetOwner();
+    printf("[Ballers] Attached %s (%s) at %f %f %f\n", Comp->Name.ToString().c_str(),
+        Owner ? Owner->Name.ToString().c_str() : "<none>", HitLocation.X, HitLocation.Y,
+        HitLocation.Z);
+    return true;
+}
+
+void AFortOctopusVehicle::TickTowhookAttachments()
+{
+    for (auto Attachment = GTowhookAttachments.begin();
+        Attachment != GTowhookAttachments.end(); )
+    {
+        auto* Vehicle = Attachment->Vehicle.Get();
+        if (!IsUsablePhysicsObject(Vehicle))
+        {
+            Attachment = GTowhookAttachments.erase(Attachment);
+            continue;
+        }
+
+        if (!IsTowhookAttached(Vehicle))
+        {
+            Attachment = GTowhookAttachments.erase(Attachment);
+            continue;
+        }
+
+        auto* Projectile = (AFortOctopusTowhookAttachableProjectile*)Attachment->Projectile.Get();
+        if (IsUsablePhysicsObject(Projectile) &&
+            Projectile->AttachedInfo.Hit.Component.Get() == Attachment->Component.Get())
+        {
+            ++Attachment;
+            continue;
+        }
+
+        Attachment = GTowhookAttachments.erase(Attachment);
+        ClearTowhookAttachState(Vehicle);
+        printf("[Ballers] Released towhook on %s\n", Vehicle->Name.ToString().c_str());
+    }
+}
+
+void AFortOctopusVehicle::ServerUpdateTowhook(UObject* Context, FFrame& Stack)
+{
+    FVector InNetTowhookAimDir;
+
+    Stack.StepCompiledIn(&InNetTowhookAimDir);
+    Stack.IncrementCode();
+    auto Vehicle = (AFortOctopusVehicle*)Context;
+
+    printf("[Ballers] ServerUpdateTowhook aim=%f %f %f attached=%d projectile=%d\n",
+        InNetTowhookAimDir.X, InNetTowhookAimDir.Y, InNetTowhookAimDir.Z,
+        IsTowhookAttached(Vehicle),
+        Vehicle->HasTowHookProjectile() && Vehicle->TowHookProjectile != nullptr);
+
+    Vehicle->NetTowhookAimDir = InNetTowhookAimDir;
+    Vehicle->OnRep_NetTowhookAimDir();
+}
+
+static bool GNativeTowhookPublishes = false;
+
 uint64_t CanGrappleToComponent_ = 0;
 void (*OnRep_ReplicatedAttachedInfoOG)(AFortOctopusTowhookAttachableProjectile* _this);
 void OnRep_ReplicatedAttachedInfo(AFortOctopusTowhookAttachableProjectile* _this)
 {
+    auto OwningVehicle = _this->OwningVehicle;
+    const bool bAttachedBeforeOG = OwningVehicle && IsTowhookAttached(OwningVehicle);
+
     OnRep_ReplicatedAttachedInfoOG(_this);
 
-    auto OwningVehicle = _this->OwningVehicle;
     if (!OwningVehicle)
-        return;
-
-    auto Comp = _this->AttachedInfo.Hit.Component.Get();
-
-    auto CanGrappleToComponent = (bool(*)(AFortOctopusVehicle*, UActorComponent*))CanGrappleToComponent_;
-
-    if (!CanGrappleToComponent(OwningVehicle, Comp))
     {
-        // game automatically kills for us in OG
+        printf("[Ballers] OnRep_ReplicatedAttachedInfo: no owning vehicle\n");
         return;
     }
 
-    OwningVehicle->ReplicatedAttachState.Component = Comp;
-    OwningVehicle->ReplicatedAttachState.LocalLocation = UKismetMathLibrary::InverseTransformLocation(Comp->K2_GetComponentToWorld(), _this->AttachedInfo.Hit.Location);
-    OwningVehicle->ReplicatedAttachState.LocalNormal = UKismetMathLibrary::InverseTransformDirection(Comp->K2_GetComponentToWorld(), _this->AttachedInfo.Hit.Normal);
-    OwningVehicle->OnRep_ReplicatedAttachState();
+    if (!bAttachedBeforeOG && IsTowhookAttached(OwningVehicle) && !GNativeTowhookPublishes)
+    {
+        GNativeTowhookPublishes = true;
+        printf("[Ballers] Native towhook publishing detected; leaving the anchor to the game\n");
+    }
 
-    printf("[Ballers] Comp: %s, Owner %s\n", Comp->Name.ToString().c_str(),
-        Comp->GetOwner()->Name.ToString().c_str());
-    printf("[Ballers] Location: %f %f %f [World] -> ", _this->AttachedInfo.Hit.Location.X,
-        _this->AttachedInfo.Hit.Location.Y, _this->AttachedInfo.Hit.Location.Z);
-    printf("%f %f %f [Local]\n", OwningVehicle->ReplicatedAttachState.LocalLocation.X,
-        OwningVehicle->ReplicatedAttachState.LocalLocation.Y,
-        OwningVehicle->ReplicatedAttachState.LocalLocation.Z);
-    printf("[Ballers] Normal: %f %f %f [World] -> ", _this->AttachedInfo.Hit.Normal.X,
-        _this->AttachedInfo.Hit.Normal.Y, _this->AttachedInfo.Hit.Normal.Z);
-    printf("%f %f %f [Local]\n", OwningVehicle->ReplicatedAttachState.LocalNormal.X,
-        OwningVehicle->ReplicatedAttachState.LocalNormal.Y,
-        OwningVehicle->ReplicatedAttachState.LocalNormal.Z);
+    if (GNativeTowhookPublishes)
+        return;
+
+    if (_this->AttachedInfo.HasAttachedToActor() && !_this->AttachedInfo.AttachedToActor)
+    {
+        ReleaseTowhookAttachment(OwningVehicle, (AActor*)_this, true);
+        return;
+    }
+
+    auto Comp = _this->AttachedInfo.Hit.Component.Get();
+    if (!Comp)
+    {
+        ReleaseTowhookAttachment(OwningVehicle, (AActor*)_this, true);
+        return;
+    }
+
+    for (const auto& Attachment : GTowhookAttachments)
+    {
+        if (Attachment.Vehicle.Get() == OwningVehicle &&
+            Attachment.Projectile.Get() == (AActor*)_this)
+        {
+            return;
+        }
+    }
+
+    auto CanGrappleToComponent = (bool(*)(AFortOctopusVehicle*, UActorComponent*))CanGrappleToComponent_;
+
+    if (!CanGrappleToComponent_ || !CanGrappleToComponent(OwningVehicle, Comp))
+    {
+        printf("[Ballers] Rejected %s (resolver=%p)\n", Comp->Name.ToString().c_str(),
+            (void*)CanGrappleToComponent_);
+        ReleaseTowhookAttachment(OwningVehicle, (AActor*)_this, true);
+        return;
+    }
+
+    if (!ApplyTowhookHit(OwningVehicle, _this))
+        printf("[Ballers] OnRep_ReplicatedAttachedInfo: apply failed\n");
 }
 
 namespace
@@ -1157,7 +1323,6 @@ namespace
         return OwnerName.find("cannon") != std::string::npos;
     }
 
-    // ServerOnExitVehicle takes a single enum on old builds and a 0x30-byte struct from FN29 on.
     void ForcePawnOutOfCannon(AFortPlayerPawnAthena* Pawn)
     {
         auto* ExitFunction = IsUsablePhysicsObject(Pawn)
@@ -1317,6 +1482,14 @@ void AFortPhysicsPawn::Hook()
 
         Utils::Hook<AFortOctopusTowhookAttachableProjectile>(OnRep_ReplicatedAttachedInfoIdx,
             OnRep_ReplicatedAttachedInfo, OnRep_ReplicatedAttachedInfoOG);
+
+        printf("[Ballers] Hook installed idx=%d CanGrappleToComponent=%p attach-info=%d "
+            "attached-to-actor=%d local-state=%d\n", (int)OnRep_ReplicatedAttachedInfoIdx,
+            (void*)CanGrappleToComponent_,
+            AFortOctopusTowhookAttachableProjectile::GetDefaultObj()->HasAttachedInfo(),
+            AFortOctopusTowhookAttachableProjectile::GetDefaultObj()
+                ->AttachedInfo.HasAttachedToActor(),
+            AFortOctopusVehicle::GetDefaultObj()->HasLocalAttachState());
     }
 
     auto MountedCannonWeapon = AFortWeaponRangedMountedCannon::GetDefaultObj();

@@ -228,6 +228,7 @@
     <ClInclude Include="FortniteGame\Public\FortSafeZoneIndicator.h" />
     <ClInclude Include="FortniteGame\Public\FortVolume.h" />
     <ClInclude Include="FortniteGame\Public\FortVehicleMods.h" />
+    <ClInclude Include="FortniteGame\Public\FortVehicleSeatWeaponComponent.h" />
     <ClInclude Include="FortniteGame\Public\FortWeapon.h" />
     <ClInclude Include="FortniteGame\Public\FortWeaponMods.h" />
     <ClInclude Include="FortniteGame\Public\GameplayTagContainer.h" />
@@ -286,6 +287,7 @@
     <ClCompile Include="FortniteGame\Private\FortPlayerPawnAthena.cpp" />
     <ClCompile Include="FortniteGame\Private\FortQuestManager.cpp" />
     <ClCompile Include="FortniteGame\Private\FortVehicleMods.cpp" />
+    <ClCompile Include="FortniteGame\Private\FortVehicleSeatWeaponComponent.cpp" />
     <ClCompile Include="FortniteGame\Private\FortWeaponMods.cpp" />
     <ClCompile Include="FortniteGame\Private\FortWeaponRanged.cpp" />
     <ClCompile Include="ImGui\imgui.cpp" />

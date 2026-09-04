@@ -146,23 +146,28 @@ void ABuildingFoundation::SetDynamicFoundationEnabled_(UObject* Context, FFrame&
         return;
     }
 
+    bool bSetupSucceeded = true;
     bool bHasLevelToStream = Foundation->LevelToStream.IsValid();
     if (!bHasLevelToStream && SelectAndSetupMyBuildingLevel_)
     {
         auto SelectAndSetupMyBuildingLevel = (bool (*)(ABuildingFoundation*, void*))
                 SelectAndSetupMyBuildingLevel_;
-        SelectAndSetupMyBuildingLevel(Foundation, nullptr);
+        bSetupSucceeded = SelectAndSetupMyBuildingLevel(Foundation, nullptr);
         bHasLevelToStream = Foundation->LevelToStream.IsValid();
     }
 
-    const bool bAlreadyStreamed = Foundation->HasbServerStreamedInLevel() &&
-        Foundation->bServerStreamedInLevel;
-    if (bHasLevelToStream && !bAlreadyStreamed && StreamInMyBuilding_)
+    const bool bStreamedIn = bSetupSucceeded && bHasLevelToStream && StreamInMyBuilding_;
+    if (bStreamedIn)
     {
         auto StreamInMyBuilding = (void (*)(ABuildingFoundation*, bool))
                 StreamInMyBuilding_;
         StreamInMyBuilding(Foundation, false);
     }
+
+    SDK::DbgLog("  [Foundation] %s enabled level=%s setup=%d streamed-in=%d flag=%d\n",
+        Foundation->Name.ToString().c_str(),
+        bHasLevelToStream ? Foundation->LevelToStream.ToString().c_str() : "none", bSetupSucceeded,
+        bStreamedIn, Foundation->HasbServerStreamedInLevel() && Foundation->bServerStreamedInLevel);
 
     WakeFoundationReplication(Foundation);
 }
@@ -177,6 +182,7 @@ void ABuildingFoundation::SetDynamicFoundationTransform_(UObject* Context, FFram
         return;
     }
 
+    SDK::DbgLog("  [Foundation] %s transform\n", Foundation->Name.ToString().c_str());
     ApplyDynamicFoundationTransform(Foundation, Transform);
     WakeFoundationReplication(Foundation);
 }

@@ -13,6 +13,7 @@
 #include "../../FortniteGame/Public/FortAthenaMutator.h"
 #include "../../FortniteGame/Public/FortInventory.h"
 #include "../../FortniteGame/Public/FortMinigame.h"
+#include "../../FortniteGame/Public/FortPhysicsPawn.h"
 #include "../../FortniteGame/Public/FortPlayerPawnAthena.h"
 #include "../../FortniteGame/Public/FortVehicleMods.h"
 #include "../../FortniteGame/Public/FortWeapon.h"
@@ -1684,6 +1685,7 @@ void UNetDriver::TickFlush(UNetDriver* Driver, float DeltaSeconds)
         AFortGameMode::TickSupplyDropSuppression();
         FortVehicleMods::TickPendingConstruction();
         FortVehicleBump::Tick();
+        AFortOctopusVehicle::TickTowhookAttachments();
         AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
         AFortMinigame::TickCreativeMinigames();
         Calendar::TickSnow(); // drain the Calendar tab's snow request
@@ -1825,6 +1827,7 @@ void UNetDriver::TickFlush__RepGraph(UNetDriver* Driver, float DeltaSeconds)
         AFortGameMode::TickSupplyDropSuppression();
         FortVehicleMods::TickPendingConstruction();
         FortVehicleBump::Tick();
+        AFortOctopusVehicle::TickTowhookAttachments();
         AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
         AFortMinigame::TickCreativeMinigames();
         Calendar::TickSnow(); // drain the Calendar tab's snow request
@@ -2008,6 +2011,7 @@ void UNetDriver::TickFlush__Iris(UNetDriver* Driver, float DeltaSeconds)
         AFortGameMode::TickSupplyDropSuppression();
         FortVehicleMods::TickPendingConstruction();
         FortVehicleBump::Tick();
+        AFortOctopusVehicle::TickTowhookAttachments();
         AFortPlayerControllerAthena::TickVehicleLoadoutReconcile();
         AFortMinigame::TickCreativeMinigames();
         Calendar::TickSnow(); // drain the Calendar tab's snow request

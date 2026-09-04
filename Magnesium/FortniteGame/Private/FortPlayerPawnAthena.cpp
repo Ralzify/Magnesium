@@ -4425,7 +4425,7 @@ void AFortPlayerPawnAthena::ServerOnExitVehicle_(UObject* Context, FFrame& Stack
 
     if (!bHasReturnValue || ExitedVehicle)
     {
-        AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(PlayerController);
+        AFortPlayerControllerAthena::RestoreVehicleLoadoutAfterExit(PlayerController, true);
     }
 }
 

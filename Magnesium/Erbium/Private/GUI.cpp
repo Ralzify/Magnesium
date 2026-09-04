@@ -5594,6 +5594,7 @@ static void ApplyInitialTrickshotDefaults()
     FConfiguration::bRemoveIceOnWaypointTP.store(VersionInfo.FortniteVersion >= 6.01,
         std::memory_order_release);
     FConfiguration::bAutoPauseTODM.store(false, std::memory_order_release);
+	FConfiguration::bGliderRedeploy.store(true, std::memory_order_release);
 
     if (GUI::IsArenaPlaylist() || GUI::IsTournamentPlaylist())
     {
